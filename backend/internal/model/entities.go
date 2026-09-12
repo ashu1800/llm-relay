@@ -185,6 +185,11 @@ type ModelPricing struct {
 	CacheReadPer1M  decimal.Decimal `gorm:"column:cache_read_per1_m;type:numeric(18,8);default:0" json:"cache_read_per_1m"`
 	CacheWritePer1M decimal.Decimal `gorm:"column:cache_write_per1_m;type:numeric(18,8);default:0" json:"cache_write_per_1m"`
 	PeakRules       JSONList        `gorm:"type:jsonb" json:"peak_rules"`
+	// Multiplier 是固定倍率（1 = 原价）。它与时段倍率是「或」的关系：
+	// 命中时段规则时用时段倍率，否则用固定倍率（见 pricing.Resolve）。
+	// 与 Enabled/Active 同一类坑：不加 gorm default 标签，
+	// 0 由代码统一归一到 1，免得「没填」被列默认值悄悄变成别的数
+	Multiplier float64 `gorm:"column:multiplier;type:numeric(10,4);not null" json:"multiplier"`
 	// 同 ChannelModel.Enabled：带 default 的布尔字段存不进 false
 	Active    bool      `gorm:"not null" json:"active"`
 	UpdatedAt time.Time `json:"updated_at"`

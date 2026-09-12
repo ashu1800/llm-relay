@@ -3,6 +3,7 @@ package pricing
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,11 +26,22 @@ type Price struct {
 	OutputPer1M     decimal.Decimal
 	CacheReadPer1M  decimal.Decimal
 	CacheWritePer1M decimal.Decimal
-	Multiplier      decimal.Decimal
-	PeakLabel       string
-	PeakApplied     bool
-	Base            model.ModelPricing
+	// Multiplier 是最终生效的倍率（时段倍率优先，其次固定倍率，都没有则为 1）
+	Multiplier decimal.Decimal
+	// Source 说明倍率来自哪里：peak / fixed / none
+	Source    string
+	PeakLabel string
+	// PeakApplied 只表示「时段规则命中」，固定倍率不算峰时
+	PeakApplied bool
+	Base        model.ModelPricing
 }
+
+// 倍率来源，写进定价快照，事后能一眼看出这笔钱是按时段算的还是按固定倍率算的。
+const (
+	MultiplierSourcePeak  = "peak"
+	MultiplierSourceFixed = "fixed"
+	MultiplierSourceNone  = "none"
+)
 
 // Cost 按归一化后的用量计算预估费用。
 // PromptTokens 是未命中缓存的输入，与 CachedTokens 互不重叠。
@@ -53,9 +65,13 @@ func (p Price) Snapshot(at time.Time) model.JSONMap {
 		"cache_read_per_1m":  p.CacheReadPer1M.String(),
 		"cache_write_per_1m": p.CacheWritePer1M.String(),
 		"multiplier":         p.Multiplier.String(),
+		"multiplier_source":  p.Source,
+		"fixed_multiplier":   strconv.FormatFloat(p.Base.Multiplier, 'f', -1, 64),
 		"peak_applied":       p.PeakApplied,
 		"peak_label":         p.PeakLabel,
-		"resolved_at":        at.UTC().Format(time.RFC3339),
+		// 带时区偏移的本地时间：时段规则是按本地时间判断的，
+		// 只记 UTC 的话事后核对「到底算不算峰时」要自己换算
+		"resolved_at": at.Format(time.RFC3339),
 	}
 }
 
@@ -110,22 +126,34 @@ func (e *Engine) Resolve(ctx context.Context, modelKey string, at time.Time) (Pr
 		return Price{}, false
 	}
 
-	mult, label := MatchPeak(base.PeakRules, at)
-	m := decimal.NewFromFloat(mult)
-	if m.LessThan(decimal.NewFromInt(1)) {
-		m = decimal.NewFromInt(1)
+	// 时段规则优先，其次固定倍率。
+	//
+	// 这里刻意不把两者相乘：用户的心智是「这个时段按 2 倍算」，
+	// 固定倍率是「平时也按 1.5 倍算」，相乘会得到 3 倍，没人预期得到。
+	//
+	// 也刻意不再把倍率夹到 >= 1：倍率可以是折扣（0.5）。
+	// 原来的夹取会让打折规则静默失效 —— 配了没反应比报错更难查。
+	mult, label, peakHit := MatchPeak(base.PeakRules, at)
+	m, source := 1.0, MultiplierSourceNone
+	switch {
+	case peakHit:
+		m, source = mult, MultiplierSourcePeak
+	case base.Multiplier > 0 && base.Multiplier != 1:
+		m, source = base.Multiplier, MultiplierSourceFixed
 	}
+	dec := decimal.NewFromFloat(m)
 
 	return Price{
 		ModelKey:        base.ModelKey,
 		Currency:        base.Currency,
-		InputPer1M:      base.InputPer1M.Mul(m),
-		OutputPer1M:     base.OutputPer1M.Mul(m),
-		CacheReadPer1M:  base.CacheReadPer1M.Mul(m),
-		CacheWritePer1M: base.CacheWritePer1M.Mul(m),
-		Multiplier:      m,
+		InputPer1M:      base.InputPer1M.Mul(dec),
+		OutputPer1M:     base.OutputPer1M.Mul(dec),
+		CacheReadPer1M:  base.CacheReadPer1M.Mul(dec),
+		CacheWritePer1M: base.CacheWritePer1M.Mul(dec),
+		Multiplier:      dec,
+		Source:          source,
 		PeakLabel:       label,
-		PeakApplied:     m.GreaterThan(decimal.NewFromInt(1)),
+		PeakApplied:     source == MultiplierSourcePeak,
 		Base:            base,
 	}, true
 }
@@ -210,6 +238,15 @@ func Validate(p model.ModelPricing) error {
 	if p.InputPer1M.IsNegative() || p.OutputPer1M.IsNegative() ||
 		p.CacheReadPer1M.IsNegative() || p.CacheWritePer1M.IsNegative() {
 		return fmt.Errorf("单价不能为负")
+	}
+	if p.Multiplier < 0 {
+		return fmt.Errorf("固定倍率不能为负")
+	}
+	if p.Multiplier > MaxMultiplier {
+		return fmt.Errorf("固定倍率不能超过 %g", MaxMultiplier)
+	}
+	if _, err := NormalizeRules(p.PeakRules); err != nil {
+		return err
 	}
 	return nil
 }

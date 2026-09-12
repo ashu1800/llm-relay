@@ -16,6 +16,9 @@ export interface Channel {
   last_error: string
   last_checked_at: string | null
   created_at: string
+  /** 模型白名单的对外名（列表接口带出，画面上「模型」列用） */
+  models?: string[]
+  model_count?: number
 }
 
 // SlotRule 描述渠道可用时段。结束时间早于开始时间表示跨午夜。
@@ -25,8 +28,9 @@ export interface SlotRule {
   end: string
 }
 
-// RateRule 是定价的倍率时段：落在窗口内时用 multiplier 覆盖默认倍率。
-// days 为空表示每天；end 早于 start 表示跨午夜。
+// RateRule 是定价的倍率时段：落在窗口内时用该窗口的 multiplier（优先级高于固定倍率）。
+// days 为空表示每天；end 早于 start 表示跨午夜；时间按服务器本地时区判断。
+// 多条同时命中时，列表里靠后的那条生效。
 export interface RateRule {
   days: number[]
   start: string
@@ -89,6 +93,8 @@ export interface RequestLog {
   reasoning_tokens: number
   usage_estimated: boolean
   estimated_cost: string
+  /** 计价快照：命中时刻的单价与倍率，日后改价不会影响历史账目 */
+  pricing_snapshot?: Record<string, any> | null
   first_byte_ms: number
   total_ms: number
   upstream_ms: number
@@ -112,8 +118,10 @@ export interface Pricing {
   output_per_1m: string
   cache_read_per_1m: string
   cache_write_per_1m: string
-  /** 倍率时段：命中时用该时段的倍率覆盖默认倍率 */
+  /** 倍率时段：命中时用该时段的倍率（优先于固定倍率） */
   peak_rules: RateRule[] | null
+  /** 固定倍率，1 = 原价；没有时段命中时用它 */
+  multiplier: number
   active: boolean
   updated_at: string
 }

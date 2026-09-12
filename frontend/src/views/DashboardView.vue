@@ -464,7 +464,7 @@ onMounted(load)
         <StatCard label="请求数量" :value="n(summary?.requests)" tone="purple" :hint="'失败 ' + n(summary?.errors) + ' 次'">
           <template #icon><ApiOutlined /></template>
         </StatCard>
-        <StatCard label="消耗金额" :value="'$' + money(summary?.estimated_cost)" tone="orange" hint="按官方单价折算">
+        <StatCard label="消耗金额" :value="'$' + money(summary?.estimated_cost)" tone="orange" hint="按录入单价折算">
           <template #icon><DollarOutlined /></template>
         </StatCard>
         <StatCard label="词元数量" :value="n(summary?.total_tokens)" tone="blue" :hint="'命中率 ' + ((summary?.cache_hit_rate ?? 0) * 100).toFixed(1) + '%'">

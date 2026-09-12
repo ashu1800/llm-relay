@@ -17,7 +17,9 @@ func (s *Server) finalizeLog(req *relay.RelayRequest, res *relay.RelayResult, us
 ) {
 	entry := relay.BuildLog(req, res, usage, status, errMsg, firstByteMs, totalMs)
 	if s.deps.Pricing != nil && entry.ModelRequested != "" {
-		at := time.Now().UTC()
+		// 必须用**服务器本地时间**：时段倍率（如工作日 9:00-12:00 双倍）
+		// 是按用户看到的钟点填的，传 UTC 会让窗口整体偏 8 小时
+		at := time.Now()
 		if p, ok := s.deps.Pricing.Resolve(context.Background(), entry.ModelRequested, at); ok {
 			entry.EstimatedCost = p.Cost(usage)
 			entry.PricingSnapshot = p.Snapshot(at)

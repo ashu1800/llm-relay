@@ -47,7 +47,7 @@ for s in test-group-update.py test-key-whitelist.py test-delete-semantics.py \
   echo
 done
 # bash 用例：没有统一的通过标志，按「没有 HAS_FAILURE」判定
-for s in test-model-whitelist.sh test-upstream-protocol.sh test-upstream-gemini.sh test-pricing.sh test-pricing-filter.sh \
+for s in test-model-whitelist.sh test-upstream-protocol.sh test-upstream-gemini.sh test-pricing.sh test-pricing-rules.sh test-pricing-filter.sh \
          test-templates.sh test-cost.sh test-routing.sh; do
   echo "########## $s ##########"
   out=$(bash "scripts/$s" 2>&1)

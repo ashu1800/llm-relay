@@ -33,7 +33,7 @@ print('  预估费用: \$%s' % it['estimated_cost'])
 snap = it.get('pricing_snapshot') or {}
 if snap:
     print('  定价快照:')
-    for k in ['model_key','currency','input_per_1m','output_per_1m','cache_read_per_1m','multiplier','peak_applied','peak_label','resolved_at']:
+    for k in ['model_key','currency','input_per_1m','output_per_1m','cache_read_per_1m','multiplier','multiplier_source','fixed_multiplier','peak_applied','peak_label','resolved_at']:
         if k in snap: print('    %-18s %s' % (k, snap[k]))
 else:
     print('  定价快照: 空（该模型无定价配置）')
@@ -53,4 +53,16 @@ if s:
     print('  库中: %.10f' % float(it['estimated_cost']))
     print('  一致:', abs(cost-float(it['estimated_cost'])) < 1e-12)
 PY
+
+# 探测密钥用完就删：留着会在「密钥信息」页里越堆越多，
+# 而且它是一把能调通上游的真实密钥
+echo
+echo "===== 5. 清理探测密钥 ====="
+for kid in $(docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A \
+    -c "SELECT id FROM api_keys WHERE name='pricing-check'"); do
+  curl -s -X DELETE "$BASE/api/admin/keys/$kid" >/dev/null
+done
+LEFT=$(docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A \
+    -c "SELECT count(*) FROM api_keys WHERE name='pricing-check'")
+echo "  剩余同名额密钥: $LEFT"
 echo "DONE"

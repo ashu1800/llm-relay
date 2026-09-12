@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"llm-relay/internal/model"
+	"llm-relay/internal/pricing"
 )
 
 func registerPricingRoutes(g *gin.RouterGroup, s *Server) {
@@ -62,6 +64,11 @@ type pricingPayload struct {
 	CacheReadPer1M  string         `json:"cache_read_per_1m"`
 	CacheWritePer1M string         `json:"cache_write_per_1m"`
 	PeakRules       model.JSONList `json:"peak_rules"`
+	// Multiplier 是固定倍率。用指针区分「没传」与「显式传 1」：
+	// 值类型时「把倍率改回 1」会被当成没传而静默失效（与 ProviderID 同一个坑）
+	Multiplier *float64 `json:"multiplier"`
+	// Active 同理：停用某条定价要能真的写进 false
+	Active *bool `json:"active"`
 }
 
 // createPricing 手工录入价格。全部定价都是手工的，不再有自动同步覆盖的问题。
@@ -76,10 +83,25 @@ func (s *Server) createPricing(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
+	if p.Multiplier != nil {
+		row.Multiplier = *p.Multiplier
+	}
 	row.Currency = "USD"
 	row.Active = true
+	if p.Active != nil {
+		row.Active = *p.Active
+	}
+	if row.Multiplier <= 0 {
+		// 0 表示「没填倍率」，按原价算；不把 0 写进库里，
+		// 免得日后有人看到 0 以为是「免费」
+		row.Multiplier = 1
+	}
 	if row.MatchType == "" {
 		row.MatchType = "exact"
+	}
+	if row.MatchType != "exact" && row.MatchType != "prefix" {
+		writeUpstreamError(c, http.StatusBadRequest, "match_type 只能是 exact 或 prefix", "invalid_request_error")
+		return
 	}
 	if err := s.deps.Store.DB().Create(&row).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
@@ -124,7 +146,27 @@ func (s *Server) updatePricing(c *gin.Context) {
 		updates[k] = d
 	}
 	if p.PeakRules != nil {
-		updates["peak_rules"] = p.PeakRules
+		rules, err := pricing.NormalizeRules(p.PeakRules)
+		if err != nil {
+			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+			return
+		}
+		updates["peak_rules"] = rules
+	}
+	if p.Multiplier != nil {
+		m := *p.Multiplier
+		if m < 0 || m > pricing.MaxMultiplier {
+			writeUpstreamError(c, http.StatusBadRequest,
+				fmt.Sprintf("固定倍率需要在 0 到 %g 之间（1 表示原价）", pricing.MaxMultiplier), "invalid_request_error")
+			return
+		}
+		if m == 0 {
+			m = 1
+		}
+		updates["multiplier"] = m
+	}
+	if p.Active != nil {
+		updates["active"] = *p.Active
 	}
 	if err := applyUpdates(s.deps.Store.DB(), &model.ModelPricing{}, id, updates); err != nil {
 		writeUpdateError(c, err)
@@ -162,14 +204,16 @@ func (s *Server) resolvePricing(c *gin.Context) {
 		writeUpstreamError(c, http.StatusServiceUnavailable, "计价引擎未启用", "internal_error")
 		return
 	}
-	at := time.Now().UTC()
+	// 时段规则按服务器本地时间判断，所以试算也要在本地时区里看：
+	// 传 2026-09-14T02:00:00Z 时，用户想知道的是「换算成本地时间后落在哪个窗口」
+	at := time.Now()
 	if p.At != "" {
 		t, err := time.Parse(time.RFC3339, p.At)
 		if err != nil {
-			writeUpstreamError(c, http.StatusBadRequest, "at 需为 RFC3339 时间", "invalid_request_error")
+			writeUpstreamError(c, http.StatusBadRequest, "at 需为 RFC3339 时间", "invalid_error")
 			return
 		}
-		at = t
+		at = t.In(time.Local)
 	}
 	price, ok := s.deps.Pricing.Resolve(c.Request.Context(), p.Model, at)
 	if !ok {

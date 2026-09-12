@@ -190,6 +190,45 @@ function fmtCost(v: string) {
   return n > 0 ? '$' + n.toFixed(6) : '-'
 }
 
+// 费用为什么是这么多：把当时生效的倍率摊在金额旁边。
+// 时段倍率按服务器本地时间命中，用户核对账单时最常问的就是「这笔怎么贵了」。
+function costMultiplierTag(row: RequestLog) {
+  const s = row.pricing_snapshot
+  if (!s || s.multiplier == null) return { peak: '', fixed: '' }
+  const m = Number(s.multiplier)
+  if (!m || m === 1) return { peak: '', fixed: '' }
+  if (s.peak_applied) {
+    return { peak: '×' + m + ' ' + (s.peak_label || '时段倍率'), fixed: '' }
+  }
+  if (s.multiplier_source === 'fixed') {
+    return { peak: '', fixed: '×' + m + ' 固定倍率' }
+  }
+  return { peak: '', fixed: '' }
+}
+
+// 计价一行：把快照里的单价与来源写清楚，便于与「价格试算」对照
+function multiplierSourceText(row: RequestLog) {
+  const s = row.pricing_snapshot
+  if (!s) return ''
+  // 库里可能是 {}（早期版本对这个字段写过空对象）：没有单价就没有「计价」可讲，
+  // 不判断的话界面上会出现「输入 $undefined」
+  if (s.input_per_1m == null && s.input == null) return ''
+  const parts: string[] = []
+  parts.push('输入 $' + (s.input_per_1m ?? s.input) + ' / 输出 $' + (s.output_per_1m ?? s.output) + ' 每 1M')
+  if (Number(s.fixed_multiplier) && Number(s.fixed_multiplier) !== 1) {
+    parts.push('固定倍率 ×' + s.fixed_multiplier)
+  }
+  if (s.peak_applied) {
+    parts.push('命中时段：' + (s.peak_label || '未命名') + ' ×' + s.multiplier)
+  } else if (s.multiplier_source === 'fixed') {
+    parts.push('按固定倍率 ×' + s.multiplier)
+  } else {
+    parts.push('原价')
+  }
+  if (s.resolved_at) parts.push('计价时刻 ' + s.resolved_at)
+  return parts.join('；')
+}
+
 // exportCsv 导出当前筛选条件下的**全部**日志。
 //
 // 原来只把当前页（默认 50 条）拼成 CSV，用户点「导出」拿到的文件却像是全部记录；
@@ -403,6 +442,16 @@ onMounted(load)
         <a-descriptions-item label="费用">
           ${{ Number(current.estimated_cost).toFixed(8) }}
           <a-tag v-if="current.usage_estimated" color="orange" style="margin-left: 6px">用量为估算值</a-tag>
+          <!-- 金额为什么是这个数：把当时生效的倍率与来源摊开，省得去猜 -->
+          <a-tag v-if="costMultiplierTag(current).peak" color="orange" style="margin-left: 6px">
+            {{ costMultiplierTag(current).peak }}
+          </a-tag>
+          <a-tag v-else-if="costMultiplierTag(current).fixed" style="margin-left: 6px">
+            {{ costMultiplierTag(current).fixed }}
+          </a-tag>
+        </a-descriptions-item>
+        <a-descriptions-item v-if="multiplierSourceText(current)" label="计价">
+          {{ multiplierSourceText(current) }}
         </a-descriptions-item>
         <a-descriptions-item v-if="current.error" label="错误">
           <pre class="err-box">{{ current.error }}</pre>

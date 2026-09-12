@@ -12,6 +12,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"llm-relay/internal/model"
+	"llm-relay/internal/pricing"
 )
 
 // parseDecimal 解析金额字符串，拒绝空值与负数。
@@ -34,7 +35,25 @@ func buildPricingRow(p pricingPayload) (model.ModelPricing, error) {
 	}
 	row.ModelKey = strings.TrimSpace(p.ModelKey)
 	row.MatchType = orDefault(p.MatchType, "exact")
-	row.PeakRules = p.PeakRules
+	// 时段规则在保存时就校验：写错的窗口不会报错、只会永不命中，
+	// 用户会以为已经配好了双倍计费（错误信息里带第几条）
+	rules, err := pricing.NormalizeRules(p.PeakRules)
+	if err != nil {
+		return row, err
+	}
+	row.PeakRules = rules
+	if p.Multiplier != nil {
+		m := *p.Multiplier
+		if m < 0 || m > pricing.MaxMultiplier {
+			return row, fmt.Errorf("固定倍率需要在 0 到 %g 之间（1 表示原价）", pricing.MaxMultiplier)
+		}
+		if m == 0 {
+			m = 1
+		}
+		row.Multiplier = m
+	} else {
+		row.Multiplier = 1
+	}
 
 	fields := []struct {
 		name string
@@ -50,6 +69,7 @@ func buildPricingRow(p pricingPayload) (model.ModelPricing, error) {
 		if strings.TrimSpace(f.raw) == "" {
 			continue
 		}
+		// 模板里的字段名与 json 名不同，这里用 json 名报错更贴近界面文案
 		d, err := parseDecimal(f.raw)
 		if err != nil {
 			return row, fmt.Errorf("%s 不是合法数字", f.name)

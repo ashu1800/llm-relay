@@ -1,32 +1,37 @@
 package pricing
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
 	"llm-relay/internal/model"
 )
 
-// PeakWindow 描述一个峰时窗口。窗口内的单价按 Multiplier 放大。
-// 基准价始终存「谷时价」，与 DeepSeek 官方的 Off-peak 口径一致。
+// PeakWindow 描述一个时段倍率窗口：窗口内的单价乘以 Multiplier。
+//
+// 时间语义：Start/End 与 Days 都按**服务器本地时区**判断（部署里是 Asia/Shanghai）。
+// 这里特意写清楚：定价自动同步还在的时候，这些字段存的是 UTC（DeepSeek 官方口径），
+// 同步删掉后规则由用户手填，用户看到的 9:00 就是他手表上的 9:00。
 type PeakWindow struct {
 	Days       []int   `json:"days"`       // ISO 星期，1=周一 .. 7=周日；空表示每天
-	Start      string  `json:"start"`      // HH:MM，UTC
-	End        string  `json:"end"`        // HH:MM，UTC；早于 Start 表示跨午夜
-	Multiplier float64 `json:"multiplier"` // 倍率，DeepSeek 峰时为 2
+	Start      string  `json:"start"`      // HH:MM，本地时间
+	End        string  `json:"end"`        // HH:MM，本地时间；早于 Start 表示跨午夜
+	Multiplier float64 `json:"multiplier"` // 倍率：2 = 双倍，0.5 = 五折
 	Label      string  `json:"label"`
 }
 
-// MatchPeak 判断给定时刻是否落在某个峰时窗口内，返回倍率与标签。
-// 多个窗口叠加时取最大倍率，避免重复相乘导致价格失真。
-func MatchPeak(rules model.JSONList, at time.Time) (float64, string) {
-	if len(rules) == 0 {
-		return 1, ""
-	}
-	best := 1.0
-	label := ""
-	for _, raw := range rules {
-		w, ok := toWindow(raw)
+// MaxMultiplier 是倍率上限，挡住「把单价填错小数位」之外的量级错误。
+const MaxMultiplier = 100.0
+
+// MatchPeak 判断给定时刻是否落在某个时段窗口内，返回倍率、标签与是否命中。
+//
+// 多条规则同时命中时**以列表里最后一条为准**（后面的覆盖前面的），
+// 而不是取最大倍率：倍率可以是折扣（0.5），取最大的话打折规则永远不生效，
+// 用户只会看到「设了没反应」。要固定优先级就把规则按顺序排好。
+func MatchPeak(rules model.JSONList, at time.Time) (float64, string, bool) {
+	for i := len(rules) - 1; i >= 0; i-- {
+		w, ok := toWindow(rules[i])
 		if !ok {
 			continue
 		}
@@ -37,12 +42,76 @@ func MatchPeak(rules model.JSONList, at time.Time) (float64, string) {
 		if mult <= 0 {
 			mult = 1
 		}
-		if mult > best {
-			best = mult
-			label = w.Label
-		}
+		return mult, w.Label, true
 	}
-	return best, label
+	return 1, "", false
+}
+
+// NormalizeRules 校验并规整时段规则。
+//
+// 为什么必须校验而不是「存进去再说」：窗口字段写错（比如 end 填成 "18"）
+// 不会报错，只会永远不命中 —— 用户以为已经配好了双倍计费，实际一直按原价。
+// 所以把错误在保存时抛出来，并指明是第几条。
+func NormalizeRules(rules model.JSONList) (model.JSONList, error) {
+	if len(rules) == 0 {
+		return nil, nil
+	}
+	out := make(model.JSONList, 0, len(rules))
+	for i, raw := range rules {
+		where := fmt.Sprintf("第 %d 条时段规则", i+1)
+		start := strings.TrimSpace(asStringValue(raw["start"]))
+		end := strings.TrimSpace(asStringValue(raw["end"]))
+		if start == "" || end == "" {
+			return nil, fmt.Errorf("%s：开始与结束时间都要填", where)
+		}
+		if _, err := time.Parse("15:04", start); err != nil {
+			return nil, fmt.Errorf("%s：开始时间 %q 不是 HH:MM 格式", where, start)
+		}
+		if _, err := time.Parse("15:04", end); err != nil {
+			return nil, fmt.Errorf("%s：结束时间 %q 不是 HH:MM 格式", where, end)
+		}
+		mult, ok := toFloat(raw["multiplier"])
+		if !ok || mult <= 0 {
+			return nil, fmt.Errorf("%s：倍率必须是大于 0 的数字", where)
+		}
+		if mult > MaxMultiplier {
+			return nil, fmt.Errorf("%s：倍率不能超过 %g", where, MaxMultiplier)
+		}
+		days := make([]int, 0, 7)
+		if list, ok := raw["days"].([]any); ok {
+			for _, item := range list {
+				n, ok := toFloat(item)
+				if !ok {
+					return nil, fmt.Errorf("%s：星期取值必须是 1-7", where)
+				}
+				d := int(n)
+				if d < 1 || d > 7 {
+					return nil, fmt.Errorf("%s：星期取值必须在 1-7 之间（1=周一）", where)
+				}
+				if !containsDay(days, d) {
+					days = append(days, d)
+				}
+			}
+		}
+		label := strings.TrimSpace(asStringValue(raw["label"]))
+		if len([]rune(label)) > 32 {
+			return nil, fmt.Errorf("%s：备注不要超过 32 个字", where)
+		}
+		out = append(out, model.JSONMap{
+			"days":       days,
+			"start":      start,
+			"end":        end,
+			"multiplier": mult,
+			"label":      label,
+		})
+	}
+	return out, nil
+}
+
+// asStringValue 安全取字符串（jsonb 里的值可能是任意类型）。
+func asStringValue(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 func inWindow(w PeakWindow, at time.Time) bool {
@@ -121,13 +190,4 @@ func toWindow(raw map[string]any) (PeakWindow, bool) {
 		return w, false
 	}
 	return w, true
-}
-
-// DeepSeekPeakRules 返回 DeepSeek 官方公布的峰时窗口。
-// 官方口径：UTC 周一至周五 01:00-04:00 与 06:00-10:00 为峰时，价格为谷时的两倍。
-func DeepSeekPeakRules() model.JSONList {
-	return model.JSONList{
-		{"days": []any{1, 2, 3, 4, 5}, "start": "01:00", "end": "04:00", "multiplier": 2.0, "label": "峰时"},
-		{"days": []any{1, 2, 3, 4, 5}, "start": "06:00", "end": "10:00", "multiplier": 2.0, "label": "峰时"},
-	}
 }
