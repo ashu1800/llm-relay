@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -200,6 +201,53 @@ func (s *Server) updateChannel(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates)})
+}
+
+// modelAllowed 判断模型是否在密钥白名单内。白名单为空表示不限制。
+func modelAllowed(list model.StringList, name string) bool {
+	if len(list) == 0 {
+		return true
+	}
+	for _, m := range list {
+		if m == name {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveGroupWhitelist 把密钥上的分组白名单解析成分组 ID。
+//
+// 白名单里写 ID 或分组名都认：纯数字按 ID，否则按名字查。
+// 一条都解析不出来时返回错误而不是放行 —— 放行等于「删掉那个分组就能绕过限制」，
+// 那这份白名单也就没有存在的意义了。调用方据此回 403 并说明原因。
+func (s *Server) resolveGroupWhitelist(list model.StringList) ([]uint, error) {
+	if len(list) == 0 {
+		return nil, nil
+	}
+	db := s.deps.Store.DB()
+	ids := make([]uint, 0, len(list))
+	var unresolved []string
+	for _, raw := range list {
+		item := strings.TrimSpace(raw)
+		if item == "" {
+			continue
+		}
+		if n, err := strconv.ParseUint(item, 10, 32); err == nil {
+			ids = append(ids, uint(n))
+			continue
+		}
+		var g model.ChannelGroup
+		if err := db.Where("name = ?", item).First(&g).Error; err != nil {
+			unresolved = append(unresolved, item)
+			continue
+		}
+		ids = append(ids, g.ID)
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("密钥的分组白名单 %v 无法解析（分组可能已被删除或改名）", unresolved)
+	}
+	return ids, nil
 }
 
 // deleteByID 删除主表行，并按 RowsAffected 区分「删掉了」与「本来就没有」。

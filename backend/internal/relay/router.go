@@ -47,9 +47,19 @@ func NewRouter(db *gorm.DB, cipher *secure.Cipher) *Router {
 	return &Router{db: db, cipher: cipher, rrCursor: make(map[uint]int)}
 }
 
+// CandidateQuery 是一次候选渠道查询的条件。
+type CandidateQuery struct {
+	PublicModel string
+	// GroupID > 0 时只在该分组内选择，分组策略也取它的
+	GroupID uint
+	// AllowedGroups 非空时只在这些分组内选择（来自密钥白名单）
+	AllowedGroups []uint
+	// Exclude 里的渠道 ID 会被跳过，用于重试时避免再次命中同一渠道
+	Exclude []uint
+}
+
 // Candidates 返回按策略排好序的候选渠道。
-// exclude 中的渠道 ID 会被跳过，用于重试时避免再次命中同一渠道。
-func (r *Router) Candidates(ctx context.Context, groupID uint, publicModel string, exclude []uint) ([]Candidate, error) {
+func (r *Router) Candidates(ctx context.Context, q CandidateQuery) ([]Candidate, error) {
 	type row struct {
 		model.Channel
 		UpstreamName string
@@ -57,23 +67,28 @@ func (r *Router) Candidates(ctx context.Context, groupID uint, publicModel strin
 	}
 
 	var rows []row
-	q := r.db.WithContext(ctx).
+	query := r.db.WithContext(ctx).
 		Table("channels").
 		Select("channels.*, channel_models.upstream_name AS upstream_name, channel_models.id AS binding_id").
 		Joins("JOIN channel_models ON channel_models.channel_id = channels.id AND channel_models.enabled = true").
 		Joins("JOIN models ON models.id = channel_models.model_id AND models.enabled = true").
-		Where("models.public_name = ?", publicModel).
+		Where("models.public_name = ?", q.PublicModel).
 		Where("channels.enabled = true")
 
-	if groupID > 0 {
-		q = q.Where("channels.group_id = ?", groupID)
+	if q.GroupID > 0 {
+		query = query.Where("channels.group_id = ?", q.GroupID)
 	}
-	if err := q.Find(&rows).Error; err != nil {
+	// 密钥白名单：分组之外的渠道一律不参选。
+	// 空切片与 nil 都表示不限制 —— 白名单没配就不该影响路由。
+	if len(q.AllowedGroups) > 0 {
+		query = query.Where("channels.group_id IN ?", q.AllowedGroups)
+	}
+	if err := query.Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("查询候选渠道失败: %w", err)
 	}
 
-	excluded := make(map[uint]bool, len(exclude))
-	for _, id := range exclude {
+	excluded := make(map[uint]bool, len(q.Exclude))
+	for _, id := range q.Exclude {
 		excluded[id] = true
 	}
 
@@ -100,7 +115,14 @@ func (r *Router) Candidates(ctx context.Context, groupID uint, publicModel strin
 		cands = append(cands, c)
 	}
 
-	sortCandidates(cands, r.strategyFor(ctx, groupID), r)
+	// 策略归属：显式分组优先；密钥只限定了一个分组时用那个分组的策略；
+	// 否则回落到默认分组。不加这一段的话，被白名单限定到某个分组的请求
+	// 仍然按默认分组的策略排序，分组上配的策略形同虚设。
+	strategyGroup := q.GroupID
+	if strategyGroup == 0 && len(q.AllowedGroups) == 1 {
+		strategyGroup = q.AllowedGroups[0]
+	}
+	sortCandidates(cands, r.strategyFor(ctx, strategyGroup), r)
 	return cands, nil
 }
 

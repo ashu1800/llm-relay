@@ -66,7 +66,12 @@ type RelayRequest struct {
 	InboundProto string
 	UpstreamPath string
 	PublicModel  string
-	GroupID      uint
+	// GroupID > 0 时只在该分组内选渠道，并用该分组的策略
+	GroupID uint
+	// AllowedGroups 是密钥上的分组白名单（已解析成分组 ID）。
+	// 非空时只在这些分组内选渠道；与 GroupID 是「与」的关系。
+	// 空表示不限制 —— 与没有配白名单是两种状态，不要混为一谈。
+	AllowedGroups []uint
 	// Body 是归一化后发给上游的载荷；InboundBody 是客户端原始报文，仅用于留存排障
 	Body        []byte
 	InboundBody []byte
@@ -118,6 +123,25 @@ type AttemptTrail struct {
 // ErrNoChannel 表示该模型当前没有可用渠道。
 var ErrNoChannel = errors.New("没有可用的渠道")
 
+// noChannelReason 说明为什么没有可用渠道。
+//
+// 特意把「被密钥白名单挡住」讲清楚：否则从「没有可用的渠道: 模型 xxx」
+// 完全看不出是密钥限制导致的，而这种失败往往出现在改完密钥配置之后，
+// 排查时最容易怀疑到别处去。
+func (req *RelayRequest) noChannelReason() string {
+	switch {
+	case len(req.AllowedGroups) > 0 && req.GroupID > 0:
+		return fmt.Sprintf("模型 %s 在分组 %d 与限定分组 %v 的交集内没有可用渠道",
+			req.PublicModel, req.GroupID, req.AllowedGroups)
+	case len(req.AllowedGroups) > 0:
+		return fmt.Sprintf("模型 %s 在密钥限定的分组 %v 内没有可用渠道",
+			req.PublicModel, req.AllowedGroups)
+	case req.GroupID > 0:
+		return fmt.Sprintf("模型 %s 在分组 %d 内没有可用渠道", req.PublicModel, req.GroupID)
+	}
+	return "模型 " + req.PublicModel
+}
+
 // Relay 执行转发，按候选顺序做故障转移。
 func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, error) {
 	started := time.Now()
@@ -131,13 +155,18 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 	}
 
 	for attemptNo := 0; attemptNo < maxAttempts; attemptNo++ {
-		cands, err := s.router.Candidates(ctx, req.GroupID, req.PublicModel, tried)
+		cands, err := s.router.Candidates(ctx, CandidateQuery{
+			PublicModel:   req.PublicModel,
+			GroupID:       req.GroupID,
+			AllowedGroups: req.AllowedGroups,
+			Exclude:       tried,
+		})
 		if err != nil {
 			return nil, err
 		}
 		if len(cands) == 0 {
 			if attemptNo == 0 {
-				return nil, fmt.Errorf("%w: 模型 %s", ErrNoChannel, req.PublicModel)
+				return nil, fmt.Errorf("%w: %s", ErrNoChannel, req.noChannelReason())
 			}
 			break
 		}

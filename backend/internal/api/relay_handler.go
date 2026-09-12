@@ -122,16 +122,38 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 		return
 	}
 
+	// 密钥白名单在这里落地。
+	//
+	// allowed_models / allowed_groups 此前只有存储与回显：创建与更新会写库，
+	// 列表接口会显示，但路由侧完全不看。也就是说界面上配了限制却毫无效果 ——
+	// 属于「看起来有访问控制、实际没有」，比没有这个字段更危险。
+	var allowedGroups []uint
+	if key != nil {
+		if !modelAllowed(key.AllowedModels, publicModel) {
+			p.writeError(c, http.StatusForbidden,
+				"该密钥不允许调用模型 "+publicModel, "permission_error")
+			return
+		}
+		groups, err := s.resolveGroupWhitelist(key.AllowedGroups)
+		if err != nil {
+			// 白名单解析不出来就不放行：否则删掉那个分组就能绕过限制
+			p.writeError(c, http.StatusForbidden, err.Error(), "permission_error")
+			return
+		}
+		allowedGroups = groups
+	}
+
 	req := &relay.RelayRequest{
-		TraceID:      traceID,
-		InboundProto: p.Name,
-		UpstreamPath: p.UpstreamPath,
-		PublicModel:  publicModel,
-		Body:         body,
-		InboundBody:  rawBody,
-		Headers:      c.Request.Header,
-		ClientIP:     c.ClientIP(),
-		Stream:       relay.ExtractStream(body),
+		TraceID:       traceID,
+		InboundProto:  p.Name,
+		UpstreamPath:  p.UpstreamPath,
+		PublicModel:   publicModel,
+		Body:          body,
+		InboundBody:   rawBody,
+		Headers:       c.Request.Header,
+		ClientIP:      c.ClientIP(),
+		Stream:        relay.ExtractStream(body),
+		AllowedGroups: allowedGroups,
 	}
 	if key != nil {
 		req.APIKeyID = key.ID
