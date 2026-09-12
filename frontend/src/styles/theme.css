@@ -60,6 +60,30 @@
   --font-family-mono: 'Cascadia Mono', 'JetBrains Mono', Consolas, 'SF Mono', Menlo,
     'DejaVu Sans Mono', 'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC',
     'Noto Sans CJK SC', monospace;
+  /* 列表（表格 / 列表）专用字体：对齐参考站的请求日志列表。
+     登录后实测参考站该列表的计算样式，事实如下：
+       · 字族就是全站那一套，**没有任何列表专用覆盖**；
+       · 字号 14px、字重 400、行高 22px、行高 40px，与本站完全一致；
+       · 无 letter-spacing、无 tabular-nums。
+     它实际是两套字体在混排（canvas 量宽判定，宽度相同即为同一字体）：
+       西文与数字 -> Harding（190.29，与纯 Harding 一致）
+       中文       -> 宋体（56，与纯 SimSun 一致）
+     这里只能取到中文那一半：Harding 是 Commercial Type 为《Nature》定制的
+     商业字体，参考站自托管的 TTF 无权分发。去掉它之后西文也会落到宋体。 */
+  /* 前面的衬线族负责西文与数字，后面的宋体负责中文 —— 与参考站同样的分工。
+     宋体自带宽度的西文字形（形如打字机体），不先用衬线挡一下，西文也会被它接管，
+     数字列就会和参考站差很远。
+     选 Book Antiqua 是量出来的，不是凭感觉：在参考站上（Harding 真实可用）
+     用 canvas 量同一串 "2026-09-12 13:05:50"（14px）：
+       Harding 128.11 | Book Antiqua 129.42 | Georgia 130.83 | SimSun 133
+       Times New Roman 118.6 | Palatino Linotype 117.82
+     Book Antiqua 只差 1.31px，是可用系统字体里最接近的；Palatino 和 Times 反而
+     差了 10px 以上。Georgia 也接近，但它用的是旧式数字（3/4/5/7/9 下沉），
+     表格里数字会上下跳动，不能放在前面兜底。 */
+  --font-family-list: 'Book Antiqua', Georgia, 'Palatino Linotype', 'Times New Roman',
+    'STSong', SimSun, 'Songti SC', 宋体, 'Hiragino Sans GB', STHeiti,
+    'WenQuanYi Micro Hei', var(--font-family-base);
+
   --font-size-base: 16px;
   --font-size-panel: 14px;
   --font-size-menu: 14.4px;
@@ -148,6 +172,13 @@ a:hover { opacity: 0.85; }
 .ant-table-tbody > tr > td {
   height: var(--size-table-row);
 }
+/* 表格与列表统一用列表字体（变量定义见文件顶部） */
+.ant-table-thead > tr > th,
+.ant-table-tbody > tr > td,
+.ant-list {
+  font-family: var(--font-family-list);
+}
+
 .ant-btn-primary {
   box-shadow: none;
 }

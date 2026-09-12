@@ -149,8 +149,25 @@ function cacheRate(row: RequestLog) {
   return ((row.cached_tokens / denom) * 100).toFixed(1) + '%'
 }
 
+// 固定成 YYYY-MM-DD HH:mm:ss —— 与参考站日志列表一致。
+// 原来用 toLocaleString('zh-CN')，出来的是 2026/9/12 13:06:02：
+// 斜杠分隔、月日不补零，同一列里宽度还会随月份变化而抖动。
+// 手工补零而不是再用一次 toLocale*，是为了不受运行环境区域设置影响。
+function pad2(n: number) {
+  return n < 10 ? '0' + n : String(n)
+}
 function fmtTime(t: string) {
-  return new Date(t).toLocaleString('zh-CN', { hour12: false })
+  if (!t) return '—'
+  const d = new Date(t)
+  if (isNaN(d.getTime())) return t
+  return (
+    d.getFullYear() +
+    '-' + pad2(d.getMonth() + 1) +
+    '-' + pad2(d.getDate()) +
+    ' ' + pad2(d.getHours()) +
+    ':' + pad2(d.getMinutes()) +
+    ':' + pad2(d.getSeconds())
+  )
 }
 
 function fmtMs(v: number) {
