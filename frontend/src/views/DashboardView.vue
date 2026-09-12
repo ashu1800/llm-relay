@@ -49,7 +49,7 @@ type GroupItem = {
   cost: string
   avg_ms: number
 }
-type HeatItem = { day: string; hour: number; requests: number }
+type HeatItem = { day: string; hour: number; requests: number; cost: string; tokens: number }
 
 const health = ref<Health | null>(null)
 const info = ref<SystemInfo | null>(null)
@@ -309,18 +309,58 @@ function heatLevel(n: number, max: number) {
 }
 
 const heatGrid = computed(() => {
-  const byKey = new Map<string, number>()
-  for (const it of heat.value) byKey.set(it.day + '#' + it.hour, it.requests)
+  const byKey = new Map<string, HeatItem>()
+  for (const it of heat.value) byKey.set(it.day + '#' + it.hour, it)
   const max = heatMax.value
   return heatDays.value.map((d) => ({
     key: d.key,
     label: d.label,
     cells: Array.from({ length: 24 }, (_, h) => {
-      const n = byKey.get(d.key + '#' + h) ?? 0
-      return { hour: h, requests: n, level: heatLevel(n, max) }
+      const it = byKey.get(d.key + '#' + h)
+      const req = it?.requests ?? 0
+      return { hour: h, requests: req, level: heatLevel(req, max) }
     })
   }))
 })
+
+// 悬浮提示：移到格子上时显示那一小时的明细（时间 / 请求数 / 消费 / Token），
+// 与参考站一致。用「整块网格共用一个提示框 + 事件委托」，而不是给 168 个格子
+// 各挂一个气泡 —— 格子自带 data-key，提示框按被指格子的位置定位。
+const heatTip = ref({
+  show: false, x: 0, y: 0, day: '', hour: 0, requests: 0, cost: '0', tokens: 0
+})
+
+const heatLookup = computed(() => {
+  const m = new Map<string, HeatItem>()
+  for (const it of heat.value) m.set(it.day + '#' + it.hour, it)
+  return m
+})
+
+function onHeatOver(e: MouseEvent) {
+  const el = (e.target as HTMLElement)?.closest('.heatmap-cell') as HTMLElement | null
+  const host = el?.closest('.heatmap') as HTMLElement | null
+  if (!el || !host) return
+  const key = el.dataset.key
+  if (!key) return
+  const [day, hour] = key.split('#')
+  const it = heatLookup.value.get(key)
+  const cr = el.getBoundingClientRect()
+  const hr = host.getBoundingClientRect()
+  heatTip.value = {
+    show: true,
+    x: cr.left - hr.left + cr.width / 2,
+    y: cr.top - hr.top,
+    day,
+    hour: Number(hour),
+    requests: it?.requests ?? 0,
+    cost: it?.cost ?? '0',
+    tokens: it?.tokens ?? 0
+  }
+}
+
+function hideHeatTip() {
+  heatTip.value.show = false
+}
 
 const heatTotal = computed(() => heat.value.reduce((a, b) => a + b.requests, 0))
 
@@ -378,11 +418,11 @@ onMounted(load)
         </StatCard>
       </div>
 
-      <PanelCard :title="'请求热力图（近 ' + HEAT_DAYS + ' 天）'">
+      <PanelCard title="请求热力图">
         <template #extra>
           <span class="panel-note">{{ n(heatTotal) }} 次请求</span>
         </template>
-        <div class="heatmap">
+        <div class="heatmap" @mouseover="onHeatOver" @mouseleave="hideHeatTip">
           <div class="heatmap-corner" />
           <div class="heatmap-col-labels">
             <!-- 每 3 小时标一个，与参考站一致 -->
@@ -400,9 +440,19 @@ onMounted(load)
                 :key="d.key + '-' + c.hour"
                 class="heatmap-cell"
                 :class="'heatmap-cell-level-' + c.level"
-                :title="d.label + ' ' + c.hour + ':00 · ' + c.requests + ' 次'"
+                :data-key="d.key + '#' + c.hour"
               />
             </template>
+          </div>
+          <div
+            v-if="heatTip.show"
+            class="heat-tip"
+            :style="{ left: heatTip.x + 'px', top: heatTip.y + 'px' }"
+          >
+            <div class="heat-tip-time">{{ heatTip.day }} {{ heatTip.hour }}:00</div>
+            <div>{{ heatTip.requests }} 次请求</div>
+            <div>消费 ${{ money(heatTip.cost) }}</div>
+            <div>Token {{ n(heatTip.tokens) }}</div>
           </div>
         </div>
       </PanelCard>
@@ -485,6 +535,8 @@ onMounted(load)
    格子的宽高比也照参考站（15:13），避免又被压成扁条。 */
 .heatmap {
   --heat-gap: 3.2px;
+  /* 悬浮提示按相对本容器的坐标定位 */
+  position: relative;
   display: grid;
   /* 左上留白角 + 小时标签；下一行是日期标签 + 格子。
      第二行用 1fr，由面板把剩余高度分给格子 —— 这样卡片文案变化、
@@ -530,6 +582,38 @@ onMounted(load)
      这样面板变高变矮时格子和日期标签始终对齐 */
   min-height: 10px;
   border-radius: 3.2px;
+}
+
+/* 悬浮提示：深色气泡，位置由被指格子算出（左中对齐格子上沿） */
+.heat-tip {
+  position: absolute;
+  z-index: 20;
+  pointer-events: none;
+  transform: translate(-50%, -100%);
+  margin-top: -4px;
+  padding: 7px 11px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.85);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+}
+
+/* 底部小三角，指向被指的格子（与参考站一致） */
+.heat-tip::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: rgba(0, 0, 0, 0.85);
+}
+
+.heat-tip-time {
+  font-weight: 600;
 }
 
 /* 五档配色：0 档中性底色，1~4 逐级加深主色（对应参考站的 level-0..4）。

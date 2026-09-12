@@ -232,9 +232,11 @@ func (s *Server) groupStats(c *gin.Context, column string) {
 }
 
 type heatRow struct {
-	Day      string `gorm:"column:day"`
-	Hour     int    `gorm:"column:hour"`
-	Requests int64  `gorm:"column:requests"`
+	Day      string          `gorm:"column:day"`
+	Hour     int             `gorm:"column:hour"`
+	Requests int64           `gorm:"column:requests"`
+	Cost     decimal.Decimal `gorm:"column:cost"`
+	Tokens   int64           `gorm:"column:tokens"`
 }
 
 // statsHeatmap 返回近 N 天按「日期 x 小时」分布的热力数据。
@@ -246,9 +248,14 @@ func (s *Server) statsHeatmap(c *gin.Context) {
 	}
 	since := time.Now().AddDate(0, 0, -days)
 
+	// 悬浮提示要显示消费与 Token（与参考站的提示一致），所以一并聚合。
+	// COALESCE 是必需的：某个小时里只要有一行 estimated_cost 为 NULL，
+	// SUM 整体就会是 NULL，扫进 decimal 会直接报错。
 	const q = `SELECT to_char(created_at AT TIME ZONE ?, 'YYYY-MM-DD') AS day,
 		EXTRACT(HOUR FROM created_at AT TIME ZONE ?)::int AS hour,
-		COUNT(*)::bigint AS requests
+		COUNT(*)::bigint AS requests,
+		COALESCE(SUM(estimated_cost), 0) AS cost,
+		COALESCE(SUM(total_tokens), 0)::bigint AS tokens
 	FROM request_logs WHERE created_at >= ?
 	GROUP BY day, hour ORDER BY day, hour`
 
@@ -261,7 +268,12 @@ func (s *Server) statsHeatmap(c *gin.Context) {
 
 	items := make([]gin.H, 0, len(rows))
 	for _, r := range rows {
-		items = append(items, gin.H{"day": r.Day, "hour": r.Hour, "requests": r.Requests})
+		items = append(items, gin.H{
+			"day": r.Day, "hour": r.Hour, "requests": r.Requests,
+			// String() 会去掉多余的尾随零，前端可直接显示
+			"cost":   r.Cost.String(),
+			"tokens": r.Tokens,
+		})
 	}
 	c.JSON(http.StatusOK, gin.H{"days": days, "timezone": tz, "items": items})
 }
