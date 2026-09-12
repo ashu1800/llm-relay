@@ -126,7 +126,7 @@ async function load() {
       api.get<{ bucket: string; items: SeriesPoint[] }>('/stats/timeseries' + q),
       api.get<{ items: GroupItem[] }>('/stats/models' + q + '&limit=8'),
       api.get<{ items: GroupItem[] }>('/stats/channels' + q + '&limit=8'),
-      api.get<{ items: HeatItem[] }>('/stats/heatmap?days=30')
+      api.get<{ items: HeatItem[] }>('/stats/heatmap?days=' + HEAT_DAYS)
     ])
     health.value = h
     info.value = i
@@ -272,62 +272,54 @@ const modelPieOption = computed(() => {
 })
 
 // ---- 热力图：近 30 天 x 24 小时 ----
-const heatOption = computed(() => {
-  const today = new Date()
-  const days: string[] = []
-  for (let i = 29; i >= 0; i--) {
-    const d = new Date(today)
+// 热力图：24 小时 × 近 14 天，一格一个 div。
+//
+// 参考站就是这么做的（docs/layout-dashboard.json 里的 heatmap-body /
+// heatmap-cells / heatmap-cell 实测项，display:grid、格子 15x13、圆角 3.2px）。
+// 我们原来用 echarts 画 30 天 × 24 小时，有两个问题：
+//   1. 面板只有 272px 高，30 行摊下来每行 7px，格子被压成又扁又长的条
+//   2. 类目轴每隔 4 天才标一个日期，**最上面那行（今天）恰好轮不到标签**，
+//      于是最上方的色带被读成落在前一天 —— 看起来就像坐标轴弄反了
+// 改成网格后每行都能标出来，格子的宽高比也和参考站一致。
+const HEAT_DAYS = 7
+
+// 从最早到最晚排列：参考站的行标签自上而下是旧 → 新，也就是今天在最下面
+const heatDays = computed(() => {
+  const out: { key: string; label: string }[] = []
+  for (let i = HEAT_DAYS - 1; i >= 0; i--) {
+    const d = new Date()
     d.setDate(d.getDate() - i)
-    days.push(dayKey(d))
+    const k = dayKey(d)
+    out.push({ key: k, label: k.slice(5) })
   }
-  const hours = Array.from({ length: 24 }, (_, i) => String(i))
-  const data: [number, number, number][] = []
-  let max = 0
-  for (const it of heat.value) {
-    const y = days.indexOf(it.day)
-    if (y < 0) continue
-    data.push([it.hour, y, it.requests])
-    if (it.requests > max) max = it.requests
-  }
-  return {
-    tooltip: {
-      position: 'top',
-      formatter: (p: any) => days[p.value[1]] + ' ' + p.value[0] + ':00 · ' + p.value[2] + ' 次'
-    },
-    grid: { left: 62, right: 12, top: 8, bottom: 34 },
-    xAxis: {
-      type: 'category',
-      data: hours,
-      splitArea: { show: true },
-      axisLabel: { color: '#8c8c8c', fontSize: 10, interval: 2 }
-    },
-    yAxis: {
-      type: 'category',
-      data: days.map((d) => d.slice(5)),
-      splitArea: { show: true },
-      axisLabel: { color: '#8c8c8c', fontSize: 11, interval: 3 }
-    },
-    visualMap: {
-      min: 0,
-      max: max || 1,
-      calculable: false,
-      orient: 'horizontal',
-      left: 'center',
-      bottom: 0,
-      itemWidth: 12,
-      itemHeight: 80,
-      textStyle: { color: '#8c8c8c', fontSize: 10 },
-      inRange: { color: ['#f5efe9', '#e0b3a4', '#c87864', '#9c4f3c'] }
-    },
-    series: [
-      {
-        type: 'heatmap',
-        data,
-        itemStyle: { borderColor: '#fff', borderWidth: 1 },
-        emphasis: { itemStyle: { shadowBlur: 6, shadowColor: 'rgba(0,0,0,0.2)' } }
-      }
-    ]
-  }
+  return out
+})
+
+const heatMax = computed(() => heat.value.reduce((a, b) => Math.max(a, b.requests), 0))
+
+// 按请求数分 5 档：0 档是中性底色，其余逐级加深主色（与参考站的 level-0..4 一致）
+function heatLevel(n: number, max: number) {
+  if (!n || n <= 0) return 0
+  if (max <= 1) return 4
+  const r = n / max
+  if (r <= 0.25) return 1
+  if (r <= 0.5) return 2
+  if (r <= 0.75) return 3
+  return 4
+}
+
+const heatGrid = computed(() => {
+  const byKey = new Map<string, number>()
+  for (const it of heat.value) byKey.set(it.day + '#' + it.hour, it.requests)
+  const max = heatMax.value
+  return heatDays.value.map((d) => ({
+    key: d.key,
+    label: d.label,
+    cells: Array.from({ length: 24 }, (_, h) => {
+      const n = byKey.get(d.key + '#' + h) ?? 0
+      return { hour: h, requests: n, level: heatLevel(n, max) }
+    })
+  }))
 })
 
 const heatTotal = computed(() => heat.value.reduce((a, b) => a + b.requests, 0))
@@ -386,11 +378,33 @@ onMounted(load)
         </StatCard>
       </div>
 
-      <PanelCard title="请求热力图（近 30 天）">
+      <PanelCard :title="'请求热力图（近 ' + HEAT_DAYS + ' 天）'">
         <template #extra>
           <span class="panel-note">{{ n(heatTotal) }} 次请求</span>
         </template>
-        <EChart :option="heatOption" height="272px" />
+        <div class="heatmap">
+          <div class="heatmap-corner" />
+          <div class="heatmap-col-labels">
+            <!-- 每 3 小时标一个，与参考站一致 -->
+            <span v-for="h in 24" :key="h" class="heatmap-col-label">
+              {{ (h - 1) % 3 === 0 ? h - 1 : '' }}
+            </span>
+          </div>
+          <div class="heatmap-row-labels">
+            <span v-for="d in heatGrid" :key="d.key" class="heatmap-row-label">{{ d.label }}</span>
+          </div>
+          <div class="heatmap-cells">
+            <template v-for="d in heatGrid" :key="d.key">
+              <div
+                v-for="c in d.cells"
+                :key="d.key + '-' + c.hour"
+                class="heatmap-cell"
+                :class="'heatmap-cell-level-' + c.level"
+                :title="d.label + ' ' + c.hour + ':00 · ' + c.requests + ' 次'"
+              />
+            </template>
+          </div>
+        </div>
       </PanelCard>
     </section>
 
@@ -453,6 +467,64 @@ onMounted(load)
   color: var(--color-text-secondary);
   font-size: 13px;
 }
+
+/* 热力图：一格一个 div 的网格。
+   尺寸取自参考站的实测值（docs/layout-dashboard.json 的 heatmap-* 项）：
+   区域 gap 4px 8px、格子 gap 3.2px、圆角 3.2px、标签 11.2px。
+   格子的宽高比也照参考站（15:13），避免又被压成扁条。 */
+.heatmap {
+  --heat-cell-w: 18px;
+  --heat-cell-h: 15px;
+  --heat-gap: 3.2px;
+  display: grid;
+  /* 左上留白角 + 小时标签；下一行是日期标签 + 格子 */
+  grid-template-columns: 36px auto;
+  grid-template-rows: 18px auto;
+  gap: 4px 8px;
+  /* 面板比网格宽：居中，而不是把格子拉扁去填满 */
+  justify-content: center;
+}
+
+.heatmap-col-labels,
+.heatmap-cells {
+  display: grid;
+  grid-template-columns: repeat(24, var(--heat-cell-w));
+  gap: var(--heat-gap);
+}
+
+.heatmap-row-labels {
+  display: grid;
+  grid-auto-rows: var(--heat-cell-h);
+  gap: var(--heat-gap);
+}
+
+.heatmap-col-label {
+  font-size: 11.2px;
+  line-height: 17.6px;
+  color: var(--color-text-secondary);
+}
+
+.heatmap-row-label {
+  display: flex;
+  align-items: center;
+  font-size: 11.2px;
+  color: var(--color-text-secondary);
+}
+
+.heatmap-cell {
+  height: var(--heat-cell-h);
+  border-radius: 3.2px;
+}
+
+/* 五档配色：0 档中性底色，1~4 逐级加深主色（对应参考站的 level-0..4）。
+   0 档用 color-mix 把文字色压到 10% 透明度 —— 这在亮色下正好等于
+   参考站实测的 rgba(48,48,48,0.1)，暗色下又自动跟着换成浅色，
+   比写死字面值或借用 --color-border（偏深）都合适。 */
+.heatmap-cell-level-0 { background: color-mix(in srgb, var(--color-text) 10%, transparent); }
+.heatmap-cell-level-1 { background: rgba(200, 120, 100, 0.28); }
+.heatmap-cell-level-2 { background: rgba(200, 120, 100, 0.52); }
+.heatmap-cell-level-3 { background: rgba(200, 120, 100, 0.76); }
+.heatmap-cell-level-4 { background: rgb(200, 120, 100); }
 
 /* DataState 的错误提示自带左右外边距（为列表页的面板布局设计），
    这里外层已经有内边距，去掉以免出现双重缩进 */
