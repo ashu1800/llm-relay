@@ -62,6 +62,11 @@ func registerChannelRoutes(g *gin.RouterGroup, s *Server) {
 	r.PUT("/:id/models", s.replaceChannelModelsAPI)
 	r.POST("/:id/models", s.bindChannelModel)
 	r.DELETE("/:id/models/:bindingId", s.unbindChannelModel)
+	// 往渠道发一句 "hi" 看通不通。与真实转发走同一套代码，
+	// 所以它验证的是「中继实际会发出去的那个请求」，不是另拼一个
+	r.POST("/:id/test", s.testChannel)
+	// 图标：空 body 表示去上游抓一个，带 icon 表示设置成自定义值
+	r.POST("/:id/icon", s.channelIcon)
 }
 
 // whitelistItem 是渠道模型白名单的一行：客户端请求 PublicName，
@@ -93,7 +98,10 @@ type channelPayload struct {
 	// 「改成直连」与「这次请求不提代理这件事」。实测踩过 ——
 	// 用户把渠道从代理改回直连时传 proxy_id=0，后端当成「没传」忽略掉，
 	// 界面上显示已保存、库里还指着那个代理。与模型白名单要用指针是同一类坑。
-	ProxyID   *uint            `json:"proxy_id"`
+	ProxyID *uint `json:"proxy_id"`
+	// Icon 是渠道图标；传空字符串表示「清空，回到默认图标」，
+	// 所以同样要用指针才能区分「清空」与「这次不提图标」
+	Icon      *string          `json:"icon"`
 	Enabled   *bool            `json:"enabled"`
 	Slots     model.JSONList   `json:"available_slots"`
 	ExtraConf model.JSONMap    `json:"extra_config"`
@@ -272,6 +280,7 @@ func (s *Server) createChannel(c *gin.Context) {
 		// 建渠道时就把代理带上：漏了它的话，界面上选了代理、保存也成功，
 		// 但库里还是 0（直连）—— 表现为「配了代理却不走代理」（实测踩过）
 		ProxyID:      proxyID,
+		Icon:         strings.TrimSpace(derefString(p.Icon)),
 		HealthStatus: "unknown",
 	}
 	if err := s.deps.Store.DB().Create(&ch).Error; err != nil {
@@ -322,6 +331,9 @@ func (s *Server) updateChannel(c *gin.Context) {
 			return
 		}
 		updates["proxy_id"] = *p.ProxyID
+	}
+	if p.Icon != nil {
+		updates["icon"] = strings.TrimSpace(*p.Icon)
 	}
 	if p.Enabled != nil {
 		updates["enabled"] = *p.Enabled

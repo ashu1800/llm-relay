@@ -49,6 +49,15 @@ type Service struct {
 // SetChannelState 注入渠道运行期状态，用于并发闸门与冷却。
 func (s *Service) SetChannelState(st *ChannelState) { s.state = st }
 
+// Probe 用一条最小请求探一次上游，供管理界面的「测试连通性」使用。
+//
+// 刻意**不**做重试、不写请求日志、不计费：它回答的是「这条渠道现在通不通」，
+// 而不是「这次请求最终会不会成功」。跟着重试会把「上游在限流」
+// 这种一眼能看出的状态藏起来，那正是用户点这个按钮时想知道的。
+func (s *Service) Probe(ctx context.Context, cand Candidate, body []byte) (*Attempt, error) {
+	return s.fwd.Do(ctx, cand, "/v1/chat/completions", body, http.Header{}, false)
+}
+
 // SetProxyResolver 把「按 id 查代理配置」的能力交给转发器。
 func (s *Service) SetProxyResolver(fn ProxyResolver) { s.fwd.SetProxyResolver(fn) }
 

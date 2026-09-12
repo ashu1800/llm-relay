@@ -84,7 +84,12 @@ type Channel struct {
 	ExtraConfig JSONMap  `gorm:"type:jsonb" json:"extra_config"`
 	// 列名显式写成 custom_map：字段名与 json 名不一致，
 	// 不显式声明的话写原生列映射时极易误用 custom_mapping
-	CustomMap     JSONMap    `gorm:"column:custom_map;type:jsonb" json:"custom_mapping"`
+	CustomMap JSONMap `gorm:"column:custom_map;type:jsonb" json:"custom_mapping"`
+	// Icon 是渠道图标：可以是 data URI（从上游抓来的 favicon）、
+	// 任意 http(s) 图片地址，或者用户直接写的一两个字符。
+	// 用 text 而不是定长：favicon 转成 base64 动辄几 KB，size:512 会在
+	// 保存时被数据库直接拒绝（或静默截断成一个坏图片）
+	Icon          string     `gorm:"type:text" json:"icon"`
 	HealthStatus  string     `gorm:"size:32;not null;default:unknown" json:"health_status"`
 	LastError     string     `gorm:"size:1024" json:"last_error"`
 	LastCheckedAt *time.Time `json:"last_checked_at"`

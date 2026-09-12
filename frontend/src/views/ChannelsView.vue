@@ -1,13 +1,22 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, h, onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { PlusOutlined, ReloadOutlined, DeleteOutlined, EditOutlined, LinkOutlined } from '@ant-design/icons-vue'
+import {
+  PlusOutlined,
+  ReloadOutlined,
+  DeleteOutlined,
+  EditOutlined,
+  LinkOutlined,
+  ThunderboltOutlined,
+  CloudDownloadOutlined
+} from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import ModelWhitelistEditor, { type WhitelistRow } from '@/components/ModelWhitelistEditor.vue'
 // Proxy 只用于代理下拉的选项类型
 import type { Proxy } from '@/api/types'
 import GroupTag from '@/components/GroupTag.vue'
+import ChannelIcon from '@/components/ChannelIcon.vue'
 import { PROTOCOLS, type Channel, type ChannelGroup, type ChannelBinding } from '@/api/types'
 
 type ChannelRow = Channel & { models?: string[]; model_count?: number }
@@ -36,6 +45,8 @@ const form = reactive({
   enabled: true,
   // 出站代理：0 = 直连。模型条目上还能单独覆盖（见白名单里的「代理」列）
   proxy_id: 0,
+  // 渠道图标：data URI / 图片地址 / 一两个字符，空表示用默认图标
+  icon: '',
   // 单渠道并发上限。新建时给 10：不限并发会让一条渠道把上游打满，
   // 而用户多半没意识到「不限」就是当前的行为
   max_concurrency: 10,
@@ -96,6 +107,7 @@ function openCreate() {
     group_id: groups.value.find((x) => x.is_default)?.id ?? groups.value[0]?.id ?? 0,
     weight: 1,
     proxy_id: 0,
+    icon: '',
     max_concurrency: 10,
     enabled: true,
     models: [{ public_name: '', upstream_name: '', enabled: true }]
@@ -114,6 +126,7 @@ async function openEdit(row: ChannelRow) {
     weight: row.weight,
     enabled: row.enabled,
     proxy_id: row.proxy_id || 0,
+    icon: row.icon || '',
     // 没配过并发上限的渠道读出来是 0（不限制），如实显示 ——
     // 强行显示成 10 会让用户以为它一直是 10
     max_concurrency: Number((row.extra_config as any)?.max_concurrency) || 0,
@@ -195,6 +208,9 @@ async function save() {
       weight: form.weight,
       enabled: form.enabled,
       proxy_id: form.proxy_id || 0,
+      // 总是带上：空字符串的语义是「清空图标，回到默认」，
+      // 不传的话用户就没法把自定义图标去掉
+      icon: form.icon.trim(),
       // extra_config 里有别的键（自定义请求头等），必须整个带着走，
       // 否则改一次并发就把它们抹掉了
       extra_config: nextExtraConfig(),
@@ -232,6 +248,84 @@ function confirmDelete(row: Channel) {
       }
     }
   })
+}
+
+// 从上游抓图标。只能在编辑已有渠道时用 —— 触发方式是把当前表单里的地址
+// 交给后端的抓取接口，所以它不依赖「先保存」。
+const iconFetching = ref(false)
+
+async function fetchIcon() {
+  if (!editing.value) {
+    message.info('先保存渠道，再抓取图标')
+    return
+  }
+  if (!form.base_url.trim()) {
+    message.warning('先填上游地址')
+    return
+  }
+  iconFetching.value = true
+  try {
+    // 用当前表单里的地址去抓（而不是库里那份）：用户刚改完地址就点抓取，
+    // 期望的是从新地址抓
+    const res = await api.post<{ ok: boolean; icon: string; error?: string }>(
+      '/channels/' + editing.value.id + '/icon',
+      { icon: '', base_url: form.base_url.trim() }
+    )
+    if (res.ok) {
+      form.icon = res.icon
+      message.success('已获取图标，保存后生效')
+    } else {
+      Modal.warning({ title: '没能从上游取到图标', content: res.error || '未知原因', width: 520 })
+    }
+  } catch (e: any) {
+    message.error(e.message)
+  } finally {
+    iconFetching.value = false
+  }
+}
+
+// 往渠道发一句 "hi"：后端用真实转发链路（协议转换、鉴权、代理）发一次最小请求。
+// 结果的展示方式跟着结果走 —— 成功一条 message 就够，
+// 失败要用 Modal：上游的错误信息往往有几十个字，一闪而过读不完
+const testingId = ref(0)
+
+interface ChannelTestResult {
+  ok: boolean
+  status_code?: number
+  latency_ms: number
+  model?: string
+  upstream_model?: string
+  reply?: string
+  error?: string
+}
+
+async function testChannel(row: ChannelRow) {
+  if (testingId.value) return
+  testingId.value = row.id
+  try {
+    const res = await api.post<ChannelTestResult>('/channels/' + row.id + '/test', {})
+    if (res.ok) {
+      Modal.success({
+        title: row.name + ' 连通正常（' + res.latency_ms + ' ms）',
+        content: h('div', [
+          h('div', '模型：' + (res.model || '-') + (res.upstream_model && res.upstream_model !== res.model ? ' → ' + res.upstream_model : '')),
+          h('div', res.reply ? '回复：' + res.reply : '上游返回 ' + (res.status_code || 200) + '，但没有正文（推理型模型可能把内容放在 reasoning 里）')
+        ])
+      })
+    } else {
+      Modal.error({
+        title: row.name + ' 连通失败' + (res.status_code ? '（HTTP ' + res.status_code + '）' : ''),
+        content: res.error || '未知错误',
+        width: 560
+      })
+    }
+    // 后端会把这次结果写进 health_status，列表要跟着刷新
+    await load()
+  } catch (e: any) {
+    message.error(e.message)
+  } finally {
+    testingId.value = 0
+  }
 }
 
 async function openBindings(row: ChannelRow) {
@@ -327,21 +421,25 @@ onMounted(load)
       >
       <!-- scroll.x 必须不小于各列宽度之和：声明偏小时，固定在右侧的
            「操作」列会盖住左边最后一列，表现为表头被截断、内容被压住。
-           1170 = 各列宽度之和，实测容器宽 1182（scripts/measure-tables.mjs） -->
+           1230 = 各列宽度之和（名称列 150 -> 170 是为了放下「经 xxx」那行代理信息，
+           操作列 190 -> 230 是为了放下「测试」），实测容器宽 1182（scripts/measure-tables.mjs） -->
       <a-table
         :data-source="rows"
         :loading="loading"
         :pagination="false"
         row-key="id"
         size="small"
-        :scroll="{ x: 1190 }"
+        :scroll="{ x: 1230 }"
       >
         <template #emptyText>
           <a-empty description="还没有渠道，点「新建渠道」添加第一个" />
         </template>
         <a-table-column title="名称" :width="170">
           <template #default="{ record }">
-            <div class="chan-name">{{ record.name }}</div>
+            <div class="chan-title">
+              <ChannelIcon :name="record.name" :icon="record.icon" :size="20" />
+              <span class="chan-name">{{ record.name }}</span>
+            </div>
             <!-- 走了代理的渠道要能一眼看出来：排查「为什么这条渠道的错误
                  和别的渠道不一样」时，第一件事就是确认它的出口 -->
             <div v-if="proxyName(record.proxy_id)" class="sub-text">
@@ -382,9 +480,13 @@ onMounted(load)
             <a-tag :color="healthTag(record).color">{{ healthTag(record).text }}</a-tag>
           </template>
         </a-table-column>
-        <a-table-column title="操作" :width="190" fixed="right">
+        <a-table-column title="操作" :width="230" fixed="right">
           <template #default="{ record }">
             <a-space>
+              <a :class="{ disabled: testingId === record.id }" @click="testChannel(record)">
+                <ThunderboltOutlined />
+                {{ testingId === record.id ? '测试中…' : '测试' }}
+              </a>
               <a @click="openBindings(record)"><LinkOutlined /> 模型</a>
               <a @click="openEdit(record)"><EditOutlined /> 编辑</a>
               <a class="danger-link" @click="confirmDelete(record)"><DeleteOutlined /> 删除</a>
@@ -417,6 +519,24 @@ onMounted(load)
             <a-select-option v-for="g in groups" :key="g.id" :value="g.id">{{ g.name }}</a-select-option>
           </a-select>
           <div class="field-hint">分组决定路由与权限范围，模型由下面的白名单决定。</div>
+        </a-form-item>
+
+        <a-form-item label="渠道图标">
+          <div class="icon-row">
+            <ChannelIcon :name="form.name" :icon="form.icon" :size="28" />
+            <a-input
+              v-model:value="form.icon"
+              placeholder="图片地址 / data URI，或者直接写一个 emoji"
+              allow-clear
+            />
+            <a-button :loading="iconFetching" @click="fetchIcon">
+              <CloudDownloadOutlined /> 从上游获取
+            </a-button>
+          </div>
+          <div class="field-hint">
+            「从上游获取」会去渠道的上游站点抓一次 favicon；抓不到就用默认图标（渠道名首字母）。
+            也可以直接填一个 emoji 当图标。
+          </div>
         </a-form-item>
 
         <a-row :gutter="8">
@@ -496,10 +616,13 @@ onMounted(load)
 .toolbar-hint { color: var(--color-text-secondary); font-size: 13px; }
 .field-hint { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
 .unassigned { color: var(--color-text-secondary); }
-.chan-name { margin-bottom: 2px; }
+.chan-title { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+.icon-row { display: flex; align-items: center; gap: 8px; }
+.chan-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 名称下方的「经 xxx」代理提示：比正文弱一档，不抢渠道名的注意力 */
 .sub-text { color: var(--color-text-secondary); font-size: 12px; }
 .model-names { color: var(--color-text); }
 .muted { color: var(--color-text-secondary); }
 .danger-link { color: var(--color-red); }
+.disabled { color: var(--color-text-secondary); cursor: not-allowed; }
 </style>

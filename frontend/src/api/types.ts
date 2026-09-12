@@ -9,6 +9,8 @@ export interface Channel {
   weight: number
   /** 走哪个出站代理转发；0 = 直连 */
   proxy_id: number
+  /** 渠道图标：data URI / 图片地址 / 一两个字符；空表示用默认图标 */
+  icon: string
   enabled: boolean
   monitor_type: string
   available_slots: SlotRule[] | null
