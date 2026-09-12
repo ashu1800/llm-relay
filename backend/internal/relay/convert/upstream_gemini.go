@@ -54,7 +54,7 @@ func OpenAIChatToGeminiRequest(body []byte) ([]byte, error) {
 		}
 	}
 	if v, ok := src["stop"]; ok {
-		if seq := openAIStopToAnthropic(v); len(seq) > 0 {
+		if seq := openAIStopList(v); len(seq) > 0 {
 			gc["stopSequences"] = seq
 		}
 	}
@@ -83,7 +83,10 @@ func OpenAIChatToGeminiRequest(body []byte) ([]byte, error) {
 //   - assistant 在 Gemini 里叫 model；
 //   - 工具调用是 model 轮次里的 functionCall 部件，工具结果是 user 轮次里的
 //     functionResponse 部件，而 Gemini 的 functionResponse **只认函数名**、
-//     没有调用 id 的概念 —— 所以要从发起调用的那一轮里记住 id -> name 的对应关系。
+//     没有调用 id 的概念 —— 所以要从发起调用的那一轮里记住 id -> name 的对应关系；
+//   - 与 Anthropic 一样要求 user / model 严格交替，连续同角色必须合并：
+//     OpenAI 侧「assistant 先输出 tool_calls，再补一条文本」、
+//     「user 连发两条」都很常见，直接发过去会被上游 400 拒绝。
 func openAIMessagesToGemini(v any) ([]any, string) {
 	list, _ := v.([]any)
 	var systemParts []string
@@ -93,6 +96,15 @@ func openAIMessagesToGemini(v any) ([]any, string) {
 	appendTurn := func(role string, parts []any) {
 		if len(parts) == 0 {
 			return
+		}
+		// 与上一条同角色就并进去，保持交替
+		if n := len(contents); n > 0 {
+			prev := asMap(contents[n-1])
+			if prev != nil && asString(prev["role"]) == role {
+				prevParts, _ := prev["parts"].([]any)
+				prev["parts"] = append(prevParts, parts...)
+				return
+			}
 		}
 		contents = append(contents, map[string]any{"role": role, "parts": parts})
 	}
@@ -268,7 +280,7 @@ func sanitizeGeminiSchema(v any) map[string]any {
 		return nil
 	}
 	out := map[string]any{}
-	for _, k := range []string{"type", "description", "format", "nullable", "enum", "required", "title"} {
+	for _, k := range []string{"type", "description", "format", "nullable", "enum", "title"} {
 		if val, ok := m[k]; ok {
 			out[k] = val
 		}
@@ -281,6 +293,22 @@ func sanitizeGeminiSchema(v any) map[string]any {
 			}
 		}
 		out["properties"] = clean
+		// required 只保留真的还在的属性：属性被过滤掉却仍写在 required 里，
+		// Gemini 会报「required 里的字段不存在」，整条请求失败
+		if req, ok := m["required"].([]any); ok {
+			kept := make([]any, 0, len(req))
+			for _, item := range req {
+				name := asString(item)
+				if _, exists := clean[name]; exists {
+					kept = append(kept, item)
+				}
+			}
+			if len(kept) > 0 {
+				out["required"] = kept
+			}
+		}
+	} else if val, ok := m["required"]; ok {
+		out["required"] = val
 	}
 	if items, ok := m["items"]; ok {
 		if sub := sanitizeGeminiSchema(items); sub != nil {

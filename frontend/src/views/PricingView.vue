@@ -83,8 +83,10 @@ async function load() {
 // 定价表现在是手工维护的，所以「哪些模型还没定价」只能这样算出来。
 async function loadUnpriced() {
   try {
+    // 渠道列表单页上限是 200，所以显式带上 page_size：
+    // 默认只有 50，渠道一多就会把「已定价」的模型误报成未定价
     const [channels, priced] = await Promise.all([
-      api.get<{ items: Channel[] }>('/channels'),
+      api.get<{ items: Channel[] }>('/channels?page_size=200'),
       api.get<{ items: Pricing[] }>('/pricing?page_size=500')
     ])
     const whitelist = new Set<string>()

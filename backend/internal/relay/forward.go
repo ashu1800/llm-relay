@@ -89,6 +89,18 @@ func (f *Forwarder) Do(
 	if req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
+
+	// Anthropic 的能力开关有一部分是**按请求**用头声明的（例如提示缓存的
+	// anthropic-beta、以及客户端在用的 API 版本）。不透传的话，客户端明明在用
+	// 提示缓存，转出去的请求里却没有这个头 —— 缓存会静默失效，账单悄悄变贵，
+	// 而客户端看到的响应一切正常。所以这两个头按协议透传。
+	if cand.Channel.Protocol == model.ProtocolAnthropic {
+		for _, h := range []string{"anthropic-beta", "anthropic-version"} {
+			if v := inboundHeaders.Get(h); v != "" {
+				req.Header.Set(h, v)
+			}
+		}
+	}
 	req.Header.Set("Accept", "text/event-stream, application/json")
 
 	ApplyAuth(req, cand.Channel.Protocol, cand.APIKeyPlain, cand.Channel.CustomMap)

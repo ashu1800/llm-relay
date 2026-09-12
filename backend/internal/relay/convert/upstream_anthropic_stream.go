@@ -19,11 +19,10 @@ import (
 // 返回的 ReadCloser 读出的是 OpenAI Chat SSE 分片，Close 会关闭上游连接。
 func NewAnthropicStreamToOpenAIChat(src io.ReadCloser, model string) io.ReadCloser {
 	return &anthropicUpstreamStream{
-		src:    src,
-		model:  model,
-		out:    make([]byte, 0, 4096),
-		blocks: map[int]string{},
-		tools:  map[int]int{},
+		src:   src,
+		model: model,
+		out:   make([]byte, 0, 4096),
+		tools: map[int]int{},
 	}
 }
 
@@ -35,29 +34,28 @@ type anthropicUpstreamStream struct {
 
 	started  bool
 	finished bool
-	done     bool // 已写出 [DONE]
 
 	id         string
 	modelSeen  string
 	stopReason string
 	usage      map[string]any
-	// blocks 记录每个内容块的类型（text / thinking / tool_use）
-	blocks map[int]string
 	// tools 把 Anthropic 的内容块序号映射成 OpenAI 的 tool_call 序号
 	tools map[int]int
 	// curEvent 记录最近一条 event: 行，Anthropic 的事件类型在这里而不是 data 里
 	curEvent string
 	readErr  error
+	// writeErr 是转换/写出过程中的错误，交给 Read 抛给调用方
+	writeErr error
 }
 
 // Read 从转换结果里吐出字节，必要时继续从上游读并转换。
 func (s *anthropicUpstreamStream) Read(p []byte) (int, error) {
 	for len(s.out) == 0 {
+		if s.writeErr != nil {
+			return 0, s.writeErr
+		}
 		if s.readErr != nil {
-			if len(s.out) == 0 {
-				return 0, s.readErr
-			}
-			break
+			return 0, s.readErr
 		}
 		buf := make([]byte, 16*1024)
 		n, err := s.src.Read(buf)
@@ -87,16 +85,16 @@ func (s *anthropicUpstreamStream) Close() error { return s.src.Close() }
 
 // feed 逐行解析上游 SSE。
 func (s *anthropicUpstreamStream) feed(p []byte) {
-	var werr error
 	splitter := &sseSplitter{buf: s.buf}
 	splitter.feed(p, func(line []byte) {
-		if werr != nil {
+		if s.writeErr != nil {
 			return
 		}
-		werr = s.handleLine(line)
+		if err := s.handleLine(line); err != nil {
+			s.writeErr = err
+		}
 	})
 	s.buf = splitter.buf
-	_ = werr
 }
 
 func (s *anthropicUpstreamStream) handleLine(line []byte) error {
@@ -181,15 +179,14 @@ func (s *anthropicUpstreamStream) onMessageStart(message map[string]any) error {
 	return s.appendChunk(map[string]any{"role": "assistant", "content": ""}, nil)
 }
 
-// onBlockStart 记录内容块类型；工具调用要立刻把头分片发出去
+// onBlockStart 只关心工具调用：它要立刻把头分片发出去
 // （OpenAI 的 tool_call 分片里带 id 与函数名，后续分片只补 arguments）。
+// 文本与思维链块不需要建状态，增量里自带类型。
 func (s *anthropicUpstreamStream) onBlockStart(index int, block map[string]any) error {
 	if block == nil {
 		return nil
 	}
-	kind := asString(block["type"])
-	s.blocks[index] = kind
-	if kind != "tool_use" {
+	if asString(block["type"]) != "tool_use" {
 		return nil
 	}
 	toolIndex := len(s.tools)

@@ -56,7 +56,7 @@ func OpenAIChatToAnthropicRequest(body []byte) ([]byte, error) {
 		}
 	}
 	if v, ok := src["stop"]; ok {
-		out["stop_sequences"] = openAIStopToAnthropic(v)
+		out["stop_sequences"] = openAIStopList(v)
 	}
 	if v, ok := src["tools"]; ok {
 		out["tools"] = openAIToolsToAnthropic(v)
@@ -77,8 +77,10 @@ func OpenAIChatToAnthropicRequest(body []byte) ([]byte, error) {
 	return json.Marshal(out)
 }
 
-// openAIStopToAnthropic 把 stop（字符串或数组）统一成 Anthropic 的 stop_sequences 数组。
-func openAIStopToAnthropic(v any) []string {
+// openAIStopList 把 stop（字符串或数组）统一成字符串数组。
+// Anthropic 用它填 stop_sequences，Gemini 用它填 generationConfig.stopSequences，
+// 所以名字里不带具体协议。
+func openAIStopList(v any) []string {
 	switch s := v.(type) {
 	case string:
 		if s == "" {

@@ -289,6 +289,12 @@ func (s *Server) importConfig(c *gin.Context) {
 			continue
 		}
 		p.ID = 0
+		// 旧备份里没有 multiplier 字段（那时还没有固定倍率），反序列化后是 0。
+		// 0 会被 GORM 从 INSERT 里省掉，而这一列是 not null 且没有默认值 ——
+		// 不归一的话「恢复旧备份」会直接写不进去
+		if p.Multiplier <= 0 {
+			p.Multiplier = 1
+		}
 		if err := db.Create(&p).Error; err != nil {
 			report.Warnings = append(report.Warnings, "定价 "+p.ModelKey+" 导入失败: "+err.Error())
 			continue

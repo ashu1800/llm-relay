@@ -32,17 +32,22 @@ type geminiUpstreamStream struct {
 	finished   bool
 	stopReason string
 	usage      map[string]any
-	readErr    error
+	// toolCalls 记录已经发过几个工具调用：OpenAI 的分片靠 index 区分不同的调用，
+	// 全都写 0 的话下游改写器会把多个调用叠进同一个内容块（只剩最后一个）
+	toolCalls int
+	readErr   error
+	// writeErr 是转换/写出过程中的错误，交给 Read 抛给调用方
+	writeErr error
 }
 
 // Read 从转换结果里吐出字节。
 func (s *geminiUpstreamStream) Read(p []byte) (int, error) {
 	for len(s.out) == 0 {
+		if s.writeErr != nil {
+			return 0, s.writeErr
+		}
 		if s.readErr != nil {
-			if len(s.out) == 0 {
-				return 0, s.readErr
-			}
-			break
+			return 0, s.readErr
 		}
 		buf := make([]byte, 16*1024)
 		n, err := s.src.Read(buf)
@@ -94,7 +99,7 @@ func (s *geminiUpstreamStream) handleChunk(payload []byte) {
 		if msg == "" {
 			msg = "上游流式响应报错"
 		}
-		_ = s.appendSSE(map[string]any{
+		s.appendSSE(map[string]any{
 			"error": map[string]any{"message": msg, "type": "upstream_error"},
 		})
 		s.finish()
@@ -126,19 +131,21 @@ func (s *geminiUpstreamStream) handleChunk(payload []byte) {
 		}
 		if isThought, _ := p["thought"].(bool); isThought {
 			if t := asString(p["text"]); t != "" {
-				_ = s.appendChunk(map[string]any{"reasoning": t}, nil)
+				s.appendChunk(map[string]any{"reasoning": t}, nil)
 			}
 			continue
 		}
 		if t := asString(p["text"]); t != "" {
-			_ = s.appendChunk(map[string]any{"content": t}, nil)
+			s.appendChunk(map[string]any{"content": t}, nil)
 		}
 		if fc := asMap(p["functionCall"]); fc != nil {
 			name := asString(fc["name"])
 			args, _ := json.Marshal(fc["args"])
-			_ = s.appendChunk(map[string]any{
+			index := s.toolCalls
+			s.toolCalls++
+			s.appendChunk(map[string]any{
 				"tool_calls": []any{map[string]any{
-					"index": 0, "id": "call_" + name, "type": "function",
+					"index": index, "id": "call_" + name, "type": "function",
 					"function": map[string]any{"name": name, "arguments": string(args)},
 				}},
 			}, nil)
@@ -154,7 +161,7 @@ func (s *geminiUpstreamStream) finish() {
 	s.finished = true
 	if !s.started {
 		s.started = true
-		_ = s.appendChunk(map[string]any{"role": "assistant", "content": ""}, nil)
+		s.appendChunk(map[string]any{"role": "assistant", "content": ""}, nil)
 	}
 	reason := geminiFinishReasonToOpenAI(s.stopReason)
 	if s.stopReason == "" {
@@ -162,9 +169,9 @@ func (s *geminiUpstreamStream) finish() {
 		// 否则客户端会以为被截断
 		reason = "stop"
 	}
-	_ = s.appendChunk(map[string]any{}, &reason)
+	s.appendChunk(map[string]any{}, &reason)
 	if usage := geminiUsageToOpenAI(s.usage); usage != nil {
-		_ = s.appendSSE(map[string]any{
+		s.appendSSE(map[string]any{
 			"id": s.id, "object": "chat.completion.chunk", "created": anthropicCreated(),
 			"model": s.model, "choices": []any{}, "usage": usage,
 		})
@@ -172,7 +179,7 @@ func (s *geminiUpstreamStream) finish() {
 	s.appendRaw("[DONE]")
 }
 
-func (s *geminiUpstreamStream) appendChunk(delta map[string]any, finishReason *string) error {
+func (s *geminiUpstreamStream) appendChunk(delta map[string]any, finishReason *string) {
 	if s.id == "" {
 		s.id = newCompletionID()
 	}
@@ -182,21 +189,23 @@ func (s *geminiUpstreamStream) appendChunk(delta map[string]any, finishReason *s
 	} else {
 		choice["finish_reason"] = nil
 	}
-	return s.appendSSE(map[string]any{
+	s.appendSSE(map[string]any{
 		"id": s.id, "object": "chat.completion.chunk", "created": anthropicCreated(),
 		"model": s.model, "choices": []any{choice},
 	})
 }
 
-func (s *geminiUpstreamStream) appendSSE(payload any) error {
+// appendSSE 写出一个 data 分片。载荷都是本地构造的 map/字符串，
+// 序列化不会失败；真失败了也记进 writeErr 由 Read 抛出去，不静默丢内容。
+func (s *geminiUpstreamStream) appendSSE(payload any) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		s.writeErr = err
+		return
 	}
 	s.out = append(s.out, "data: "...)
 	s.out = append(s.out, raw...)
 	s.out = append(s.out, '\n', '\n')
-	return nil
 }
 
 // appendRaw 写一条非 JSON 的 data 行（只有 [DONE] 用得上）。

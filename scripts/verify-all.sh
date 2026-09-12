@@ -47,8 +47,9 @@ for s in test-group-update.py test-key-whitelist.py test-delete-semantics.py \
   echo
 done
 # bash 用例：没有统一的通过标志，按「没有 HAS_FAILURE」判定
-for s in test-model-whitelist.sh test-upstream-protocol.sh test-upstream-gemini.sh test-pricing.sh test-pricing-rules.sh test-pricing-filter.sh \
-         test-templates.sh test-cost.sh test-routing.sh; do
+# test-legacy-column-add.sh 会删列并重启应用（约 10 秒不可用），放在最后跑
+for s in test-model-whitelist.sh test-upstream-protocol.sh test-upstream-gemini.sh test-pricing.sh test-pricing-rules.sh test-pricing-backup.sh test-pricing-filter.sh \
+         test-templates.sh test-cost.sh test-routing.sh test-legacy-column-add.sh; do
   echo "########## $s ##########"
   out=$(bash "scripts/$s" 2>&1)
   echo "$out" | tail -1

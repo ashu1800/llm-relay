@@ -83,18 +83,12 @@ func (s *Server) createPricing(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
-	if p.Multiplier != nil {
-		row.Multiplier = *p.Multiplier
-	}
+	// 倍率（含 0 -> 1 的归一）已经在 buildPricingRow 里处理过，这里不再重复一遍：
+	// 同一件事写两处，改动时漏掉一处就会出现两种行为
 	row.Currency = "USD"
 	row.Active = true
 	if p.Active != nil {
 		row.Active = *p.Active
-	}
-	if row.Multiplier <= 0 {
-		// 0 表示「没填倍率」，按原价算；不把 0 写进库里，
-		// 免得日后有人看到 0 以为是「免费」
-		row.Multiplier = 1
 	}
 	if row.MatchType == "" {
 		row.MatchType = "exact"
@@ -126,6 +120,12 @@ func (s *Server) updatePricing(c *gin.Context) {
 		updates["model_key"] = p.ModelKey
 	}
 	if p.MatchType != "" {
+		// 与创建时同样的校验：写错的值不会报错，
+		// 只会让这条定价静默按精确匹配处理（引擎里非 prefix 一律当精确）
+		if p.MatchType != "exact" && p.MatchType != "prefix" {
+			writeUpstreamError(c, http.StatusBadRequest, "match_type 只能是 exact 或 prefix", "invalid_request_error")
+			return
+		}
 		updates["match_type"] = p.MatchType
 	}
 	// 列名用常量而非 json 名，二者不一样，写错会在更新时报「列不存在」

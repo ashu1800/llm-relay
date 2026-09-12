@@ -146,6 +146,28 @@ func (s *Store) migrateLegacySchema() error {
 		slog.Info("渠道绑定已迁移为渠道模型白名单")
 	}
 
+	// model_pricings.multiplier（固定倍率）在实体上是 not null 且没有 default。
+	//
+	// 这类列**不能在表里已有数据时交给 AutoMigrate 去加**：它生成的是
+	// ALTER TABLE ... ADD COLUMN multiplier numeric(10,4) NOT NULL，
+	// Postgres 会直接报 "column contains null values"，AutoMigrate 返回错误，
+	// 应用连不上库就起不来（实测就是在 3552 行定价上启动失败，
+	// 清空后才起来 —— 用户升级时不该靠这种巧合）。
+	//
+	// 所以这里先建列并给已有行兜底 1（1 = 原价，语义上正是「没配倍率」），
+	// 再立刻把 DEFAULT 去掉：留着它会让「忘记填倍率」被列默认值静默补上。
+	if s.hasTable("model_pricings") && !s.hasColumn("model_pricings", "multiplier") {
+		for _, stmt := range []string{
+			"ALTER TABLE model_pricings ADD COLUMN multiplier numeric(10,4) NOT NULL DEFAULT 1",
+			"ALTER TABLE model_pricings ALTER COLUMN multiplier DROP DEFAULT",
+		} {
+			if err := s.db.Exec(stmt).Error; err != nil {
+				return fmt.Errorf("迁移 model_pricings.multiplier 失败（%s）: %w", stmt, err)
+			}
+		}
+		slog.Info("定价表已补充固定倍率列（既有记录按 1 倍原价处理）")
+	}
+
 	// 模型商彻底退场：表与各表上的归属列一并删掉
 	for _, stmt := range []string{
 		"ALTER TABLE channel_models DROP COLUMN IF EXISTS model_id",
