@@ -315,7 +315,7 @@ onMounted(load)
             </a-tag>
           </template>
         </a-table-column>
-        <a-table-column title="Token（输入/输出/缓存）" :width="180">
+        <a-table-column title="词元（输入/输出/缓存）" :width="180">
           <template #default="{ record }">
             <span class="token-cell">
               {{ record.prompt_tokens }} / {{ record.completion_tokens }} / {{ record.cached_tokens }}
@@ -359,7 +359,7 @@ onMounted(load)
         <a-descriptions-item label="密钥">{{ current.api_key_name }}</a-descriptions-item>
         <a-descriptions-item label="客户端 IP">{{ current.client_ip }}</a-descriptions-item>
         <a-descriptions-item label="流式">{{ current.stream ? '是' : '否' }}</a-descriptions-item>
-        <a-descriptions-item label="Token 明细">
+        <a-descriptions-item label="词元明细">
           输入 {{ current.prompt_tokens }} · 输出 {{ current.completion_tokens }} ·
           缓存命中 {{ current.cached_tokens }} · 缓存写入 {{ current.cache_creation_tokens }} ·
           推理 {{ current.reasoning_tokens }} · 命中率 {{ cacheRate(current) }}

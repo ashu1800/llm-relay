@@ -42,7 +42,8 @@ async function evaluate(expression, awaitPromise = false) {
 const raw = await evaluate(
   'JSON.stringify({' +
   '  rowLabels: Array.from(document.querySelectorAll(".heatmap-row-labels .heatmap-row-label")).map(function(e){return e.innerText}),' +
-  '  titles: Array.from(document.querySelectorAll(".heatmap-cells .heatmap-cell")).map(function(e){return e.title}),' +
+  '  keys: Array.from(document.querySelectorAll(".heatmap-cells .heatmap-cell")).map(function(e){return e.dataset.key}),' +
+  '  levels: Array.from(document.querySelectorAll(".heatmap-cells .heatmap-cell")).map(function(e){return e.className.split("heatmap-cell-level-")[1] || ""}),' +
   '  summary: (document.querySelector(".panel-note") || {}).innerText || "",' +
   '  gridBottom: Math.round((document.querySelector(".summary-grid") || {getBoundingClientRect: function(){return {bottom: -1}}}).getBoundingClientRect().bottom),' +
   '  panelBottom: Math.round((Array.from(document.querySelectorAll(".panel")).find(function(p){return p.innerText.indexOf("请求热力图") >= 0}) || {getBoundingClientRect: function(){return {bottom: -2}}}).getBoundingClientRect().bottom),' +
@@ -64,13 +65,14 @@ function chk(name, cond, detail) {
 
 console.log('面板标题: ' + dom.title + '   摘要: ' + dom.summary)
 console.log('行标签: ' + dom.rowLabels.join(' '))
-console.log('格子数: ' + dom.titles.length)
+console.log('格子数: ' + dom.keys.length)
 console.log('接口点数: ' + api.length)
 console.log('')
 
-chk('标题是 7 天', dom.title.indexOf('7 天') >= 0, dom.title)
+// 标题不再带天数（用户要求去掉），这里只断言标题本身
+chk('标题是「请求热力图」', dom.title === '请求热力图', dom.title)
 chk('行数 = 7', dom.rowLabels.length === 7, String(dom.rowLabels.length))
-chk('格子数 = 7 x 24', dom.titles.length === 168, String(dom.titles.length))
+chk('格子数 = 7 x 24', dom.keys.length === 168, String(dom.keys.length))
 
 const today = new Date()
 const pad = (n) => String(n).padStart(2, '0')
@@ -84,16 +86,30 @@ for (let i = 6; i >= 0; i--) {
 chk('行标签是从早到晚且连续', JSON.stringify(dom.rowLabels) === JSON.stringify(days),
     dom.rowLabels.join(',') + ' vs ' + days.join(','))
 
-// 接口的每个点都要在页面上找到，并且计数一致
+// 接口的每个点都要落在正确的行列，且档位与请求数相符。
+// 位置用 data-key 核对，数值用档位核对（0~4 表示相对强度）。
+const maxReq = api.reduce((a, b) => Math.max(a, b.requests), 0)
+function expectLevel(n) {
+  if (!n || n <= 0) return '0'
+  if (maxReq <= 1) return '4'
+  const r = n / maxReq
+  if (r <= 0.25) return '1'
+  if (r <= 0.5) return '2'
+  if (r <= 0.75) return '3'
+  return '4'
+}
 let missing = 0, wrong = 0
 for (const it of api) {
   const idx = days.indexOf(it.day.slice(5))
   if (idx < 0) { missing++; continue }
   const cellIdx = idx * 24 + it.hour
-  const t = dom.titles[cellIdx] || ''
-  if (t.indexOf('· ' + it.requests + ' 次') < 0) {
+  const want = it.day + '#' + it.hour
+  const got = dom.keys[cellIdx] || ''
+  const lv = dom.levels[cellIdx] || ''
+  if (got !== want || lv !== expectLevel(it.requests)) {
     wrong++
-    console.log('    行 ' + it.day + ' ' + it.hour + '时 期望 ' + it.requests + ' 次，实际 title=' + t)
+    console.log('    行 ' + it.day + ' ' + it.hour + '时 期望 key=' + want + ' 档' + expectLevel(it.requests) +
+                '，实际 key=' + got + ' 档' + lv)
   }
 }
 chk('接口的每个点都出现在正确的行列', missing === 0 && wrong === 0,

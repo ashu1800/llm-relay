@@ -14,8 +14,6 @@ import StatCard from '@/components/StatCard.vue'
 import EChart from '@/components/EChart.vue'
 import DataState from '@/components/DataState.vue'
 
-type Health = { status: string; uptime: string }
-type SystemInfo = { version: string; port: number; pricing_sync: number; payload_store: string }
 type Summary = {
   requests: number
   success: number
@@ -51,8 +49,6 @@ type GroupItem = {
 }
 type HeatItem = { day: string; hour: number; requests: number; cost: string; tokens: number }
 
-const health = ref<Health | null>(null)
-const info = ref<SystemInfo | null>(null)
 const summary = ref<Summary | null>(null)
 const series = ref<SeriesPoint[]>([])
 const byModel = ref<GroupItem[]>([])
@@ -119,17 +115,15 @@ async function load() {
   loadError.value = ''
   try {
     const q = '?range=' + range.value
-    const [h, i, s, ts, m, ch, hm] = await Promise.all([
-      fetch('/healthz').then((r) => r.json()),
-      api.get<SystemInfo>('/system/info'),
+    // 「服务状态」卡片移除后，healthz 与 system/info 已无人读取，
+    // 一并去掉：它们挂在 Promise.all 里，任何一个失败都会让整个看板报错
+    const [s, ts, m, ch, hm] = await Promise.all([
       api.get<Summary>('/stats/summary' + q),
       api.get<{ bucket: string; items: SeriesPoint[] }>('/stats/timeseries' + q),
       api.get<{ items: GroupItem[] }>('/stats/models' + q + '&limit=8'),
       api.get<{ items: GroupItem[] }>('/stats/channels' + q + '&limit=8'),
       api.get<{ items: HeatItem[] }>('/stats/heatmap?days=' + HEAT_DAYS)
     ])
-    health.value = h
-    info.value = i
     summary.value = s
     series.value = ts.items || []
     seriesBucket.value = ts.bucket || 'hour'
@@ -323,7 +317,7 @@ const heatGrid = computed(() => {
   }))
 })
 
-// 悬浮提示：移到格子上时显示那一小时的明细（时间 / 请求数 / 消费 / Token），
+// 悬浮提示：移到格子上时显示那一小时的明细（时间 / 请求数 / 消费 / 词元），
 // 与参考站一致。用「整块网格共用一个提示框 + 事件委托」，而不是给 168 个格子
 // 各挂一个气泡 —— 格子自带 data-key，提示框按被指格子的位置定位。
 const heatTip = ref({
@@ -473,20 +467,6 @@ onMounted(load)
         <EChart :option="modelPieOption" height="260px" />
       </PanelCard>
     </section>
-
-    <!-- 运行状态（本站自检，参考站无此项） -->
-    <PanelCard title="服务状态">
-      <a-descriptions :column="2" size="small">
-        <a-descriptions-item label="服务">
-          <a-tag :color="health ? 'green' : 'red'">{{ health ? '运行中' : '不可用' }}</a-tag>
-        </a-descriptions-item>
-        <a-descriptions-item label="运行时长">{{ health?.uptime ?? '-' }}</a-descriptions-item>
-        <a-descriptions-item label="监听端口">{{ info?.port ?? '-' }}</a-descriptions-item>
-        <a-descriptions-item label="版本">{{ info?.version ?? '-' }}</a-descriptions-item>
-        <a-descriptions-item label="定价同步间隔">{{ info?.pricing_sync ?? '-' }} 小时</a-descriptions-item>
-        <a-descriptions-item label="报文留存">{{ info?.payload_store ?? '-' }}</a-descriptions-item>
-      </a-descriptions>
-    </PanelCard>
     </DataState>
   </div>
 </template>
