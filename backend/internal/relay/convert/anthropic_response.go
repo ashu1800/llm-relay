@@ -255,24 +255,36 @@ func (t *AnthropicStreamTranslator) handleChunk(payload []byte) error {
 	if delta == nil {
 		return nil
 	}
-	// 思维链增量以 thinking 块输出
+	// 一个 delta 里可能同时带思维链、正文和工具调用，三者都要发出去。
+	//
+	// 原来每个分支各自 return，同一个 delta 里只有第一个字段能活下来：
+	// 上游把 content 和 tool_calls 放在一起时，工具调用被静默丢弃，
+	// 客户端（Claude Code 等）于是认为模型没有要调用工具，
+	// 一次本该继续的对话就此中断，而且没有任何错误提示。
+	//
+	// ensureBlock 会按需切换块类型（thinking -> text -> tool_use），
+	// 顺序发出去即可。
 	if r := asString(delta["reasoning"]); r != "" {
 		if err := t.ensureBlock("thinking"); err != nil {
 			return err
 		}
-		return writeSSE(t.w, "content_block_delta", map[string]any{
+		if err := writeSSE(t.w, "content_block_delta", map[string]any{
 			"type": "content_block_delta", "index": t.blockIndex,
 			"delta": map[string]any{"type": "thinking_delta", "thinking": r},
-		})
+		}); err != nil {
+			return err
+		}
 	}
 	if c := asString(delta["content"]); c != "" {
 		if err := t.ensureBlock("text"); err != nil {
 			return err
 		}
-		return writeSSE(t.w, "content_block_delta", map[string]any{
+		if err := writeSSE(t.w, "content_block_delta", map[string]any{
 			"type": "content_block_delta", "index": t.blockIndex,
 			"delta": map[string]any{"type": "text_delta", "text": c},
-		})
+		}); err != nil {
+			return err
+		}
 	}
 	if calls, ok := delta["tool_calls"].([]any); ok {
 		for _, c := range calls {

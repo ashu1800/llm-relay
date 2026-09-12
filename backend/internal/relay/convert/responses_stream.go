@@ -100,16 +100,21 @@ func (t *ResponsesStreamTranslator) handleChunk(payload []byte) error {
 		return nil
 	}
 
+	// 一个 delta 里可能同时带思维链、正文和工具调用，三者都要发出去。
+	// 原来每个分支各自 return，同一 delta 里只有第一个字段能活下来，
+	// 上游把 content 和 tool_calls 放在一起时工具调用会被静默丢弃。
 	if r := asString(delta["reasoning"]); r != "" {
 		if err := t.ensureReasoning(); err != nil {
 			return err
 		}
 		t.openText.WriteString(r)
-		return writeSSE(t.w, "response.reasoning_summary_text.delta", map[string]any{
+		if err := writeSSE(t.w, "response.reasoning_summary_text.delta", map[string]any{
 			"type":    "response.reasoning_summary_text.delta",
 			"item_id": t.openID, "output_index": t.openIdx,
 			"summary_index": 0, "delta": r,
-		})
+		}); err != nil {
+			return err
+		}
 	}
 
 	if c := asString(delta["content"]); c != "" {
@@ -117,11 +122,13 @@ func (t *ResponsesStreamTranslator) handleChunk(payload []byte) error {
 			return err
 		}
 		t.openText.WriteString(c)
-		return writeSSE(t.w, "response.output_text.delta", map[string]any{
+		if err := writeSSE(t.w, "response.output_text.delta", map[string]any{
 			"type":    "response.output_text.delta",
 			"item_id": t.openID, "output_index": t.openIdx,
 			"content_index": 0, "delta": c,
-		})
+		}); err != nil {
+			return err
+		}
 	}
 
 	if calls, ok := delta["tool_calls"].([]any); ok {
