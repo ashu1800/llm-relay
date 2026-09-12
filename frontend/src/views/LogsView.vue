@@ -20,17 +20,68 @@ const payload = ref<LogPayload | null>(null)
 // 简略 / 详细 切换，对应参考站的 segmented 控件
 const dense = ref<string>('brief')
 
-const query = reactive({ page: 1, page_size: 50, model: '', status: '' })
+const query = reactive({
+  page: 1,
+  page_size: 50,
+  model: '',
+  trace_id: '',
+  // '' 表示不限；'success' / 'error' 走状态码区间，其余按精确状态码
+  status: '',
+  // '' 表示不限时间范围
+  range: '24h'
+})
+
+const rangeOptions = [
+  { value: '1h', label: '近 1 小时' },
+  { value: '24h', label: '近 24 小时' },
+  { value: '7d', label: '近 7 天' },
+  { value: '30d', label: '近 30 天' },
+  { value: '', label: '不限时间' }
+]
+
+const statusOptions = [
+  { value: '', label: '全部状态' },
+  { value: 'success', label: '仅成功' },
+  { value: 'error', label: '仅失败' },
+  { value: '429', label: '429 限流' },
+  { value: '502', label: '502 上游错误' }
+]
+
+// rangeToSince 把「近 N 小时/天」换算成绝对时刻。
+// 不用「N 小时前的此刻」之外的写法：后端按 created_at 过滤，
+// 相对区间每次请求都变会导致翻页时结果漂移，所以要固定成绝对时间。
+function rangeToSince(range: string): string {
+  if (!range) return ''
+  const hours: Record<string, number> = { '1h': 1, '24h': 24, '7d': 24 * 7, '30d': 24 * 30 }
+  const h = hours[range]
+  if (!h) return ''
+  return new Date(Date.now() - h * 3600 * 1000).toISOString()
+}
+
+// buildParams 在列表与导出之间共用：两边条件必须完全一致，
+// 否则「导出的」和「看到的」不是一回事，排障时最容易被误导。
+function buildParams(includePaging: boolean): URLSearchParams {
+  const params = new URLSearchParams()
+  if (includePaging) {
+    params.set('page', String(query.page))
+    params.set('page_size', String(query.page_size))
+  }
+  if (query.model.trim()) params.set('model', query.model.trim())
+  if (query.trace_id.trim()) params.set('trace_id', query.trace_id.trim())
+  if (query.status === 'success' || query.status === 'error') {
+    params.set('status_class', query.status)
+  } else if (query.status.trim()) {
+    params.set('status', query.status.trim())
+  }
+  const since = rangeToSince(query.range)
+  if (since) params.set('since', since)
+  return params
+}
 
 async function load() {
   loading.value = true
   try {
-    const params = new URLSearchParams()
-    params.set('page', String(query.page))
-    params.set('page_size', String(query.page_size))
-    if (query.model.trim()) params.set('model', query.model.trim())
-    if (query.status.trim()) params.set('status', query.status.trim())
-    const res = await api.get<Paged<RequestLog>>('/logs?' + params.toString())
+    const res = await api.get<Paged<RequestLog>>('/logs?' + buildParams(true).toString())
     rows.value = res.items || []
     total.value = res.total || 0
   } catch (e: any) {
@@ -105,27 +156,49 @@ function fmtCost(v: string) {
   return n > 0 ? '$' + n.toFixed(6) : '-'
 }
 
-function exportCsv() {
-  const header = [
-    '请求时间', '模型', '状态', '密钥', '渠道',
-    '输入Token', '输出Token', '缓存命中', '缓存写入', '推理Token',
-    '首包延迟', '完成时长', '费用USD'
-  ]
-  const lines = rows.value.map((r) =>
-    [
-      fmtTime(r.created_at), r.model_requested, r.status_code, r.api_key_name, r.channel_name,
-      r.prompt_tokens, r.completion_tokens, r.cached_tokens, r.cache_creation_tokens,
-      r.reasoning_tokens, r.first_byte_ms, r.total_ms, r.estimated_cost
-    ].join(',')
-  )
-  const csv = [header.join(','), ...lines].join(String.fromCharCode(10))
-  // 加 BOM 以便 Excel 正确识别 UTF-8
-  const blob = new Blob([String.fromCharCode(0xfeff) + csv], { type: 'text/csv;charset=utf-8' })
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
-  a.download = 'request-logs.csv'
-  a.click()
-  URL.revokeObjectURL(a.href)
+// exportCsv 导出当前筛选条件下的**全部**日志。
+//
+// 原来只把当前页（默认 50 条）拼成 CSV，用户点「导出」拿到的文件却像是全部记录；
+// 这种「看起来成功、实际只有一小部分」的问题不会报错，只会让人得出错误结论。
+// 现在由服务端按同一套筛选条件全量导出，并把实际条数回报给用户。
+const exporting = ref(false)
+
+async function exportCsv() {
+  exporting.value = true
+  try {
+    const res = await fetch('/api/admin/logs/export?' + buildParams(false).toString())
+    if (!res.ok) {
+      const text = await res.text()
+      let msg = '导出失败 ' + res.status
+      try {
+        msg = JSON.parse(text)?.error?.message || msg
+      } catch {
+        // 非 JSON 错误体，保留默认文案
+      }
+      throw new Error(msg)
+    }
+    const blob = await res.blob()
+    const exported = Number(res.headers.get('X-Exported-Count') || 0)
+    const total = Number(res.headers.get('X-Total-Count') || 0)
+    const truncated = res.headers.get('X-Exported-Truncated') === 'true'
+
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = 'request-logs.csv'
+    a.click()
+    URL.revokeObjectURL(a.href)
+
+    if (truncated) {
+      // 被截断时必须说出来，否则用户会以为拿到了全部
+      message.warning('已导出 ' + exported + ' 条，但符合条件的有 ' + total + ' 条，结果被截断', 6)
+    } else {
+      message.success('已导出 ' + exported + ' 条')
+    }
+  } catch (e: any) {
+    message.error(e.message)
+  } finally {
+    exporting.value = false
+  }
 }
 
 const pagination = computed(() => ({
@@ -151,23 +224,35 @@ onMounted(load)
       <div class="manage-toolbar">
         <div class="toolbar-left">
           <a-button :loading="loading" @click="load"><ReloadOutlined /> 刷新</a-button>
-          <a-button @click="exportCsv"><DownloadOutlined /> 导出</a-button>
+          <a-button :loading="exporting" @click="exportCsv"><DownloadOutlined /> 导出</a-button>
         </div>
         <a-input
           v-model:value="query.model"
           placeholder="按模型筛选"
           allow-clear
-          style="width: 180px"
+          style="width: 170px"
           @press-enter="search"
         >
           <template #prefix><SearchOutlined /></template>
         </a-input>
         <a-input
-          v-model:value="query.status"
-          placeholder="状态码"
+          v-model:value="query.trace_id"
+          placeholder="trace_id 精确查找"
           allow-clear
-          style="width: 110px"
+          style="width: 200px"
           @press-enter="search"
+        />
+        <a-select
+          v-model:value="query.status"
+          :options="statusOptions"
+          style="width: 130px"
+          @change="search"
+        />
+        <a-select
+          v-model:value="query.range"
+          :options="rangeOptions"
+          style="width: 130px"
+          @change="search"
         />
         <a-button type="primary" @click="search">查询</a-button>
         <div class="toolbar-spacer" />

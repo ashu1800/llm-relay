@@ -827,7 +827,53 @@ func (s *Server) deleteKey(c *gin.Context) {
 func registerLogRoutes(g *gin.RouterGroup, s *Server) {
 	r := g.Group("/logs")
 	r.GET("", s.listLogs)
+	// 必须注册在 /:id 之前，否则 "export" 会被当成日志 id
+	r.GET("/export", s.exportLogs)
 	r.GET("/:id", s.logDetail)
+}
+
+// logFilters 按查询参数拼出日志筛选条件。
+//
+// 单拎出来是为了让列表与导出用同一套条件：两边各写一遍迟早会不一致，
+// 而「导出的和看到的不一样」是排查问题时最误导人的情况。
+func (s *Server) logFilters(c *gin.Context) *gorm.DB {
+	q := s.deps.Store.DB().Model(&model.RequestLog{})
+
+	if m := strings.TrimSpace(c.Query("model")); m != "" {
+		q = q.Where("model_requested = ?", m)
+	}
+	// trace_id 精确定位：从一条报错跳到完整链路的入口
+	if tid := strings.TrimSpace(c.Query("trace_id")); tid != "" {
+		q = q.Where("trace_id = ?", tid)
+	}
+	// 状态码：既支持精确值，也支持按类别看
+	// （「只看失败的」是排查时最常用的，而精确匹配单个状态码做不到）
+	if st := strings.TrimSpace(c.Query("status")); st != "" {
+		q = q.Where("status_code = ?", st)
+	}
+	switch c.Query("status_class") {
+	case "success":
+		q = q.Where("status_code >= 200 AND status_code < 300")
+	case "error":
+		q = q.Where("status_code >= 400")
+	}
+	if cid := strings.TrimSpace(c.Query("channel_id")); cid != "" {
+		q = q.Where("channel_id = ?", cid)
+	}
+	if kid := strings.TrimSpace(c.Query("key_id")); kid != "" {
+		q = q.Where("api_key_id = ?", kid)
+	}
+	if since := c.Query("since"); since != "" {
+		if t, err := time.Parse(time.RFC3339, since); err == nil {
+			q = q.Where("created_at >= ?", t)
+		}
+	}
+	if until := c.Query("until"); until != "" {
+		if t, err := time.Parse(time.RFC3339, until); err == nil {
+			q = q.Where("created_at <= ?", t)
+		}
+	}
+	return q
 }
 
 func (s *Server) listLogs(c *gin.Context) {
@@ -840,21 +886,7 @@ func (s *Server) listLogs(c *gin.Context) {
 		size = 50
 	}
 
-	q := s.deps.Store.DB().Model(&model.RequestLog{})
-	if m := c.Query("model"); m != "" {
-		q = q.Where("model_requested = ?", m)
-	}
-	if st := c.Query("status"); st != "" {
-		q = q.Where("status_code = ?", st)
-	}
-	if cid := c.Query("channel_id"); cid != "" {
-		q = q.Where("channel_id = ?", cid)
-	}
-	if since := c.Query("since"); since != "" {
-		if t, err := time.Parse(time.RFC3339, since); err == nil {
-			q = q.Where("created_at >= ?", t)
-		}
-	}
+	q := s.logFilters(c)
 
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
@@ -867,6 +899,68 @@ func (s *Server) listLogs(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items, "total": total, "page": page, "page_size": size})
+}
+
+// maxExportRows 是单次导出的上限。日志可能很多，全量导出会把内存和响应撑爆；
+// 到顶时会在响应头里说明被截断，而不是悄悄少给。
+const maxExportRows = 20000
+
+// exportLogs 导出当前筛选条件下的全部日志。
+//
+// 前端原来只导出当前页（默认 50 条），用户点「导出」拿到的文件却像是全部日志 ——
+// 这种「看起来成功、实际只有一小部分」是最难发现的一类问题。
+// 导出必须在服务端按同一套筛选条件做全量，并把实际条数写进响应头。
+func (s *Server) exportLogs(c *gin.Context) {
+	var total int64
+	if err := s.logFilters(c).Count(&total).Error; err != nil {
+		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		return
+	}
+	exported := total
+	if exported > maxExportRows {
+		exported = maxExportRows
+	}
+
+	var items []model.RequestLog
+	if err := s.logFilters(c).Order("id DESC").Limit(int(exported)).Find(&items).Error; err != nil {
+		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		return
+	}
+
+	c.Header("X-Total-Count", strconv.FormatInt(total, 10))
+	c.Header("X-Exported-Count", strconv.Itoa(len(items)))
+	c.Header("X-Exported-Truncated", strconv.FormatBool(total > int64(len(items))))
+	c.Header("Content-Disposition", "attachment; filename=request-logs.csv")
+	c.Header("Content-Type", "text/csv; charset=utf-8")
+
+	var b strings.Builder
+	// 加 BOM，Excel 才会按 UTF-8 识别。
+	// 这里必须写转义序列：直接嵌入 BOM 字符会让 Go 源码在词法分析阶段就报错
+	b.WriteString("\ufeff")
+	b.WriteString("请求时间,模型,状态,密钥,渠道,输入Token,输出Token,缓存命中,缓存写入,推理Token,首包延迟(ms),完成时长(ms),费用USD,trace_id\n")
+	for i := range items {
+		r := &items[i]
+		row := []string{
+			r.CreatedAt.Format(time.RFC3339),
+			r.ModelRequested, strconv.Itoa(r.StatusCode), r.APIKeyName, r.ChannelName,
+			strconv.Itoa(r.PromptTokens), strconv.Itoa(r.CompletionTokens),
+			strconv.Itoa(r.CachedTokens), strconv.Itoa(r.CacheCreationTokens), strconv.Itoa(r.ReasoningTokens),
+			strconv.Itoa(r.FirstByteMs), strconv.Itoa(r.TotalMs), r.EstimatedCost.String(), r.TraceID,
+		}
+		for j, cell := range row {
+			if j > 0 {
+				b.WriteByte(',')
+			}
+			// CSV 转义：字段里有逗号、引号或换行时要用引号包起来
+			if strings.ContainsAny(cell, ",\"\n\r") {
+				b.WriteString(`"` + strings.ReplaceAll(cell, `"`, `""`) + `"`)
+			} else {
+				b.WriteString(cell)
+			}
+		}
+		b.WriteByte('\n')
+	}
+	c.String(http.StatusOK, b.String())
 }
 
 func (s *Server) logDetail(c *gin.Context) {
