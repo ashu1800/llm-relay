@@ -58,8 +58,22 @@ func (f *Forwarder) Do(
 		return nil, fmt.Errorf("构造上游请求失败: %w", err)
 	}
 
-	// 透传客户端的内容协商相关头，其余一律用我们自己的，避免泄漏或串味
-	for _, h := range []string{"Content-Type", "Accept", "Accept-Encoding", "User-Agent"} {
+	// 透传客户端的内容协商相关头，其余一律用我们自己的，避免泄漏或串味。
+	//
+	// Accept-Encoding 特意不在其中，这不是遗漏：
+	// Go 的 http.Transport 只在请求里**没有**这个头时才会自己加上
+	// Accept-Encoding: gzip 并透明解压；一旦调用方自己设了（哪怕是 gzip），
+	// 传输层就把压缩字节原样交出来。
+	//
+	// 实测客户端带 Accept-Encoding: gzip 时中继拿到的是 gzip 数据，
+	// 解析不出 usage，于是退化成按报文长度估算：
+	// 16 个输出 token 被估成 159，费用从 0.00001455 涨到 0.00010125，高了 7 倍。
+	// 因为 Content-Encoding 会透传给客户端、浏览器照常解压，
+	// 所以客户端看起来一切正常，只有统计和账单是错的。
+	// 协议转换路径更糟：正文解析失败会直接产出空回复。
+	//
+	// 不透传的代价只是「中继到客户端」这一段不压缩，而那一端通常就在本机。
+	for _, h := range []string{"Content-Type", "Accept", "User-Agent"} {
 		if v := inboundHeaders.Get(h); v != "" {
 			req.Header.Set(h, v)
 		}
