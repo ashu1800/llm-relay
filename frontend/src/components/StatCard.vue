@@ -26,7 +26,11 @@ withDefaults(defineProps<{
     </div>
     <div class="summary-body">
       <div class="summary-label">{{ label }}</div>
-      <div class="summary-value">{{ value }}</div>
+      <!-- 需要滚动动画的数值走这个插槽（看板接的是实时推送）；
+           不传插槽时行为完全不变 -->
+      <div class="summary-value">
+        <slot name="value">{{ value }}</slot>
+      </div>
       <div v-if="hint" class="summary-hint">{{ hint }}</div>
     </div>
   </article>

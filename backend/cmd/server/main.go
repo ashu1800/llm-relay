@@ -101,6 +101,9 @@ func run() error {
 		}
 		return proxy.FromEntity(p, cipher)
 	})
+	// 实时推送：看板数值与请求日志由 WebSocket 主动推给前端，
+	// 前端只更新变化的那几个数字，不重绘整页
+	live := api.NewLiveHub(logger)
 	gate := relay.NewConcurrencyGate(cfg.Relay.MaxConcurrency)
 	rateLimiter := relay.NewRateLimiter()
 	logs := relay.NewLogWriter(st.DB(), 2048, logger)
@@ -128,6 +131,8 @@ func run() error {
 		RateLimiter: rateLimiter,
 		Gate:        gate,
 		GroupLimit:  groupLimit,
+		Live:        live,
+		Logger:      logger,
 		// 渠道运行期状态（冷却 / 在途）由 Router 与 Service 自己持有，
 		// 不经过 HTTP 层：原来这里的 State 字段没有任何读取方，
 		// 是路由分析页留下的最后一点残留
@@ -142,6 +147,9 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// 推送循环跟着进程生命周期走：退出时 ctx 结束，两个 goroutine 自行收尾
+	srv.StartLive(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {

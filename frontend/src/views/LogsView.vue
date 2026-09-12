@@ -5,6 +5,7 @@ import { ReloadOutlined, DownloadOutlined, SearchOutlined } from '@ant-design/ic
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import GroupTag from '@/components/GroupTag.vue'
+import { liveConnected, onLive } from '@/composables/useLive'
 import type { ChannelGroup, Paged, RequestLog } from '@/api/types'
 
 // 分组表：日志里的模型、密钥、分组三处标签共用该请求所属分组的颜色。
@@ -57,12 +58,15 @@ const query = reactive({
   // '' 表示不限；'success' / 'error' 走状态码区间，其余按精确状态码
   status: '',
   // '' 表示不限时间范围
-  range: '24h'
+  range: 'today'
 })
 
+// 「今天」按本地零点算，而不是「最近 24 小时」：
+// 后者在早上看会把昨天的调用也算进来，与看板上的今日口径对不上 ——
+// 两个页面显示同一个上午的请求数却不一样，是最容易被当成 bug 的那种不一致。
 const rangeOptions = [
   { value: '1h', label: '近 1 小时' },
-  { value: '24h', label: '近 24 小时' },
+  { value: 'today', label: '今天' },
   { value: '7d', label: '近 7 天' },
   { value: '30d', label: '近 30 天' },
   { value: '', label: '不限时间' }
@@ -81,6 +85,12 @@ const statusOptions = [
 // 相对区间每次请求都变会导致翻页时结果漂移，所以要固定成绝对时间。
 function rangeToSince(range: string): string {
   if (!range) return ''
+  if (range === 'today') {
+    // 本地零点，再转成绝对时刻 —— 与看板的「今天」用同一套边界
+    const d = new Date()
+    d.setHours(0, 0, 0, 0)
+    return d.toISOString()
+  }
   const hours: Record<string, number> = { '1h': 1, '24h': 24, '7d': 24 * 7, '30d': 24 * 30 }
   const h = hours[range]
   if (!h) return ''
@@ -340,12 +350,28 @@ const pagination = computed(() => ({
   }
 }))
 
+// 实时插入：服务端每秒查一次新日志（id 增量），有就推过来。
+// 只在「看的是第一页且没有筛选」时插进去 —— 翻了页或筛了模型时，
+// 新来的日志不一定属于当前视图，硬插会让列表与筛选条件对不上。
+const liveTail = ref(true)
+
+onLive('logs', (items: RequestLog[]) => {
+  if (!liveTail.value || !Array.isArray(items) || !items.length) return
+  if (query.page !== 1) return
+  if (query.model.trim() || query.trace_id.trim() || query.status) return
+  // 新日志的时间一定落在当前时间范围里（今天/近 1 小时……），
+  // 只有「不限时间」之外的范围需要担心，而边界只差几毫秒，不值得再过滤一次
+  const fresh = items.filter((it) => !rows.value.some((r) => r.id === it.id))
+  if (!fresh.length) return
+  rows.value = [...fresh.reverse(), ...rows.value].slice(0, query.page_size)
+  total.value += fresh.length
+})
+
 onMounted(() => {
   // 分组必须先加载：模型/密钥/分组三列的颜色都取自它，
   // 拿不到就会退回「按名字派生」，三列出现三种颜色（实测踩过）
   loadGroups()
   load()
-  // WebSocket 由 useLogStream 负责，见下方
 })
 </script>
 
@@ -356,6 +382,12 @@ onMounted(() => {
         <div class="toolbar-left">
           <a-button :loading="loading" @click="load"><ReloadOutlined /> 刷新</a-button>
           <a-button :loading="exporting" @click="exportCsv"><DownloadOutlined /> 导出</a-button>
+          <!-- 实时插入可以关掉：正在盯着某一行排障时，
+               不断有新行从上面顶进来会看串行 -->
+          <a-button :type="liveTail ? 'primary' : 'default'" ghost @click="liveTail = !liveTail">
+            <span class="live-dot" :class="{ on: liveConnected && liveTail }" />
+            {{ liveTail ? '实时插入中' : '实时已暂停' }}
+          </a-button>
         </div>
         <a-input
           v-model:value="query.model"
@@ -569,6 +601,24 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 .toolbar-left { display: flex; gap: var(--gap); }
+.live-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 6px;
+  background: currentColor;
+  opacity: 0.35;
+}
+.live-dot.on {
+  background: var(--color-green);
+  opacity: 1;
+  animation: live-pulse 2s ease-in-out infinite;
+}
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
 .sub-text { font-size: 12px; color: var(--color-text-secondary); }
 .token-cell { font-variant-numeric: tabular-nums; }
 

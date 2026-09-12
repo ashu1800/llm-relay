@@ -38,6 +38,10 @@ const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: t
 await send('Page.enable', {}, sessionId)
 await send('Runtime.enable', {}, sessionId)
 await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId)
+// 让页面认为自己有焦点：CDP 打开的标签页在后台，浏览器会**暂停
+// requestAnimationFrame**，于是任何滚动/补间动画都不会跑 ——
+// 实测「数字滚动」时采样到的值一直不动，就是这个原因，不是功能坏了。
+await send('Emulation.setFocusEmulationEnabled', { enabled: true }, sessionId)
 await send('Page.navigate', { url: 'http://127.0.0.1:8888' + path }, sessionId)
 await new Promise((r) => setTimeout(r, Number(waitMs) || 4000))
 const res = await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true }, sessionId)

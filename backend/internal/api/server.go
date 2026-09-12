@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -16,9 +17,13 @@ import (
 
 // Deps 汇总 HTTP 层依赖，便于测试时替换。
 type Deps struct {
-	Config  *config.Config
-	Store   *store.Store
-	Cipher  *secure.Cipher
+	Config *config.Config
+	Store  *store.Store
+	Cipher *secure.Cipher
+	// Live 是实时推送的订阅中心（WebSocket）。为 nil 时实时功能整体关闭，
+	// 接口返回 501 而不是悄悄什么都不推
+	Live    *liveHub
+	Logger  *slog.Logger
 	Router  *relay.Router
 	Service *relay.Service
 	Logs    *relay.LogWriter
@@ -80,6 +85,8 @@ func (s *Server) Register(r *gin.Engine) {
 		registerPricingRoutes(admin, s)
 		registerProxyRoutes(admin, s)
 		registerStatsRoutes(admin, s)
+		// 实时推送（WebSocket）：看板数值与请求日志由它主动推给前端
+		admin.GET("/live", s.liveSocket)
 	}
 
 	s.registerStatic(r)

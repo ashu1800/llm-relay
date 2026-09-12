@@ -11,6 +11,8 @@ import { api } from '@/api/client'
 import PageToolbar from '@/components/PageToolbar.vue'
 import PanelCard from '@/components/PanelCard.vue'
 import StatCard from '@/components/StatCard.vue'
+import AnimatedNumber from '@/components/AnimatedNumber.vue'
+import { liveConnected, onLive } from '@/composables/useLive'
 import EChart from '@/components/EChart.vue'
 import { useChartTheme } from '@/utils/chartTheme'
 import DataState from '@/components/DataState.vue'
@@ -221,6 +223,12 @@ const TOKEN_PARTS: { name: string; color: string; pick: (s: Summary | null) => n
   { name: '输出', color: '#f2d3c9', pick: (s) => s?.completion_tokens ?? 0 }
 ]
 
+// 实时推送的数值：金额与成功率不是整数，滚动组件用 format 预设走不同的格式化。
+// 用 computed 而不是直接传字符串：滚动需要的是**数字**，
+// 传 "12.3%" 过去它没法补间
+const costValue = computed(() => (summary.value ? Number(summary.value.estimated_cost) : null))
+const rateValue = computed(() => (summary.value ? summary.value.success_rate * 100 : null))
+
 const compositionOption = computed(() => {
   const s = summary.value
   const data = TOKEN_PARTS.map((p) => ({ name: p.name, value: p.pick(s) }))
@@ -430,6 +438,16 @@ const heatTotal = computed(() => heat.value.reduce((a, b) => a + b.requests, 0))
 // 它的 change 只在取值真的变化时触发，所以这里不需要再判一次重
 
 
+// 实时数值：服务端每两秒比一次今日汇总，变了才推。
+// 这里只做字段合并 —— 它不带 range 等本地查询字段，
+// 整个替换会把页面依赖的其它字段抹掉。
+onLive('stats', (data: Record<string, unknown>) => {
+  // 首屏还没加载完时忽略推送：那一份由 load() 负责，
+  // 提前合并会得到一个缺字段的 summary
+  if (!summary.value) return
+  summary.value = { ...summary.value, ...(data as object) } as Summary
+})
+
 onMounted(load)
 </script>
 
@@ -446,6 +464,11 @@ onMounted(load)
         <a-radio-button v-for="r in ranges" :key="r.key" :value="r.key">{{ r.label }}</a-radio-button>
       </a-radio-group>
       <template #right>
+        <!-- 实时状态：断开时要让用户知道「数字不动」是连接断了，
+             而不是这段时间真的没有请求 -->
+        <span class="live-badge" :class="{ on: liveConnected }" :title="liveConnected ? '数值由服务端实时推送' : '实时连接已断开，正在重连'">
+          <span class="live-dot" />{{ liveConnected ? '实时' : '已断开' }}
+        </span>
         <a-button :loading="loading" @click="load"><ReloadOutlined /> 刷新</a-button>
       </template>
     </PageToolbar>
@@ -462,12 +485,21 @@ onMounted(load)
     <section class="overview-row">
       <div class="summary-grid">
         <StatCard label="请求数量" :value="n(summary?.requests)" tone="purple" :hint="'失败 ' + n(summary?.errors) + ' 次'">
+          <template #value>
+            <AnimatedNumber :value="summary?.requests ?? null" />
+          </template>
           <template #icon><ApiOutlined /></template>
         </StatCard>
         <StatCard label="消耗金额" :value="'$' + money(summary?.estimated_cost)" tone="orange" hint="按录入单价折算">
+          <template #value>
+            <AnimatedNumber :value="costValue" format="money" />
+          </template>
           <template #icon><DollarOutlined /></template>
         </StatCard>
         <StatCard label="词元数量" :value="n(summary?.total_tokens)" tone="blue" :hint="'命中率 ' + ((summary?.cache_hit_rate ?? 0) * 100).toFixed(1) + '%'">
+          <template #value>
+            <AnimatedNumber :value="summary?.total_tokens ?? null" />
+          </template>
           <template #icon><ThunderboltOutlined /></template>
         </StatCard>
         <StatCard
@@ -476,6 +508,9 @@ onMounted(load)
           tone="green"
           :hint="'平均首包 ' + Math.round(summary?.avg_first_byte_ms ?? 0) + 'ms'"
         >
+          <template #value>
+            <AnimatedNumber :value="rateValue" format="percent" />
+          </template>
           <template #icon><CheckCircleOutlined /></template>
         </StatCard>
       </div>
@@ -559,6 +594,29 @@ onMounted(load)
   flex-direction: column;
 }
 
+.live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: 10px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-gray);
+}
+.live-badge.on .live-dot {
+  background: var(--color-green);
+  /* 呼吸效果：让「正在实时接收」这件事在余光里也能被注意到 */
+  animation: live-pulse 2s ease-in-out infinite;
+}
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
 .summary-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);

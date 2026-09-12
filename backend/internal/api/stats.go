@@ -68,7 +68,21 @@ type summaryRow struct {
 
 func (s *Server) statsSummary(c *gin.Context) {
 	start, end, _ := resolveRange(c.Query("range"))
+	data, err := s.summarySnapshot(start, end)
+	if err != nil {
+		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		return
+	}
+	data["range"] = gin.H{
+		"key": c.Query("range"), "start": start.Format(time.RFC3339), "end": end.Format(time.RFC3339),
+	}
+	c.JSON(http.StatusOK, data)
+}
 
+// summarySnapshot 算出某个区间的汇总。抽出来是为了让实时推送复用同一套口径 ——
+// 看板上的数字与 WebSocket 推来的数字必须来自同一个查询，
+// 否则「刚刷新是 A、两秒后自己变成 B」这种不一致会让人怀疑看板本身。
+func (s *Server) summarySnapshot(start, end time.Time) (gin.H, error) {
 	const q = `SELECT
 		COUNT(*)::bigint AS requests,
 		COUNT(*) FILTER (WHERE status_code >= 200 AND status_code < 300)::bigint AS success,
@@ -85,8 +99,7 @@ func (s *Server) statsSummary(c *gin.Context) {
 
 	var row summaryRow
 	if err := s.deps.Store.DB().Raw(q, start, end).Scan(&row).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
-		return
+		return nil, err
 	}
 
 	successRate := 0.0
@@ -100,10 +113,7 @@ func (s *Server) statsSummary(c *gin.Context) {
 		hitRate = float64(row.CachedTokens) / float64(cacheDenom)
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"range": gin.H{
-			"key": c.Query("range"), "start": start.Format(time.RFC3339), "end": end.Format(time.RFC3339),
-		},
+	return gin.H{
 		"requests":              row.Requests,
 		"success":               row.Success,
 		"errors":                row.Errors,
@@ -118,7 +128,7 @@ func (s *Server) statsSummary(c *gin.Context) {
 		"estimated_cost":        row.Cost.StringFixed(8),
 		"avg_first_byte_ms":     row.AvgFirstByte,
 		"avg_total_ms":          row.AvgTotal,
-	})
+	}, nil
 }
 
 type seriesRow struct {
