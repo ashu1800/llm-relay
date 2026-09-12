@@ -10,6 +10,16 @@ import json
 import urllib.error
 import urllib.request
 
+import os
+import subprocess
+
+# 依赖 mock 上游（slow-upstream）：它会随 docker 网络重建被带走，
+# 这里先确保它在跑，避免把「上游不在」误判成产品问题
+subprocess.run(
+    ["bash", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ensure-mock-upstream.sh")],
+    check=True,
+)
+
 ADMIN = "http://127.0.0.1:8888/api/admin"
 ok = 0
 bad = 0
@@ -45,7 +55,6 @@ GHOST = 999999
 for path, label in [
     ("/channels/%d" % GHOST, "渠道"),
     ("/groups/%d" % GHOST, "分组"),
-    ("/models/%d" % GHOST, "模型"),
     ("/keys/%d" % GHOST, "密钥"),
     ("/pricing/%d" % GHOST, "定价"),
     ("/channel-templates/%d" % GHOST, "渠道模板"),
@@ -98,7 +107,7 @@ chk("模板迁走后可以删分组", 200, code)
 call("DELETE", "/channel-templates/%d" % tpl["id"])
 
 print()
-print("=== 4. 删渠道要一并清掉绑定，且不能留下悬挂 ===")
+print("=== 4. 删渠道要一并清掉模型白名单，且不能留下悬挂 ===")
 _, ch = call("POST", "/channels", {
     "name": "delete-semantics-chan", "protocol": "openai-chat",
     "base_url": "http://slow-upstream:9999/v1", "api_key": "k",
@@ -107,17 +116,16 @@ _, ch = call("POST", "/channels", {
 cid = ch["id"]
 call("POST", "/channels/%d/models" % cid, {"public_name": "delete-semantics-model"})
 _, bindings = call("GET", "/channels/%d/models" % cid)
-chk("绑定已建立", 1, len(bindings.get("items", [])))
+chk("白名单已建立", 1, len(bindings.get("items", [])))
 code, _ = call("DELETE", "/channels/%d" % cid)
 chk("删除渠道", 200, code)
 code, _ = call("GET", "/channels/%d/models" % cid)
 chk("渠道已不存在", 404, code)
 
-# 模型本身还在，但不应再有指向已删渠道的绑定
-_, ms = call("GET", "/models")
-for m in ms.get("items", []):
-    if m["public_name"] == "delete-semantics-model":
-        call("DELETE", "/models/%d" % m["id"])
+# 白名单随渠道一起走：库里不应再留下指向已删渠道的行
+code, rows = call("GET", "/channels")
+names = {c["id"]: len(c.get("models") or []) for c in rows.get("items", [])}
+chk("已删渠道不再出现在渠道列表里", False, cid in names)
 
 print()
 print("通过 %d 项，失败 %d 项" % (ok, bad))

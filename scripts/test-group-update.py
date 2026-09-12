@@ -10,6 +10,16 @@ import json
 import urllib.error
 import urllib.request
 
+import os
+import subprocess
+
+# 依赖 mock 上游（slow-upstream）：它会随 docker 网络重建被带走，
+# 这里先确保它在跑，避免把「上游不在」误判成产品问题
+subprocess.run(
+    ["bash", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ensure-mock-upstream.sh")],
+    check=True,
+)
+
 ADMIN = "http://127.0.0.1:8888/api/admin"
 BASE = "http://127.0.0.1:8888"
 ok = 0

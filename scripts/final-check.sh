@@ -20,7 +20,7 @@ curl -s -m 5 http://127.0.0.1:8888/healthz
 echo
 echo "=== 数据规模 ==="
 docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c \
-  "SELECT '渠道 '||(SELECT count(*) FROM channels)||' | 模型 '||(SELECT count(*) FROM models)||' | 密钥 '||(SELECT count(*) FROM api_keys)||' | 日志 '||(SELECT count(*) FROM request_logs)||' | 定价 '||(SELECT count(*) FROM model_pricings)||' | 模板 '||(SELECT count(*) FROM channel_templates)"
+  "SELECT '渠道 '||(SELECT count(*) FROM channels)||' | 对外模型 '||(SELECT count(DISTINCT public_name) FROM channel_models)||' | 密钥 '||(SELECT count(*) FROM api_keys)||' | 日志 '||(SELECT count(*) FROM request_logs)||' | 定价 '||(SELECT count(*) FROM model_pricings)||' | 模板 '||(SELECT count(*) FROM channel_templates)"
 echo
 echo "=== 绑定地址 ==="
 docker port llm-relay

@@ -6,7 +6,6 @@ const pages = [
   ['密钥信息', '/console/keys'],
   ['请求日志', '/console/logs'],
   ['模型定价', '/console/pricing'],
-  ['模型管理', '/console/models-manage'],
   ['模板管理', '/console/channel-templates']
 ]
 const ver = await (await fetch('http://127.0.0.1:9222/json/version')).json()

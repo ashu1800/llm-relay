@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -59,38 +58,128 @@ func registerChannelRoutes(g *gin.RouterGroup, s *Server) {
 	r.PUT("/:id", s.updateChannel)
 	r.DELETE("/:id", s.deleteChannel)
 	r.GET("/:id/models", s.listChannelModels)
+	// 整表替换是界面用主路径：白名单在表单里就是一张表，一次提交一整张
+	r.PUT("/:id/models", s.replaceChannelModelsAPI)
 	r.POST("/:id/models", s.bindChannelModel)
 	r.DELETE("/:id/models/:bindingId", s.unbindChannelModel)
 }
 
+// whitelistItem 是渠道模型白名单的一行：客户端请求 PublicName，
+// 转发时替换成 UpstreamName（留空则同名）。
+type whitelistItem struct {
+	PublicName   string `json:"public_name"`
+	UpstreamName string `json:"upstream_name"`
+	Enabled      *bool  `json:"enabled"`
+}
+
 // channelPayload 是渠道的写入载荷。
 //
-// ProviderID 用指针接收：渠道的模型商可以为空（0 = 未指定，聚合站就是这种），
-// 用值类型时「显式改成未指定」与「根本没传这个字段」都是 0，改回未指定会静默失效。
+// Models 用指针接收整个白名单：nil 表示「这次不动白名单」，
+// 空数组表示「清空白名单」—— 若用值类型，这两件事都是 len=0，分不开，
+// 于是「把最后一条删掉」会静默失效。
 type channelPayload struct {
-	Name       string         `json:"name"`
-	GroupID    uint           `json:"group_id"`
-	ProviderID *uint          `json:"provider_id"`
-	Protocol   string         `json:"protocol"`
-	BaseURL    string         `json:"base_url"`
-	APIKey     string         `json:"api_key"`
-	Weight     int            `json:"weight"`
-	Enabled    *bool          `json:"enabled"`
-	Slots      model.JSONList `json:"available_slots"`
-	ExtraConf  model.JSONMap  `json:"extra_config"`
-	CustomMap  model.JSONMap  `json:"custom_mapping"`
-	Monitor    string         `json:"monitor_type"`
+	Name      string           `json:"name"`
+	GroupID   uint             `json:"group_id"`
+	Protocol  string           `json:"protocol"`
+	BaseURL   string           `json:"base_url"`
+	APIKey    string           `json:"api_key"`
+	Weight    int              `json:"weight"`
+	Enabled   *bool            `json:"enabled"`
+	Slots     model.JSONList   `json:"available_slots"`
+	ExtraConf model.JSONMap    `json:"extra_config"`
+	CustomMap model.JSONMap    `json:"custom_mapping"`
+	Monitor   string           `json:"monitor_type"`
+	Models    *[]whitelistItem `json:"models"`
+}
+
+// normalizeWhitelist 校验并规整白名单：对外名必填、同渠道内不重复、上游名留空则同名。
+func normalizeWhitelist(items []whitelistItem) ([]model.ChannelModel, error) {
+	out := make([]model.ChannelModel, 0, len(items))
+	seen := map[string]bool{}
+	for _, it := range items {
+		name := strings.TrimSpace(it.PublicName)
+		if name == "" {
+			return nil, errors.New("模型白名单里有空的对外模型名")
+		}
+		if seen[name] {
+			return nil, errors.New("模型白名单里对外名重复: " + name)
+		}
+		seen[name] = true
+		upstream := strings.TrimSpace(it.UpstreamName)
+		if upstream == "" {
+			upstream = name
+		}
+		enabled := true
+		if it.Enabled != nil {
+			enabled = *it.Enabled
+		}
+		out = append(out, model.ChannelModel{PublicName: name, UpstreamName: upstream, Enabled: enabled})
+	}
+	return out, nil
+}
+
+// replaceChannelModels 用给定白名单整体替换某个渠道的条目。
+// 整体替换而不是逐条 diff：白名单在界面上就是一张表，一次提交一整张表，
+// 不会出现「删了两条、加了一条，结果只生效一半」的中间状态。
+func replaceChannelModels(tx *gorm.DB, channelID uint, items []model.ChannelModel) error {
+	if err := tx.Where("channel_id = ?", channelID).Delete(&model.ChannelModel{}).Error; err != nil {
+		return err
+	}
+	for i := range items {
+		items[i].ID = 0
+		items[i].ChannelID = channelID
+		if err := tx.Create(&items[i]).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// channelListItem 在渠道字段之外带上模型白名单摘要。
+//
+// 列表里直接能看到「这条渠道能跑哪些模型」很重要：白名单是模型存在的唯一依据，
+// 而「渠道建好了但白名单是空的」正是最容易被忽略、又只表现为请求 502 的状态。
+type channelListItem struct {
+	model.Channel
+	Models     []string `json:"models"`
+	ModelCount int      `json:"model_count"`
 }
 
 func (s *Server) listChannels(c *gin.Context) {
-	var items []model.Channel
-	q := s.deps.Store.DB().Order("id DESC")
+	db := s.deps.Store.DB()
+	var channels []model.Channel
+	q := db.Order("id DESC")
 	if gid := c.Query("group_id"); gid != "" {
 		q = q.Where("group_id = ?", gid)
 	}
-	if err := q.Find(&items).Error; err != nil {
+	if err := q.Find(&channels).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
+	}
+
+	ids := make([]uint, 0, len(channels))
+	for _, ch := range channels {
+		ids = append(ids, ch.ID)
+	}
+	names := map[uint][]string{}
+	if len(ids) > 0 {
+		var rows []model.ChannelModel
+		if err := db.Where("channel_id IN ?", ids).Order("public_name").Find(&rows).Error; err != nil {
+			writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+			return
+		}
+		for _, r := range rows {
+			names[r.ChannelID] = append(names[r.ChannelID], r.PublicName)
+		}
+	}
+
+	items := make([]channelListItem, 0, len(channels))
+	for _, ch := range channels {
+		list := names[ch.ID]
+		if list == nil {
+			list = []string{}
+		}
+		items = append(items, channelListItem{Channel: ch, Models: list, ModelCount: len(list)})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
 }
@@ -114,28 +203,15 @@ func (s *Server) createChannel(c *gin.Context) {
 	if p.GroupID == 0 {
 		p.GroupID = defaultGroupID(s)
 	}
-	// 没传或传 0 都表示未指定，不再兜底成 OpenAI：
-	// 兜底会让「我没选过」显示成「这条渠道是 OpenAI 的」，那是错的
-	providerID := uint(0)
-	if p.ProviderID != nil {
-		providerID = *p.ProviderID
-	}
-	if providerID != 0 && !s.providerExists(providerID) {
-		writeUpstreamError(c, http.StatusBadRequest,
-			"模型商不存在: "+strconv.FormatUint(uint64(providerID), 10), "invalid_request_error")
-		return
-	}
-	// 分组限定了模型商，渠道就得跟着它：没填就继承，填了别的就是选错了分组
-	if gp, ok := s.groupProvider(p.GroupID); ok && gp != 0 {
-		switch {
-		case providerID == 0:
-			providerID = gp
-		case providerID != gp:
-			writeUpstreamError(c, http.StatusBadRequest,
-				"分组「"+s.groupNameFor(p.GroupID)+"」限定只收 "+s.providerName(gp)+
-					" 的渠道，与所选模型商 "+s.providerName(providerID)+" 不一致", "invalid_request_error")
+	// 白名单在这里就校验：等到写完渠道再报错，用户得重填一遍表单
+	var whitelist []model.ChannelModel
+	if p.Models != nil {
+		items, err := normalizeWhitelist(*p.Models)
+		if err != nil {
+			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
 			return
 		}
+		whitelist = items
 	}
 
 	enc, err := s.deps.Cipher.Encrypt(strings.TrimSpace(p.APIKey))
@@ -149,7 +225,7 @@ func (s *Server) createChannel(c *gin.Context) {
 		enabled = *p.Enabled
 	}
 	ch := model.Channel{
-		Name: p.Name, GroupID: p.GroupID, ProviderID: providerID,
+		Name: p.Name, GroupID: p.GroupID,
 		Protocol: p.Protocol, BaseURL: strings.TrimRight(strings.TrimSpace(p.BaseURL), "/"),
 		APIKeyEnc: enc, APIKeyHint: secure.MaskKey(p.APIKey),
 		Weight: p.Weight, Enabled: enabled, MonitorType: orDefault(p.Monitor, "none"),
@@ -159,6 +235,14 @@ func (s *Server) createChannel(c *gin.Context) {
 	if err := s.deps.Store.DB().Create(&ch).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
+	}
+	// 白名单随渠道一起建：建渠道时就能把「这条渠道能跑哪些模型」填完，
+	// 不用再回列表点一次「模型」
+	if p.Models != nil {
+		if err := replaceChannelModels(s.deps.Store.DB(), ch.ID, whitelist); err != nil {
+			writeUpstreamError(c, http.StatusInternalServerError, "写入模型白名单失败: "+err.Error(), "internal_error")
+			return
+		}
 	}
 	c.JSON(http.StatusOK, ch)
 }
@@ -187,43 +271,6 @@ func (s *Server) updateChannel(c *gin.Context) {
 	if p.GroupID != 0 {
 		updates["group_id"] = p.GroupID
 	}
-	if p.ProviderID != nil {
-		if *p.ProviderID != 0 && !s.providerExists(*p.ProviderID) {
-			writeUpstreamError(c, http.StatusBadRequest,
-				"模型商不存在: "+strconv.FormatUint(uint64(*p.ProviderID), 10), "invalid_request_error")
-			return
-		}
-		updates["provider_id"] = *p.ProviderID
-	}
-	// 渠道的模型商必须与所在分组一致（分组限定了模型商时）：
-	// 没填就继承分组，填了别的直接拒绝 —— 否则徽标与实际路由范围会打架。
-	// 只有真的动了分组或模型商才查这一次。
-	if p.GroupID != 0 || p.ProviderID != nil {
-		var cur model.Channel
-		if err := s.deps.Store.DB().First(&cur, id).Error; err != nil {
-			writeUpdateError(c, err)
-			return
-		}
-		effGroup := cur.GroupID
-		if p.GroupID != 0 {
-			effGroup = p.GroupID
-		}
-		effProvider := cur.ProviderID
-		if p.ProviderID != nil {
-			effProvider = *p.ProviderID
-		}
-		if gp, ok := s.groupProvider(effGroup); ok && gp != 0 {
-			switch {
-			case effProvider == 0:
-				updates["provider_id"] = gp
-			case effProvider != gp:
-				writeUpstreamError(c, http.StatusBadRequest,
-					"分组「"+s.groupNameFor(effGroup)+"」限定只收 "+s.providerName(gp)+
-						" 的渠道，与所选模型商 "+s.providerName(effProvider)+" 不一致", "invalid_request_error")
-				return
-			}
-		}
-	}
 	if p.Weight > 0 {
 		updates["weight"] = p.Weight
 	}
@@ -249,16 +296,49 @@ func (s *Server) updateChannel(c *gin.Context) {
 		updates["api_key_enc"] = enc
 		updates["api_key_hint"] = secure.MaskKey(p.APIKey)
 	}
-	if len(updates) == 0 {
+	// 只改白名单（改完模型点保存）也是合法请求，所以不能只看 updates 是否为空
+	if len(updates) == 0 && p.Models == nil {
 		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
 		return
 	}
+	var whitelist []model.ChannelModel
+	if p.Models != nil {
+		items, err := normalizeWhitelist(*p.Models)
+		if err != nil {
+			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+			return
+		}
+		whitelist = items
+	}
 
-	if err := applyUpdates(s.deps.Store.DB(), &model.Channel{}, id, updates); err != nil {
+	// 渠道字段与白名单放同一个事务：白名单是整表替换，
+	// 中途失败留下「渠道改了、白名单没改」会让人以为保存没生效
+	err := s.deps.Store.DB().Transaction(func(tx *gorm.DB) error {
+		if len(updates) > 0 {
+			if err := applyUpdates(tx, &model.Channel{}, id, updates); err != nil {
+				return err
+			}
+		} else {
+			// 一个渠道字段都不改时 applyUpdates 无事可做，但仍要确认渠道存在，
+			// 否则会给一个不存在的 id 建出一堆孤儿白名单
+			var n int64
+			if err := tx.Model(&model.Channel{}).Where("id = ?", id).Count(&n).Error; err != nil {
+				return err
+			}
+			if n == 0 {
+				return gorm.ErrRecordNotFound
+			}
+		}
+		if p.Models != nil {
+			return replaceChannelModels(tx, id, whitelist)
+		}
+		return nil
+	})
+	if err != nil {
 		writeUpdateError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates)})
+	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates), "models_replaced": p.Models != nil})
 }
 
 // modelAllowed 判断模型是否在密钥白名单内。白名单为空表示不限制。
@@ -367,28 +447,62 @@ func (s *Server) listChannelModels(c *gin.Context) {
 		writeUpstreamError(c, http.StatusNotFound, "渠道不存在", "not_found_error")
 		return
 	}
-	var rows []struct {
-		model.ChannelModel
-		PublicName string `json:"public_name"`
-	}
-	err := s.deps.Store.DB().Table("channel_models").
-		Select("channel_models.*, models.public_name AS public_name").
-		Joins("JOIN models ON models.id = channel_models.model_id").
-		Where("channel_models.channel_id = ?", id).
-		Scan(&rows).Error
-	if err != nil {
+	var rows []model.ChannelModel
+	if err := s.deps.Store.DB().Where("channel_id = ?", id).
+		Order("public_name").Find(&rows).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": rows})
+	c.JSON(http.StatusOK, gin.H{"items": rows, "total": len(rows)})
 }
 
 type bindPayload struct {
 	PublicName   string `json:"public_name"`
 	UpstreamName string `json:"upstream_name"`
+	Enabled      *bool  `json:"enabled"`
 }
 
-// bindChannelModel 绑定模型到渠道。若对外模型不存在则自动创建（中转场景很常见）。
+func (p bindPayload) whitelistItem() whitelistItem {
+	return whitelistItem{PublicName: p.PublicName, UpstreamName: p.UpstreamName, Enabled: p.Enabled}
+}
+
+// replaceChannelModelsAPI 用请求体里的整张白名单替换该渠道的条目。
+func (s *Server) replaceChannelModelsAPI(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	var p struct {
+		Items []whitelistItem `json:"items"`
+	}
+	if err := c.ShouldBindJSON(&p); err != nil {
+		writeUpstreamError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
+		return
+	}
+	items, err := normalizeWhitelist(p.Items)
+	if err != nil {
+		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
+	}
+	db := s.deps.Store.DB()
+	var ch model.Channel
+	if err := db.First(&ch, id).Error; err != nil {
+		writeUpstreamError(c, http.StatusNotFound, "渠道不存在", "not_found_error")
+		return
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		return replaceChannelModels(tx, id, items)
+	}); err != nil {
+		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"channel_id": id, "total": len(items)})
+}
+
+// bindChannelModel 给渠道加一条模型白名单。
+//
+// 这里不再需要「模型不存在就自动创建」：白名单就是模型在系统里的唯一登记处，
+// 写进来即生效，不存在两处状态对不上的可能。
 func (s *Server) bindChannelModel(c *gin.Context) {
 	id, ok := parseID(c)
 	if !ok {
@@ -399,59 +513,50 @@ func (s *Server) bindChannelModel(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
 		return
 	}
-	if strings.TrimSpace(p.PublicName) == "" {
-		writeUpstreamError(c, http.StatusBadRequest, "public_name 必填", "invalid_request_error")
+	items, err := normalizeWhitelist([]whitelistItem{p.whitelistItem()})
+	if err != nil {
+		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
-	if p.UpstreamName == "" {
-		p.UpstreamName = p.PublicName
-	}
+	item := items[0]
 
 	db := s.deps.Store.DB()
 	var ch model.Channel
 	if err := db.First(&ch, id).Error; err != nil {
-		writeUpdateError(c, err)
-		return
-	}
-	// 分组限定了模型商：这个组里只能绑该模型商的模型
-	groupProvider, _ := s.groupProvider(ch.GroupID)
-
-	var m model.Model
-	if err := db.Where("public_name = ?", p.PublicName).First(&m).Error; err != nil {
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
-			return
-		}
-		// 新建的模型直接归到这条渠道的模型商（分组限定的优先），
-		// 不再写死成 1（OpenAI）—— 那正是「模型商总是 OpenAI」的老毛病
-		pid := groupProvider
-		if pid == 0 {
-			pid = ch.ProviderID
-		}
-		m = model.Model{PublicName: p.PublicName, ProviderID: pid, Enabled: true}
-		if err := db.Create(&m).Error; err != nil {
-			writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
-			return
-		}
-	}
-	if groupProvider != 0 && m.ProviderID != groupProvider {
-		owner := "还没有指定模型商"
-		if m.ProviderID != 0 {
-			owner = "属于 " + s.providerName(m.ProviderID)
-		}
-		writeUpstreamError(c, http.StatusBadRequest,
-			"分组「"+s.groupNameFor(ch.GroupID)+"」限定只跑 "+s.providerName(groupProvider)+
-				" 的模型，"+m.PublicName+" "+owner+"，不能绑到这个分组下的渠道",
-			"invalid_request_error")
+		writeUpstreamError(c, http.StatusNotFound, "渠道不存在", "not_found_error")
 		return
 	}
 
-	binding := model.ChannelModel{ChannelID: id, ModelID: m.ID, UpstreamName: p.UpstreamName, Enabled: true}
-	if err := db.Where(model.ChannelModel{ChannelID: id, ModelID: m.ID}).
-		Assign(model.ChannelModel{UpstreamName: p.UpstreamName, Enabled: true}).
-		FirstOrCreate(&binding).Error; err != nil {
+	// 同渠道内对外名唯一：重复添加视为「改上游名/启用状态」，而不是塞第二条。
+	//
+	// 这里刻意不用 FirstOrCreate + Assign：Assign 的结构体走的是零值跳过逻辑，
+	// enabled=false 会被当成「没传」而跳过，于是「把某条白名单停用」静默失效。
+	// 显式分「新建」与「改已有」两条路，两个字段都写死在 map 里，不依赖零值语义。
+	binding := model.ChannelModel{ChannelID: id, PublicName: item.PublicName}
+	err = db.Where("channel_id = ? AND public_name = ?", id, item.PublicName).First(&binding).Error
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		binding = model.ChannelModel{
+			ChannelID: id, PublicName: item.PublicName,
+			UpstreamName: item.UpstreamName, Enabled: item.Enabled,
+		}
+		if err := db.Create(&binding).Error; err != nil {
+			writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+			return
+		}
+	case err != nil:
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
+	default:
+		if err := db.Model(&binding).Updates(map[string]any{
+			"upstream_name": item.UpstreamName,
+			"enabled":       item.Enabled,
+		}).Error; err != nil {
+			writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+			return
+		}
+		binding.UpstreamName = item.UpstreamName
+		binding.Enabled = item.Enabled
 	}
 	c.JSON(http.StatusOK, binding)
 }
@@ -493,72 +598,24 @@ func (s *Server) listGroups(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
 }
 
-// errGroupConflict 表示分组里仍有不属于目标模型商的渠道或模型，改归属被拒绝。
-type errGroupConflict struct {
-	channels []string
-	models   []string
-}
-
-func (e errGroupConflict) Error() string {
-	var parts []string
-	if len(e.channels) > 0 {
-		parts = append(parts, "渠道 "+strings.Join(e.channels, "、"))
-	}
-	if len(e.models) > 0 {
-		parts = append(parts, "模型 "+strings.Join(e.models, "、"))
-	}
-	return "分组里还有不属于该模型商的内容：" + strings.Join(parts, "；") +
-		"。先把这些渠道/模型的模型商改过来，或把它们挪到别的分组，再改分组归属，" +
-		"否则它们会直接退出路由。"
-}
-
-// providerName / groupNameFor 只用于错误提示：把编号换成人看得懂的名字。
-func (s *Server) providerName(id uint) string {
-	var p model.Provider
-	if err := s.deps.Store.DB().First(&p, id).Error; err != nil || p.Name == "" {
-		return "模型商 " + strconv.FormatUint(uint64(id), 10)
-	}
-	return p.Name
-}
-
-func (s *Server) groupNameFor(id uint) string {
-	var g model.ChannelGroup
-	if err := s.deps.Store.DB().First(&g, id).Error; err != nil || g.Name == "" {
-		return "分组 " + strconv.FormatUint(uint64(id), 10)
-	}
-	return g.Name
-}
-
-// groupProvider 取分组限定的模型商，0 表示不限；分组不存在时 found=false。
-func (s *Server) groupProvider(id uint) (uint, bool) {
-	var g model.ChannelGroup
-	if err := s.deps.Store.DB().First(&g, id).Error; err != nil {
-		return 0, false
-	}
-	return g.ProviderID, true
-}
-
-// groupConflicts 找出分组里「不属于该模型商」的渠道与模型绑定（最多各 5 个名字）。
+// groupCreatePayload 是新建分组的入参。
 //
-// 改分组的模型商或把渠道挪进分组之前必须没有冲突：分组一旦限定模型商，
-// 这些渠道与模型就会被路由静默排除，用户只会看到请求突然「没有可用渠道」。
-// 所以宁可当场拒绝并点名，也不要让它在路由器里悄悄生效。
-func groupConflicts(tx *gorm.DB, groupID, providerID uint) (channels, models []string) {
-	tx.Table("channels").
-		Where("group_id = ? AND provider_id <> 0 AND provider_id <> ?", groupID, providerID).
-		Limit(5).Pluck("name", &channels)
-
-	tx.Table("channel_models").
-		Select("DISTINCT models.public_name").
-		Joins("JOIN channels ON channels.id = channel_models.channel_id").
-		Joins("JOIN models ON models.id = channel_models.model_id").
-		Where("channels.group_id = ? AND models.provider_id <> ?", groupID, providerID).
-		Limit(5).Pluck("models.public_name", &models)
-	return channels, models
+// 刻意不直接绑定实体：Enabled 用指针才能区分「没传」与「传 false」。
+// 以前「不传就启用」是靠数据库列默认值兜的（实体带 gorm default 时，
+// false 会被从 INSERT 里省掉，正好落成 true），而那个标签同时让
+// 「显式传 false」也存不进去 —— 见 model.ChannelModel.Enabled 的注释。
+// 去掉标签后两种语义必须在代码里分开，否则新建的分组会默认停用，
+// 而停用的分组不参与任何路由，现象是「刚建的分组怎么调都不通」。
+type groupCreatePayload struct {
+	Name      string `json:"name"`
+	Remark    string `json:"remark"`
+	Strategy  string `json:"strategy"`
+	IsDefault bool   `json:"is_default"`
+	Enabled   *bool  `json:"enabled"`
 }
 
 func (s *Server) createGroup(c *gin.Context) {
-	var p model.ChannelGroup
+	var p groupCreatePayload
 	if err := c.ShouldBindJSON(&p); err != nil {
 		writeUpstreamError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
 		return
@@ -567,40 +624,36 @@ func (s *Server) createGroup(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, "name 必填", "invalid_request_error")
 		return
 	}
-	// 新建分组必须选模型商：分组就是「某个模型商的一组渠道」，
-	// 不选的话这个分组就没有路由范围，等于回到「所有模型都能走」的旧行为
-	if p.ProviderID == 0 {
-		writeUpstreamError(c, http.StatusBadRequest,
-			"模型商必选：分组决定只允许哪个模型商的模型走它", "invalid_request_error")
-		return
+	strategy := p.Strategy
+	if strategy == "" {
+		strategy = model.StrategyWeighted
 	}
-	if !s.providerExists(p.ProviderID) {
-		writeUpstreamError(c, http.StatusBadRequest,
-			"模型商不存在: "+strconv.FormatUint(uint64(p.ProviderID), 10), "invalid_request_error")
-		return
+	enabled := true
+	if p.Enabled != nil {
+		enabled = *p.Enabled
 	}
-	if p.Strategy == "" {
-		p.Strategy = model.StrategyWeighted
+	gr := model.ChannelGroup{
+		Name: strings.TrimSpace(p.Name), Remark: p.Remark,
+		Strategy: strategy, IsDefault: p.IsDefault, Enabled: enabled,
 	}
-	p.ID = 0
 	db := s.deps.Store.DB()
 	// 默认分组只能有一个：strategyFor(0) 取的是第一条 is_default=true 的记录，
 	// 存在多个时选中哪个完全看返回顺序，行为不可预期。
 	err := db.Transaction(func(tx *gorm.DB) error {
-		if p.IsDefault {
+		if gr.IsDefault {
 			if err := tx.Model(&model.ChannelGroup{}).
 				Where("is_default = ?", true).
 				Update("is_default", false).Error; err != nil {
 				return err
 			}
 		}
-		return tx.Create(&p).Error
+		return tx.Create(&gr).Error
 	})
 	if err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
-	c.JSON(http.StatusOK, p)
+	c.JSON(http.StatusOK, gr)
 }
 
 // groupUpdatePayload 是编辑分组的入参，所有字段可选。
@@ -610,12 +663,11 @@ func (s *Server) createGroup(c *gin.Context) {
 // 界面上开关拨过去又弹回来，看起来像「保存失败但没报错」。
 // 字符串字段同样有问题：remark 传空串清不掉。
 type groupUpdatePayload struct {
-	Name       *string `json:"name"`
-	Remark     *string `json:"remark"`
-	Strategy   *string `json:"strategy"`
-	IsDefault  *bool   `json:"is_default"`
-	Enabled    *bool   `json:"enabled"`
-	ProviderID *uint   `json:"provider_id"`
+	Name      *string `json:"name"`
+	Remark    *string `json:"remark"`
+	Strategy  *string `json:"strategy"`
+	IsDefault *bool   `json:"is_default"`
+	Enabled   *bool   `json:"enabled"`
 }
 
 func (s *Server) updateGroup(c *gin.Context) {
@@ -649,24 +701,6 @@ func (s *Server) updateGroup(c *gin.Context) {
 	if p.Enabled != nil {
 		updates["enabled"] = *p.Enabled
 	}
-	if p.ProviderID != nil {
-		if *p.ProviderID != 0 && !s.providerExists(*p.ProviderID) {
-			writeUpstreamError(c, http.StatusBadRequest,
-				"模型商不存在: "+strconv.FormatUint(uint64(*p.ProviderID), 10), "invalid_request_error")
-			return
-		}
-		// 0 只允许把「已经是 0」的分组留在不限状态（默认分组）；
-		// 已经限定了模型商的分组不能改回不限，否则限定形同虚设
-		if *p.ProviderID == 0 {
-			var cur model.ChannelGroup
-			if err := s.deps.Store.DB().First(&cur, id).Error; err == nil && cur.ProviderID != 0 {
-				writeUpstreamError(c, http.StatusBadRequest,
-					"分组已限定模型商，不能改回「不限」；要换就换成另一个模型商", "invalid_request_error")
-				return
-			}
-		}
-		updates["provider_id"] = *p.ProviderID
-	}
 	if len(updates) == 0 {
 		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
 		return
@@ -674,14 +708,6 @@ func (s *Server) updateGroup(c *gin.Context) {
 	// 把「设为默认」与「清掉其它分组的默认标记」放进同一个事务，
 	// 否则中途失败会留下两个默认分组或零个默认分组
 	err := s.deps.Store.DB().Transaction(func(tx *gorm.DB) error {
-		// 换模型商之前先确认组里没有「别的模型商」的渠道与模型：
-		// 留着它们，路由会把那些模型直接过滤掉，而界面上看不出任何异常
-		if p.ProviderID != nil && *p.ProviderID != 0 {
-			chans, mods := groupConflicts(tx, id, *p.ProviderID)
-			if len(chans) > 0 || len(mods) > 0 {
-				return errGroupConflict{channels: chans, models: mods}
-			}
-		}
 		if p.IsDefault != nil && *p.IsDefault {
 			if err := tx.Model(&model.ChannelGroup{}).
 				Where("id <> ?", id).
@@ -692,11 +718,6 @@ func (s *Server) updateGroup(c *gin.Context) {
 		return applyUpdates(tx, &model.ChannelGroup{}, id, updates)
 	})
 	if err != nil {
-		var conflict errGroupConflict
-		if errors.As(err, &conflict) {
-			writeUpstreamError(c, http.StatusConflict, conflict.Error(), "invalid_request_error")
-			return
-		}
 		writeUpdateError(c, err)
 		return
 	}
@@ -733,172 +754,6 @@ func (s *Server) deleteGroup(c *gin.Context) {
 		return
 	}
 	deleteByID(c, db, &model.ChannelGroup{}, id, "分组不存在")
-}
-
-// ============================ 模型 ============================
-
-func registerModelRoutes(g *gin.RouterGroup, s *Server) {
-	r := g.Group("/models")
-	r.GET("", s.listModelsAdmin)
-	r.POST("", s.createModel)
-	r.PUT("/:id", s.updateModel)
-	r.DELETE("/:id", s.deleteModel)
-	r.GET("/providers", s.listProviders)
-}
-
-func (s *Server) listModelsAdmin(c *gin.Context) {
-	var items []model.Model
-	if err := s.deps.Store.DB().Order("public_name").Find(&items).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
-}
-
-func (s *Server) listProviders(c *gin.Context) {
-	var items []model.Provider
-	if err := s.deps.Store.DB().Order("id").Find(&items).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
-}
-
-// modelPayload 是模型的写入载荷。
-//
-// 除名称外用指针接收：只有客户端真的传了某个字段才更新它。
-// 若直接用值类型，未传的字段会以零值参与更新——只改个名字就会把
-// enabled 悄悄改成 false，或者把模型商改成 0。
-type modelPayload struct {
-	PublicName  string  `json:"public_name"`
-	Description *string `json:"description"`
-	ProviderID  *uint   `json:"provider_id"`
-	Enabled     *bool   `json:"enabled"`
-}
-
-// modelUpdates 把「显式提供」的字段转成更新映射。
-// 抽成纯函数是为了能直接测——这里漏掉一个字段不会报错，
-// 只会表现为界面上改了却没生效。
-func modelUpdates(p modelPayload) map[string]any {
-	updates := map[string]any{}
-	if name := strings.TrimSpace(p.PublicName); name != "" {
-		updates["public_name"] = name
-	}
-	if p.Description != nil {
-		updates["description"] = *p.Description
-	}
-	if p.ProviderID != nil {
-		updates["provider_id"] = *p.ProviderID
-	}
-	if p.Enabled != nil {
-		updates["enabled"] = *p.Enabled
-	}
-	return updates
-}
-
-// providerExists 校验模型商存在，避免模型挂到一个不存在的模型商上。
-func (s *Server) providerExists(id uint) bool {
-	var n int64
-	s.deps.Store.DB().Model(&model.Provider{}).Where("id = ?", id).Count(&n)
-	return n > 0
-}
-
-func (s *Server) createModel(c *gin.Context) {
-	var p modelPayload
-	if err := c.ShouldBindJSON(&p); err != nil {
-		writeUpstreamError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
-		return
-	}
-	name := strings.TrimSpace(p.PublicName)
-	if name == "" {
-		writeUpstreamError(c, http.StatusBadRequest, "public_name 必填", "invalid_request_error")
-		return
-	}
-	m := model.Model{PublicName: name, ProviderID: 1, Enabled: true}
-	if p.Description != nil {
-		m.Description = *p.Description
-	}
-	if p.ProviderID != nil {
-		m.ProviderID = *p.ProviderID
-	}
-	if p.Enabled != nil {
-		m.Enabled = *p.Enabled
-	}
-	if !s.providerExists(m.ProviderID) {
-		writeUpstreamError(c, http.StatusBadRequest,
-			"模型商不存在: "+strconv.FormatUint(uint64(m.ProviderID), 10), "invalid_request_error")
-		return
-	}
-	if err := s.deps.Store.DB().Create(&m).Error; err != nil {
-		if isUniqueViolation(err) {
-			writeUpstreamError(c, http.StatusConflict, "模型名已存在: "+name, "invalid_request_error")
-			return
-		}
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
-		return
-	}
-	c.JSON(http.StatusOK, m)
-}
-
-func (s *Server) updateModel(c *gin.Context) {
-	id, ok := parseID(c)
-	if !ok {
-		return
-	}
-	var p modelPayload
-	if err := c.ShouldBindJSON(&p); err != nil {
-		writeUpstreamError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
-		return
-	}
-	updates := modelUpdates(p)
-	if len(updates) == 0 {
-		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
-		return
-	}
-	if p.ProviderID != nil && !s.providerExists(*p.ProviderID) {
-		writeUpstreamError(c, http.StatusBadRequest,
-			"模型商不存在: "+strconv.FormatUint(uint64(*p.ProviderID), 10), "invalid_request_error")
-		return
-	}
-	if err := applyUpdates(s.deps.Store.DB(), &model.Model{}, id, updates); err != nil {
-		if isUniqueViolation(err) {
-			writeUpstreamError(c, http.StatusConflict, "模型名已存在", "invalid_request_error")
-			return
-		}
-		writeUpdateError(c, err)
-		return
-	}
-	// 如实回报改了哪些字段，便于排查「界面改了没生效」
-	changed := make([]string, 0, len(updates))
-	for k := range updates {
-		changed = append(changed, k)
-	}
-	sort.Strings(changed)
-	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates), "fields": changed})
-}
-
-func (s *Server) deleteModel(c *gin.Context) {
-	id, ok := parseID(c)
-	if !ok {
-		return
-	}
-	db := s.deps.Store.DB()
-	// 同 deleteChannel：先确认主表行存在，关联行与主表行同一个事务
-	var m model.Model
-	if err := db.First(&m, id).Error; err != nil {
-		writeUpstreamError(c, http.StatusNotFound, "模型不存在", "not_found_error")
-		return
-	}
-	if err := db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("model_id = ?", id).Delete(&model.ChannelModel{}).Error; err != nil {
-			return err
-		}
-		return tx.Delete(&model.Model{}, id).Error
-	}); err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"id": id, "deleted": true})
 }
 
 // ============================ 密钥 ============================

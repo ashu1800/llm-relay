@@ -103,7 +103,6 @@ func BuildLog(req *RelayRequest, res *RelayResult, usage Usage, status int, errM
 			entry.ChannelID = res.Candidate.Channel.ID
 			entry.ChannelName = res.Candidate.Channel.Name
 			entry.GroupID = res.Candidate.Channel.GroupID
-			entry.ProviderID = res.Candidate.Channel.ProviderID
 		}
 	}
 	return entry

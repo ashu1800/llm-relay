@@ -1,11 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { PlusOutlined, ReloadOutlined, EditOutlined, DeleteOutlined, ThunderboltOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
-import ProviderTag from '@/components/ProviderTag.vue'
-import { useProviderStore } from '@/stores/providers'
 import { PROTOCOLS } from '@/api/types'
 
 interface Template {
@@ -19,12 +17,9 @@ interface Template {
 interface Group {
   id: number
   name: string
-  /** 分组归属的模型商；0 表示不限 */
-  provider_id?: number
 }
 
 const loading = ref(false)
-const providerStore = useProviderStore()
 const rows = ref<Template[]>([])
 const groups = ref<Group[]>([])
 
@@ -36,23 +31,8 @@ const form = reactive({ name: '', protocol: 'openai-chat', base_url: '' })
 const applyOpen = ref(false)
 const applying = ref(false)
 const applyTarget = ref<Template | null>(null)
-// provider_id = 0 表示未指定：模板只提供协议与地址，同一份地址可以被
-// 不同模型商复用，所以模型商在建渠道时选。以前这里没有这一项、后端又写死 1，
-// 用模板建的渠道一律挂着 OpenAI 徽标。
-const applyForm = reactive({ name: '', api_key: '', base_url: '', group_id: 0, weight: 1, provider_id: 0 })
-
-// 目标分组限定了模型商时，建出来的渠道必须跟着它（后端也会拒不一致的组合）
-const applyGroupProvider = computed(
-  () => groups.value.find((g) => g.id === applyForm.group_id)?.provider_id ?? 0
-)
-
-function onApplyGroupChange() {
-  if (applyGroupProvider.value) {
-    applyForm.provider_id = applyGroupProvider.value
-    return
-  }
-  applyForm.provider_id = providerStore.matchByText(applyTarget.value?.name || '')?.id ?? 0
-}
+// 模型白名单不在这个弹窗里配：用模板建完渠道后到「渠道管理」里填
+const applyForm = reactive({ name: '', api_key: '', base_url: '', group_id: 0, weight: 1 })
 
 // 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
 // 表格紧接着显示「暂无数据」，用户会以为模板本来就没有
@@ -66,7 +46,6 @@ async function load() {
     rows.value = res.items || []
     const g = await api.get<{ items: Group[] }>('/groups')
     groups.value = g.items || []
-    await providerStore.ensure()
   } catch (e: any) {
     loadError.value = e.message || '加载失败'
     message.error(e.message)
@@ -137,13 +116,7 @@ function openApply(row: Template) {
     api_key: '',
     base_url: row.base_url,
     group_id: gid,
-    weight: 1,
-    // 目标分组限定了模型商就跟着分组；否则按模板名认（"DeepSeek 官方"），
-    // 认不出来（本地 vLLM、OpenRouter 这类）落「未指定」，不硬凑
-    provider_id:
-      groups.value.find((g) => g.id === gid)?.provider_id ||
-      providerStore.matchByText(row.name)?.id ||
-      0
+    weight: 1
   })
   applyOpen.value = true
 }
@@ -161,8 +134,7 @@ async function doApply() {
       api_key: applyForm.api_key.trim(),
       base_url: applyForm.base_url.trim(),
       group_id: applyForm.group_id,
-      weight: applyForm.weight,
-      provider_id: applyForm.provider_id
+      weight: applyForm.weight
     })
     message.success('渠道已创建，记得去「渠道管理」绑定模型')
     applyOpen.value = false
@@ -272,9 +244,10 @@ onMounted(load)
         <a-row :gutter="12">
           <a-col :span="12">
             <a-form-item label="分组">
-              <a-select v-model:value="applyForm.group_id" @change="onApplyGroupChange">
+              <a-select v-model:value="applyForm.group_id">
                 <a-select-option v-for="g in groups" :key="g.id" :value="g.id">{{ g.name }}</a-select-option>
               </a-select>
+              <div class="field-hint">建好渠道后到「渠道管理」里填它的模型白名单，请求才能路由过去。</div>
             </a-form-item>
           </a-col>
           <a-col :span="12">
@@ -283,22 +256,6 @@ onMounted(load)
             </a-form-item>
           </a-col>
         </a-row>
-        <a-form-item label="模型商">
-          <a-select v-model:value="applyForm.provider_id" :disabled="applyGroupProvider !== 0">
-            <a-select-option :value="0">未指定</a-select-option>
-            <a-select-option v-for="p in providerStore.items" :key="p.id" :value="p.id">
-              <ProviderTag :code="p.code" :name="p.name" />
-            </a-select-option>
-          </a-select>
-          <div class="field-hint">
-            <template v-if="applyGroupProvider">
-              跟随分组：该分组限定只跑 {{ providerStore.byId(applyGroupProvider)?.name }} 的模型。
-            </template>
-            <template v-else>
-              决定渠道列表里的模型商徽标；本地推理与聚合站这类留「未指定」即可。
-            </template>
-          </div>
-        </a-form-item>
       </a-form>
     </a-modal>
   </div>

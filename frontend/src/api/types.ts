@@ -2,7 +2,7 @@ export interface Channel {
   id: number
   name: string
   group_id: number
-  provider_id: number
+  /** 上游协议：客户端无论用哪种协议，都会按它转成上游格式 */
   protocol: string
   base_url: string
   api_key_hint: string
@@ -25,6 +25,16 @@ export interface SlotRule {
   end: string
 }
 
+// RateRule 是定价的倍率时段：落在窗口内时用 multiplier 覆盖默认倍率。
+// days 为空表示每天；end 早于 start 表示跨午夜。
+export interface RateRule {
+  days: number[]
+  start: string
+  end: string
+  multiplier: number
+  label: string
+}
+
 export interface ChannelGroup {
   id: number
   name: string
@@ -32,31 +42,14 @@ export interface ChannelGroup {
   strategy: string
   is_default: boolean
   enabled: boolean
-  /** 分组归属的模型商；0 表示不限（默认分组与历史数据） */
-  provider_id: number
 }
 
-export interface ModelItem {
-  id: number
-  public_name: string
-  provider_id: number
-  description: string
-  enabled: boolean
-  created_at: string
-}
-
-export interface Provider {
-  id: number
-  code: string
-  name: string
-}
-
+/** 渠道的模型白名单条目：对外名 → 上游名（留空则同名） */
 export interface ChannelBinding {
   id: number
   channel_id: number
-  model_id: number
-  upstream_name: string
   public_name: string
+  upstream_name: string
   enabled: boolean
 }
 
@@ -80,7 +73,6 @@ export interface RequestLog {
   channel_id: number
   channel_name: string
   group_id: number
-  provider_id: number
   inbound_protocol: string
   upstream_protocol: string
   model_requested: string
@@ -113,7 +105,6 @@ export interface Paged<T> {
 
 export interface Pricing {
   id: number
-  provider_id: number
   model_key: string
   match_type: string
   currency: string
@@ -121,41 +112,10 @@ export interface Pricing {
   output_per_1m: string
   cache_read_per_1m: string
   cache_write_per_1m: string
-  peak_rules: SlotRule[] | null
-  source: string
-  source_url: string
-  priority: number
+  /** 倍率时段：命中时用该时段的倍率覆盖默认倍率 */
+  peak_rules: RateRule[] | null
   active: boolean
   updated_at: string
-}
-
-export interface PricingSyncResult {
-  source: string
-  status: string
-  added: number
-  updated: number
-  unchanged: number
-  skipped_manual: number
-  error?: string
-}
-
-export interface PricingSyncLog extends PricingSyncResult {
-  id: number
-  started_at: string
-  finished_at: string | null
-}
-
-// 定价来源优先级：手工录入最高，不会被自动同步覆盖
-export const PRICE_SOURCES = [
-  { value: 'manual', label: '手工录入' },
-  { value: 'official', label: '官方页面' },
-  { value: 'litellm', label: 'LiteLLM' }
-]
-
-export const SOURCE_META: Record<string, { label: string; color: string }> = {
-  manual: { label: '手工', color: 'purple' },
-  official: { label: '官方', color: 'green' },
-  litellm: { label: 'LiteLLM', color: 'blue' }
 }
 
 // 渠道协议选项，与后端 model.Protocol* 常量保持一致

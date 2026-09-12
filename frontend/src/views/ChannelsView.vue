@@ -3,14 +3,14 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { PlusOutlined, ReloadOutlined, DeleteOutlined, EditOutlined, LinkOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
-import { useProviderStore } from '@/stores/providers'
-import ProviderTag from '@/components/ProviderTag.vue'
 import DataState from '@/components/DataState.vue'
+import ModelWhitelistEditor, { type WhitelistRow } from '@/components/ModelWhitelistEditor.vue'
 import { PROTOCOLS, type Channel, type ChannelGroup, type ChannelBinding } from '@/api/types'
 
+type ChannelRow = Channel & { models?: string[]; model_count?: number }
+
 const loading = ref(false)
-const providerStore = useProviderStore()
-const rows = ref<Channel[]>([])
+const rows = ref<ChannelRow[]>([])
 const groups = ref<ChannelGroup[]>([])
 
 const modalOpen = ref(false)
@@ -18,13 +18,10 @@ const editing = ref<Channel | null>(null)
 const saving = ref(false)
 
 const bindOpen = ref(false)
-const bindChannel = ref<Channel | null>(null)
-// 正在绑定的渠道所属分组限定的模型商（0 = 不限）
-const bindGroupProvider = computed(
-  () => groups.value.find((g) => g.id === bindChannel.value?.group_id)?.provider_id ?? 0
-)
-const bindings = ref<ChannelBinding[]>([])
-const bindForm = reactive({ public_name: '', upstream_name: '' })
+const bindChannel = ref<ChannelRow | null>(null)
+// 抽屉里编辑的是整张白名单，点保存时整表提交
+const bindItems = ref<WhitelistRow[]>([])
+const bindSaving = ref(false)
 
 const form = reactive({
   name: '',
@@ -32,43 +29,11 @@ const form = reactive({
   base_url: '',
   api_key: '',
   group_id: 0,
-  // 0 = 未指定。渠道的模型商只是一枚徽标（聚合站本来就不专属于某一家），
-  // 所以允许留空；以前表单里根本没有这一项，后端又把空值兜底成 1，
-  // 于是所有渠道都挂着 OpenAI 徽标。
-  provider_id: 0,
   weight: 1,
-  enabled: true
+  enabled: true,
+  // 白名单随渠道一起提交：新建渠道时就把「能跑哪些模型」填完
+  models: [] as WhitelistRow[]
 })
-
-// 模型商默认值只在「用户还没自己选过」时跟着分组走：
-// 分组按模型商命名（DeepSeek / OpenAI）时，换分组顺手把模型商也切过去；
-// 他一旦手动选过，就不再覆盖他的选择。
-const providerTouched = ref(false)
-
-function groupName(id: number): string {
-  return groups.value.find((g) => g.id === id)?.name ?? ''
-}
-
-/** 按分组名猜一个模型商；猜不出来就是 0（未指定），不兜底成 OpenAI */
-function defaultProviderID(groupID: number): number {
-  return providerStore.matchByText(groupName(groupID))?.id ?? 0
-}
-
-// 分组限定了模型商时，渠道必须跟着它 —— 分组的模型商就是这个组的路由范围，
-// 渠道自己填一个不一样的只会让徽标和实际能跑的模型对不上。
-// 后端同样会拒（分组与渠道模型商不一致时返回 400），这里先一步做在界面上。
-const groupProviderID = computed(
-  () => groups.value.find((g) => g.id === form.group_id)?.provider_id ?? 0
-)
-
-function onGroupChange() {
-  if (groupProviderID.value) {
-    form.provider_id = groupProviderID.value
-    return
-  }
-  if (providerTouched.value) return
-  form.provider_id = defaultProviderID(form.group_id)
-}
 
 const title = computed(() => (editing.value ? '编辑渠道' : '新建渠道'))
 
@@ -81,9 +46,8 @@ async function load() {
   loadError.value = ''
   try {
     const [c, g] = await Promise.all([
-      api.get<{ items: Channel[] }>('/channels'),
-      api.get<{ items: ChannelGroup[] }>('/groups'),
-      providerStore.ensure()
+      api.get<{ items: ChannelRow[] }>('/channels'),
+      api.get<{ items: ChannelGroup[] }>('/groups')
     ])
     rows.value = c.items || []
     groups.value = g.items || []
@@ -100,36 +64,68 @@ async function load() {
 
 function openCreate() {
   editing.value = null
-  const gid = groups.value.find((x) => x.is_default)?.id ?? groups.value[0]?.id ?? 0
-  providerTouched.value = false
   Object.assign(form, {
     name: '',
     protocol: 'openai-chat',
     base_url: '',
     api_key: '',
-    group_id: gid,
-    provider_id: groups.value.find((g) => g.id === gid)?.provider_id || defaultProviderID(gid),
+    group_id: groups.value.find((x) => x.is_default)?.id ?? groups.value[0]?.id ?? 0,
     weight: 1,
-    enabled: true
+    enabled: true,
+    models: [{ public_name: '', upstream_name: '', enabled: true }]
   })
   modalOpen.value = true
 }
 
-function openEdit(row: Channel) {
+async function openEdit(row: ChannelRow) {
   editing.value = row
-  // 编辑时以库里的值为准：改分组不再重算模型商，免得把已保存的值带偏
-  providerTouched.value = true
   Object.assign(form, {
     name: row.name,
     protocol: row.protocol,
     base_url: row.base_url,
     api_key: '',
     group_id: row.group_id,
-    provider_id: row.provider_id,
     weight: row.weight,
-    enabled: row.enabled
+    enabled: row.enabled,
+    models: [] as WhitelistRow[]
   })
   modalOpen.value = true
+  // 编辑时把已有白名单读出来一起改：白名单是渠道的一部分，
+  // 分开两个入口改很容易出现「改了渠道没改模型」的错觉
+  try {
+    const res = await api.get<{ items: ChannelBinding[] }>('/channels/' + row.id + '/models')
+    form.models = (res.items || []).map((b) => ({
+      public_name: b.public_name,
+      upstream_name: b.upstream_name === b.public_name ? '' : b.upstream_name,
+      enabled: b.enabled
+    }))
+  } catch (e: any) {
+    message.error('读取模型白名单失败：' + e.message)
+  }
+}
+
+// 白名单在提交前先自查一遍：后端也会校验，但等一个来回再报错体验差得多
+function whitelistPayload(): WhitelistRow[] | null {
+  const rows = form.models
+    .map((r) => ({
+      public_name: r.public_name.trim(),
+      upstream_name: r.upstream_name.trim(),
+      enabled: r.enabled
+    }))
+    .filter((r) => r.public_name || r.upstream_name)
+  const seen = new Set<string>()
+  for (const r of rows) {
+    if (!r.public_name) {
+      message.warning('有白名单条目只填了上游模型名，请补上对外模型名')
+      return null
+    }
+    if (seen.has(r.public_name)) {
+      message.warning('模型白名单里对外名重复：' + r.public_name)
+      return null
+    }
+    seen.add(r.public_name)
+  }
+  return rows
 }
 
 async function save() {
@@ -137,16 +133,29 @@ async function save() {
     message.warning('渠道名称与地址必填')
     return
   }
+  const models = whitelistPayload()
+  if (!models) return
+  if (!models.length) {
+    message.warning('请至少填一个模型：没有白名单的渠道不会参与任何路由')
+    return
+  }
   saving.value = true
   try {
+    const payload: Record<string, unknown> = {
+      name: form.name.trim(),
+      protocol: form.protocol,
+      base_url: form.base_url.trim(),
+      group_id: form.group_id,
+      weight: form.weight,
+      enabled: form.enabled,
+      models
+    }
+    if (form.api_key) payload.api_key = form.api_key
     if (editing.value) {
-      // 密钥留空表示不修改，避免误清空已保存的密钥
-      const payload: Record<string, unknown> = { ...form }
-      if (!payload.api_key) delete payload.api_key
       await api.put('/channels/' + editing.value.id, payload)
       message.success('更新成功')
     } else {
-      await api.post('/channels', form)
+      await api.post('/channels', payload)
       message.success('创建成功')
     }
     modalOpen.value = false
@@ -175,10 +184,8 @@ function confirmDelete(row: Channel) {
   })
 }
 
-async function openBindings(row: Channel) {
+async function openBindings(row: ChannelRow) {
   bindChannel.value = row
-  bindForm.public_name = ''
-  bindForm.upstream_name = ''
   bindOpen.value = true
   await loadBindings()
 }
@@ -187,40 +194,47 @@ async function loadBindings() {
   if (!bindChannel.value) return
   try {
     const res = await api.get<{ items: ChannelBinding[] }>('/channels/' + bindChannel.value.id + '/models')
-    bindings.value = res.items || []
+    bindItems.value = (res.items || []).map((b) => ({
+      public_name: b.public_name,
+      // 上游名与对外名相同时留空显示，避免满屏重复的模型名
+      upstream_name: b.upstream_name === b.public_name ? '' : b.upstream_name,
+      enabled: b.enabled
+    }))
   } catch (e: any) {
     message.error(e.message)
   }
 }
 
-async function addBinding() {
-  if (!bindChannel.value || !bindForm.public_name.trim()) {
-    message.warning('请填写对外模型名')
+// 整表提交而不是逐条增删：一张表改完一次保存，
+// 不会出现「删了两条加了一条只生效一半」的中间状态
+async function saveBindings() {
+  if (!bindChannel.value) return
+  const items = bindItems.value
+    .map((r) => ({
+      public_name: r.public_name.trim(),
+      upstream_name: r.upstream_name.trim() || r.public_name.trim(),
+      enabled: r.enabled
+    }))
+    .filter((r) => r.public_name)
+  if (!items.length) {
+    message.warning('白名单不能为空：没有模型的渠道不会参与任何路由')
     return
   }
+  const names = items.map((r) => r.public_name)
+  if (new Set(names).size !== names.length) {
+    message.warning('模型白名单里有重复的对外名')
+    return
+  }
+  bindSaving.value = true
   try {
-    await api.post('/channels/' + bindChannel.value.id + '/models', {
-      public_name: bindForm.public_name.trim(),
-      upstream_name: (bindForm.upstream_name || bindForm.public_name).trim()
-    })
-    message.success('已绑定')
-    bindForm.public_name = ''
-    bindForm.upstream_name = ''
+    await api.put('/channels/' + bindChannel.value.id + '/models', { items })
+    message.success('白名单已保存')
     await loadBindings()
     await load()
   } catch (e: any) {
     message.error(e.message)
-  }
-}
-
-async function removeBinding(b: ChannelBinding) {
-  if (!bindChannel.value) return
-  try {
-    await api.del('/channels/' + bindChannel.value.id + '/models/' + b.id)
-    message.success('已解绑')
-    await loadBindings()
-  } catch (e: any) {
-    message.error(e.message)
+  } finally {
+    bindSaving.value = false
   }
 }
 
@@ -254,7 +268,8 @@ onMounted(load)
         @retry="load"
       >
       <!-- scroll.x 必须不小于各列宽度之和：声明偏小时，固定在右侧的
-           「操作」列会盖住左边最后一列，表现为表头被截断、内容被压住 -->
+           「操作」列会盖住左边最后一列，表现为表头被截断、内容被压住。
+           1170 = 各列宽度之和，实测容器宽 1182（scripts/measure-tables.mjs） -->
       <a-table
         :data-source="rows"
         :loading="loading"
@@ -266,33 +281,38 @@ onMounted(load)
         <template #emptyText>
           <a-empty description="还没有渠道，点「新建渠道」添加第一个" />
         </template>
-        <a-table-column title="名称" :width="200">
+        <a-table-column title="名称" :width="150">
           <template #default="{ record }">
             <div class="chan-name">{{ record.name }}</div>
-            <ProviderTag
-              v-if="providerStore.byId(record.provider_id)"
-              :code="providerStore.byId(record.provider_id)?.code"
-              :name="providerStore.byId(record.provider_id)?.name"
-            />
-            <!-- 未指定（0，聚合站常见）时给占位，不硬凑一个模型商标签 -->
-            <span v-else class="unassigned" title="未指定模型商">—</span>
           </template>
         </a-table-column>
-        <a-table-column title="协议" data-index="protocol" :width="150" />
-        <a-table-column title="地址" data-index="base_url" :width="220" ellipsis />
+        <a-table-column title="模型" :width="200" ellipsis>
+          <template #default="{ record }">
+            <!-- 白名单是模型存在的唯一依据，「一条都没有」必须显眼：
+                 这种渠道看着一切正常，实际任何请求都不会路由到它 -->
+            <span v-if="!record.model_count" class="unassigned">未配置模型</span>
+            <!-- 列宽有限，装不下的模型名走省略号，完整清单放 title（悬停可见）：
+                 模型目录现在只存在于这些白名单里，列表是最常用的查看入口 -->
+            <span v-else class="model-names" :title="(record.models || []).join('、')">
+              {{ (record.models || []).join('、') }}
+            </span>
+          </template>
+        </a-table-column>
+        <a-table-column title="协议" data-index="protocol" :width="125" />
+        <a-table-column title="地址" data-index="base_url" :width="174" ellipsis />
         <a-table-column title="分组" :width="90">
           <template #default="{ record }">
             {{ groups.find((g) => g.id === record.group_id)?.name ?? record.group_id }}
           </template>
         </a-table-column>
-        <a-table-column title="权重" data-index="weight" :width="70" />
-        <a-table-column title="密钥" data-index="api_key_hint" :width="150" />
-        <a-table-column title="状态" :width="90">
+        <a-table-column title="权重" data-index="weight" :width="58" />
+        <a-table-column title="密钥" data-index="api_key_hint" :width="105" />
+        <a-table-column title="状态" :width="78">
           <template #default="{ record }">
             <a-tag :color="healthTag(record).color">{{ healthTag(record).text }}</a-tag>
           </template>
         </a-table-column>
-        <a-table-column title="操作" :width="200" fixed="right">
+        <a-table-column title="操作" :width="190" fixed="right">
           <template #default="{ record }">
             <a-space>
               <a @click="openBindings(record)"><LinkOutlined /> 模型</a>
@@ -310,8 +330,11 @@ onMounted(load)
         <a-form-item label="渠道名称" required>
           <a-input v-model:value="form.name" placeholder="例如 ohub-deepseek" />
         </a-form-item>
-        <a-form-item label="协议类型" required>
+        <a-form-item label="上游协议" required>
           <a-select v-model:value="form.protocol" :options="PROTOCOLS" />
+          <div class="field-hint">
+            客户端用哪种协议请求都行：会先归一成 OpenAI Chat，再按这里选的协议转成上游格式。
+          </div>
         </a-form-item>
         <a-form-item label="上游地址" required>
           <a-input v-model:value="form.base_url" placeholder="https://api.example.com 或 https://api.example.com/v1" />
@@ -320,30 +343,19 @@ onMounted(load)
           <a-input-password v-model:value="form.api_key" placeholder="sk-..." />
         </a-form-item>
         <a-form-item label="所属分组">
-          <a-select v-model:value="form.group_id" @change="onGroupChange">
+          <a-select v-model:value="form.group_id">
             <a-select-option v-for="g in groups" :key="g.id" :value="g.id">{{ g.name }}</a-select-option>
           </a-select>
+          <div class="field-hint">分组决定路由与权限范围，模型由下面的白名单决定。</div>
         </a-form-item>
-        <a-form-item label="模型商">
-          <a-select
-            v-model:value="form.provider_id"
-            :disabled="groupProviderID !== 0"
-            @change="providerTouched = true"
-          >
-            <a-select-option :value="0">未指定</a-select-option>
-            <a-select-option v-for="p in providerStore.items" :key="p.id" :value="p.id">
-              <ProviderTag :code="p.code" :name="p.name" />
-            </a-select-option>
-          </a-select>
+
+        <a-form-item label="模型白名单" required>
+          <ModelWhitelistEditor v-model:items="form.models" />
           <div class="field-hint">
-            <template v-if="groupProviderID">
-              跟随分组：该分组限定只跑 {{ providerStore.byId(groupProviderID)?.name }} 的模型。
-            </template>
-            <template v-else>
-              只决定渠道名称下方的模型商徽标；聚合站这类不专属于某家的渠道留「未指定」即可。
-            </template>
+            只有写在这里的模型才会被路由到这条渠道；上游名留空表示与对外名相同。
           </div>
         </a-form-item>
+
         <a-row :gutter="8">
           <a-col :span="12">
             <a-form-item label="路由权重">
@@ -359,33 +371,20 @@ onMounted(load)
       </a-form>
     </a-modal>
 
-    <a-drawer v-model:open="bindOpen" :title="'模型绑定 · ' + (bindChannel?.name ?? '')" width="620">
+    <a-drawer v-model:open="bindOpen" :title="'模型白名单 · ' + (bindChannel?.name ?? '')" width="620">
       <a-space direction="vertical" style="width: 100%" :size="12">
-        <a-card size="small" title="新增绑定">
+        <a-card size="small" title="这条渠道能跑哪些模型">
           <a-space direction="vertical" style="width: 100%">
             <a-alert
-              v-if="bindGroupProvider"
               type="info"
               show-icon
-              :message="'该渠道所在分组限定只跑 ' + providerStore.byId(bindGroupProvider)?.name + ' 的模型，绑定其它模型商的模型会被拒绝。'"
+              message="对外名是客户端请求时用的名字；上游名是转发给上游时替换成的名字。客户端写错名字是最常见的 502 原因。"
             />
-            <a-input v-model:value="bindForm.public_name" placeholder="对外模型名，例如 deepseek-v4-flash" />
-            <a-input v-model:value="bindForm.upstream_name" placeholder="上游原生模型名（留空则同上）" />
-            <a-button type="primary" block @click="addBinding"><PlusOutlined /> 绑定</a-button>
+            <ModelWhitelistEditor v-model:items="bindItems" />
+            <a-button type="primary" block :loading="bindSaving" @click="saveBindings">保存白名单</a-button>
           </a-space>
         </a-card>
 
-        <a-list :data-source="bindings" size="small" bordered>
-          <template #renderItem="{ item }">
-            <a-list-item>
-              <a-list-item-meta>
-                <template #title>{{ item.public_name }}</template>
-                <template #description>上游：{{ item.upstream_name }}</template>
-              </a-list-item-meta>
-              <a class="danger-link" @click="removeBinding(item)">解绑</a>
-            </a-list-item>
-          </template>
-        </a-list>
       </a-space>
     </a-drawer>
   </div>
@@ -407,5 +406,7 @@ onMounted(load)
 .field-hint { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
 .unassigned { color: var(--color-text-secondary); }
 .chan-name { margin-bottom: 2px; }
+.model-names { color: var(--color-text); }
+.muted { color: var(--color-text-secondary); }
 .danger-link { color: var(--color-red); }
 </style>

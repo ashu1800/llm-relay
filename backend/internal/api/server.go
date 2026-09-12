@@ -23,7 +23,6 @@ type Deps struct {
 	Service *relay.Service
 	Logs    *relay.LogWriter
 	Pricing *pricing.Engine
-	Syncer  *pricing.Syncer
 
 	// 限流与并发控制
 	RateLimiter *relay.RateLimiter
@@ -73,7 +72,6 @@ func (s *Server) Register(r *gin.Engine) {
 		admin.GET("/system/info", s.systemInfo)
 		registerChannelRoutes(admin, s)
 		registerGroupRoutes(admin, s)
-		registerModelRoutes(admin, s)
 		registerKeyRoutes(admin, s)
 		registerLogRoutes(admin, s)
 		registerTemplateRoutes(admin, s)
@@ -153,7 +151,6 @@ func (s *Server) systemInfo(c *gin.Context) {
 		"version":       Version,
 		"port":          s.deps.Config.Server.Port,
 		"started_at":    s.startedAt.UTC().Format(time.RFC3339),
-		"pricing_sync":  s.deps.Config.Pricing.UpdateIntervalHours,
 		"payload_store": s.deps.Config.Relay.PayloadStorageMode,
 		// 前端据此显示持久告警，而不是只在启动日志里提一句
 		"using_default_secret": UsingDefaultSecret(s.deps.Config.Security.Secret),

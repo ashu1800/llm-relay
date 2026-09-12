@@ -4,8 +4,6 @@ import { message, Modal } from 'ant-design-vue'
 import { PlusOutlined, ReloadOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
-import ProviderTag from '@/components/ProviderTag.vue'
-import { useProviderStore } from '@/stores/providers'
 import type { ChannelGroup } from '@/api/types'
 
 // 路由策略选项：value 与后端 model.Strategy* 常量一致，label 同时用于下拉与表格展示
@@ -17,7 +15,6 @@ const STRATEGY_OPTIONS = [
 ]
 
 const loading = ref(false)
-const providerStore = useProviderStore()
 const rows = ref<ChannelGroup[]>([])
 const loadError = ref('')
 
@@ -30,19 +27,10 @@ const form = reactive({
   remark: '',
   strategy: 'weighted',
   is_default: false,
-  enabled: true,
-  // 分组归属的模型商：新建必选。分组决定「只允许哪个模型商的模型走它」，
-  // 所以 0（不限）只在编辑历史分组时保留。
-  // 新建时留 undefined 而不是 0：0 会让下拉把原始值「0」显示出来，
-  // 而「不限」这一项在新建时压根不存在（后端会拒），显示 0 就是个看不懂的值
-  provider_id: undefined as number | undefined
+  enabled: true
 })
 
 const title = computed(() => (editing.value ? '编辑分组' : '新建分组'))
-
-// 「不限」只在分组本来就是不限时可选：默认分组是历史数据，不能因为
-// 编辑它（比如改个策略）就被迫给整个中转站限定一个模型商
-const allowUnlimited = computed(() => !!editing.value && editing.value.provider_id === 0)
 
 async function load() {
   loading.value = true
@@ -50,7 +38,6 @@ async function load() {
   try {
     const res = await api.get<{ items: ChannelGroup[] }>('/groups')
     rows.value = res.items || []
-    await providerStore.ensure()
   } catch (e: any) {
     // 失败时仍然清空列表：旧数据配上错误提示容易被当成「当前真实的分组」，
     // 清空后由 DataState 统一呈现「加载失败 + 重试」，不会退化成「暂无数据」
@@ -75,8 +62,7 @@ function openCreate() {
     remark: '',
     strategy: 'weighted',
     is_default: false,
-    enabled: true,
-    provider_id: undefined
+    enabled: true
   })
   modalOpen.value = true
 }
@@ -88,8 +74,7 @@ function openEdit(row: ChannelGroup) {
     remark: row.remark || '',
     strategy: row.strategy || 'weighted',
     is_default: !!row.is_default,
-    enabled: !!row.enabled,
-    provider_id: row.provider_id || 0
+    enabled: !!row.enabled
   })
   modalOpen.value = true
 }
@@ -99,10 +84,6 @@ async function save() {
     message.warning('分组名称必填')
     return
   }
-  if (!form.provider_id) {
-    message.warning('模型商必选：分组决定只允许哪个模型商的模型走它')
-    return
-  }
   saving.value = true
   try {
     const body = {
@@ -110,9 +91,7 @@ async function save() {
       remark: form.remark.trim(),
       strategy: form.strategy,
       is_default: form.is_default,
-      enabled: form.enabled,
-      // 新建时没选就是 0，交给后端给出「模型商必选」的明确报错
-      provider_id: form.provider_id ?? 0
+      enabled: form.enabled
     }
     if (editing.value) {
       await api.put('/groups/' + editing.value.id, body)
@@ -180,16 +159,6 @@ onMounted(load)
       >
         <a-table-column title="ID" data-index="id" :width="70" />
         <a-table-column title="名称" data-index="name" :width="180" />
-        <a-table-column title="模型商" :width="140">
-          <template #default="{ record }">
-            <ProviderTag
-              v-if="providerStore.byId(record.provider_id)"
-              :code="providerStore.byId(record.provider_id)?.code"
-              :name="providerStore.byId(record.provider_id)?.name"
-            />
-            <span v-else class="muted" title="不限定模型商，任何模型都能走这个分组">不限</span>
-          </template>
-        </a-table-column>
         <a-table-column title="备注" :width="240" ellipsis>
           <template #default="{ record }">
             <span v-if="record.remark">{{ record.remark }}</span>
@@ -234,17 +203,6 @@ onMounted(load)
         </a-form-item>
         <a-form-item label="备注">
           <a-input v-model:value="form.remark" placeholder="选填，说明这个分组的用途" />
-        </a-form-item>
-        <a-form-item label="模型商" required>
-          <a-select v-model:value="form.provider_id" placeholder="选择这个分组归属的模型商">
-            <a-select-option v-if="allowUnlimited" :value="0">不限（不限定模型商）</a-select-option>
-            <a-select-option v-for="p in providerStore.items" :key="p.id" :value="p.id">
-              <ProviderTag :code="p.code" :name="p.name" />
-            </a-select-option>
-          </a-select>
-          <div class="field-hint">
-            分组决定只允许哪个模型商的模型走它：组里的渠道与绑定的模型都会被限定在该模型商内。
-          </div>
         </a-form-item>
         <a-form-item label="路由策略">
           <a-select v-model:value="form.strategy" :options="STRATEGY_OPTIONS" />

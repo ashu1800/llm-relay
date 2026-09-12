@@ -4,7 +4,6 @@ import { modelStyle, modelVars } from '@/utils/modelStyle'
 
 // 模型标签：同一个模型永远同一种颜色（色相由模型名派生，见 utils/modelStyle.ts）。
 // 颜色只是辅助 —— 模型名始终写在胶囊里，色盲用户与黑白打印同样能分辨。
-// 形状与模型商标签（ProviderTag）一致，两者会在同一张表里同时出现。
 const props = defineProps<{
   name?: string | null
 }>()
@@ -20,8 +19,8 @@ const vars = computed(() => modelVars(style.value))
 <style scoped>
 .model-tag {
   /* 明度由主题决定，色相与彩度由模型名决定（见 utils/modelStyle.ts）。
-     L=0.47 与模型商标签取同一个值：两套标签同屏出现时必须一样亮，
-     这个明度对各色相都能满足正文 4.5:1 的对比度要求。 */
+     L=0.47 是实测出来的：它让各色相都能满足正文 4.5:1 的对比度要求，
+     又不会在浅色主题下糊成一片。 */
   --mt-l: 0.47;
 
   display: inline-block;

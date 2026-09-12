@@ -248,6 +248,28 @@ else
   fi
 fi
 
+# ---------- 5.5 升级前自动备份数据库 ----------
+# 启动时后端会自动执行迁移（含改列、删表）。迁移一旦执行就是单向的，
+# 出问题时没有备份只能靠重新录配置。所以只要旧库还在，就先把整库导出来。
+log "备份现有数据库（迁移前的安全网）"
+if docker ps --format '{{.Names}}' | grep -qx "${APP_NAME}-postgres"; then
+  BACKUP_DIR="${INSTALL_DIR}/backups"
+  mkdir -p "$BACKUP_DIR"
+  BACKUP_FILE="$BACKUP_DIR/pre-migrate-$(date +%Y%m%d-%H%M%S).sql"
+  # 用 pg_dump 做逻辑备份：与数据库版本无关，恢复时不必先建同名容器
+  if docker exec "${APP_NAME}-postgres" pg_dump -U "${DB_USER:-llmrelay}" -d "${DB_NAME:-llm_relay}" > "$BACKUP_FILE" 2>/dev/null; then
+    gzip -f "$BACKUP_FILE"
+    log "已备份到 ${BACKUP_FILE}.gz（$(du -h "${BACKUP_FILE}.gz" | cut -f1)）"
+    # 只留最近 10 份，避免长期升级把磁盘占满
+    ls -1t "$BACKUP_DIR"/pre-migrate-*.sql.gz 2>/dev/null | tail -n +11 | xargs -r rm -f
+  else
+    rm -f "$BACKUP_FILE"
+    warn "数据库备份失败，继续安装（升级风险自担）"
+  fi
+else
+  log "没有正在运行的数据库容器，跳过备份（首次安装）"
+fi
+
 # ---------- 6. 构建并启动 ----------
 log "构建镜像并启动容器（首次构建较慢，请耐心等待）"
 cd "$INSTALL_DIR/deploy"

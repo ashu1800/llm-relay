@@ -13,18 +13,18 @@
   `gemini` 用 `x-goog-api-key`，
   `custom` 可用 `auth_header` / `auth_prefix` 指定任意鉴权头
 
-  > 注意：`anthropic-messages` 与 `gemini` 目前**只改变鉴权头**，请求体与路径仍是
-  > OpenAI 格式的 `/v1/chat/completions`。也就是说它们适用于「OpenAI 兼容、
-  > 但要求这两种鉴权方式」的站点；要接 Anthropic / Gemini 的**原生端点**，
-  > 需要上游本身提供 OpenAI 兼容入口。真正的出站协议转换尚未实现。
+  > 注意：渠道上选的协议是**上游协议**。客户端无论用哪种协议请求，都会先归一成
+  > OpenAI Chat 的内部格式，再按渠道协议转成上游格式发出。`anthropic-messages` 与
+  > `gemini-generateContent` 的出站转换正在实现中，实现前它们只改变鉴权头，
+  > 请求体与路径仍是 OpenAI 格式的 `/v1/chat/completions`。
 - **精细计量**：输入 / 输出 / 缓存命中 / 缓存写入 / 推理 Token，区分「子集型」与「并列型」缓存口径
-- **模型定价与预估金额**：定时同步官方价格（OpenAI / DeepSeek），支持 DeepSeek **峰谷双价**；金额仅作成本感知，**不做任何扣减**
+- **模型定价与预估金额**：价格全部手工录入；支持固定倍率与**按时段倍率**（如工作日 9:00-12:00 按 ×2 计费）；金额仅作成本感知，**不做任何扣减**
 - **详尽的请求日志**：首包时间、总耗时、渠道与模型映射、状态码、原始报文、计费过程还原、导出
-- **渠道管理**：分组、权重、可用时段（支持跨午夜）、模型映射、内置模板一键建渠道
+- **渠道管理**：分组、权重、可用时段（支持跨午夜）、**模型白名单（对外名 → 上游名映射）**、内置模板一键建渠道
 - **限流与并发**：密钥级每分钟配额、渠道并发上限、全局在途闸门；上游 429 按
   `Retry-After` 自动冷却并切走，不再把已限流的上游打得更惨
 - **报文留存**：`all` / `errors` / `none` 三档，按体积截断，凭据类请求头自动脱敏
-- **配置备份**：一键导出/导入渠道、模型、密钥与手工定价，渠道密钥以密文保存
+- **配置备份**：一键导出/导入分组、渠道（含模型白名单）、密钥与定价，渠道密钥以密文保存
 - **无登录 / 无充值 / 无金额系统**：纯本地运行
 
 ## 目录结构
@@ -39,7 +39,7 @@ llm-relay/
 │       ├── model/              数据实体
 │       ├── store/              数据库与缓存
 │       ├── relay/              协议适配与转发内核
-│       ├── pricing/            单价同步与成本计算
+│       ├── pricing/            单价解析与成本计算
 │       ├── usage/              Token 计量
 │       └── web/                前端产物 embed
 ├── frontend/                   Vue 3 + Vite + Ant Design Vue 5
@@ -202,9 +202,6 @@ rm -rf backend/internal/web/dist && cp -r frontend/dist backend/internal/web/dis
 |---|---|---|
 | `SERVER_PORT` | `8888` | 监听端口 |
 | `DB_*` | — | PostgreSQL 连接 |
-| `PRICING_REMOTE_URL` | LiteLLM 定价库 | 兜底定价来源 |
-| `PRICING_UPDATE_INTERVAL_HOURS` | `24` | 单价同步间隔 |
-| `PRICING_OFFICIAL_SYNC_ENABLED` | `true` | 是否抓取官方定价页（含峰谷双价） |
 | `RELAY_PAYLOAD_STORAGE_MODE` | `errors` | 报文留存：`all` / `errors` / `none` |
 | `RELAY_PAYLOAD_MAX_KB` | `256` | 单条报文留存上限，超出截断并标注 |
 | `RELAY_MAX_CONCURRENCY` | `64` | 全局在途请求上限，超出排队（最多 60 秒）；`0` 不限 |
@@ -225,7 +222,7 @@ rm -rf backend/internal/web/dist && cp -r frontend/dist backend/internal/web/dis
 - [x] Phase 0 项目骨架：Go+Gin 服务、Vue3+AntdV 前端、Docker 多阶段构建、一键脚本
 - [x] Phase 1 UI 逆向与设计系统：CDP 抓取、`ui-spec.md`、主题令牌、MainLayout、看板骨架
 - [x] Phase 2 数据层与转发内核：实体与迁移、渠道路由（加权/轮询/故障转移）、协议适配
-- [x] Phase 3 计量、成本与定价同步：Token 计量归一化、LiteLLM + 官方定价、峰谷双价
+- [x] Phase 3 计量与成本：Token 计量归一化、手工定价、时段倍率（价格不再自动同步）
 - [x] Phase 4 全协议与页面完善：Chat / Responses / Anthropic / Gemini / Embeddings 入站
 - [x] Phase 5 健壮性与可观测：报文留存、限流与并发、渠道模板、配置备份
 - [x] Phase 6 部署固化与冷启动验收：`install-bare.sh`、密钥轮换、冷启动实测

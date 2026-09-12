@@ -45,15 +45,18 @@ type backupBundle struct {
 	ExportedAt time.Time `json:"exported_at"`
 	// SecretFingerprint 是加密主密钥的短指纹。渠道密钥在备份里始终是密文，
 	// 只有同一把 RELAY_SECRET 才能解出原文；靠这个指纹可以提前判断能否恢复。
-	SecretFingerprint string                  `json:"secret_fingerprint"`
-	Providers         []model.Provider        `json:"providers"`
-	Groups            []model.ChannelGroup    `json:"channel_groups"`
-	Channels          []channelExport         `json:"channels"`
-	Models            []model.Model           `json:"models"`
-	Bindings          []model.ChannelModel    `json:"channel_models"`
-	Templates         []model.ChannelTemplate `json:"channel_templates"`
-	APIKeys           []apiKeyExport          `json:"api_keys"`
-	ManualPricings    []model.ModelPricing    `json:"manual_pricings"`
+	SecretFingerprint string               `json:"secret_fingerprint"`
+	Groups            []model.ChannelGroup `json:"channel_groups"`
+	Channels          []channelExport      `json:"channels"`
+	// Bindings 就是渠道的模型白名单。老备份里还带着 models/providers 两个数组，
+	// 结构体里已经没有了 —— Go 解析时会忽略不认识的字段，所以旧备份仍能导入，
+	// 只是其中的 models 不会再生效（绑定的 public_name 已经随白名单落库）。
+	Bindings  []model.ChannelModel    `json:"channel_models"`
+	Templates []model.ChannelTemplate `json:"channel_templates"`
+	APIKeys   []apiKeyExport          `json:"api_keys"`
+	Pricings  []model.ModelPricing    `json:"pricings"`
+	// ManualPricings 是旧备份文件里的字段名，只为能继续读出来
+	ManualPricings []model.ModelPricing `json:"manual_pricings"`
 }
 
 // secretFingerprint 取主密钥的短哈希，用于判断备份能否在本实例解开。
@@ -75,7 +78,6 @@ func (s *Server) exportConfig(c *gin.Context) {
 		name string
 		run  func() error
 	}{
-		{"模型商", func() error { return db.Order("id").Find(&b.Providers).Error }},
 		{"分组", func() error { return db.Order("id").Find(&b.Groups).Error }},
 		{
 			"渠道", func() error {
@@ -89,8 +91,7 @@ func (s *Server) exportConfig(c *gin.Context) {
 				return nil
 			},
 		},
-		{"模型", func() error { return db.Order("id").Find(&b.Models).Error }},
-		{"模型绑定", func() error { return db.Order("id").Find(&b.Bindings).Error }},
+		{"模型白名单", func() error { return db.Order("id").Find(&b.Bindings).Error }},
 		{"渠道模板", func() error { return db.Order("id").Find(&b.Templates).Error }},
 		{
 			"密钥", func() error {
@@ -105,9 +106,9 @@ func (s *Server) exportConfig(c *gin.Context) {
 			},
 		},
 		{
-			// 只导手工定价：自动同步的来源重新同步即可，导出它们只会让备份文件膨胀
-			"手工定价", func() error {
-				return db.Where("source = ?", "manual").Order("id").Find(&b.ManualPricings).Error
+			// 定价全部手工录入，都是不可再生的数据，必须整体导出
+			"模型定价", func() error {
+				return db.Order("id").Find(&b.Pricings).Error
 			},
 		},
 	}
@@ -154,21 +155,6 @@ func (s *Server) importConfig(c *gin.Context) {
 	}
 
 	// 按自然键合并：已存在的不覆盖，避免把本机正在用的配置改掉
-	for i := range b.Providers {
-		p := b.Providers[i]
-		var exist model.Provider
-		if err := db.Where("code = ?", p.Code).First(&exist).Error; err == nil {
-			report.Skipped["模型商"]++
-			continue
-		}
-		p.ID = 0
-		if err := db.Create(&p).Error; err != nil {
-			report.Warnings = append(report.Warnings, "模型商 "+p.Code+" 导入失败: "+err.Error())
-			continue
-		}
-		report.Created["模型商"]++
-	}
-
 	groupIDMap := map[uint]uint{}
 	for i := range b.Groups {
 		gr := b.Groups[i]
@@ -219,47 +205,37 @@ func (s *Server) importConfig(c *gin.Context) {
 		report.Created["渠道"]++
 	}
 
-	modelIDMap := map[uint]uint{}
-	for i := range b.Models {
-		m := b.Models[i]
-		oldID := m.ID
-		var exist model.Model
-		if err := db.Where("public_name = ?", m.PublicName).First(&exist).Error; err == nil {
-			modelIDMap[oldID] = exist.ID
-			report.Skipped["模型"]++
-			continue
-		}
-		m.ID = 0
-		if err := db.Create(&m).Error; err != nil {
-			report.Warnings = append(report.Warnings, "模型 "+m.PublicName+" 导入失败: "+err.Error())
-			continue
-		}
-		modelIDMap[oldID] = m.ID
-		report.Created["模型"]++
-	}
-
 	for i := range b.Bindings {
 		bd := b.Bindings[i]
-		newCh, ok1 := channelIDMap[bd.ChannelID]
-		newMd, ok2 := modelIDMap[bd.ModelID]
-		if !ok1 || !ok2 {
-			report.Skipped["模型绑定"]++
+		newCh, ok := channelIDMap[bd.ChannelID]
+		if !ok {
+			report.Skipped["模型白名单"]++
+			continue
+		}
+		if strings.TrimSpace(bd.PublicName) == "" {
+			// 旧备份里的绑定只带 model_id，那份模型清单在新结构里没有对应物，
+			// 只能跳过 —— 但我们明确说清楚跳过了什么，不静默丢数据
+			report.Warnings = append(report.Warnings,
+				"有一条旧格式的模型绑定（只有 model_id）无法转换，已跳过")
+			report.Skipped["模型白名单"]++
 			continue
 		}
 		var exist model.ChannelModel
-		if err := db.Where("channel_id = ? AND model_id = ?", newCh, newMd).
+		if err := db.Where("channel_id = ? AND public_name = ?", newCh, bd.PublicName).
 			First(&exist).Error; err == nil {
-			report.Skipped["模型绑定"]++
+			report.Skipped["模型白名单"]++
 			continue
 		}
 		bd.ID = 0
 		bd.ChannelID = newCh
-		bd.ModelID = newMd
+		if strings.TrimSpace(bd.UpstreamName) == "" {
+			bd.UpstreamName = bd.PublicName
+		}
 		if err := db.Create(&bd).Error; err != nil {
-			report.Warnings = append(report.Warnings, "模型绑定导入失败: "+err.Error())
+			report.Warnings = append(report.Warnings, "模型白名单导入失败: "+err.Error())
 			continue
 		}
-		report.Created["模型绑定"]++
+		report.Created["模型白名单"]++
 	}
 
 	for i := range b.Templates {
@@ -299,12 +275,17 @@ func (s *Server) importConfig(c *gin.Context) {
 		report.Created["密钥"]++
 	}
 
-	for i := range b.ManualPricings {
-		p := b.ManualPricings[i]
+	// 新备份读 pricings，旧备份读 manual_pricings：后者当年只存手工来源，
+	// 正好是现在定价的全部
+	pricings := b.Pricings
+	if len(pricings) == 0 {
+		pricings = b.ManualPricings
+	}
+	for i := range pricings {
+		p := pricings[i]
 		var exist model.ModelPricing
-		if err := db.Where("model_key = ? AND source = ?", p.ModelKey, p.Source).
-			First(&exist).Error; err == nil {
-			report.Skipped["手工定价"]++
+		if err := db.Where("model_key = ?", p.ModelKey).First(&exist).Error; err == nil {
+			report.Skipped["模型定价"]++
 			continue
 		}
 		p.ID = 0
@@ -312,7 +293,7 @@ func (s *Server) importConfig(c *gin.Context) {
 			report.Warnings = append(report.Warnings, "定价 "+p.ModelKey+" 导入失败: "+err.Error())
 			continue
 		}
-		report.Created["手工定价"]++
+		report.Created["模型定价"]++
 	}
 
 	if s.deps.Pricing != nil {

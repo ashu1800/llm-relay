@@ -47,10 +47,6 @@ def cleanup():
     for c in chans.get("items", []):
         if c["name"] == CHANNEL:
             call("DELETE", "/channels/%d" % c["id"])
-    _, ms = call("GET", "/models")
-    for m in ms.get("items", []):
-        if m["public_name"] == MODEL:
-            call("DELETE", "/models/%d" % m["id"])
     _, ks = call("GET", "/keys")
     for k in ks.get("items", []):
         if k["name"] == "slow-concurrency-key":

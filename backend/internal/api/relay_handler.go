@@ -11,25 +11,45 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"llm-relay/internal/model"
 	"llm-relay/internal/relay"
 	"llm-relay/internal/relay/convert"
 )
 
-// listModels 返回已启用的对外模型，供客户端做模型探测。
+// listModels 返回当前密钥能调用的对外模型，供客户端做模型探测。
+//
+// 模型目录不单独维护：它就是「启用渠道的启用白名单条目」的并集，
+// 与路由用的是同一份数据 —— 列表里有、请求却调不通（或反过来）是不可能出现的。
+// 密钥配了分组白名单时只列那些分组里的模型，否则客户端会看到一堆自己调不了的模型。
 func (s *Server) listModels(c *gin.Context) {
-	var models []model.Model
-	if err := s.deps.Store.DB().Where("enabled = ?", true).
-		Order("public_name").Find(&models).Error; err != nil {
+	q := s.deps.Store.DB().Table("channel_models").
+		Distinct("channel_models.public_name").
+		Joins("JOIN channels ON channels.id = channel_models.channel_id AND channels.enabled = true").
+		Joins("JOIN channel_groups ON channel_groups.id = channels.group_id AND channel_groups.enabled = true").
+		Where("channel_models.enabled = true")
+
+	if key := apiKeyFromContext(c); key != nil {
+		groups, err := s.resolveGroupWhitelist(key.AllowedGroups)
+		if err != nil {
+			writeUpstreamError(c, http.StatusForbidden, err.Error(), "permission_error")
+			return
+		}
+		if len(groups) > 0 {
+			q = q.Where("channels.group_id IN ?", groups)
+		}
+	}
+
+	var names []string
+	if err := q.Order("channel_models.public_name").Pluck("channel_models.public_name", &names).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
-	data := make([]gin.H, 0, len(models))
-	for _, m := range models {
+	now := time.Now().Unix()
+	data := make([]gin.H, 0, len(names))
+	for _, name := range names {
 		data = append(data, gin.H{
-			"id":       m.PublicName,
+			"id":       name,
 			"object":   "model",
-			"created":  m.CreatedAt.Unix(),
+			"created":  now,
 			"owned_by": "llm-relay",
 		})
 	}

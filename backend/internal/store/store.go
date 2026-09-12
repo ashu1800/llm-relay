@@ -60,19 +60,24 @@ func (s *Store) Ready() error {
 }
 
 // Migrate 建表。实体变更时自动补齐列，适合个人自用场景。
+//
+// 顺序不能颠倒：AutoMigrate 会按实体定义去建列，而 channel_models.public_name
+// 是 not null 且没有默认值 —— 表里已经有行时，直接 ADD COLUMN 会被 Postgres 拒绝。
+// 所以先把老结构迁到新结构（补列、回填、去重、置非空、删旧列），
+// 再让 AutoMigrate 去补索引与其余表。
 func (s *Store) Migrate() error {
+	if err := s.migrateLegacySchema(); err != nil {
+		return err
+	}
 	if err := s.db.AutoMigrate(
-		&model.Provider{},
 		&model.ChannelGroup{},
 		&model.Channel{},
-		&model.Model{},
 		&model.ChannelModel{},
 		&model.ChannelTemplate{},
 		&model.APIKey{},
 		&model.RequestLog{},
 		&model.RequestPayload{},
 		&model.ModelPricing{},
-		&model.PricingSyncLog{},
 		&model.Setting{},
 	); err != nil {
 		return fmt.Errorf("数据库迁移失败: %w", err)
@@ -81,21 +86,90 @@ func (s *Store) Migrate() error {
 	return nil
 }
 
-// Seed 写入首次启动所需的基线数据，可重复执行。
-func (s *Store) Seed() error {
-	providers := []model.Provider{
-		{Code: "openai", Name: "OpenAI", PricingURL: "https://developers.openai.com/api/docs/pricing", Enabled: true},
-		{Code: "deepseek", Name: "DeepSeek", PricingURL: "https://api-docs.deepseek.com/quick_start/pricing", Enabled: true},
+// hasTable / hasColumn 用于判断老结构还在不在。
+//
+// 迁移语句必须在「老库」与「全新库」上都能跑：全新库上 channel_models 里
+// 根本没有 model_id，照搬那条 UPDATE ... FROM models 会因为表不存在直接报错，
+// 于是新装用户第一次启动就失败。
+func (s *Store) hasTable(table string) bool {
+	var n int64
+	if err := s.db.Raw(
+		"SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?",
+		table).Scan(&n).Error; err != nil {
+		return false
 	}
-	for i := range providers {
-		p := providers[i]
-		if err := s.db.Where(model.Provider{Code: p.Code}).
-			Attrs(model.Provider{Name: p.Name, PricingURL: p.PricingURL, Enabled: true}).
-			FirstOrCreate(&p).Error; err != nil {
-			return fmt.Errorf("初始化模型商 %s 失败: %w", p.Code, err)
+	return n > 0
+}
+
+func (s *Store) hasColumn(table, column string) bool {
+	var n int64
+	if err := s.db.Raw(
+		"SELECT count(*) FROM information_schema.columns WHERE table_name = ? AND column_name = ?",
+		table, column).Scan(&n).Error; err != nil {
+		return false
+	}
+	return n > 0
+}
+
+// migrateLegacySchema 把「模型商 + 模型目录 + 渠道绑定」那套老结构收敛成
+// 「渠道自带模型白名单」，并删掉模型商相关的一切。
+//
+// 背景：模型目录（models）曾是一张独立的表，渠道绑定只存 model_id。
+// 这让「模型建好了但没绑渠道」变成一种界面上看不出来的死状态（请求直接没有候选），
+// 所以白名单改为直接存在渠道上。迁移要保证已有绑定不丢：
+// public_name 从 models 回填，回填不到的（模型已被删）才丢弃。
+func (s *Store) migrateLegacySchema() error {
+	if s.hasTable("channel_models") && s.hasColumn("channel_models", "model_id") {
+		if err := s.db.Exec(
+			"ALTER TABLE channel_models ADD COLUMN IF NOT EXISTS public_name varchar(128)").Error; err != nil {
+			return fmt.Errorf("迁移 channel_models.public_name 失败: %w", err)
 		}
+		if s.hasTable("models") {
+			if err := s.db.Exec(`UPDATE channel_models cm SET public_name = m.public_name
+				FROM models m WHERE m.id = cm.model_id AND COALESCE(cm.public_name, '') = ''`).Error; err != nil {
+				return fmt.Errorf("回填 channel_models.public_name 失败: %w", err)
+			}
+		}
+		// 同一个渠道内对外名必须唯一（新索引是 (channel_id, public_name)），
+		// 回填后可能出现重复，保留 id 最小的那条
+		for _, stmt := range []string{
+			`DELETE FROM channel_models a USING channel_models b
+			 WHERE a.id > b.id AND a.channel_id = b.channel_id AND a.public_name = b.public_name`,
+			"DELETE FROM channel_models WHERE COALESCE(public_name, '') = ''",
+			"ALTER TABLE channel_models ALTER COLUMN public_name SET NOT NULL",
+			"ALTER TABLE channel_models DROP CONSTRAINT IF EXISTS fk_channel_models_model",
+		} {
+			if err := s.db.Exec(stmt).Error; err != nil {
+				return fmt.Errorf("迁移 channel_models 失败: %w", err)
+			}
+		}
+		slog.Info("渠道绑定已迁移为渠道模型白名单")
 	}
 
+	// 模型商彻底退场：表与各表上的归属列一并删掉
+	for _, stmt := range []string{
+		"ALTER TABLE channel_models DROP COLUMN IF EXISTS model_id",
+		"ALTER TABLE channels DROP COLUMN IF EXISTS provider_id",
+		"ALTER TABLE channel_groups DROP COLUMN IF EXISTS provider_id",
+		"ALTER TABLE model_pricings DROP COLUMN IF EXISTS provider_id",
+		// 定价改为纯手工：自动同步的来源、来源地址与优先级都不再有意义
+		"ALTER TABLE model_pricings DROP COLUMN IF EXISTS source",
+		"ALTER TABLE model_pricings DROP COLUMN IF EXISTS source_url",
+		"ALTER TABLE model_pricings DROP COLUMN IF EXISTS priority",
+		"ALTER TABLE request_logs DROP COLUMN IF EXISTS provider_id",
+		"DROP TABLE IF EXISTS pricing_sync_logs",
+		"DROP TABLE IF EXISTS models",
+		"DROP TABLE IF EXISTS providers",
+	} {
+		if err := s.db.Exec(stmt).Error; err != nil {
+			return fmt.Errorf("删除模型商结构失败（%s）: %w", stmt, err)
+		}
+	}
+	return nil
+}
+
+// Seed 写入首次启动所需的基线数据，可重复执行。
+func (s *Store) Seed() error {
 	group := model.ChannelGroup{}
 	if err := s.db.Where(model.ChannelGroup{Name: "默认分组"}).
 		Attrs(model.ChannelGroup{Strategy: model.StrategyWeighted, IsDefault: true, Enabled: true}).
@@ -180,9 +254,6 @@ func (s *Store) EnsureForeignKeys() error {
 		"ALTER TABLE channel_models DROP CONSTRAINT IF EXISTS fk_channel_models_channel",
 		`ALTER TABLE channel_models ADD CONSTRAINT fk_channel_models_channel
 			FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE`,
-		"ALTER TABLE channel_models DROP CONSTRAINT IF EXISTS fk_channel_models_model",
-		`ALTER TABLE channel_models ADD CONSTRAINT fk_channel_models_model
-			FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE CASCADE`,
 		"ALTER TABLE channels DROP CONSTRAINT IF EXISTS fk_channels_group",
 		`ALTER TABLE channels ADD CONSTRAINT fk_channels_group
 			FOREIGN KEY (group_id) REFERENCES channel_groups(id) ON DELETE RESTRICT`,
@@ -197,11 +268,4 @@ func (s *Store) EnsureForeignKeys() error {
 	}
 	slog.Info("外键约束就绪")
 	return nil
-}
-
-// ProviderByCode 按编码取模型商，供定价同步使用。
-func (s *Store) ProviderByCode(code string) (model.Provider, error) {
-	var p model.Provider
-	err := s.db.Where(model.Provider{Code: code}).First(&p).Error
-	return p, err
 }

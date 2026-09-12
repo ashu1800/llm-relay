@@ -37,12 +37,27 @@ fi
 echo "慢速上游就绪"
 echo
 
-for s in test-group-update.py test-accept-encoding.py test-log-filters.py test-time-consistency.py test-csrf.py; do
+# python 用例：统一以 ALL_PASS 作为通过标志
+for s in test-group-update.py test-key-whitelist.py test-delete-semantics.py \
+         test-accept-encoding.py test-log-filters.py test-time-consistency.py test-csrf.py; do
   echo "########## $s ##########"
   out=$(python3 "scripts/$s" 2>&1)
   echo "$out" | tail -1
   echo "$out" | grep -q ALL_PASS || { fail=1; echo "$out" | grep "失败\]" | head -5; }
   echo
 done
+# bash 用例：没有统一的通过标志，按「没有 HAS_FAILURE」判定
+for s in test-model-whitelist.sh test-pricing.sh test-pricing-filter.sh \
+         test-templates.sh test-cost.sh test-routing.sh; do
+  echo "########## $s ##########"
+  out=$(bash "scripts/$s" 2>&1)
+  echo "$out" | tail -1
+  if echo "$out" | grep -q HAS_FAILURE; then
+    fail=1
+    echo "$out" | grep -E "失败" | head -5
+  fi
+  echo
+done
+
 if [ "$fail" -eq 0 ]; then echo "全部验证通过"; else echo "有验证未通过"; fi
 exit "$fail"

@@ -25,7 +25,6 @@ type Price struct {
 	OutputPer1M     decimal.Decimal
 	CacheReadPer1M  decimal.Decimal
 	CacheWritePer1M decimal.Decimal
-	Source          string
 	Multiplier      decimal.Decimal
 	PeakLabel       string
 	PeakApplied     bool
@@ -44,12 +43,11 @@ func (p Price) Cost(u relay.Usage) decimal.Decimal {
 	return total
 }
 
-// Snapshot 是可写入日志的定价快照，保证历史账目不会因后续同步而漂移。
+// Snapshot 是可写入日志的定价快照，保证历史账目不会因日后改价而漂移。
 func (p Price) Snapshot(at time.Time) model.JSONMap {
 	return model.JSONMap{
 		"model_key":          p.ModelKey,
 		"currency":           p.Currency,
-		"source":             p.Source,
 		"input_per_1m":       p.InputPer1M.String(),
 		"output_per_1m":      p.OutputPer1M.String(),
 		"cache_read_per_1m":  p.CacheReadPer1M.String(),
@@ -125,7 +123,6 @@ func (e *Engine) Resolve(ctx context.Context, modelKey string, at time.Time) (Pr
 		OutputPer1M:     base.OutputPer1M.Mul(m),
 		CacheReadPer1M:  base.CacheReadPer1M.Mul(m),
 		CacheWritePer1M: base.CacheWritePer1M.Mul(m),
-		Source:          base.Source,
 		Multiplier:      m,
 		PeakLabel:       label,
 		PeakApplied:     m.GreaterThan(decimal.NewFromInt(1)),

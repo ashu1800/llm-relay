@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"net/http"
 	"strconv"
 	"strings"
@@ -10,7 +9,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"llm-relay/internal/model"
-	"llm-relay/internal/pricing"
 )
 
 func registerPricingRoutes(g *gin.RouterGroup, s *Server) {
@@ -19,8 +17,6 @@ func registerPricingRoutes(g *gin.RouterGroup, s *Server) {
 	r.POST("", s.createPricing)
 	r.PUT("/:id", s.updatePricing)
 	r.DELETE("/:id", s.deletePricing)
-	r.POST("/sync", s.syncPricing)
-	r.GET("/history", s.pricingHistory)
 	r.POST("/resolve", s.resolvePricing)
 }
 
@@ -29,12 +25,10 @@ func (s *Server) listPricing(c *gin.Context) {
 	if kw := strings.TrimSpace(c.Query("keyword")); kw != "" {
 		q = q.Where("model_key ILIKE ?", "%"+kw+"%")
 	}
-	if src := c.Query("source"); src != "" {
-		q = q.Where("source = ?", src)
-	}
-	// 外部价格表有数千条，绝大多数与本站无关；只看已绑定到渠道的模型更实用
+	// 只看已经写进某个渠道白名单的模型：定价表是手录的，但白名单会变，
+	// 「这条价还有没有模型在用」是排障时最常问的问题
 	if c.Query("bound_only") == "true" {
-		q = q.Where("model_key IN (SELECT public_name FROM models WHERE enabled = true)")
+		q = q.Where("model_key IN (SELECT DISTINCT public_name FROM channel_models WHERE enabled = true)")
 	}
 
 	var total int64
@@ -53,8 +47,7 @@ func (s *Server) listPricing(c *gin.Context) {
 	}
 
 	var items []model.ModelPricing
-	// 官方与手工来源优先展示，避免被外部表的无关条目刷屏
-	if err := q.Order("priority DESC, model_key").Offset((page - 1) * size).Limit(size).Find(&items).Error; err != nil {
+	if err := q.Order("model_key").Offset((page - 1) * size).Limit(size).Find(&items).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
@@ -71,7 +64,7 @@ type pricingPayload struct {
 	PeakRules       model.JSONList `json:"peak_rules"`
 }
 
-// createPricing 手工录入价格。手工来源优先级最高，不会被自动同步覆盖。
+// createPricing 手工录入价格。全部定价都是手工的，不再有自动同步覆盖的问题。
 func (s *Server) createPricing(c *gin.Context) {
 	var p pricingPayload
 	if err := c.ShouldBindJSON(&p); err != nil {
@@ -83,8 +76,6 @@ func (s *Server) createPricing(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
-	row.Source = pricing.SourceManual
-	row.Priority = pricing.PriorityManual
 	row.Currency = "USD"
 	row.Active = true
 	if row.MatchType == "" {
@@ -135,10 +126,6 @@ func (s *Server) updatePricing(c *gin.Context) {
 	if p.PeakRules != nil {
 		updates["peak_rules"] = p.PeakRules
 	}
-	// 手工改动后提升为最高优先级，避免下次同步把人工修正冲掉
-	updates["source"] = pricing.SourceManual
-	updates["priority"] = pricing.PriorityManual
-
 	if err := applyUpdates(s.deps.Store.DB(), &model.ModelPricing{}, id, updates); err != nil {
 		writeUpdateError(c, err)
 		return
@@ -159,35 +146,12 @@ func (s *Server) deletePricing(c *gin.Context) {
 	s.refreshPricing()
 }
 
-// syncPricing 触发一次全量同步。耗时取决于外网速度，给足超时。
-func (s *Server) syncPricing(c *gin.Context) {
-	if s.deps.Syncer == nil {
-		writeUpstreamError(c, http.StatusServiceUnavailable, "定价同步器未启用", "internal_error")
-		return
-	}
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Minute)
-	defer cancel()
-
-	results := s.deps.Syncer.SyncAll(ctx)
-	s.refreshPricing()
-	c.JSON(http.StatusOK, gin.H{"results": results})
-}
-
-func (s *Server) pricingHistory(c *gin.Context) {
-	var items []model.PricingSyncLog
-	if err := s.deps.Store.DB().Order("id DESC").Limit(30).Find(&items).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
-}
-
 type resolvePayload struct {
 	Model string `json:"model"`
 	At    string `json:"at"`
 }
 
-// resolvePricing 演示某模型在指定时刻实际生效的单价，便于核对峰谷与来源。
+// resolvePricing 演示某模型在指定时刻实际生效的单价，便于核对倍率是否按预期命中。
 func (s *Server) resolvePricing(c *gin.Context) {
 	var p resolvePayload
 	if err := c.ShouldBindJSON(&p); err != nil {

@@ -87,8 +87,10 @@ func run() error {
 	defer logs.Close()
 
 	// ---- 定价 ----
+	// 单价一律手工录入：外部价格表（LiteLLM / 官网）里的模型命名与本站
+	// 对外模型名并不一致，自动同步会写进大量用不上的行，还会在用户改价后
+	// 被下一轮同步覆盖。宁可让人自己填，也不要有会漂移的假数据。
 	priceEngine := pricing.NewEngine(st.DB(), 5*time.Minute)
-	syncer := pricing.NewSyncer(st.DB(), priceEngine, logger)
 
 	gin.SetMode(ginMode(cfg.Server.Mode))
 	engine := gin.New()
@@ -102,7 +104,6 @@ func run() error {
 		Service: svc,
 		Logs:    logs,
 		Pricing: priceEngine,
-		Syncer:  syncer,
 
 		RateLimiter: rateLimiter,
 		Gate:        gate,
@@ -118,8 +119,6 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	startPricingScheduler(ctx, syncer, cfg, logger)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -147,48 +146,6 @@ func run() error {
 	}
 	logger.Info("已退出")
 	return nil
-}
-
-// startPricingScheduler 周期性同步模型单价。
-// 首次同步延后执行，避免和启动流程抢网络与数据库连接。
-func startPricingScheduler(ctx context.Context, syncer *pricing.Syncer, cfg *config.Config, logger *slog.Logger) {
-	if !cfg.Pricing.OfficialSyncEnabled || cfg.Pricing.UpdateIntervalHours <= 0 {
-		logger.Info("定价定时同步未启用")
-		return
-	}
-	interval := time.Duration(cfg.Pricing.UpdateIntervalHours) * time.Hour
-	go func() {
-		select {
-		case <-time.After(30 * time.Second):
-		case <-ctx.Done():
-			return
-		}
-		syncPricingOnce(ctx, syncer, logger)
-
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				syncPricingOnce(ctx, syncer, logger)
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	logger.Info("定价定时同步已启用", "interval_hours", cfg.Pricing.UpdateIntervalHours)
-}
-
-func syncPricingOnce(ctx context.Context, syncer *pricing.Syncer, logger *slog.Logger) {
-	sctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
-	started := time.Now()
-	for _, r := range syncer.SyncAll(sctx) {
-		if r.Status != "ok" {
-			logger.Warn("定价同步未成功", "source", r.Source, "error", r.Error)
-		}
-	}
-	logger.Info("定价同步流程结束", "cost", time.Since(started).Round(time.Second).String())
 }
 
 func newLogger(cfg config.LogConfig) *slog.Logger {

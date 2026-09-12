@@ -11,7 +11,7 @@ curl -s -X POST "$BASE/api/admin/pricing/resolve" -H 'Content-Type: application/
 import sys,json;d=json.load(sys.stdin)
 print('  可解析:', d.get('found'))
 if d.get('found'):
-    s=d['snapshot']; print('  输入 %s 输出 %s 缓存读 %s 来源 %s' % (s['input_per_1m'],s['output_per_1m'],s['cache_read_per_1m'],s['source']))
+    s=d['snapshot']; print('  输入 %s 输出 %s 缓存读 %s 倍率 %s' % (s['input_per_1m'],s['output_per_1m'],s['cache_read_per_1m'],s.get('multiplier')))
 "
 echo
 echo "===== 2. 发一次真实请求 ====="
@@ -33,7 +33,7 @@ print('  预估费用: \$%s' % it['estimated_cost'])
 snap = it.get('pricing_snapshot') or {}
 if snap:
     print('  定价快照:')
-    for k in ['model_key','source','currency','input_per_1m','output_per_1m','cache_read_per_1m','multiplier','peak_applied','peak_label','resolved_at']:
+    for k in ['model_key','currency','input_per_1m','output_per_1m','cache_read_per_1m','multiplier','peak_applied','peak_label','resolved_at']:
         if k in snap: print('    %-18s %s' % (k, snap[k]))
 else:
     print('  定价快照: 空（该模型无定价配置）')

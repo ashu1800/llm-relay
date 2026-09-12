@@ -15,7 +15,6 @@ type Config struct {
 	Server   ServerConfig   `yaml:"server"`
 	Database DatabaseConfig `yaml:"database"`
 	Redis    RedisConfig    `yaml:"redis"`
-	Pricing  PricingConfig  `yaml:"pricing"`
 	Relay    RelayConfig    `yaml:"relay"`
 	Security SecurityConfig `yaml:"security"`
 	Log      LogConfig      `yaml:"log"`
@@ -66,24 +65,6 @@ type RedisConfig struct {
 
 func (r RedisConfig) Addr() string { return fmt.Sprintf("%s:%d", r.Host, r.Port) }
 
-// PricingConfig 控制模型单价的定时同步。
-// 命名对齐 sub2api 的 pricing.remote_url / pricing.update_interval_hours。
-type PricingConfig struct {
-	RemoteURL           string `yaml:"remote_url"`
-	UpdateIntervalHours int    `yaml:"update_interval_hours"`
-	OfficialSyncEnabled bool   `yaml:"official_sync_enabled"`
-	ProxyURL            string `yaml:"proxy_url"`
-	SyncOnStart         bool   `yaml:"sync_on_start"`
-}
-
-// Interval 把小时配置转成 time.Duration，非法值回退到 24h。
-func (p PricingConfig) Interval() time.Duration {
-	if p.UpdateIntervalHours <= 0 {
-		return 24 * time.Hour
-	}
-	return time.Duration(p.UpdateIntervalHours) * time.Hour
-}
-
 type RelayConfig struct {
 	UpstreamTimeout    time.Duration `yaml:"upstream_timeout"`
 	FirstByteTimeout   time.Duration `yaml:"first_byte_timeout"`
@@ -109,13 +90,7 @@ func Default() *Config {
 			Host: "127.0.0.1", Port: 5432, User: "llmrelay",
 			Password: "", DBName: "llm_relay", SSLMode: "disable", TimeZone: "UTC",
 		},
-		Redis: RedisConfig{Host: "127.0.0.1", Port: 6379, DB: 0, Enabled: true},
-		Pricing: PricingConfig{
-			RemoteURL:           "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
-			UpdateIntervalHours: 24,
-			OfficialSyncEnabled: true,
-			SyncOnStart:         true,
-		},
+		Redis:    RedisConfig{Host: "127.0.0.1", Port: 6379, DB: 0, Enabled: true},
 		Security: SecurityConfig{Secret: "llm-relay-dev-secret-change-me"},
 		Relay: RelayConfig{
 			UpstreamTimeout:    300 * time.Second,
@@ -172,11 +147,6 @@ func applyEnv(c *Config) {
 	setStr(&c.Redis.Password, "REDIS_PASSWORD")
 	setInt(&c.Redis.DB, "REDIS_DB")
 	setBool(&c.Redis.Enabled, "REDIS_ENABLED")
-
-	setStr(&c.Pricing.RemoteURL, "PRICING_REMOTE_URL")
-	setInt(&c.Pricing.UpdateIntervalHours, "PRICING_UPDATE_INTERVAL_HOURS")
-	setBool(&c.Pricing.OfficialSyncEnabled, "PRICING_OFFICIAL_SYNC_ENABLED")
-	setStr(&c.Pricing.ProxyURL, "PRICING_PROXY_URL")
 
 	setInt(&c.Relay.MaxRetries, "RELAY_MAX_RETRIES")
 	setStr(&c.Relay.PayloadStorageMode, "RELAY_PAYLOAD_STORAGE_MODE")

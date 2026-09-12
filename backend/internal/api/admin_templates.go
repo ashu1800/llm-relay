@@ -3,7 +3,6 @@ package api
 import (
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -216,14 +215,14 @@ func (s *Server) deleteTemplate(c *gin.Context) {
 
 // applyTemplatePayload 是「用模板建渠道」的入参。
 // 模板只提供协议与 base_url，密钥必须由调用方现填——模板里不该存凭据。
+// Models 是随渠道一起写入的模型白名单，可不传。
 type applyTemplatePayload struct {
-	Name    string `json:"name"`
-	APIKey  string `json:"api_key"`
-	BaseURL string `json:"base_url"`
-	GroupID uint   `json:"group_id"`
-	Weight  int    `json:"weight"`
-	// 渠道的模型商，0 / 不传 = 未指定（聚合站不属于任何一家）
-	ProviderID *uint `json:"provider_id"`
+	Name    string           `json:"name"`
+	APIKey  string           `json:"api_key"`
+	BaseURL string           `json:"base_url"`
+	GroupID uint             `json:"group_id"`
+	Weight  int              `json:"weight"`
+	Models  *[]whitelistItem `json:"models"`
 }
 
 func (s *Server) applyTemplate(c *gin.Context) {
@@ -289,32 +288,18 @@ func (s *Server) applyTemplate(c *gin.Context) {
 		weight = 1
 	}
 
-	// 模板里没有模型商（同一份地址可以被不同模型商复用），由调用方选；
-	// 早先这里写死 1，用模板建的渠道一律被标成 OpenAI
-	providerID := uint(0)
-	if p.ProviderID != nil {
-		providerID = *p.ProviderID
-	}
-	if providerID != 0 && !s.providerExists(providerID) {
-		writeUpstreamError(c, http.StatusBadRequest,
-			"模型商不存在: "+strconv.FormatUint(uint64(providerID), 10), "invalid_request_error")
-		return
-	}
-	// 目标分组限定了模型商：模板建的渠道同样跟随分组
-	if gp, ok := s.groupProvider(groupID); ok && gp != 0 {
-		switch {
-		case providerID == 0:
-			providerID = gp
-		case providerID != gp:
-			writeUpstreamError(c, http.StatusBadRequest,
-				"分组「"+s.groupNameFor(groupID)+"」限定只收 "+s.providerName(gp)+
-					" 的渠道，与所选模型商 "+s.providerName(providerID)+" 不一致", "invalid_request_error")
+	var whitelist []model.ChannelModel
+	if p.Models != nil {
+		items, err := normalizeWhitelist(*p.Models)
+		if err != nil {
+			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
 			return
 		}
+		whitelist = items
 	}
 
 	ch := model.Channel{
-		Name: name, GroupID: groupID, ProviderID: providerID,
+		Name: name, GroupID: groupID,
 		Protocol: tpl.Protocol, BaseURL: baseURL,
 		APIKeyEnc: enc, APIKeyHint: secure.MaskKey(p.APIKey),
 		Weight: weight, Enabled: true, MonitorType: "none",
@@ -324,6 +309,14 @@ func (s *Server) applyTemplate(c *gin.Context) {
 	if err := s.deps.Store.DB().Create(&ch).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
+	}
+	// 模板可以带一份默认白名单（如「DeepSeek 官方」带 deepseek-chat 的映射），
+	// 这样用模板建的渠道建完就能用，不必再逐个添模型
+	if p.Models != nil {
+		if err := replaceChannelModels(s.deps.Store.DB(), ch.ID, whitelist); err != nil {
+			writeUpstreamError(c, http.StatusInternalServerError, "写入模型白名单失败: "+err.Error(), "internal_error")
+			return
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"channel": ch, "template_id": tpl.ID})
 }

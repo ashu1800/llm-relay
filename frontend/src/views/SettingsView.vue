@@ -2,12 +2,11 @@
 import { onMounted, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import {
-  ReloadOutlined, DeleteOutlined, SyncOutlined,
+  ReloadOutlined, DeleteOutlined,
   DownloadOutlined, UploadOutlined
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
-import type { PricingSyncResult } from '@/api/types'
 
 const loading = ref(false)
 // 这一页加载的是「多项设置」而不是列表，没有 length 可数，
@@ -20,7 +19,6 @@ const runtime = ref<Record<string, any>>({})
 const counts = ref<Record<string, number>>({})
 const span = ref<Record<string, string | null>>({})
 const cleaning = ref(false)
-const syncing = ref(false)
 
 const exporting = ref(false)
 const importing = ref(false)
@@ -46,9 +44,6 @@ const runtimeRows = [
   { key: 'payload_max_kb', label: '单条报文上限（KB）', hint: 'RELAY_PAYLOAD_MAX_KB' },
   { key: 'max_concurrency', label: '上游并发上限', hint: 'RELAY_MAX_CONCURRENCY' },
   { key: 'default_rpm', label: '默认每分钟请求上限', hint: 'RELAY_DEFAULT_RPM' },
-  { key: 'pricing_interval_hours', label: '价格同步间隔（小时）', hint: 'RELAY_PRICING_INTERVAL_HOURS' },
-  { key: 'official_sync_enabled', label: '启用官方价格源', hint: 'RELAY_PRICING_OFFICIAL' },
-  { key: 'sync_on_start', label: '启动时同步价格', hint: 'RELAY_PRICING_SYNC_ON_START' },
   { key: 'redis_enabled', label: '启用 Redis', hint: 'REDIS_ENABLED' }
 ]
 
@@ -111,21 +106,6 @@ function confirmCleanup() {
       }
     }
   })
-}
-
-async function runSync() {
-  syncing.value = true
-  try {
-    const res = await api.post<{ results: PricingSyncResult[] }>('/pricing/sync', {})
-    const added = res.results.reduce((s, r) => s + (r.added || 0), 0)
-    const updated = res.results.reduce((s, r) => s + (r.updated || 0), 0)
-    message.success('同步完成：新增 ' + added + ' 条，更新 ' + updated + ' 条')
-    await load()
-  } catch (e: any) {
-    message.error(e.message)
-  } finally {
-    syncing.value = false
-  }
 }
 
 // 导出走 fetch 而不是直接开新标签页，这样才能把失败原因显示出来
@@ -192,7 +172,6 @@ onMounted(load)
         </div>
         <a-space>
           <a-button :loading="loading" @click="load"><ReloadOutlined /> 刷新</a-button>
-          <a-button :loading="syncing" @click="runSync"><SyncOutlined /> 立即同步价格</a-button>
           <a-button danger :loading="cleaning" @click="confirmCleanup"><DeleteOutlined /> 清理过期数据</a-button>
         </a-space>
       </div>

@@ -35,7 +35,7 @@ func (s *Server) getSettings(c *gin.Context) {
 		(SELECT COUNT(*) FROM request_payloads)::bigint AS payloads,
 		(SELECT COUNT(*) FROM model_pricings)::bigint AS pricings,
 		(SELECT COUNT(*) FROM channels)::bigint AS channels,
-		(SELECT COUNT(*) FROM models)::bigint AS models,
+		(SELECT COUNT(DISTINCT public_name) FROM channel_models WHERE enabled = true)::bigint AS models,
 		(SELECT COUNT(*) FROM api_keys)::bigint AS keys,
 		(SELECT COUNT(*) FROM channel_groups)::bigint AS groups`).Scan(&counts).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
@@ -70,9 +70,6 @@ func (s *Server) getSettings(c *gin.Context) {
 			"payload_max_kb":         cfg.Relay.PayloadMaxKB,
 			"max_concurrency":        cfg.Relay.MaxConcurrency,
 			"default_rpm":            cfg.Relay.DefaultRPM,
-			"pricing_interval_hours": cfg.Pricing.UpdateIntervalHours,
-			"official_sync_enabled":  cfg.Pricing.OfficialSyncEnabled,
-			"sync_on_start":          cfg.Pricing.SyncOnStart,
 			"redis_enabled":          cfg.Redis.Enabled,
 			"database_ok":            dbVersion != "",
 			"database_version":       dbVersion,

@@ -5,8 +5,7 @@ PSQL="docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A"
 
 q() { $PSQL -c "$1"; }
 
-echo "=== 1. 建一个带真实密钥的测试渠道并绑定模型 ==="
-MID=$(q "SELECT id FROM models WHERE public_name='deepseek-v4-flash'")
+echo "=== 1. 建一个带真实密钥的测试渠道并写入模型白名单 ==="
 GID=$(q "SELECT id FROM channel_groups WHERE is_default=true LIMIT 1")
 # 密钥一律从环境变量取，脚本里不留明文凭据
 : "${DS_KEY:?请先 export DS_KEY 与 DS_BASE}"
@@ -17,8 +16,8 @@ CHID=$(echo "$CH" | python3 -c "import sys,json;print(json.load(sys.stdin)['id']
 echo "  渠道 id=$CHID"
 BIND=$(curl -s -X POST "$BASE/channels/$CHID/models" -H 'Content-Type: application/json' \
   -d '{"public_name":"deepseek-v4-flash","upstream_name":"deepseek-v4-flash"}')
-echo "  绑定响应: $(echo "$BIND" | head -c 160)"
-echo "  库中绑定数: $(q "SELECT count(*) FROM channel_models WHERE channel_id=$CHID")"
+echo "  白名单响应: $(echo "$BIND" | head -c 160)"
+echo "  库中白名单条数: $(q "SELECT count(*) FROM channel_models WHERE channel_id=$CHID")"
 
 ENC_BEFORE=$(q "SELECT api_key_enc FROM channels WHERE id=$CHID")
 echo "  恢复前密文: ${ENC_BEFORE:0:32}... (长度 ${#ENC_BEFORE})"

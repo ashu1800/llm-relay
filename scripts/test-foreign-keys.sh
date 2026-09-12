@@ -14,7 +14,9 @@ P "DELETE FROM channels WHERE name = 'fk-cascade-probe'" >/dev/null
 echo
 echo "=== 1. 外键是否建起来了 ==="
 P "SELECT conname FROM pg_constraint WHERE contype='f' ORDER BY conname"
-chk "外键数量" "4" "$(P "SELECT count(*) FROM pg_constraint WHERE contype='f'")"
+# 三条：渠道->分组、白名单->渠道、模板->分组。
+# 原来还有一条 白名单->模型 的外键，模型表被删除后它也随之消失。
+chk "外键数量" "3" "$(P "SELECT count(*) FROM pg_constraint WHERE contype='f'")"
 
 echo
 echo "=== 2. 模板分组是否已回填（不应再有 0 或悬挂）==="
@@ -23,12 +25,15 @@ chk "指向不存在分组的模板数" "0" "$(P 'SELECT count(*) FROM channel_t
 
 echo
 echo "=== 3. 外键必须拦住孤儿数据 ==="
-chkcontains "插入指向不存在渠道的绑定会被拒" "foreign key" \
-  "$(P "INSERT INTO channel_models (channel_id, model_id, upstream_name, enabled, created_at, updated_at) VALUES (999999, 1, 'ghost', true, now(), now())")"
-chkcontains "插入指向不存在模型的绑定会被拒" "foreign key" \
-  "$(P "INSERT INTO channel_models (channel_id, model_id, upstream_name, enabled, created_at, updated_at) VALUES (1, 999999, 'ghost', true, now(), now())")"
+chkcontains "插入指向不存在渠道的白名单会被拒" "foreign key" \
+  "$(P "INSERT INTO channel_models (channel_id, public_name, upstream_name, enabled, created_at, updated_at) VALUES (999999, 'ghost', 'ghost', true, now(), now())")"
+# 复制一条已有白名单（渠道 id 必须一起复制，否则先撞上外键而不是唯一索引）
+chkcontains "同一渠道内重复的对外名会被唯一索引拒绝" "duplicate key" \
+  "$(P "INSERT INTO channel_models (channel_id, public_name, upstream_name, enabled, created_at, updated_at)
+        SELECT channel_id, public_name, upstream_name, enabled, now(), now() FROM channel_models LIMIT 1")"
+EXISTING_CH=$(P "SELECT id FROM channels ORDER BY id LIMIT 1")
 chkcontains "把渠道改到不存在的分组会被拒" "foreign key" \
-  "$(P "UPDATE channels SET group_id=999999 WHERE id=1")"
+  "$(P "UPDATE channels SET group_id=999999 WHERE id=$EXISTING_CH")"
 
 echo
 echo "=== 4. 仍有渠道的分组删不掉 ==="
@@ -42,7 +47,7 @@ echo "=== 5. 删渠道时绑定级联清除（用临时渠道，不动真实数�
 # 插进去再按名字查回来，简单且确定。
 P "INSERT INTO channels (name, group_id, protocol, base_url, api_key_enc, weight, enabled, created_at, updated_at) VALUES ('fk-cascade-probe', 1, 'openai-chat', 'http://x', '', 1, false, now(), now())" >/dev/null
 TMPCH=$(P "SELECT id FROM channels WHERE name = 'fk-cascade-probe'")
-P "INSERT INTO channel_models (channel_id, model_id, upstream_name, enabled, created_at, updated_at) VALUES ($TMPCH, 1, 'probe', true, now(), now())" >/dev/null
+P "INSERT INTO channel_models (channel_id, public_name, upstream_name, enabled, created_at, updated_at) VALUES ($TMPCH, 'fk-probe', 'fk-probe', true, now(), now())" >/dev/null
 BEFORE=$(P "SELECT count(*) FROM channel_models WHERE channel_id=$TMPCH")
 P "DELETE FROM channels WHERE id=$TMPCH" >/dev/null
 AFTER=$(P "SELECT count(*) FROM channel_models WHERE channel_id=$TMPCH")
@@ -51,9 +56,11 @@ chk "删除后绑定数（级联清掉）" "0" "$AFTER"
 
 echo
 echo "=== 6. 真实数据未被影响 ==="
-chk "渠道数（探测渠道已清理）" "2" "$(P 'SELECT count(*) FROM channels')"
-chk "模型数" "2" "$(P 'SELECT count(*) FROM models')"
-chk "分组数" "1" "$(P 'SELECT count(*) FROM channel_groups')"
+# 具体数字随实际配置变化，这里只确认探测行没留下、表结构还在
+chk "探测渠道已清理" "0" "$(P "SELECT count(*) FROM channels WHERE name = 'fk-cascade-probe'")"
+chk "探测白名单已清理" "0" "$(P "SELECT count(*) FROM channel_models WHERE public_name = 'fk-probe'")"
+chk "models 表已删除" "0" "$(P "SELECT count(*) FROM information_schema.tables WHERE table_name = 'models'")"
+chk "providers 表已删除" "0" "$(P "SELECT count(*) FROM information_schema.tables WHERE table_name = 'providers'")"
 
 echo
 echo "通过 $ok 项，失败 $bad 项"

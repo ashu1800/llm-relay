@@ -10,8 +10,8 @@ import json
 b = json.load(open('/tmp/backup.json'))
 print('  版本:', b['version'], '| 应用:', b['app'])
 print('  主密钥指纹:', b['secret_fingerprint'])
-for k in ['providers','channel_groups','channels','models','channel_models',
-          'channel_templates','api_keys','manual_pricings']:
+for k in ['channel_groups','channels','channel_models',
+          'channel_templates','api_keys','pricings']:
     print('    %-18s %d' % (k, len(b.get(k) or [])))
 PY
 

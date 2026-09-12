@@ -62,27 +62,25 @@ type CandidateQuery struct {
 func (r *Router) Candidates(ctx context.Context, q CandidateQuery) ([]Candidate, error) {
 	type row struct {
 		model.Channel
+		PublicName   string
 		UpstreamName string
 		BindingID    uint
 	}
 
 	var rows []row
+	// 候选 = 「渠道自己的模型白名单里写了这个对外名」的启用渠道。
+	// 白名单直接存在渠道上，不再经过一张独立的模型目录表 ——
+	// 那种两层结构会留下「模型建好了但没绑渠道」的死状态，请求只能得到
+	// 「没有可用渠道」，而界面上两处看起来都是配好的。
 	query := r.db.WithContext(ctx).
 		Table("channels").
-		Select("channels.*, channel_models.upstream_name AS upstream_name, channel_models.id AS binding_id").
+		Select("channels.*, channel_models.public_name AS public_name, channel_models.upstream_name AS upstream_name, channel_models.id AS binding_id").
 		Joins("JOIN channel_models ON channel_models.channel_id = channels.id AND channel_models.enabled = true").
-		Joins("JOIN models ON models.id = channel_models.model_id AND models.enabled = true").
 		Joins("JOIN channel_groups ON channel_groups.id = channels.group_id").
-		Where("models.public_name = ?", q.PublicModel).
+		Where("channel_models.public_name = ?", q.PublicModel).
 		Where("channels.enabled = true").
 		// 停用的分组连同它的渠道一起退出候选，否则「停用分组」这个开关毫无作用
-		Where("channel_groups.enabled = true").
-		// 「分组 = 某个模型商的一组渠道」这条约定就在这里生效：
-		// 分组声明了模型商（provider_id <> 0）时，只有该模型商的模型能走它。
-		// 0 表示不限，默认分组与历史分组都是 0，行为与从前一致。
-		// 模型自己没指定模型商（provider_id = 0）时同样不匹配 ——
-		// 说不清归属的模型不应该混进「只跑某一家」的分组。
-		Where("channel_groups.provider_id = 0 OR channel_groups.provider_id = models.provider_id")
+		Where("channel_groups.enabled = true")
 
 	if q.GroupID > 0 {
 		query = query.Where("channels.group_id = ?", q.GroupID)
@@ -114,7 +112,7 @@ func (r *Router) Candidates(ctx context.Context, q CandidateQuery) ([]Candidate,
 		maxConc := ChannelMaxConcurrency(rw.ExtraConfig)
 		c := Candidate{
 			Channel:   rw.Channel,
-			Binding:   model.ChannelModel{ID: rw.BindingID, ChannelID: rw.ID, UpstreamName: rw.UpstreamName, Enabled: true},
+			Binding:   model.ChannelModel{ID: rw.BindingID, ChannelID: rw.ID, PublicName: rw.PublicName, UpstreamName: rw.UpstreamName, Enabled: true},
 			Available: SlotAvailable(rw.Slots, now),
 			Saturated: maxConc > 0 && r.state.Inflight(rw.ID) >= maxConc,
 		}
