@@ -1,6 +1,7 @@
 package api
 
 import (
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,6 +10,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
 )
+
+// round2 保留两位小数，用于毫秒等展示型数值。
+// 比例类字段一律返回原始浮点，格式化交给前端，避免各接口精度不一致。
+func round2(v float64) float64 {
+	return math.Round(v*100) / 100
+}
 
 func registerStatsRoutes(g *gin.RouterGroup, s *Server) {
 	r := g.Group("/stats")

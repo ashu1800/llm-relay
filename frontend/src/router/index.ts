@@ -16,8 +16,8 @@ const routes: RouteRecordRaw[] = [
       { path: 'channel-templates', name: 'channel-templates', component: () => import('@/views/PlaceholderView.vue'), meta: { title: '模板管理' } },
       { path: 'models-manage', name: 'models-manage', component: () => import('@/views/ModelsView.vue'), meta: { title: '模型管理' } },
       { path: 'pricing', name: 'pricing', component: () => import('@/views/PricingView.vue'), meta: { title: '模型定价' } },
-      { path: 'route-analysis', name: 'route-analysis', component: () => import('@/views/PlaceholderView.vue'), meta: { title: '路由分析' } },
-      { path: 'system', name: 'system', component: () => import('@/views/PlaceholderView.vue'), meta: { title: '系统看板' } }
+      { path: 'route-analysis', name: 'route-analysis', component: () => import('@/views/RoutingView.vue'), meta: { title: '路由分析' } },
+      { path: 'system', name: 'system', component: () => import('@/views/SettingsView.vue'), meta: { title: '系统设置' } }
     ]
   },
   { path: '/:pathMatch(.*)*', redirect: '/console/dashboard' }

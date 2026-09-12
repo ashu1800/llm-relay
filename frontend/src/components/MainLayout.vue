@@ -35,7 +35,7 @@ const menus = [
   { key: '/console/models-manage', label: '模型管理', icon: DatabaseOutlined },
   { key: '/console/pricing', label: '模型定价', icon: DollarOutlined },
   { key: '/console/route-analysis', label: '路由分析', icon: PartitionOutlined },
-  { key: '/console/system', label: '系统看板', icon: SettingOutlined }
+  { key: '/console/system', label: '系统设置', icon: SettingOutlined }
 ]
 
 const topNav = [
