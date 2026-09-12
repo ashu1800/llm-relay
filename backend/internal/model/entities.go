@@ -55,11 +55,17 @@ type ChannelGroup struct {
 }
 
 // Channel 上游渠道。APIKeyEnc 存放 AES-GCM 密文，不随 JSON 输出。
+//
+// ProviderID 是这条渠道对接的模型商，0 表示未指定 —— 聚合站（OpenRouter、
+// 各类中转）本来就不专属于某一家，不该硬凑一个模型商。
+// 它刻意不留 gorm 的 default 标签：带默认值的字段在值为零时会被 GORM 从 INSERT
+// 里省掉、转而落库成列默认值，0 就永远存不进去 —— 结果是「没选过的渠道」
+// 全被标成 OpenAI，徽标显示的和实际不符。
 type Channel struct {
 	ID          uint     `gorm:"primaryKey" json:"id"`
 	Name        string   `gorm:"size:128;not null" json:"name"`
 	GroupID     uint     `gorm:"index;not null;default:1" json:"group_id"`
-	ProviderID  uint     `gorm:"index;not null;default:1" json:"provider_id"`
+	ProviderID  uint     `gorm:"index;not null" json:"provider_id"`
 	Protocol    string   `gorm:"size:32;not null;default:openai-chat" json:"protocol"`
 	BaseURL     string   `gorm:"size:512;not null" json:"base_url"`
 	APIKeyEnc   string   `gorm:"size:2048" json:"-"`

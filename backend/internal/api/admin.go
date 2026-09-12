@@ -63,10 +63,14 @@ func registerChannelRoutes(g *gin.RouterGroup, s *Server) {
 	r.DELETE("/:id/models/:bindingId", s.unbindChannelModel)
 }
 
+// channelPayload 是渠道的写入载荷。
+//
+// ProviderID 用指针接收：渠道的模型商可以为空（0 = 未指定，聚合站就是这种），
+// 用值类型时「显式改成未指定」与「根本没传这个字段」都是 0，改回未指定会静默失效。
 type channelPayload struct {
 	Name       string         `json:"name"`
 	GroupID    uint           `json:"group_id"`
-	ProviderID uint           `json:"provider_id"`
+	ProviderID *uint          `json:"provider_id"`
 	Protocol   string         `json:"protocol"`
 	BaseURL    string         `json:"base_url"`
 	APIKey     string         `json:"api_key"`
@@ -110,8 +114,16 @@ func (s *Server) createChannel(c *gin.Context) {
 	if p.GroupID == 0 {
 		p.GroupID = defaultGroupID(s)
 	}
-	if p.ProviderID == 0 {
-		p.ProviderID = 1
+	// 没传或传 0 都表示未指定，不再兜底成 OpenAI：
+	// 兜底会让「我没选过」显示成「这条渠道是 OpenAI 的」，那是错的
+	providerID := uint(0)
+	if p.ProviderID != nil {
+		providerID = *p.ProviderID
+	}
+	if providerID != 0 && !s.providerExists(providerID) {
+		writeUpstreamError(c, http.StatusBadRequest,
+			"模型商不存在: "+strconv.FormatUint(uint64(providerID), 10), "invalid_request_error")
+		return
 	}
 
 	enc, err := s.deps.Cipher.Encrypt(strings.TrimSpace(p.APIKey))
@@ -125,7 +137,7 @@ func (s *Server) createChannel(c *gin.Context) {
 		enabled = *p.Enabled
 	}
 	ch := model.Channel{
-		Name: p.Name, GroupID: p.GroupID, ProviderID: p.ProviderID,
+		Name: p.Name, GroupID: p.GroupID, ProviderID: providerID,
 		Protocol: p.Protocol, BaseURL: strings.TrimRight(strings.TrimSpace(p.BaseURL), "/"),
 		APIKeyEnc: enc, APIKeyHint: secure.MaskKey(p.APIKey),
 		Weight: p.Weight, Enabled: enabled, MonitorType: orDefault(p.Monitor, "none"),
@@ -163,8 +175,13 @@ func (s *Server) updateChannel(c *gin.Context) {
 	if p.GroupID != 0 {
 		updates["group_id"] = p.GroupID
 	}
-	if p.ProviderID != 0 {
-		updates["provider_id"] = p.ProviderID
+	if p.ProviderID != nil {
+		if *p.ProviderID != 0 && !s.providerExists(*p.ProviderID) {
+			writeUpstreamError(c, http.StatusBadRequest,
+				"模型商不存在: "+strconv.FormatUint(uint64(*p.ProviderID), 10), "invalid_request_error")
+			return
+		}
+		updates["provider_id"] = *p.ProviderID
 	}
 	if p.Weight > 0 {
 		updates["weight"] = p.Weight

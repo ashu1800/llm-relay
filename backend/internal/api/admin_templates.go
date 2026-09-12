@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -221,6 +222,8 @@ type applyTemplatePayload struct {
 	BaseURL string `json:"base_url"`
 	GroupID uint   `json:"group_id"`
 	Weight  int    `json:"weight"`
+	// 渠道的模型商，0 / 不传 = 未指定（聚合站不属于任何一家）
+	ProviderID *uint `json:"provider_id"`
 }
 
 func (s *Server) applyTemplate(c *gin.Context) {
@@ -286,8 +289,20 @@ func (s *Server) applyTemplate(c *gin.Context) {
 		weight = 1
 	}
 
+	// 模板里没有模型商（同一份地址可以被不同模型商复用），由调用方选；
+	// 早先这里写死 1，用模板建的渠道一律被标成 OpenAI
+	providerID := uint(0)
+	if p.ProviderID != nil {
+		providerID = *p.ProviderID
+	}
+	if providerID != 0 && !s.providerExists(providerID) {
+		writeUpstreamError(c, http.StatusBadRequest,
+			"模型商不存在: "+strconv.FormatUint(uint64(providerID), 10), "invalid_request_error")
+		return
+	}
+
 	ch := model.Channel{
-		Name: name, GroupID: groupID, ProviderID: 1,
+		Name: name, GroupID: groupID, ProviderID: providerID,
 		Protocol: tpl.Protocol, BaseURL: baseURL,
 		APIKeyEnc: enc, APIKeyHint: secure.MaskKey(p.APIKey),
 		Weight: weight, Enabled: true, MonitorType: "none",

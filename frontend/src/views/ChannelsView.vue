@@ -28,9 +28,32 @@ const form = reactive({
   base_url: '',
   api_key: '',
   group_id: 0,
+  // 0 = 未指定。渠道的模型商只是一枚徽标（聚合站本来就不专属于某一家），
+  // 所以允许留空；以前表单里根本没有这一项，后端又把空值兜底成 1，
+  // 于是所有渠道都挂着 OpenAI 徽标。
+  provider_id: 0,
   weight: 1,
   enabled: true
 })
+
+// 模型商默认值只在「用户还没自己选过」时跟着分组走：
+// 分组按模型商命名（DeepSeek / OpenAI）时，换分组顺手把模型商也切过去；
+// 他一旦手动选过，就不再覆盖他的选择。
+const providerTouched = ref(false)
+
+function groupName(id: number): string {
+  return groups.value.find((g) => g.id === id)?.name ?? ''
+}
+
+/** 按分组名猜一个模型商；猜不出来就是 0（未指定），不兜底成 OpenAI */
+function defaultProviderID(groupID: number): number {
+  return providerStore.matchByText(groupName(groupID))?.id ?? 0
+}
+
+function onGroupChange() {
+  if (providerTouched.value) return
+  form.provider_id = defaultProviderID(form.group_id)
+}
 
 const title = computed(() => (editing.value ? '编辑渠道' : '新建渠道'))
 
@@ -62,12 +85,15 @@ async function load() {
 
 function openCreate() {
   editing.value = null
+  const gid = groups.value.find((x) => x.is_default)?.id ?? groups.value[0]?.id ?? 0
+  providerTouched.value = false
   Object.assign(form, {
     name: '',
     protocol: 'openai-chat',
     base_url: '',
     api_key: '',
-    group_id: groups.value.find((x) => x.is_default)?.id ?? groups.value[0]?.id ?? 0,
+    group_id: gid,
+    provider_id: defaultProviderID(gid),
     weight: 1,
     enabled: true
   })
@@ -76,12 +102,15 @@ function openCreate() {
 
 function openEdit(row: Channel) {
   editing.value = row
+  // 编辑时以库里的值为准：改分组不再重算模型商，免得把已保存的值带偏
+  providerTouched.value = true
   Object.assign(form, {
     name: row.name,
     protocol: row.protocol,
     base_url: row.base_url,
     api_key: '',
     group_id: row.group_id,
+    provider_id: row.provider_id,
     weight: row.weight,
     enabled: row.enabled
   })
@@ -230,6 +259,8 @@ onMounted(load)
               :code="providerStore.byId(record.provider_id)?.code"
               :name="providerStore.byId(record.provider_id)?.name"
             />
+            <!-- 未指定（0，聚合站常见）时给占位，不硬凑一个模型商标签 -->
+            <span v-else class="unassigned" title="未指定模型商">—</span>
           </template>
         </a-table-column>
         <a-table-column title="协议" data-index="protocol" :width="150" />
@@ -274,9 +305,20 @@ onMounted(load)
           <a-input-password v-model:value="form.api_key" placeholder="sk-..." />
         </a-form-item>
         <a-form-item label="所属分组">
-          <a-select v-model:value="form.group_id">
+          <a-select v-model:value="form.group_id" @change="onGroupChange">
             <a-select-option v-for="g in groups" :key="g.id" :value="g.id">{{ g.name }}</a-select-option>
           </a-select>
+        </a-form-item>
+        <a-form-item label="模型商">
+          <a-select v-model:value="form.provider_id" @change="providerTouched = true">
+            <a-select-option :value="0">未指定</a-select-option>
+            <a-select-option v-for="p in providerStore.items" :key="p.id" :value="p.id">
+              <ProviderTag :code="p.code" :name="p.name" />
+            </a-select-option>
+          </a-select>
+          <div class="field-hint">
+            只决定渠道名称下方的模型商徽标；聚合站这类不专属于某家的渠道留「未指定」即可。
+          </div>
         </a-form-item>
         <a-row :gutter="8">
           <a-col :span="12">
@@ -332,6 +374,8 @@ onMounted(load)
 .toolbar-left { display: flex; gap: var(--gap); }
 .toolbar-spacer { flex: 1; }
 .toolbar-hint { color: var(--color-text-secondary); font-size: 13px; }
+.field-hint { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
+.unassigned { color: var(--color-text-secondary); }
 .chan-name { margin-bottom: 2px; }
 .danger-link { color: var(--color-red); }
 </style>
