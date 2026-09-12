@@ -18,8 +18,7 @@ interface LogPayload {
   response_headers?: Record<string, string>
 }
 const payload = ref<LogPayload | null>(null)
-// 简略 / 详细 切换，对应参考站的 segmented 控件
-const dense = ref<string>('brief')
+
 
 const query = reactive({
   page: 1,
@@ -156,7 +155,7 @@ function statusColor(code: number) {
 function cacheRate(row: RequestLog) {
   const denom = row.prompt_tokens + row.cached_tokens + row.cache_creation_tokens
   if (denom <= 0) return '-'
-  return ((row.cached_tokens / denom) * 100).toFixed(1) + '%'
+  return ((row.cached_tokens / denom) * 100).toFixed(2) + '%'
 }
 
 // 固定成 YYYY-MM-DD HH:mm:ss —— 与参考站日志列表一致。
@@ -289,11 +288,6 @@ onMounted(load)
           @change="search"
         />
         <a-button type="primary" @click="search">查询</a-button>
-        <div class="toolbar-spacer" />
-        <a-segmented
-          v-model:value="dense"
-          :options="[{ label: '简略', value: 'brief' }, { label: '详细', value: 'full' }]"
-        />
       </div>
 
       <DataState
@@ -309,7 +303,7 @@ onMounted(load)
         :pagination="pagination"
         row-key="id"
         size="small"
-        :scroll="{ x: 1169 }"
+        :scroll="{ x: 1139 }"
       >
         <template #emptyText>
           <a-empty description="当前筛选条件下没有日志，可放宽筛选条件：把时间范围改成「近 7 天」，或清空模型 / trace_id" />
@@ -321,7 +315,7 @@ onMounted(load)
           <template #default="{ record }">
             <div class="cell-model">{{ record.model_requested }}</div>
             <div
-              v-if="dense === 'full' && record.model_upstream !== record.model_requested"
+              v-if="record.model_upstream && record.model_upstream !== record.model_requested"
               class="sub-text"
             >
               上游：{{ record.model_upstream }}
@@ -338,14 +332,6 @@ onMounted(load)
             <span class="cell-key" :title="record.api_key_name">{{ record.api_key_name || '-' }}</span>
           </template>
         </a-table-column>
-        <a-table-column title="渠道" :width="140">
-          <template #default="{ record }">
-            <span class="cell-channel">{{ record.channel_name || '-' }}</span>
-            <a-tag v-if="record.retry_count > 0" color="orange" style="margin-left: 4px">
-              重试{{ record.retry_count }}
-            </a-tag>
-          </template>
-        </a-table-column>
         <a-table-column title="词元（输入/输出/缓存）" :width="180">
           <template #default="{ record }">
             <span class="token-cell">
@@ -355,13 +341,11 @@ onMounted(load)
               <span class="tk-sep">/</span>
               <span class="tk tk-cache">{{ record.cached_tokens }}</span>
             </span>
-            <div v-if="dense === 'full'" class="sub-text">
-              命中率 {{ cacheRate(record) }}
-              <template v-if="record.cache_creation_tokens > 0">
-                · 写入 {{ record.cache_creation_tokens }}
-              </template>
-              <template v-if="record.reasoning_tokens > 0">· 推理 {{ record.reasoning_tokens }}</template>
-            </div>
+          </template>
+        </a-table-column>
+        <a-table-column title="缓存命中" :width="110">
+          <template #default="{ record }">
+            <span class="cache-hit">{{ cacheRate(record) }}</span>
           </template>
         </a-table-column>
         <a-table-column title="响应延迟" :width="100">
@@ -402,6 +386,9 @@ onMounted(load)
           输入 {{ current.prompt_tokens }} · 输出 {{ current.completion_tokens }} ·
           缓存命中 {{ current.cached_tokens }} · 缓存写入 {{ current.cache_creation_tokens }} ·
           推理 {{ current.reasoning_tokens }} · 命中率 {{ cacheRate(current) }}
+        </a-descriptions-item>
+        <a-descriptions-item label="重试">
+          {{ current.retry_count > 0 ? '重试 ' + current.retry_count + ' 次' : '无' }}
         </a-descriptions-item>
         <a-descriptions-item label="延迟">
           首包 {{ fmtMs(current.first_byte_ms) }} · 上游握手 {{ fmtMs(current.upstream_ms) }} ·
@@ -454,12 +441,10 @@ onMounted(load)
   flex-wrap: wrap;
 }
 .toolbar-left { display: flex; gap: var(--gap); }
-.toolbar-spacer { flex: 1; }
 .sub-text { font-size: 12px; color: var(--color-text-secondary); }
 .token-cell { font-variant-numeric: tabular-nums; }
 
-/* 模型是这一行的主角，比正文稍重一点；密钥是标识符，用等宽并与正文区分开；
-   渠道给一个浅底胶囊，因为它右边还可能跟一个「重试」标签，需要自己的边界。 */
+/* 模型是这一行的主角，比正文稍重一点；密钥是标识符，用等宽并与正文区分开。 */
 .cell-model { font-weight: 500; }
 /* 等宽字体比正文宽，密钥名会超出 105px 的列宽。
    不改窄列宽而是截断：列宽一动，整张表的横向布局都要跟着调。
@@ -474,15 +459,6 @@ onMounted(load)
   font-size: 12px;
   color: var(--color-text-secondary);
 }
-.cell-channel {
-  display: inline-block;
-  padding: 1px 7px;
-  border-radius: var(--radius-pill);
-  background: var(--color-bg);
-  border: 1px solid var(--color-border);
-  font-size: 12px;
-  line-height: 18px;
-}
 
 /* 词元三段各自的颜色（变量定义见 theme.css，深色主题自动换档） */
 .tk-in { color: var(--token-input); }
@@ -495,6 +471,9 @@ onMounted(load)
 .lat-mid { color: var(--latency-mid); }
 .lat-slow { color: var(--latency-slow); font-weight: 500; }
 .lat-none { color: var(--color-text-secondary); }
+
+/* 缓存命中率用缓存那段的颜色，与词元列第三个数是同一个语义 */
+.cache-hit { color: var(--token-cache); font-variant-numeric: tabular-nums; }
 .section-title { margin: 16px 0 8px; font-size: 14px; }
 .code-box, .err-box {
   font-family: var(--font-family-mono);

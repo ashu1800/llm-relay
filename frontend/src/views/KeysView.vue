@@ -234,13 +234,13 @@ onMounted(() => {
         </template>
         <a-table-column title="名称" data-index="name" :width="150" />
         <a-table-column title="密钥前缀" data-index="key_prefix" :width="140" />
-        <a-table-column title="模型白名单" :width="170" ellipsis>
+        <a-table-column title="模型白名单" :width="160" ellipsis>
           <template #default="{ record }">
             <span v-if="whitelistText(record.allowed_models) === '不限'" class="muted">不限</span>
             <span v-else>{{ whitelistText(record.allowed_models) }}</span>
           </template>
         </a-table-column>
-        <a-table-column title="分组白名单" :width="150" ellipsis>
+        <a-table-column title="分组白名单" :width="140" ellipsis>
           <template #default="{ record }">
             <span v-if="whitelistText(record.allowed_groups) === '不限'" class="muted">不限</span>
             <span v-else>{{ whitelistText(record.allowed_groups) }}</span>
@@ -257,7 +257,9 @@ onMounted(() => {
             <a-tag :color="record.enabled ? 'green' : 'default'">{{ record.enabled ? '启用' : '停用' }}</a-tag>
           </template>
         </a-table-column>
-        <a-table-column title="操作" :width="190" fixed="right">
+        <!-- 宽度按内容实测：四个动作加间距共 181px，加上左右各 8px 内边距需要 197px，
+             原来写 190 会让链接被压缩到从词中间换行 -->
+        <a-table-column title="操作" :width="200" fixed="right">
           <template #default="{ record }">
             <a-space>
               <a @click="openEdit(record)"><EditOutlined /> 编辑</a>

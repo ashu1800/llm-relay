@@ -199,10 +199,22 @@ a:hover { opacity: 0.85; }
 .ant-table-thead > tr > th {
   background: var(--color-bg) !important;
   height: var(--size-table-row);
+  /* 表头与单元格一律居中。只作用于 .ant-table-*，
+     详情面板 a-descriptions 内部虽然也是 <table>，但类名不同，不受影响。 */
+  text-align: center;
 }
 .ant-table-tbody > tr > td {
   height: var(--size-table-row);
+  text-align: center;
 }
+/* 「操作」列里的链接不能被拆成两行。
+   列宽装不下几个动作时，a-space 的子项会按 flex-shrink 被压窄，
+   文字就从词中间断开，出现「编 / 辑」「改限 / 额」这种断法 ——
+   中文词被拆开比换行难读得多，宁可让列宽去适配内容。 */
+.ant-table-tbody .ant-space-item {
+  white-space: nowrap;
+}
+
 /* 表格与列表统一用列表字体（变量定义见文件顶部） */
 .ant-table-thead > tr > th,
 .ant-table-tbody > tr > td,
