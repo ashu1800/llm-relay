@@ -44,6 +44,9 @@ const raw = await evaluate(
   '  rowLabels: Array.from(document.querySelectorAll(".heatmap-row-labels .heatmap-row-label")).map(function(e){return e.innerText}),' +
   '  titles: Array.from(document.querySelectorAll(".heatmap-cells .heatmap-cell")).map(function(e){return e.title}),' +
   '  summary: (document.querySelector(".panel-note") || {}).innerText || "",' +
+  '  gridBottom: Math.round((document.querySelector(".summary-grid") || {getBoundingClientRect: function(){return {bottom: -1}}}).getBoundingClientRect().bottom),' +
+  '  panelBottom: Math.round((Array.from(document.querySelectorAll(".panel")).find(function(p){return p.innerText.indexOf("请求热力图") >= 0}) || {getBoundingClientRect: function(){return {bottom: -2}}}).getBoundingClientRect().bottom),' +
+  '  cellsW: Math.round((document.querySelector(".heatmap-cells") || {getBoundingClientRect: function(){return {width: 0}}}).getBoundingClientRect().width),' +
   '  title: (document.querySelector(".section-title") || {}).innerText || ""' +
   '})'
 )
@@ -97,6 +100,18 @@ chk('接口的每个点都出现在正确的行列', missing === 0 && wrong === 
     '缺失 ' + missing + ' 错位 ' + wrong)
 chk('接口总次数等于面板摘要', dom.summary.indexOf(String(api.reduce((a, b) => a + b.requests, 0))) >= 0,
     dom.summary)
+
+// 布局：面板底边必须和左侧卡片区齐平。
+// .panel 全局带 margin-bottom: 8px，作为网格项时会吃掉面板高度，
+// 曾经因此比卡片区矮 8px、底边错开。
+chk('热力图面板底边与卡片区齐平', dom.gridBottom === dom.panelBottom,
+    '卡片区 ' + dom.gridBottom + ' vs 面板 ' + dom.panelBottom)
+
+// 格子要铺满可用宽度，不能缩在一侧留出空白
+const panelW = JSON.parse(await evaluate(
+  'JSON.stringify(Math.round((Array.from(document.querySelectorAll(".panel")).find(function(p){return p.innerText.indexOf("请求热力图") >= 0})).getBoundingClientRect().width))'
+))
+chk('格子区铺满面板宽度', dom.cellsW > panelW * 0.8, dom.cellsW + ' / 面板 ' + panelW)
 
 await send('Target.closeTarget', { targetId })
 ws.close()

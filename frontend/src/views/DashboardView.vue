@@ -445,9 +445,20 @@ onMounted(load)
 /* 概览区与图表区均使用 grid，gap 恒为 8px（实测） */
 .overview-row {
   display: grid;
-  grid-template-columns: minmax(340px, 1fr) minmax(420px, 1.35fr);
+  /* 两列等宽，与参考站的 summary-grid 501 + heatmap-panel 501 一致。
+     原来是 1fr + 1.35fr，热力图那块被拉宽，格子跟着变形 */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: var(--gap);
   margin-bottom: var(--gap);
+}
+
+/* .panel 全局带 margin-bottom: 8px，作为网格项时会把面板高度吃掉 8px，
+   底边比左侧卡片区高出一截。这里清零，并让面板成为纵向 flex，
+   好让热力图网格撑满剩余高度而不是靠写死格子高度去凑。 */
+.overview-row > :deep(.panel) {
+  margin-bottom: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .summary-grid {
@@ -473,28 +484,31 @@ onMounted(load)
    区域 gap 4px 8px、格子 gap 3.2px、圆角 3.2px、标签 11.2px。
    格子的宽高比也照参考站（15:13），避免又被压成扁条。 */
 .heatmap {
-  --heat-cell-w: 18px;
-  --heat-cell-h: 15px;
   --heat-gap: 3.2px;
   display: grid;
-  /* 左上留白角 + 小时标签；下一行是日期标签 + 格子 */
-  grid-template-columns: 36px auto;
-  grid-template-rows: 18px auto;
+  /* 左上留白角 + 小时标签；下一行是日期标签 + 格子。
+     第二行用 1fr，由面板把剩余高度分给格子 —— 这样卡片文案变化、
+     面板高度跟着变时，格子会自动适配，不会错位。 */
+  grid-template-columns: 36px 1fr;
+  grid-template-rows: 18px 1fr;
   gap: 4px 8px;
-  /* 面板比网格宽：居中，而不是把格子拉扁去填满 */
-  justify-content: center;
+  flex: 1;
+  min-height: 0;
 }
 
+/* 列宽用 1fr 让 24 个小时格铺满整行 —— 参考站就是这么做的
+   （它的 cells 区 439px 正好等于 24*15 + 23*3.2）。
+   原来写死 18px 再居中，网格浮在面板中间、右侧空一大片。 */
 .heatmap-col-labels,
 .heatmap-cells {
   display: grid;
-  grid-template-columns: repeat(24, var(--heat-cell-w));
+  grid-template-columns: repeat(24, 1fr);
   gap: var(--heat-gap);
 }
 
 .heatmap-row-labels {
   display: grid;
-  grid-auto-rows: var(--heat-cell-h);
+  grid-auto-rows: 1fr;
   gap: var(--heat-gap);
 }
 
@@ -512,7 +526,9 @@ onMounted(load)
 }
 
 .heatmap-cell {
-  height: var(--heat-cell-h);
+  /* 高度由所属网格行决定（1fr），不再写死，
+     这样面板变高变矮时格子和日期标签始终对齐 */
+  min-height: 10px;
   border-radius: 3.2px;
 }
 
