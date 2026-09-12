@@ -6,17 +6,13 @@
 ## 特性
 
 - **多协议入站**：OpenAI Chat Completions / Responses、Anthropic Messages、Gemini generateContent、Embeddings
-- **渠道协议与鉴权**：所有渠道的上游报文统一为 OpenAI Chat Completions 格式，
-  渠道上的 `protocol` 决定用哪种鉴权方式：
-  `openai-chat` / `openai-responses` / `openai-embeddings` 用 `Authorization: Bearer`，
-  `anthropic-messages` 用 `x-api-key`（并补 `anthropic-version`），
-  `gemini` 用 `x-goog-api-key`，
-  `custom` 可用 `auth_header` / `auth_prefix` 指定任意鉴权头
-
-  > 注意：渠道上选的协议是**上游协议**。客户端无论用哪种协议请求，都会先归一成
-  > OpenAI Chat 的内部格式，再按渠道协议转成上游格式发出。`anthropic-messages` 与
-  > `gemini-generateContent` 的出站转换正在实现中，实现前它们只改变鉴权头，
-  > 请求体与路径仍是 OpenAI 格式的 `/v1/chat/completions`。
+- **渠道协议 = 上游协议**：客户端用哪种协议请求都行，站内先归一成 OpenAI Chat，
+  再按渠道上的 `protocol` 转成上游格式发出，响应转回来后再改写回客户端协议。
+  `anthropic-messages` 会改写成 Anthropic Messages 并请求 `/v1/messages`；
+  `openai-chat` / `openai-responses` / `openai-embeddings` 走 OpenAI 端点；
+  `custom` 可用 `auth_header` / `auth_prefix` 指定任意鉴权头。
+  鉴权按协议自动选择：`anthropic-messages` 用 `x-api-key`（并补 `anthropic-version`），
+  `gemini` 用 `x-goog-api-key`，其余用 `Authorization: Bearer`
 - **精细计量**：输入 / 输出 / 缓存命中 / 缓存写入 / 推理 Token，区分「子集型」与「并列型」缓存口径
 - **模型定价与预估金额**：价格全部手工录入；支持固定倍率与**按时段倍率**（如工作日 9:00-12:00 按 ×2 计费）；金额仅作成本感知，**不做任何扣减**
 - **详尽的请求日志**：首包时间、总耗时、渠道与模型映射、状态码、原始报文、计费过程还原、导出

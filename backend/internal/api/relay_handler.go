@@ -214,7 +214,9 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 
 	// 上游返回不可重试的错误状态：按入站协议的错误结构回给客户端
 	if att.Stream == nil && att.StatusCode >= 400 {
-		upMsg := string(att.Body)
+		// 上游按它自己的协议报错（Anthropic 是 {"type":"error","error":{...}}），
+		// 抽成一行可读信息再回给客户端，别把整段 JSON 塞进 message 里套娃
+		upMsg := convert.UpstreamErrorMessage(res.Candidate.Channel.Protocol, att.Body)
 		p.writeError(c, att.StatusCode, upMsg, "upstream_error")
 		s.finalizeLog(req, res, relay.Usage{}, att.StatusCode,
 			upMsg, att.HeaderMs, int(time.Since(started).Milliseconds()), att.Body, att.Headers)

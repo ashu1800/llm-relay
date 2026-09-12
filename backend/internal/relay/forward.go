@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"llm-relay/internal/model"
+	"llm-relay/internal/relay/convert"
 )
 
 // Attempt 表示一次上游调用的结果。
@@ -52,7 +53,14 @@ func (f *Forwarder) Do(
 		return nil, fmt.Errorf("改写请求体失败: %w", err)
 	}
 
-	url := BuildUpstreamURL(cand.Channel.BaseURL, upstreamPath)
+	// 出站协议转换：站内统一是 OpenAI Chat，渠道声明的是上游协议。
+	// 路径也要一起换（Anthropic 是 /v1/messages，Gemini 的模型名在路径里）。
+	path, body, err := convert.UpstreamRequest(cand.Channel.Protocol, upstreamPath, body)
+	if err != nil {
+		return nil, fmt.Errorf("转换上游请求失败: %w", err)
+	}
+
+	url := BuildUpstreamURL(cand.Channel.BaseURL, path)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("构造上游请求失败: %w", err)
@@ -106,7 +114,9 @@ func (f *Forwarder) Do(
 
 	// 依据响应内容类型判定是否流式，而不是只看请求参数
 	if isEventStream(resp.Header.Get("Content-Type")) {
-		att.Stream = resp.Body
+		// 上游协议与站内通用语不一致时在这里就地转换：
+		// 下游的用量抓取、日志留存与入站改写器看到的都是 OpenAI 的 SSE 分片
+		att.Stream = convert.UpstreamStream(cand.Channel.Protocol, resp.Body, cand.Binding.UpstreamName)
 		return att, nil
 	}
 
@@ -115,8 +125,8 @@ func (f *Forwarder) Do(
 	if err != nil {
 		return att, fmt.Errorf("读取上游响应失败: %w", err)
 	}
-	att.Body = raw
-	att.Usage, att.HasUsage = extractUsageFromJSON(raw)
+	att.Body = convert.UpstreamResponseBody(cand.Channel.Protocol, raw, cand.Binding.UpstreamName)
+	att.Usage, att.HasUsage = extractUsageFromJSON(att.Body)
 	return att, nil
 }
 
