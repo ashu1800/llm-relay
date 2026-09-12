@@ -95,14 +95,16 @@ func NewSyncer(db *gorm.DB, engine *Engine, logger *slog.Logger) *Syncer {
 
 // SyncResult 汇总一次同步的结果。
 type SyncResult struct {
-	Source        string    `json:"source"`
-	Status        string    `json:"status"`
-	Added         int       `json:"added"`
-	Updated       int       `json:"updated"`
-	Unchanged     int       `json:"unchanged"`
-	SkippedManual int       `json:"skipped_manual"`
-	Error         string    `json:"error,omitempty"`
-	StartedAt     time.Time `json:"started_at"`
+	Source        string `json:"source"`
+	Status        string `json:"status"`
+	Added         int    `json:"added"`
+	Updated       int    `json:"updated"`
+	Unchanged     int    `json:"unchanged"`
+	SkippedManual int    `json:"skipped_manual"`
+	// Pruned 是本次清理掉的过时裸名条数，见 pruneOrphanBareNames
+	Pruned    int       `json:"pruned,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	StartedAt time.Time `json:"started_at"`
 }
 
 // SyncAll 依次同步全部自动源，并写入同步历史。
@@ -137,11 +139,40 @@ func (s *Syncer) runSource(ctx context.Context, source string, priority int, url
 		res.Unchanged += unchanged
 		res.SkippedManual += skipped
 	}
+	if source == SourceLiteLLM {
+		res.Pruned = s.pruneOrphanBareNames()
+	}
 	s.logger.Info("定价同步完成", "source", source,
 		"added", res.Added, "updated", res.Updated,
-		"unchanged", res.Unchanged, "skipped", res.SkippedManual)
+		"unchanged", res.Unchanged, "skipped", res.SkippedManual,
+		"pruned", res.Pruned)
 	s.recordHistory(res, url)
 	return res
+}
+
+// pruneOrphanBareNames 删除「无前缀、且不属于已接入模型商」的自动源定价行。
+//
+// 这些行的来历：LiteLLM 一份表里有十几家托管商提供同名模型，早期实现把
+// 「provider/model」额外拆成裸名也写一遍，同一裸名被反复覆盖，最后留下的是
+// 字典序最大的那家（实测 deepseek-v4-flash 被 15 个来源争抢，tencent 胜出）。
+//
+// 现在裸名只由已接入的模型商（provider_id > 0）写，剩下的 provider_id=0 裸名
+// 再也不会被刷新 —— 留着只会变成冻结的假数据：看起来有价，实际停在某次同步的
+// 瞬时值上，而且会盖住用户后来新建的同名模型。
+//
+// 只删自动源的裸名行：手工录入（source=manual）与带前缀的全名都不受影响。
+func (s *Syncer) pruneOrphanBareNames() int {
+	res := s.db.Exec(
+		"DELETE FROM model_pricings WHERE source = ? AND provider_id = 0 AND model_key NOT LIKE '%/%'",
+		SourceLiteLLM)
+	if res.Error != nil {
+		s.logger.Warn("清理过时裸名失败", "err", res.Error)
+		return 0
+	}
+	if res.RowsAffected > 0 {
+		s.logger.Info("已清理不再维护的裸名定价", "条数", res.RowsAffected)
+	}
+	return int(res.RowsAffected)
 }
 
 func (s *Syncer) recordHistory(res SyncResult, url string) {
@@ -229,6 +260,11 @@ var (
 	priceRe = regexp.MustCompile("\\$([0-9]+(?:\\.[0-9]+)?)")
 	// 官方表头会把脚注编号跟在模型名后，例如 deepseek-flash(1)
 	footnoteRe = regexp.MustCompile("\\([0-9]+\\)$")
+	// 脚注正文形如「(1) Use deepseek-flash as the model name. The legacy names
+	// deepseek-v4-flash and deepseek-v4-flash-vision-exp are still accepted, ...」
+	footnoteItemRe = regexp.MustCompile("\\((\\d{1,2})\\)\\s*([^()]{20,800})")
+	legacyNamesRe  = regexp.MustCompile("(?i)legacy names?\\s+(.+?)\\s+are still accepted")
+	modelNameRe    = regexp.MustCompile("^[A-Za-z0-9][A-Za-z0-9._-]*$")
 )
 
 // fetchDeepSeekOfficial 抓取并解析 DeepSeek 官方定价表。
@@ -263,6 +299,57 @@ func (s *Syncer) fetchDeepSeekOfficial(ctx context.Context) ([]Entry, error) {
 		entries[i].ProviderID = id
 	}
 	return entries, nil
+}
+
+// footnoteAliases 返回「表头第几列 -> 该列模型的遗留别名」。
+//
+// 为什么需要它：官方给 deepseek-flash 挂了脚注 (1)，正文写明
+// 「legacy names deepseek-v4-flash and deepseek-v4-flash-vision-exp are still
+// accepted ... billed at the Flash price」——旧名字仍然可用且按同一价格计费。
+// 不把别名一并生成定价行的话，调用方用旧名字请求就会匹配不到价格，
+// 费用静默记成 0（或落到 LiteLLM 里某家无关托管商的报价上）。
+//
+// 抽不到就返回空，不影响主流程。
+func footnoteAliases(body []byte, header []string) map[int][]string {
+	text := html.UnescapeString(tagRe.ReplaceAllString(string(body), " "))
+	text = strings.Join(strings.Fields(text), " ")
+
+	// 同一个编号可能出现多次（表头里的「deepseek-flash (1)」也算一次），
+	// 取最长的那段正文 —— 真正的脚注是一长句，表头那次只会捕获到相邻的模型名。
+	notes := map[string]string{}
+	for _, m := range footnoteItemRe.FindAllStringSubmatch(text, -1) {
+		if len(m[2]) > len(notes[m[1]]) {
+			notes[m[1]] = m[2]
+		}
+	}
+
+	outMap := map[int][]string{}
+	for i, h := range header[1:] {
+		fn := footnoteRe.FindString(h)
+		if fn == "" {
+			continue
+		}
+		num := strings.Trim(fn, "()")
+		note, ok := notes[num]
+		if !ok {
+			continue
+		}
+		m := legacyNamesRe.FindStringSubmatch(note)
+		if m == nil {
+			continue
+		}
+		// 名字列表用 and / or / 逗号分隔，按分隔符切开。
+		// 不能逐词取 —— 那样 "and" 本身会被当成一个模型名写进定价表。
+		phrase := strings.ReplaceAll(m[1], " or ", ", ")
+		phrase = strings.ReplaceAll(phrase, " and ", ", ")
+		for _, part := range strings.Split(phrase, ",") {
+			name := strings.TrimSpace(strings.Trim(part, ".,;"))
+			if modelNameRe.MatchString(name) {
+				outMap[i] = append(outMap[i], name)
+			}
+		}
+	}
+	return outMap
 }
 
 // parseDeepSeekTable 解析官方定价表。抽成纯函数以便用固定样本测试。
@@ -351,6 +438,7 @@ func parseDeepSeekTable(body []byte) ([]Entry, error) {
 		}
 	}
 
+	aliasMap := footnoteAliases(body, header)
 	var entries []Entry
 	for i, name := range names {
 		b := buckets[i]
@@ -364,14 +452,25 @@ func parseDeepSeekTable(body []byte) ([]Entry, error) {
 			mult, _ := b.peakInput.Div(b.offInput).Float64()
 			rules = scaleRules(rules, mult)
 		}
-		entries = append(entries, Entry{
+		base := Entry{
 			ModelKey:        name,
 			InputPer1M:      b.offInput,
 			OutputPer1M:     b.offOutput,
 			CacheReadPer1M:  b.offCache,
 			CacheWritePer1M: b.offInput,
 			PeakRules:       rules,
-		})
+		}
+		entries = append(entries, base)
+
+		// 官方脚注承认的遗留别名按同一价格计费，同样生成定价行
+		for _, alias := range aliasMap[i] {
+			if alias == name {
+				continue
+			}
+			a := base
+			a.ModelKey = alias
+			entries = append(entries, a)
+		}
 	}
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("DeepSeek 定价表解析结果为空")
@@ -438,6 +537,9 @@ func (s *Syncer) fetchLiteLLM(ctx context.Context) ([]Entry, error) {
 	sort.Strings(keys)
 
 	ids := s.providerIDs()
+	// 裸名的归属登记，见下方写入处的说明
+	bareOwner := map[string]string{}
+	bareConflicts := 0
 	var entries []Entry
 	for _, k := range keys {
 		item := raw[k]
@@ -480,16 +582,34 @@ func (s *Syncer) fetchLiteLLM(ctx context.Context) ([]Entry, error) {
 			ProviderID: pid, ModelKey: k, InputPer1M: in, OutputPer1M: out,
 			CacheReadPer1M: cacheRead, CacheWritePer1M: cacheWrite, PeakRules: rules,
 		})
-		if idx := strings.Index(k, "/"); idx > 0 {
+		// 裸名只在「该模型商已接入」时才写。
+		//
+		// LiteLLM 一份表里有十几家托管商提供同名模型（实测 deepseek-v4-flash
+		// 有 15 个来源，输入价从 0.088 到 0.25），而 upsert 只按 model_key 定位、
+		// 同优先级后写覆盖先写 —— 不设限时最终留下的是「字典序最大的那家」，
+		// 与模型真正的来源无关。线上就是这样把 DeepSeek 的价写成了 tencent 的。
+		//
+		// 已接入的模型商之间若仍撞名，用 bareOwner 记住先写入者（键已排序，
+		// 结果确定），后来者跳过，避免同一轮同步里自相覆盖。
+		if idx := strings.Index(k, "/"); idx > 0 && pid > 0 {
 			bare := k[idx+1:]
-			entries = append(entries, Entry{
-				ProviderID: pid, ModelKey: bare, InputPer1M: in, OutputPer1M: out,
-				CacheReadPer1M: cacheRead, CacheWritePer1M: cacheWrite, PeakRules: rules,
-			})
+			if owner, taken := bareOwner[bare]; !taken {
+				bareOwner[bare] = k
+				entries = append(entries, Entry{
+					ProviderID: pid, ModelKey: bare, InputPer1M: in, OutputPer1M: out,
+					CacheReadPer1M: cacheRead, CacheWritePer1M: cacheWrite, PeakRules: rules,
+				})
+			} else if owner != k {
+				bareConflicts++
+			}
 		}
 	}
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("LiteLLM 价格表解析结果为空")
+	}
+	if bareConflicts > 0 {
+		s.logger.Info("LiteLLM 裸名冲突已按来源保留首个",
+			"跳过", bareConflicts, "说明", "同一裸名被多个已接入模型商提供")
 	}
 	return entries, nil
 }
