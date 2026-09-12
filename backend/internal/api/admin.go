@@ -78,12 +78,19 @@ type whitelistItem struct {
 // 空数组表示「清空白名单」—— 若用值类型，这两件事都是 len=0，分不开，
 // 于是「把最后一条删掉」会静默失效。
 type channelPayload struct {
-	Name      string           `json:"name"`
-	GroupID   uint             `json:"group_id"`
-	Protocol  string           `json:"protocol"`
-	BaseURL   string           `json:"base_url"`
-	APIKey    string           `json:"api_key"`
-	Weight    int              `json:"weight"`
+	Name     string `json:"name"`
+	GroupID  uint   `json:"group_id"`
+	Protocol string `json:"protocol"`
+	BaseURL  string `json:"base_url"`
+	APIKey   string `json:"api_key"`
+	Weight   int    `json:"weight"`
+	// ProxyID 走哪个出站代理；0 = 直连。
+	//
+	// 必须是指针：0 既是「直连」也是 uint 的零值，用值类型就分不出
+	// 「改成直连」与「这次请求不提代理这件事」。实测踩过 ——
+	// 用户把渠道从代理改回直连时传 proxy_id=0，后端当成「没传」忽略掉，
+	// 界面上显示已保存、库里还指着那个代理。与模型白名单要用指针是同一类坑。
+	ProxyID   *uint            `json:"proxy_id"`
 	Enabled   *bool            `json:"enabled"`
 	Slots     model.JSONList   `json:"available_slots"`
 	ExtraConf model.JSONMap    `json:"extra_config"`
@@ -203,6 +210,16 @@ func (s *Server) createChannel(c *gin.Context) {
 	if p.GroupID == 0 {
 		p.GroupID = defaultGroupID(s)
 	}
+	// 代理存在性在这里校验：填一个不存在的 id，转发时才发现的话，
+	// 表现是「渠道莫名其妙不通」，而配置看起来完全正常
+	proxyID := uint(0)
+	if p.ProxyID != nil {
+		proxyID = *p.ProxyID
+	}
+	if err := checkProxyExists(s, proxyID); err != nil {
+		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
+	}
 	// 白名单在这里就校验：等到写完渠道再报错，用户得重填一遍表单
 	var whitelist []model.ChannelModel
 	if p.Models != nil {
@@ -273,6 +290,13 @@ func (s *Server) updateChannel(c *gin.Context) {
 	}
 	if p.Weight > 0 {
 		updates["weight"] = p.Weight
+	}
+	if p.ProxyID != nil {
+		if err := checkProxyExists(s, *p.ProxyID); err != nil {
+			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+			return
+		}
+		updates["proxy_id"] = *p.ProxyID
 	}
 	if p.Enabled != nil {
 		updates["enabled"] = *p.Enabled

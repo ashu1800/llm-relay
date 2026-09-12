@@ -38,6 +38,13 @@ type apiKeyExport struct {
 	KeyHash string `json:"key_hash"`
 }
 
+// proxyExport 与 channelExport 同理：代理密码的 json tag 是 "-"，
+// 不显式带出来备份里就没有它。
+type proxyExport struct {
+	model.Proxy
+	PasswordEnc string `json:"password_enc"`
+}
+
 // backupBundle 是配置备份的载体。
 type backupBundle struct {
 	Version    int       `json:"version"`
@@ -54,6 +61,10 @@ type backupBundle struct {
 	Bindings []model.ChannelModel `json:"channel_models"`
 	// Templates 字段随模板管理一起下线。旧备份里仍然带着 channel_templates 数组，
 	// Go 解析时会忽略不认识的字段：旧备份照样能导入，只是其中的模板不再生效
+	// Proxies 里的密码是密文，靠 proxyExport 显式带出来 ——
+	// model.Proxy.PasswordEnc 的 json tag 是 "-"，直接序列化会把密码整个丢掉，
+	// 恢复出来的代理会变成「没有密码」，而界面上看不出任何异常。
+	Proxies  []proxyExport        `json:"proxies"`
 	APIKeys  []apiKeyExport       `json:"api_keys"`
 	Pricings []model.ModelPricing `json:"pricings"`
 	// ManualPricings 是旧备份文件里的字段名，只为能继续读出来
@@ -93,6 +104,18 @@ func (s *Server) exportConfig(c *gin.Context) {
 			},
 		},
 		{"模型白名单", func() error { return db.Order("id").Find(&b.Bindings).Error }},
+		{
+			"代理", func() error {
+				var rows []model.Proxy
+				if err := db.Order("id").Find(&rows).Error; err != nil {
+					return err
+				}
+				for _, p := range rows {
+					b.Proxies = append(b.Proxies, proxyExport{Proxy: p, PasswordEnc: p.PasswordEnc})
+				}
+				return nil
+			},
+		},
 		{
 			"密钥", func() error {
 				var rows []model.APIKey
@@ -172,6 +195,34 @@ func (s *Server) importConfig(c *gin.Context) {
 		}
 		groupIDMap[oldID] = gr.ID
 		report.Created["分组"]++
+	}
+
+	// 代理同样按名字合并。渠道要引用代理，所以这张映射表先建好
+	proxyIDMap := map[uint]uint{}
+	for i := range b.Proxies {
+		px := b.Proxies[i].Proxy
+		// 密文被 json:"-" 挡住过，导入时必须显式写回
+		px.PasswordEnc = b.Proxies[i].PasswordEnc
+		oldID := px.ID
+		var exist model.Proxy
+		if err := db.Where("name = ?", px.Name).First(&exist).Error; err == nil {
+			proxyIDMap[oldID] = exist.ID
+			report.Skipped["代理"]++
+			continue
+		}
+		px.ID = 0
+		// 导入出来的代理一律先标成「未测试」：它在本机根本没拨过，
+		// 沿用备份里的「正常」会让用户以为已经验证过
+		px.LastStatus = "unknown"
+		px.LastError = ""
+		px.LastLatencyMs = 0
+		px.LastTestedAt = nil
+		if err := db.Create(&px).Error; err != nil {
+			report.Warnings = append(report.Warnings, "代理 "+px.Name+" 导入失败: "+err.Error())
+			continue
+		}
+		proxyIDMap[oldID] = px.ID
+		report.Created["代理"]++
 	}
 
 	channelIDMap := map[uint]uint{}

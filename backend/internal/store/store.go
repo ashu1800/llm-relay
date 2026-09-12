@@ -77,6 +77,7 @@ func (s *Store) Migrate() error {
 		&model.RequestLog{},
 		&model.RequestPayload{},
 		&model.ModelPricing{},
+		&model.Proxy{},
 		&model.Setting{},
 	); err != nil {
 		return fmt.Errorf("数据库迁移失败: %w", err)

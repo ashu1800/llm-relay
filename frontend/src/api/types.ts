@@ -7,6 +7,8 @@ export interface Channel {
   base_url: string
   api_key_hint: string
   weight: number
+  /** 走哪个出站代理转发；0 = 直连 */
+  proxy_id: number
   enabled: boolean
   monitor_type: string
   available_slots: SlotRule[] | null
@@ -52,6 +54,37 @@ export interface ChannelGroup {
   rpm: number
   /** 每分钟 token 数上限，0 = 不限制 */
   tpm: number
+}
+
+/**
+ * Proxy 出站代理。密码只进不出：接口返回的是 has_password，
+ * 编辑时留空即表示沿用原密码。
+ */
+export interface Proxy {
+  id: number
+  name: string
+  /** socks5 / http / https；https 表示用 TLS 连到代理本身 */
+  protocol: string
+  host: string
+  port: number
+  username: string
+  has_password: boolean
+  enabled: boolean
+  /** unknown / ok / fail —— 最近一次连通性测试的结论 */
+  last_status: string
+  last_latency_ms: number
+  last_error: string
+  last_tested_at: string | null
+  created_at: string
+}
+
+/** 代理连通性测试结果 */
+export interface ProxyTestResult {
+  ok: boolean
+  latency_ms: number
+  status_code: number
+  error: string
+  tested_at: string
 }
 
 /** 渠道的模型白名单条目：对外名 → 上游名（留空则同名） */

@@ -78,6 +78,7 @@ func (s *Server) Register(r *gin.Engine) {
 		registerBackupRoutes(admin, s)
 		registerSettingsRoutes(admin, s)
 		registerPricingRoutes(admin, s)
+		registerProxyRoutes(admin, s)
 		registerStatsRoutes(admin, s)
 	}
 

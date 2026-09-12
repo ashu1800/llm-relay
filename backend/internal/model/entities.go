@@ -66,14 +66,18 @@ type ChannelGroup struct {
 //   - Protocol 是**上游**协议：客户端无论用哪种协议请求，都会先归一成
 //     OpenAI Chat，再按这里声明的协议转成上游格式（见 relay/forward.go）。
 type Channel struct {
-	ID          uint     `gorm:"primaryKey" json:"id"`
-	Name        string   `gorm:"size:128;not null" json:"name"`
-	GroupID     uint     `gorm:"index;not null;default:1" json:"group_id"`
-	Protocol    string   `gorm:"size:32;not null;default:openai-chat" json:"protocol"`
-	BaseURL     string   `gorm:"size:512;not null" json:"base_url"`
-	APIKeyEnc   string   `gorm:"size:2048" json:"-"`
-	APIKeyHint  string   `gorm:"size:32" json:"api_key_hint"`
-	Weight      int      `gorm:"not null;default:1" json:"weight"`
+	ID         uint   `gorm:"primaryKey" json:"id"`
+	Name       string `gorm:"size:128;not null" json:"name"`
+	GroupID    uint   `gorm:"index;not null;default:1" json:"group_id"`
+	Protocol   string `gorm:"size:32;not null;default:openai-chat" json:"protocol"`
+	BaseURL    string `gorm:"size:512;not null" json:"base_url"`
+	APIKeyEnc  string `gorm:"size:2048" json:"-"`
+	APIKeyHint string `gorm:"size:32" json:"api_key_hint"`
+	Weight     int    `gorm:"not null;default:1" json:"weight"`
+	// ProxyID 指定这个渠道走哪个出站代理（见 model.Proxy）；0 表示直连。
+	// 用 0 而不是 NULL：零值就等于默认行为，能少一层判空；带 default 的列在
+	// 已有数据上加列也安全（非空且无默认值时 AutoMigrate 会直接失败）
+	ProxyID     uint     `gorm:"not null;default:0" json:"proxy_id"`
 	Enabled     bool     `gorm:"not null" json:"enabled"`
 	MonitorType string   `gorm:"size:32;not null;default:none" json:"monitor_type"`
 	Slots       JSONList `gorm:"type:jsonb" json:"available_slots"`
@@ -105,6 +109,43 @@ type ChannelModel struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
+
+// Proxy 出站代理。渠道可以指定走某个代理转发（见 Channel.ProxyID）。
+//
+// 只支持这三种：socks5 / http / https，其中 https 表示「用 TLS 连到代理本身」。
+// 之所以不做「代理池 / 自动切换」：那是另一个量级的东西，
+// 而这里的实际需求是「某些上游在国内直连不通」。
+type Proxy struct {
+	ID   uint   `gorm:"primaryKey" json:"id"`
+	Name string `gorm:"size:64;uniqueIndex;not null" json:"name"`
+	// Protocol 见 model.ProxyProtocol* 常量
+	Protocol string `gorm:"size:16;not null;default:socks5" json:"protocol"`
+	Host     string `gorm:"size:255;not null" json:"host"`
+	Port     int    `gorm:"not null" json:"port"`
+	Username string `gorm:"size:128" json:"username"`
+	// PasswordEnc 是 AES-GCM 密文，不随 JSON 输出。
+	// 与渠道密钥同一套加密：代理密码同样是凭据，落到备份文件里必须是密文。
+	PasswordEnc string `gorm:"size:512" json:"-"`
+	// HasPassword 让界面知道「已经配了密码」而不必回传密文（gorm 不存这一列）
+	HasPassword bool `gorm:"-" json:"has_password"`
+	// 与渠道同一类坑：带 gorm default 标签的布尔字段存不进 false
+	Enabled bool `gorm:"not null" json:"enabled"`
+	// 最近一次连通性测试的结果。缓存下来，打开页面就能看到上次的结果，
+	// 不必每次进页面都去拨一遍（拨号要花时间，代理不通时更慢）
+	LastStatus    string     `gorm:"size:16;not null;default:unknown" json:"last_status"`
+	LastLatencyMs int        `gorm:"not null;default:0" json:"last_latency_ms"`
+	LastError     string     `gorm:"size:512" json:"last_error"`
+	LastTestedAt  *time.Time `json:"last_tested_at"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+// 代理协议常量。
+const (
+	ProxyProtocolSOCKS5 = "socks5"
+	ProxyProtocolHTTP   = "http"
+	ProxyProtocolHTTPS  = "https"
+)
 
 // APIKey 对外下发的调用密钥。只存哈希与展示前缀，明文仅在创建时返回一次。
 type APIKey struct {
