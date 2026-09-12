@@ -51,6 +51,15 @@ const ranges = [
   { value: '30d', label: '近 30 天' }
 ]
 
+// 与日志页、密钥页保持同一套渲染方式：后端给的是带偏移的 RFC3339，
+// new Date 能正确解析，toLocaleString 再按浏览器本地时区显示。
+// 原来这一列直接把原始字符串打出来，而后端那串被 to_char 抹掉了时区
+// （且按 UTC 渲染），于是同一时刻在这一页比日志页早 8 小时，还看不出原因。
+function fmtTime(t: string) {
+  if (!t) return '—'
+  return new Date(t).toLocaleString('zh-CN', { hour12: false })
+}
+
 function pct(v: number | string | undefined) {
   const n = typeof v === 'string' ? parseFloat(v) : v
   if (n === undefined || !isFinite(n)) return '0%'
@@ -220,7 +229,9 @@ onMounted(load)
     <section class="panel table-panel">
       <div class="panel-title">重试与失败记录（近 30 条）</div>
       <a-table :data-source="incidents" :pagination="false" row-key="trace_id" size="small" :scroll="{ x: 900 }">
-        <a-table-column title="时间" data-index="created_at" :width="160" />
+        <a-table-column title="时间" :width="170">
+          <template #default="{ record }">{{ fmtTime(record.created_at) }}</template>
+        </a-table-column>
         <a-table-column title="模型" data-index="model" :width="160" ellipsis />
         <a-table-column title="渠道" data-index="channel_name" :width="140" ellipsis />
         <a-table-column title="状态" :width="80">

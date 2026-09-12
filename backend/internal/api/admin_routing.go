@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -39,7 +40,13 @@ type incidentRow struct {
 	RetryCount  int    `json:"retry_count"`
 	Error       string `json:"error"`
 	TotalMs     int    `json:"total_ms"`
-	CreatedAt   string `json:"created_at"`
+	// 用 time.Time 而不是格式化好的字符串：
+	// 原来这里是 to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')，
+	// to_char 会把时区信息整个丢掉，而且按数据库会话时区（UTC）渲染 ——
+	// 同一时刻在日志页显示的是 +08:00 的 12:36，在这一页却成了不带时区的 04:36，
+	// 差 8 小时且看不出是时区问题。
+	// 直接选原始列，由 Go 统一序列化成带偏移的 RFC3339。
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // routingAnalysis 汇总渠道权重与实际分流情况，用于回答「策略是否按预期生效」。
@@ -189,8 +196,7 @@ func (s *Server) routingAnalysis(c *gin.Context) {
 	// 重试与失败记录：排查「为什么流量跑到别的渠道去了」的直接证据
 	var incidents []incidentRow
 	incSQL := `SELECT trace_id, model_requested AS model, channel_name,
-		status_code, retry_count, error, total_ms,
-		to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
+		status_code, retry_count, error, total_ms, created_at
 		FROM request_logs
 		WHERE created_at >= ? AND created_at <= ? AND (retry_count > 0 OR status_code >= 400)
 		ORDER BY created_at DESC LIMIT 30`
