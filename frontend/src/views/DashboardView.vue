@@ -137,53 +137,60 @@ async function load() {
   }
 }
 
-// ---- 趋势：请求数（柱） + 费用（线，双 Y 轴）----
+// ---- 趋势：消费金额（左轴）+ 请求数（右轴），两条平滑曲线 ----
+// 对齐参考站：两条都是带圆点标记的平滑曲线（原来请求数画的是柱状），
+// 图例居中在顶部、左右轴各带名称（金额 / 请求），只保留横向虚线网格，
+// 金额在左、请求在右。配色取自参考站的 --color-orange / --color-blue。
 const trendOption = computed(() => {
   const labels = series.value.map((p) => fmtBucket(p.ts, seriesBucket.value))
+  const COST = '#f59e0b'
+  const REQ = '#06b6d4'
+  // 圆点是空心的：填充用卡片底色、描边用线色
+  const lineSeries = (name: string, color: string, data: number[]) => ({
+    name,
+    type: 'line',
+    smooth: true,
+    symbol: 'circle',
+    symbolSize: 7,
+    lineStyle: { width: 2, color },
+    itemStyle: { color: '#fff', borderColor: color, borderWidth: 2 },
+    data
+  })
+  const axisName = { color: '#8c8c8c', fontSize: 11 }
   return {
-    color: PALETTE,
     tooltip: { trigger: 'axis' },
-    legend: { data: ['请求数', '费用'], right: 0, top: 0, icon: 'roundRect' },
-    grid: { left: 44, right: 52, top: 36, bottom: 28 },
+    legend: { data: ['消费金额', '请求数'], top: 0, left: 'center' },
+    grid: { left: 54, right: 56, top: 46, bottom: 28 },
     xAxis: {
       type: 'category',
       data: labels,
+      // 曲线要从左边缘起笔，不能像柱状图那样两侧留白
+      boundaryGap: false,
       axisLine: { lineStyle: { color: '#d9d9d9' } },
+      axisTick: { show: false },
       axisLabel: { color: '#8c8c8c', fontSize: 11 }
     },
     yAxis: [
       {
         type: 'value',
-        name: '请求',
-        nameTextStyle: { color: '#8c8c8c', fontSize: 11 },
-        splitLine: { lineStyle: { color: '#f0f0f0' } },
+        name: '金额',
+        nameTextStyle: axisName,
+        splitLine: { lineStyle: { color: '#f0f0f0', type: 'dashed' } },
+        axisLine: { show: false },
         axisLabel: { color: '#8c8c8c', fontSize: 11 }
       },
       {
         type: 'value',
-        name: 'USD',
-        nameTextStyle: { color: '#8c8c8c', fontSize: 11 },
+        name: '请求',
+        nameTextStyle: axisName,
         splitLine: { show: false },
+        axisLine: { show: false },
         axisLabel: { color: '#8c8c8c', fontSize: 11 }
       }
     ],
     series: [
-      {
-        name: '请求数',
-        type: 'bar',
-        barMaxWidth: 18,
-        itemStyle: { color: '#c87864', borderRadius: [3, 3, 0, 0] },
-        data: series.value.map((p) => p.requests)
-      },
-      {
-        name: '费用',
-        type: 'line',
-        yAxisIndex: 1,
-        smooth: true,
-        symbolSize: 5,
-        itemStyle: { color: '#8b5cf5' },
-        data: series.value.map((p) => Number(p.cost))
-      }
+      lineSeries('消费金额', COST, series.value.map((p) => Number(p.cost))),
+      { ...lineSeries('请求数', REQ, series.value.map((p) => p.requests)), yAxisIndex: 1 }
     ]
   }
 })
