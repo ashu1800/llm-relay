@@ -45,12 +45,23 @@ http.createServer((req, res) => {
     total++;
     if (current > peak) peak = current;
 
+    // 模型名里带 truncate 时模拟「上游中途挂掉」：
+    // 发两个分片后直接掐断 TCP 连接，不补结束标记。
+    // 用来验证中继不会把截断的回复伪装成正常结束。
+    const TRUNCATE = String(p.model || '').includes('truncate');
+
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
     const N = 4;
     const gap = Math.max(50, Math.floor(HOLD_MS / N));
     let i = 0;
     const timer = setInterval(() => {
       i++;
+      if (TRUNCATE && i > 2) {
+        clearInterval(timer);
+        current--;
+        res.socket.destroy();
+        return;
+      }
       const last = i >= N;
       const chunk = {
         id: 'slow', object: 'chat.completion.chunk', created: 0, model: p.model,

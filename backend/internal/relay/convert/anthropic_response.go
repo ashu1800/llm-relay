@@ -393,8 +393,26 @@ func (t *AnthropicStreamTranslator) emitMessageStart(chunk map[string]any) error
 	})
 }
 
+// Abort 在上游流中断时收尾：关掉未闭合的内容块，再发一个 error 事件。
+//
+// 原来中断时走的是 Close，会补上 message_delta + message_stop，
+// 客户端（Claude Code 等）据此认为回复完整 —— 截断被伪装成成功。
+func (t *AnthropicStreamTranslator) Abort(reason string) error {
+	if t.started && t.blockOpen {
+		// 内容块没关就发 error，部分客户端的状态机会卡在块内
+		_ = writeSSE(t.w, "content_block_stop", map[string]any{
+			"type": "content_block_stop", "index": t.blockIndex,
+		})
+		t.blockOpen = false
+	}
+	return writeSSE(t.w, "error", map[string]any{
+		"type":  "error",
+		"error": map[string]any{"type": "api_error", "message": reason},
+	})
+}
+
 // Close 收尾：补上 message_delta 与 message_stop。
-// 上游若在流中途断掉，这里仍会补齐事件，避免客户端一直等待。
+// 仅用于上游**正常**结束的场合；中断请走 Abort。
 func (t *AnthropicStreamTranslator) Close() error {
 	var flushErr error
 	t.splitter.flush(func(line []byte) {

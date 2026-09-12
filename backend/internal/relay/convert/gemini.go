@@ -443,8 +443,22 @@ func (t *GeminiStreamTranslator) handleChunk(payload []byte) error {
 	})
 }
 
+// Abort 在上游流中断时收尾。
+//
+// Gemini 的流式协议没有专门的错误事件，官方在 HTTP 层用 {"error":{...}} 表达失败，
+// 这里沿用同一结构。原来中断时走的是 Close，会补一个带 finishReason 的终止分片，
+// 客户端据此认为生成正常结束 —— 截断被伪装成成功。
+func (t *GeminiStreamTranslator) Abort(reason string) error {
+	return writeGeminiSSE(t.w, map[string]any{
+		"error": map[string]any{
+			"code": 502, "message": reason, "status": "UNAVAILABLE",
+		},
+	})
+}
+
 // Close 收尾并补出终止分片。
 // Gemini 客户端靠 finishReason 判断结束，缺了它会一直等。
+// 仅用于上游**正常**结束的场合；中断请走 Abort。
 func (t *GeminiStreamTranslator) Close() error {
 	var flushErr error
 	t.splitter.flush(func(line []byte) {

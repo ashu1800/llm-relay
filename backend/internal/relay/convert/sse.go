@@ -72,6 +72,22 @@ func dataPayload(line []byte) []byte {
 	return payload
 }
 
+// Aborter 由「需要区分正常收尾与异常中断」的改写器实现。
+//
+// 为什么必须区分：上游流中断时如果仍补发协议的正常结束标记，客户端会把截断的
+// 回复当成完整回复 —— 内容少了一半却没有任何错误信号，用户看到的是「模型答到
+// 一半停了」而系统显示成功。反过来什么都不发，客户端会一直等下去。
+// 所以异常收尾发的是**错误型终止事件**：既结束等待，又明确说明这次不完整。
+//
+// 同协议透传（Passthrough）不需要实现：上游的结束标记本身就没发出来，
+// 客户端靠它的缺失即可判断截断。
+type Aborter interface {
+	Abort(reason string) error
+}
+
+// StreamAbortedMessage 是上游中断时下发给客户端的说明。
+const StreamAbortedMessage = "上游连接在响应完成前中断，本次回复不完整"
+
 // writeSSE 以 Anthropic 的 event+data 形式写出一个事件。
 func writeSSE(w io.Writer, event string, payload any) error {
 	raw, err := json.Marshal(payload)

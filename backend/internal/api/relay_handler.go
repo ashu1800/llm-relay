@@ -13,6 +13,7 @@ import (
 
 	"llm-relay/internal/model"
 	"llm-relay/internal/relay"
+	"llm-relay/internal/relay/convert"
 )
 
 // listModels 返回已启用的对外模型，供客户端做模型探测。
@@ -224,6 +225,10 @@ func (s *Server) streamToClient(c *gin.Context, p *inboundProfile, req *relay.Re
 	buf := make([]byte, 32*1024)
 	firstByteMs := 0
 
+	// 上游中断、以及客户端主动断开，是两种不同的收尾，不能混为一谈
+	var streamErr error
+	clientGone := false
+
 	// 报文留存用：只留前若干字节，长流不能无限攒在内存里
 	captureLimit := s.deps.Config.Relay.PayloadMaxKB << 10
 	if captureLimit <= 0 {
@@ -248,24 +253,56 @@ func (s *Server) streamToClient(c *gin.Context, p *inboundProfile, req *relay.Re
 				streamCapture = append(streamCapture, buf[:room]...)
 			}
 			if _, writeErr := tr.Write(buf[:n]); writeErr != nil {
+				// 写不出去基本是客户端断开，不是上游的问题，不必再补错误事件
+				clientGone = true
 				break
 			}
 			c.Writer.Flush()
 		}
 		if readErr != nil {
+			// io.EOF 是上游正常收尾（例如已发出 [DONE]）；
+			// 其它错误说明连接在响应完成前断了，必须区分对待
+			if readErr != io.EOF {
+				streamErr = readErr
+			}
 			break
 		}
 	}
 
-	if err := tr.Close(); err != nil {
-		slog.Default().Warn("流式改写收尾失败", "trace_id", req.TraceID, "err", err)
+	// 上游中断时不能补发「正常结束」标记：客户端会把截断的回复当成完整回复，
+	// 用户看到的是「模型答到一半停了」而系统显示成功。
+	// 改为下发错误型终止事件，既结束等待又明确说明不完整。
+	switch {
+	case clientGone:
+		// 客户端已断开，写什么都是白费
+	case streamErr != nil:
+		reason := convert.StreamAbortedMessage
+		slog.Default().Warn("上游流中断，下发错误终止事件",
+			"trace_id", req.TraceID, "err", streamErr)
+		if ab, ok := tr.(convert.Aborter); ok {
+			if err := ab.Abort(reason); err != nil {
+				slog.Default().Warn("错误终止事件写出失败", "trace_id", req.TraceID, "err", err)
+			}
+		}
+	default:
+		if err := tr.Close(); err != nil {
+			slog.Default().Warn("流式改写收尾失败", "trace_id", req.TraceID, "err", err)
+		}
 	}
+
 	tee.Flush()
 	usage, hasUsage := tee.Usage()
 	if !hasUsage {
 		// SSE 帧带 JSON 包装，按 1/4 折算正文字符数后再估算
 		usage = relay.EstimateUsage(len(req.Body), tee.Bytes()/4)
 	}
-	s.finalizeLog(req, res, usage, att.StatusCode, "",
+
+	// 截断记进日志：状态码按失败记，否则仪表盘上看不出这次请求有问题
+	logStatus, logErr := att.StatusCode, ""
+	if streamErr != nil && !clientGone {
+		logStatus = http.StatusBadGateway
+		logErr = "上游流中断: " + streamErr.Error()
+	}
+	s.finalizeLog(req, res, usage, logStatus, logErr,
 		firstByteMs, int(time.Since(started).Milliseconds()), streamCapture, att.Headers)
 }

@@ -331,8 +331,21 @@ func (t *ResponsesStreamTranslator) emitCreated(chunk map[string]any) error {
 	})
 }
 
+// Abort 在上游流中断时收尾：发 error 事件，而不是 response.completed。
+//
+// 原来中断时走的是 Close，会补出 response.completed，
+// 客户端据此认为回复完整 —— 截断被伪装成成功。
+func (t *ResponsesStreamTranslator) Abort(reason string) error {
+	return writeSSE(t.w, "error", map[string]any{
+		"type":    "error",
+		"code":    "upstream_error",
+		"message": reason,
+		"param":   nil,
+	})
+}
+
 // Close 收尾并补出 response.completed。
-// 上游中途断开时同样会补全，避免客户端一直等待流结束。
+// 仅用于上游**正常**结束的场合；中断请走 Abort。
 func (t *ResponsesStreamTranslator) Close() error {
 	var flushErr error
 	t.splitter.flush(func(line []byte) {
