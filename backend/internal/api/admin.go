@@ -125,6 +125,18 @@ func (s *Server) createChannel(c *gin.Context) {
 			"模型商不存在: "+strconv.FormatUint(uint64(providerID), 10), "invalid_request_error")
 		return
 	}
+	// 分组限定了模型商，渠道就得跟着它：没填就继承，填了别的就是选错了分组
+	if gp, ok := s.groupProvider(p.GroupID); ok && gp != 0 {
+		switch {
+		case providerID == 0:
+			providerID = gp
+		case providerID != gp:
+			writeUpstreamError(c, http.StatusBadRequest,
+				"分组「"+s.groupNameFor(p.GroupID)+"」限定只收 "+s.providerName(gp)+
+					" 的渠道，与所选模型商 "+s.providerName(providerID)+" 不一致", "invalid_request_error")
+			return
+		}
+	}
 
 	enc, err := s.deps.Cipher.Encrypt(strings.TrimSpace(p.APIKey))
 	if err != nil {
@@ -182,6 +194,35 @@ func (s *Server) updateChannel(c *gin.Context) {
 			return
 		}
 		updates["provider_id"] = *p.ProviderID
+	}
+	// 渠道的模型商必须与所在分组一致（分组限定了模型商时）：
+	// 没填就继承分组，填了别的直接拒绝 —— 否则徽标与实际路由范围会打架。
+	// 只有真的动了分组或模型商才查这一次。
+	if p.GroupID != 0 || p.ProviderID != nil {
+		var cur model.Channel
+		if err := s.deps.Store.DB().First(&cur, id).Error; err != nil {
+			writeUpdateError(c, err)
+			return
+		}
+		effGroup := cur.GroupID
+		if p.GroupID != 0 {
+			effGroup = p.GroupID
+		}
+		effProvider := cur.ProviderID
+		if p.ProviderID != nil {
+			effProvider = *p.ProviderID
+		}
+		if gp, ok := s.groupProvider(effGroup); ok && gp != 0 {
+			switch {
+			case effProvider == 0:
+				updates["provider_id"] = gp
+			case effProvider != gp:
+				writeUpstreamError(c, http.StatusBadRequest,
+					"分组「"+s.groupNameFor(effGroup)+"」限定只收 "+s.providerName(gp)+
+						" 的渠道，与所选模型商 "+s.providerName(effProvider)+" 不一致", "invalid_request_error")
+				return
+			}
+		}
 	}
 	if p.Weight > 0 {
 		updates["weight"] = p.Weight
@@ -367,17 +408,42 @@ func (s *Server) bindChannelModel(c *gin.Context) {
 	}
 
 	db := s.deps.Store.DB()
+	var ch model.Channel
+	if err := db.First(&ch, id).Error; err != nil {
+		writeUpdateError(c, err)
+		return
+	}
+	// 分组限定了模型商：这个组里只能绑该模型商的模型
+	groupProvider, _ := s.groupProvider(ch.GroupID)
+
 	var m model.Model
 	if err := db.Where("public_name = ?", p.PublicName).First(&m).Error; err != nil {
-		if err != gorm.ErrRecordNotFound {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 			return
 		}
-		m = model.Model{PublicName: p.PublicName, ProviderID: 1, Enabled: true}
+		// 新建的模型直接归到这条渠道的模型商（分组限定的优先），
+		// 不再写死成 1（OpenAI）—— 那正是「模型商总是 OpenAI」的老毛病
+		pid := groupProvider
+		if pid == 0 {
+			pid = ch.ProviderID
+		}
+		m = model.Model{PublicName: p.PublicName, ProviderID: pid, Enabled: true}
 		if err := db.Create(&m).Error; err != nil {
 			writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 			return
 		}
+	}
+	if groupProvider != 0 && m.ProviderID != groupProvider {
+		owner := "还没有指定模型商"
+		if m.ProviderID != 0 {
+			owner = "属于 " + s.providerName(m.ProviderID)
+		}
+		writeUpstreamError(c, http.StatusBadRequest,
+			"分组「"+s.groupNameFor(ch.GroupID)+"」限定只跑 "+s.providerName(groupProvider)+
+				" 的模型，"+m.PublicName+" "+owner+"，不能绑到这个分组下的渠道",
+			"invalid_request_error")
+		return
 	}
 
 	binding := model.ChannelModel{ChannelID: id, ModelID: m.ID, UpstreamName: p.UpstreamName, Enabled: true}
@@ -427,6 +493,70 @@ func (s *Server) listGroups(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
 }
 
+// errGroupConflict 表示分组里仍有不属于目标模型商的渠道或模型，改归属被拒绝。
+type errGroupConflict struct {
+	channels []string
+	models   []string
+}
+
+func (e errGroupConflict) Error() string {
+	var parts []string
+	if len(e.channels) > 0 {
+		parts = append(parts, "渠道 "+strings.Join(e.channels, "、"))
+	}
+	if len(e.models) > 0 {
+		parts = append(parts, "模型 "+strings.Join(e.models, "、"))
+	}
+	return "分组里还有不属于该模型商的内容：" + strings.Join(parts, "；") +
+		"。先把这些渠道/模型的模型商改过来，或把它们挪到别的分组，再改分组归属，" +
+		"否则它们会直接退出路由。"
+}
+
+// providerName / groupNameFor 只用于错误提示：把编号换成人看得懂的名字。
+func (s *Server) providerName(id uint) string {
+	var p model.Provider
+	if err := s.deps.Store.DB().First(&p, id).Error; err != nil || p.Name == "" {
+		return "模型商 " + strconv.FormatUint(uint64(id), 10)
+	}
+	return p.Name
+}
+
+func (s *Server) groupNameFor(id uint) string {
+	var g model.ChannelGroup
+	if err := s.deps.Store.DB().First(&g, id).Error; err != nil || g.Name == "" {
+		return "分组 " + strconv.FormatUint(uint64(id), 10)
+	}
+	return g.Name
+}
+
+// groupProvider 取分组限定的模型商，0 表示不限；分组不存在时 found=false。
+func (s *Server) groupProvider(id uint) (uint, bool) {
+	var g model.ChannelGroup
+	if err := s.deps.Store.DB().First(&g, id).Error; err != nil {
+		return 0, false
+	}
+	return g.ProviderID, true
+}
+
+// groupConflicts 找出分组里「不属于该模型商」的渠道与模型绑定（最多各 5 个名字）。
+//
+// 改分组的模型商或把渠道挪进分组之前必须没有冲突：分组一旦限定模型商，
+// 这些渠道与模型就会被路由静默排除，用户只会看到请求突然「没有可用渠道」。
+// 所以宁可当场拒绝并点名，也不要让它在路由器里悄悄生效。
+func groupConflicts(tx *gorm.DB, groupID, providerID uint) (channels, models []string) {
+	tx.Table("channels").
+		Where("group_id = ? AND provider_id <> 0 AND provider_id <> ?", groupID, providerID).
+		Limit(5).Pluck("name", &channels)
+
+	tx.Table("channel_models").
+		Select("DISTINCT models.public_name").
+		Joins("JOIN channels ON channels.id = channel_models.channel_id").
+		Joins("JOIN models ON models.id = channel_models.model_id").
+		Where("channels.group_id = ? AND models.provider_id <> ?", groupID, providerID).
+		Limit(5).Pluck("models.public_name", &models)
+	return channels, models
+}
+
 func (s *Server) createGroup(c *gin.Context) {
 	var p model.ChannelGroup
 	if err := c.ShouldBindJSON(&p); err != nil {
@@ -435,6 +565,18 @@ func (s *Server) createGroup(c *gin.Context) {
 	}
 	if strings.TrimSpace(p.Name) == "" {
 		writeUpstreamError(c, http.StatusBadRequest, "name 必填", "invalid_request_error")
+		return
+	}
+	// 新建分组必须选模型商：分组就是「某个模型商的一组渠道」，
+	// 不选的话这个分组就没有路由范围，等于回到「所有模型都能走」的旧行为
+	if p.ProviderID == 0 {
+		writeUpstreamError(c, http.StatusBadRequest,
+			"模型商必选：分组决定只允许哪个模型商的模型走它", "invalid_request_error")
+		return
+	}
+	if !s.providerExists(p.ProviderID) {
+		writeUpstreamError(c, http.StatusBadRequest,
+			"模型商不存在: "+strconv.FormatUint(uint64(p.ProviderID), 10), "invalid_request_error")
 		return
 	}
 	if p.Strategy == "" {
@@ -468,11 +610,12 @@ func (s *Server) createGroup(c *gin.Context) {
 // 界面上开关拨过去又弹回来，看起来像「保存失败但没报错」。
 // 字符串字段同样有问题：remark 传空串清不掉。
 type groupUpdatePayload struct {
-	Name      *string `json:"name"`
-	Remark    *string `json:"remark"`
-	Strategy  *string `json:"strategy"`
-	IsDefault *bool   `json:"is_default"`
-	Enabled   *bool   `json:"enabled"`
+	Name       *string `json:"name"`
+	Remark     *string `json:"remark"`
+	Strategy   *string `json:"strategy"`
+	IsDefault  *bool   `json:"is_default"`
+	Enabled    *bool   `json:"enabled"`
+	ProviderID *uint   `json:"provider_id"`
 }
 
 func (s *Server) updateGroup(c *gin.Context) {
@@ -506,6 +649,24 @@ func (s *Server) updateGroup(c *gin.Context) {
 	if p.Enabled != nil {
 		updates["enabled"] = *p.Enabled
 	}
+	if p.ProviderID != nil {
+		if *p.ProviderID != 0 && !s.providerExists(*p.ProviderID) {
+			writeUpstreamError(c, http.StatusBadRequest,
+				"模型商不存在: "+strconv.FormatUint(uint64(*p.ProviderID), 10), "invalid_request_error")
+			return
+		}
+		// 0 只允许把「已经是 0」的分组留在不限状态（默认分组）；
+		// 已经限定了模型商的分组不能改回不限，否则限定形同虚设
+		if *p.ProviderID == 0 {
+			var cur model.ChannelGroup
+			if err := s.deps.Store.DB().First(&cur, id).Error; err == nil && cur.ProviderID != 0 {
+				writeUpstreamError(c, http.StatusBadRequest,
+					"分组已限定模型商，不能改回「不限」；要换就换成另一个模型商", "invalid_request_error")
+				return
+			}
+		}
+		updates["provider_id"] = *p.ProviderID
+	}
 	if len(updates) == 0 {
 		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
 		return
@@ -513,6 +674,14 @@ func (s *Server) updateGroup(c *gin.Context) {
 	// 把「设为默认」与「清掉其它分组的默认标记」放进同一个事务，
 	// 否则中途失败会留下两个默认分组或零个默认分组
 	err := s.deps.Store.DB().Transaction(func(tx *gorm.DB) error {
+		// 换模型商之前先确认组里没有「别的模型商」的渠道与模型：
+		// 留着它们，路由会把那些模型直接过滤掉，而界面上看不出任何异常
+		if p.ProviderID != nil && *p.ProviderID != 0 {
+			chans, mods := groupConflicts(tx, id, *p.ProviderID)
+			if len(chans) > 0 || len(mods) > 0 {
+				return errGroupConflict{channels: chans, models: mods}
+			}
+		}
 		if p.IsDefault != nil && *p.IsDefault {
 			if err := tx.Model(&model.ChannelGroup{}).
 				Where("id <> ?", id).
@@ -523,6 +692,11 @@ func (s *Server) updateGroup(c *gin.Context) {
 		return applyUpdates(tx, &model.ChannelGroup{}, id, updates)
 	})
 	if err != nil {
+		var conflict errGroupConflict
+		if errors.As(err, &conflict) {
+			writeUpstreamError(c, http.StatusConflict, conflict.Error(), "invalid_request_error")
+			return
+		}
 		writeUpdateError(c, err)
 		return
 	}

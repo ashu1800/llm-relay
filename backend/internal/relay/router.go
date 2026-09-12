@@ -76,7 +76,13 @@ func (r *Router) Candidates(ctx context.Context, q CandidateQuery) ([]Candidate,
 		Where("models.public_name = ?", q.PublicModel).
 		Where("channels.enabled = true").
 		// 停用的分组连同它的渠道一起退出候选，否则「停用分组」这个开关毫无作用
-		Where("channel_groups.enabled = true")
+		Where("channel_groups.enabled = true").
+		// 「分组 = 某个模型商的一组渠道」这条约定就在这里生效：
+		// 分组声明了模型商（provider_id <> 0）时，只有该模型商的模型能走它。
+		// 0 表示不限，默认分组与历史分组都是 0，行为与从前一致。
+		// 模型自己没指定模型商（provider_id = 0）时同样不匹配 ——
+		// 说不清归属的模型不应该混进「只跑某一家」的分组。
+		Where("channel_groups.provider_id = 0 OR channel_groups.provider_id = models.provider_id")
 
 	if q.GroupID > 0 {
 		query = query.Where("channels.group_id = ?", q.GroupID)

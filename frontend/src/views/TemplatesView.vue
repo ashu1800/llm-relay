@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { PlusOutlined, ReloadOutlined, EditOutlined, DeleteOutlined, ThunderboltOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
@@ -19,6 +19,8 @@ interface Template {
 interface Group {
   id: number
   name: string
+  /** 分组归属的模型商；0 表示不限 */
+  provider_id?: number
 }
 
 const loading = ref(false)
@@ -38,6 +40,19 @@ const applyTarget = ref<Template | null>(null)
 // 不同模型商复用，所以模型商在建渠道时选。以前这里没有这一项、后端又写死 1，
 // 用模板建的渠道一律挂着 OpenAI 徽标。
 const applyForm = reactive({ name: '', api_key: '', base_url: '', group_id: 0, weight: 1, provider_id: 0 })
+
+// 目标分组限定了模型商时，建出来的渠道必须跟着它（后端也会拒不一致的组合）
+const applyGroupProvider = computed(
+  () => groups.value.find((g) => g.id === applyForm.group_id)?.provider_id ?? 0
+)
+
+function onApplyGroupChange() {
+  if (applyGroupProvider.value) {
+    applyForm.provider_id = applyGroupProvider.value
+    return
+  }
+  applyForm.provider_id = providerStore.matchByText(applyTarget.value?.name || '')?.id ?? 0
+}
 
 // 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
 // 表格紧接着显示「暂无数据」，用户会以为模板本来就没有
@@ -116,15 +131,19 @@ function confirmDelete(row: Template) {
 // 用模板建渠道：模板只提供协议与地址，密钥必须现填，避免凭据落在模板里
 function openApply(row: Template) {
   applyTarget.value = row
+  const gid = row.group_id || (groups.value[0] ? groups.value[0].id : 0)
   Object.assign(applyForm, {
     name: row.name,
     api_key: '',
     base_url: row.base_url,
-    group_id: row.group_id || (groups.value[0] ? groups.value[0].id : 0),
+    group_id: gid,
     weight: 1,
-    // 模板是按厂商命名的（"DeepSeek 官方"），名字里认得出模型商就默认选上；
+    // 目标分组限定了模型商就跟着分组；否则按模板名认（"DeepSeek 官方"），
     // 认不出来（本地 vLLM、OpenRouter 这类）落「未指定」，不硬凑
-    provider_id: providerStore.matchByText(row.name)?.id ?? 0
+    provider_id:
+      groups.value.find((g) => g.id === gid)?.provider_id ||
+      providerStore.matchByText(row.name)?.id ||
+      0
   })
   applyOpen.value = true
 }
@@ -253,7 +272,7 @@ onMounted(load)
         <a-row :gutter="12">
           <a-col :span="12">
             <a-form-item label="分组">
-              <a-select v-model:value="applyForm.group_id">
+              <a-select v-model:value="applyForm.group_id" @change="onApplyGroupChange">
                 <a-select-option v-for="g in groups" :key="g.id" :value="g.id">{{ g.name }}</a-select-option>
               </a-select>
             </a-form-item>
@@ -265,14 +284,19 @@ onMounted(load)
           </a-col>
         </a-row>
         <a-form-item label="模型商">
-          <a-select v-model:value="applyForm.provider_id">
+          <a-select v-model:value="applyForm.provider_id" :disabled="applyGroupProvider !== 0">
             <a-select-option :value="0">未指定</a-select-option>
             <a-select-option v-for="p in providerStore.items" :key="p.id" :value="p.id">
               <ProviderTag :code="p.code" :name="p.name" />
             </a-select-option>
           </a-select>
           <div class="field-hint">
-            决定渠道列表里的模型商徽标；本地推理与聚合站这类留「未指定」即可。
+            <template v-if="applyGroupProvider">
+              跟随分组：该分组限定只跑 {{ providerStore.byId(applyGroupProvider)?.name }} 的模型。
+            </template>
+            <template v-else>
+              决定渠道列表里的模型商徽标；本地推理与聚合站这类留「未指定」即可。
+            </template>
           </div>
         </a-form-item>
       </a-form>

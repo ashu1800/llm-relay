@@ -32,6 +32,8 @@ export interface ChannelGroup {
   strategy: string
   is_default: boolean
   enabled: boolean
+  /** 分组归属的模型商；0 表示不限（默认分组与历史数据） */
+  provider_id: number
 }
 
 export interface ModelItem {

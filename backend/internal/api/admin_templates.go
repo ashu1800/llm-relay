@@ -300,6 +300,18 @@ func (s *Server) applyTemplate(c *gin.Context) {
 			"模型商不存在: "+strconv.FormatUint(uint64(providerID), 10), "invalid_request_error")
 		return
 	}
+	// 目标分组限定了模型商：模板建的渠道同样跟随分组
+	if gp, ok := s.groupProvider(groupID); ok && gp != 0 {
+		switch {
+		case providerID == 0:
+			providerID = gp
+		case providerID != gp:
+			writeUpstreamError(c, http.StatusBadRequest,
+				"分组「"+s.groupNameFor(groupID)+"」限定只收 "+s.providerName(gp)+
+					" 的渠道，与所选模型商 "+s.providerName(providerID)+" 不一致", "invalid_request_error")
+			return
+		}
+	}
 
 	ch := model.Channel{
 		Name: name, GroupID: groupID, ProviderID: providerID,

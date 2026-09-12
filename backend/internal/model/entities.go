@@ -43,15 +43,25 @@ type Provider struct {
 }
 
 // ChannelGroup 渠道分组，决定一组渠道的路由策略。
+//
+// ProviderID 是这个分组归属的模型商：组内只允许该模型商的模型参与路由
+// （路由查询里按它过滤，见 relay/router.go）。0 表示不限，
+// 只有默认分组与历史数据会是 0，新建分组时必填。
+//
+// 这里的 default:0 是刻意保留的，与 Channel.ProviderID 不同：
+// 新增一个 not null 列时，Postgres 需要默认值才能给已有行补上（否则 ALTER 直接失败），
+// 而 0 恰好等于「GORM 省略零值后落库」的结果，不会出现渠道那边
+// 「想存 0 却存成 1」的问题。
 type ChannelGroup struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	Name      string    `gorm:"size:64;uniqueIndex;not null" json:"name"`
-	Remark    string    `gorm:"size:255" json:"remark"`
-	Strategy  string    `gorm:"size:32;not null;default:weighted" json:"strategy"`
-	IsDefault bool      `gorm:"not null;default:false" json:"is_default"`
-	Enabled   bool      `gorm:"not null;default:true" json:"enabled"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	Name       string    `gorm:"size:64;uniqueIndex;not null" json:"name"`
+	Remark     string    `gorm:"size:255" json:"remark"`
+	Strategy   string    `gorm:"size:32;not null;default:weighted" json:"strategy"`
+	IsDefault  bool      `gorm:"not null;default:false" json:"is_default"`
+	Enabled    bool      `gorm:"not null;default:true" json:"enabled"`
+	ProviderID uint      `gorm:"index;not null;default:0" json:"provider_id"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // Channel 上游渠道。APIKeyEnc 存放 AES-GCM 密文，不随 JSON 输出。

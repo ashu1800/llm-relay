@@ -19,6 +19,10 @@ const saving = ref(false)
 
 const bindOpen = ref(false)
 const bindChannel = ref<Channel | null>(null)
+// 正在绑定的渠道所属分组限定的模型商（0 = 不限）
+const bindGroupProvider = computed(
+  () => groups.value.find((g) => g.id === bindChannel.value?.group_id)?.provider_id ?? 0
+)
 const bindings = ref<ChannelBinding[]>([])
 const bindForm = reactive({ public_name: '', upstream_name: '' })
 
@@ -50,7 +54,18 @@ function defaultProviderID(groupID: number): number {
   return providerStore.matchByText(groupName(groupID))?.id ?? 0
 }
 
+// 分组限定了模型商时，渠道必须跟着它 —— 分组的模型商就是这个组的路由范围，
+// 渠道自己填一个不一样的只会让徽标和实际能跑的模型对不上。
+// 后端同样会拒（分组与渠道模型商不一致时返回 400），这里先一步做在界面上。
+const groupProviderID = computed(
+  () => groups.value.find((g) => g.id === form.group_id)?.provider_id ?? 0
+)
+
 function onGroupChange() {
+  if (groupProviderID.value) {
+    form.provider_id = groupProviderID.value
+    return
+  }
   if (providerTouched.value) return
   form.provider_id = defaultProviderID(form.group_id)
 }
@@ -93,7 +108,7 @@ function openCreate() {
     base_url: '',
     api_key: '',
     group_id: gid,
-    provider_id: defaultProviderID(gid),
+    provider_id: groups.value.find((g) => g.id === gid)?.provider_id || defaultProviderID(gid),
     weight: 1,
     enabled: true
   })
@@ -310,14 +325,23 @@ onMounted(load)
           </a-select>
         </a-form-item>
         <a-form-item label="模型商">
-          <a-select v-model:value="form.provider_id" @change="providerTouched = true">
+          <a-select
+            v-model:value="form.provider_id"
+            :disabled="groupProviderID !== 0"
+            @change="providerTouched = true"
+          >
             <a-select-option :value="0">未指定</a-select-option>
             <a-select-option v-for="p in providerStore.items" :key="p.id" :value="p.id">
               <ProviderTag :code="p.code" :name="p.name" />
             </a-select-option>
           </a-select>
           <div class="field-hint">
-            只决定渠道名称下方的模型商徽标；聚合站这类不专属于某家的渠道留「未指定」即可。
+            <template v-if="groupProviderID">
+              跟随分组：该分组限定只跑 {{ providerStore.byId(groupProviderID)?.name }} 的模型。
+            </template>
+            <template v-else>
+              只决定渠道名称下方的模型商徽标；聚合站这类不专属于某家的渠道留「未指定」即可。
+            </template>
           </div>
         </a-form-item>
         <a-row :gutter="8">
@@ -339,6 +363,12 @@ onMounted(load)
       <a-space direction="vertical" style="width: 100%" :size="12">
         <a-card size="small" title="新增绑定">
           <a-space direction="vertical" style="width: 100%">
+            <a-alert
+              v-if="bindGroupProvider"
+              type="info"
+              show-icon
+              :message="'该渠道所在分组限定只跑 ' + providerStore.byId(bindGroupProvider)?.name + ' 的模型，绑定其它模型商的模型会被拒绝。'"
+            />
             <a-input v-model:value="bindForm.public_name" placeholder="对外模型名，例如 deepseek-v4-flash" />
             <a-input v-model:value="bindForm.upstream_name" placeholder="上游原生模型名（留空则同上）" />
             <a-button type="primary" block @click="addBinding"><PlusOutlined /> 绑定</a-button>

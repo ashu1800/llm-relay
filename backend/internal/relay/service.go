@@ -142,6 +142,59 @@ func (req *RelayRequest) noChannelReason() string {
 	return "模型 " + req.PublicModel
 }
 
+// groupScopeHint 在「没有可用渠道」时补一句分组限定的模型商。
+//
+// 这层过滤在界面上看不出来：模型明明绑好了、渠道也是启用的，请求却直接没有候选。
+// 不解释的话只能看到「没有可用渠道」，而真正的原因是模型不属于这个分组。
+// 只在请求已经失败时查库，正常路径不受影响。
+func (s *Service) groupScopeHint(ctx context.Context, req *RelayRequest) string {
+	ids := req.AllowedGroups
+	if req.GroupID > 0 {
+		if len(ids) == 0 {
+			ids = []uint{req.GroupID}
+		} else {
+			// 显式分组与密钥白名单是「与」的关系，只有同时命中的分组才可能被用到
+			kept := make([]uint, 0, len(ids))
+			for _, g := range ids {
+				if g == req.GroupID {
+					kept = append(kept, g)
+				}
+			}
+			if len(kept) == 0 {
+				return "" // 交集为空，原因不在模型商限定上
+			}
+			ids = kept
+		}
+	}
+	if len(ids) == 0 {
+		return ""
+	}
+	db := s.router.db.WithContext(ctx)
+
+	var groups []model.ChannelGroup
+	if err := db.Where("id IN ?", ids).Find(&groups).Error; err != nil || len(groups) == 0 {
+		return ""
+	}
+	var m model.Model
+	if err := db.Where("public_name = ?", req.PublicModel).First(&m).Error; err != nil {
+		return ""
+	}
+	// 只要还有分组能装下这个模型，原因就不在分组限定上
+	var scoped []string
+	for _, g := range groups {
+		if g.ProviderID == 0 || g.ProviderID == m.ProviderID {
+			return ""
+		}
+		scoped = append(scoped, g.Name)
+	}
+	var p model.Provider
+	owner := "未指定模型商"
+	if err := db.First(&p, m.ProviderID).Error; err == nil && p.Name != "" {
+		owner = p.Name
+	}
+	return "；分组「" + strings.Join(scoped, "、") + "」限定了模型商，而 " + req.PublicModel + " 属于 " + owner
+}
+
 // Relay 执行转发，按候选顺序做故障转移。
 func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, error) {
 	started := time.Now()
@@ -166,7 +219,7 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 		}
 		if len(cands) == 0 {
 			if attemptNo == 0 {
-				return nil, fmt.Errorf("%w: %s", ErrNoChannel, req.noChannelReason())
+				return nil, fmt.Errorf("%w: %s", ErrNoChannel, req.noChannelReason()+s.groupScopeHint(ctx, req))
 			}
 			break
 		}
