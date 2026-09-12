@@ -27,6 +27,8 @@ type Deps struct {
 	// 限流与并发控制
 	RateLimiter *relay.RateLimiter
 	Gate        *relay.ConcurrencyGate
+	// GroupLimit 是分组级的每分钟额度，与密钥级限流是两套独立的口子
+	GroupLimit *relay.GroupLimiter
 }
 
 // Server 持有 HTTP 层状态。

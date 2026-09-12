@@ -4,6 +4,7 @@ import { InputNumber, message, Modal } from 'ant-design-vue'
 import { PlusOutlined, ReloadOutlined, DeleteOutlined, CopyOutlined, EditOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
+import GroupTag from '@/components/GroupTag.vue'
 import type { APIKey, ChannelGroup } from '@/api/types'
 
 const loading = ref(false)
@@ -44,6 +45,11 @@ async function load() {
 }
 
 // 分组白名单的候选项：用分组名作为值，用户也可以自己输入别的值
+/** 按分组名取颜色：密钥白名单存的是名字，不是 ID */
+function groupColorByName(name: string) {
+  return groups.value.find((g) => g.name === name)?.color
+}
+
 async function loadGroups() {
   try {
     const res = await api.get<{ items: ChannelGroup[] }>('/groups')
@@ -240,10 +246,19 @@ onMounted(() => {
             <span v-else>{{ whitelistText(record.allowed_models) }}</span>
           </template>
         </a-table-column>
-        <a-table-column title="分组白名单" :width="140" ellipsis>
+        <a-table-column title="分组白名单" :width="180" ellipsis>
           <template #default="{ record }">
-            <span v-if="whitelistText(record.allowed_groups) === '不限'" class="muted">不限</span>
-            <span v-else>{{ whitelistText(record.allowed_groups) }}</span>
+            <span v-if="!(record.allowed_groups || []).length" class="muted">不限</span>
+            <span v-else class="group-tag-list">
+              <!-- 白名单存的是分组名，颜色要去分组表里按名字取，
+                   与分组管理、渠道列表用的是同一份颜色 -->
+              <GroupTag
+                v-for="g in record.allowed_groups"
+                :key="g"
+                :name="g"
+                :color="groupColorByName(g)"
+              />
+            </span>
           </template>
         </a-table-column>
         <a-table-column title="最后使用" :width="150">
@@ -332,6 +347,7 @@ onMounted(() => {
 .toolbar-spacer { flex: 1; }
 .toolbar-hint { color: var(--color-text-secondary); font-size: 13px; }
 .muted { color: var(--color-text-secondary); }
+.group-tag-list { display: inline-flex; flex-wrap: wrap; gap: 4px; }
 .danger-link { color: var(--color-red); }
 .key-box {
   display: flex;

@@ -23,6 +23,23 @@ type Usage struct {
 	Estimated           bool `json:"estimated"`
 }
 
+// BillableTokens 返回本次请求应计入配额的 token 总数（分组 TPM 记账用）。
+//
+// 口径与落库的 total_tokens 一致：上游明确给了总数就用它，
+// 否则按「非缓存输入 + 输出（+ 缓存）」累加。单独抽出来是为了让
+// 「TPM 记的是哪个数」只有一处定义，改口径时不会漏。
+func (u Usage) BillableTokens() int {
+	if u.TotalTokens > 0 {
+		return u.TotalTokens
+	}
+	total := u.PromptTokens + u.CompletionTokens + u.CachedTokens + u.CacheCreationTokens
+	if total == 0 {
+		// 有些上游只报 reasoning_tokens，至少别把它漏掉
+		total = u.ReasoningTokens
+	}
+	return total
+}
+
 // CacheHitRate 返回缓存命中率，分母为总输入 token。
 func (u Usage) CacheHitRate() float64 {
 	denom := u.PromptTokens + u.CachedTokens

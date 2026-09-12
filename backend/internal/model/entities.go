@@ -36,12 +36,24 @@ const (
 // 「这个分组能用哪些模型」不由分组自己声明，而由组内渠道的模型白名单决定
 // （见 ChannelModel）。分组只回答「走哪批渠道、按什么策略排序、密钥能不能用它」。
 type ChannelGroup struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	Name      string    `gorm:"size:64;uniqueIndex;not null" json:"name"`
-	Remark    string    `gorm:"size:255" json:"remark"`
-	Strategy  string    `gorm:"size:32;not null;default:weighted" json:"strategy"`
-	IsDefault bool      `gorm:"not null;default:false" json:"is_default"`
-	Enabled   bool      `gorm:"not null" json:"enabled"`
+	ID        uint   `gorm:"primaryKey" json:"id"`
+	Name      string `gorm:"size:64;uniqueIndex;not null" json:"name"`
+	Remark    string `gorm:"size:255" json:"remark"`
+	Strategy  string `gorm:"size:32;not null;default:weighted" json:"strategy"`
+	IsDefault bool   `gorm:"not null;default:false" json:"is_default"`
+	Enabled   bool   `gorm:"not null" json:"enabled"`
+	// Color 是分组在界面上的胶囊颜色（#rgb / #rrggbb）。
+	// 空值表示按分组名派生一个稳定颜色（见前端 utils/groupStyle.ts）——
+	// 不强制每个人都去挑颜色，但挑过就必须全站一致地用它。
+	Color string `gorm:"size:32" json:"color"`
+	// RPM / TPM 是这个分组整体的每分钟请求数 / token 数上限，0 表示不限制。
+	// 语义见 relay.GroupLimiter：RPM 统计发往上游的请求（含重试），
+	// TPM 统计上游回报的实际 token 数。
+	//
+	// 这两个列有 default 标签，AutoMigrate 给已有数据的表加列时会带上
+	// DEFAULT 0，因此不会像 multiplier 那样在升级时把应用卡死。
+	RPM       int       `gorm:"not null;default:0" json:"rpm"`
+	TPM       int       `gorm:"not null;default:0" json:"tpm"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

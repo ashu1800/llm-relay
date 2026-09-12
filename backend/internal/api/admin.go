@@ -612,6 +612,42 @@ type groupCreatePayload struct {
 	Strategy  string `json:"strategy"`
 	IsDefault bool   `json:"is_default"`
 	Enabled   *bool  `json:"enabled"`
+	Color     string `json:"color"`
+	RPM       int    `json:"rpm"`
+	TPM       int    `json:"tpm"`
+}
+
+// normalizeGroupColor 校验并归一化分组颜色。
+//
+// 只接受 #rgb / #rrggbb：这个值会被前端直接写进内联样式，
+// 放开格式就等于给「把任意字符串塞进 style」留了口子。
+// 空串是合法的，表示「按分组名派生一个颜色」。
+func normalizeGroupColor(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", nil
+	}
+	if !strings.HasPrefix(s, "#") {
+		return "", errors.New("颜色要写成 #rgb 或 #rrggbb")
+	}
+	hex := s[1:]
+	if len(hex) != 3 && len(hex) != 6 {
+		return "", errors.New("颜色要写成 #rgb 或 #rrggbb")
+	}
+	for _, c := range hex {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+			return "", errors.New("颜色里只能出现 0-9 与 a-f")
+		}
+	}
+	return strings.ToLower(s), nil
+}
+
+// validateGroupQuota 校验分组的每分钟额度。0 表示不限制，负值没有意义。
+func validateGroupQuota(rpm, tpm int) error {
+	if rpm < 0 || tpm < 0 {
+		return errors.New("rpm / tpm 不能为负数（0 表示不限制）")
+	}
+	return nil
 }
 
 func (s *Server) createGroup(c *gin.Context) {
@@ -632,14 +668,24 @@ func (s *Server) createGroup(c *gin.Context) {
 	if p.Enabled != nil {
 		enabled = *p.Enabled
 	}
+	color, err := normalizeGroupColor(p.Color)
+	if err != nil {
+		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
+	}
+	if err := validateGroupQuota(p.RPM, p.TPM); err != nil {
+		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
+	}
 	gr := model.ChannelGroup{
 		Name: strings.TrimSpace(p.Name), Remark: p.Remark,
 		Strategy: strategy, IsDefault: p.IsDefault, Enabled: enabled,
+		Color: color, RPM: p.RPM, TPM: p.TPM,
 	}
 	db := s.deps.Store.DB()
 	// 默认分组只能有一个：strategyFor(0) 取的是第一条 is_default=true 的记录，
 	// 存在多个时选中哪个完全看返回顺序，行为不可预期。
-	err := db.Transaction(func(tx *gorm.DB) error {
+	err = db.Transaction(func(tx *gorm.DB) error {
 		if gr.IsDefault {
 			if err := tx.Model(&model.ChannelGroup{}).
 				Where("is_default = ?", true).
@@ -668,6 +714,11 @@ type groupUpdatePayload struct {
 	Strategy  *string `json:"strategy"`
 	IsDefault *bool   `json:"is_default"`
 	Enabled   *bool   `json:"enabled"`
+	// Color / RPM / TPM 同样必须是指针：0 与「没传」要能分开
+	// （把 RPM 从 10 改回 0 = 取消限制，是常见操作）
+	Color *string `json:"color"`
+	RPM   *int    `json:"rpm"`
+	TPM   *int    `json:"tpm"`
 }
 
 func (s *Server) updateGroup(c *gin.Context) {
@@ -700,6 +751,36 @@ func (s *Server) updateGroup(c *gin.Context) {
 	}
 	if p.Enabled != nil {
 		updates["enabled"] = *p.Enabled
+	}
+	if p.Color != nil {
+		color, err := normalizeGroupColor(*p.Color)
+		if err != nil {
+			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+			return
+		}
+		// 显式传空串表示「恢复自动配色」，所以这里要能写进去
+		updates["color"] = color
+	}
+	if p.RPM != nil || p.TPM != nil {
+		// 只改其中一个时，另一个按当前值参与校验，免得单独改 TPM 被当成 rpm=0
+		var cur model.ChannelGroup
+		if err := s.deps.Store.DB().First(&cur, id).Error; err != nil {
+			writeUpstreamError(c, http.StatusNotFound, "分组不存在", "not_found_error")
+			return
+		}
+		rpm, tpm := cur.RPM, cur.TPM
+		if p.RPM != nil {
+			rpm = *p.RPM
+		}
+		if p.TPM != nil {
+			tpm = *p.TPM
+		}
+		if err := validateGroupQuota(rpm, tpm); err != nil {
+			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+			return
+		}
+		updates["rpm"] = rpm
+		updates["tpm"] = tpm
 	}
 	if len(updates) == 0 {
 		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
@@ -742,6 +823,11 @@ func (s *Server) deleteGroup(c *gin.Context) {
 	if count > 0 {
 		writeUpstreamError(c, http.StatusConflict, "该分组下仍有渠道，请先迁移", "invalid_request_error")
 		return
+	}
+	if s.deps.GroupLimit != nil {
+		// 连同限流窗口一起删掉：分组没了，它的每分钟计数没有任何意义，
+		// 留着只会在内存里慢慢堆积（而且 id 复用的话会把旧计数带给新分组）
+		s.deps.GroupLimit.Reset(id)
 	}
 	deleteByID(c, db, &model.ChannelGroup{}, id, "分组不存在")
 }

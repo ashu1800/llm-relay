@@ -25,6 +25,10 @@ type Candidate struct {
 	// Saturated 表示该渠道的在途请求已达自身上限。它只是被排到后面，
 	// 不出局——全部渠道都饱和时仍然要能发出去。
 	Saturated bool
+	// GroupRPM / GroupTPM 是所属分组的每分钟额度（0 = 不限制）。
+	// 路由时一并取出来，省得为每个候选再查一次分组表。
+	GroupRPM int
+	GroupTPM int
 }
 
 // Router 负责按分组与模型挑选渠道，并给出故障转移顺序。
@@ -65,6 +69,8 @@ func (r *Router) Candidates(ctx context.Context, q CandidateQuery) ([]Candidate,
 		PublicName   string
 		UpstreamName string
 		BindingID    uint
+		GroupRPM     int
+		GroupTPM     int
 	}
 
 	var rows []row
@@ -74,7 +80,7 @@ func (r *Router) Candidates(ctx context.Context, q CandidateQuery) ([]Candidate,
 	// 「没有可用渠道」，而界面上两处看起来都是配好的。
 	query := r.db.WithContext(ctx).
 		Table("channels").
-		Select("channels.*, channel_models.public_name AS public_name, channel_models.upstream_name AS upstream_name, channel_models.id AS binding_id").
+		Select("channels.*, channel_models.public_name AS public_name, channel_models.upstream_name AS upstream_name, channel_models.id AS binding_id, channel_groups.rpm AS group_rpm, channel_groups.tpm AS group_tpm").
 		Joins("JOIN channel_models ON channel_models.channel_id = channels.id AND channel_models.enabled = true").
 		Joins("JOIN channel_groups ON channel_groups.id = channels.group_id").
 		Where("channel_models.public_name = ?", q.PublicModel).
@@ -115,6 +121,8 @@ func (r *Router) Candidates(ctx context.Context, q CandidateQuery) ([]Candidate,
 			Binding:   model.ChannelModel{ID: rw.BindingID, ChannelID: rw.ID, PublicName: rw.PublicName, UpstreamName: rw.UpstreamName, Enabled: true},
 			Available: SlotAvailable(rw.Slots, now),
 			Saturated: maxConc > 0 && r.state.Inflight(rw.ID) >= maxConc,
+			GroupRPM:  rw.GroupRPM,
+			GroupTPM:  rw.GroupTPM,
 		}
 		if plain, err := r.cipher.Decrypt(rw.APIKeyEnc); err == nil {
 			c.APIKeyPlain = plain

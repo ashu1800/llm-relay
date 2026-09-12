@@ -46,6 +46,12 @@ export interface ChannelGroup {
   strategy: string
   is_default: boolean
   enabled: boolean
+  /** 胶囊颜色（#rrggbb）；空表示按分组名自动配色 */
+  color: string
+  /** 每分钟请求数上限，0 = 不限制 */
+  rpm: number
+  /** 每分钟 token 数上限，0 = 不限制 */
+  tpm: number
 }
 
 /** 渠道的模型白名单条目：对外名 → 上游名（留空则同名） */

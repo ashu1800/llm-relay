@@ -81,6 +81,11 @@ func run() error {
 		InjectStreamUsage: true,
 	}, logger)
 	svc.SetChannelState(state)
+	// 分组级每分钟额度：分组上配的 RPM / TPM 由它生效。
+	// 与密钥级限流（RateLimiter）是两套独立的口子：前者保护上游，
+	// 后者约束单把密钥，两者都不配就是不限制。
+	groupLimit := relay.NewGroupLimiter()
+	svc.SetGroupLimiter(groupLimit)
 	gate := relay.NewConcurrencyGate(cfg.Relay.MaxConcurrency)
 	rateLimiter := relay.NewRateLimiter()
 	logs := relay.NewLogWriter(st.DB(), 2048, logger)
@@ -107,6 +112,7 @@ func run() error {
 
 		RateLimiter: rateLimiter,
 		Gate:        gate,
+		GroupLimit:  groupLimit,
 		// 渠道运行期状态（冷却 / 在途）由 Router 与 Service 自己持有，
 		// 不经过 HTTP 层：原来这里的 State 字段没有任何读取方，
 		// 是路由分析页留下的最后一点残留

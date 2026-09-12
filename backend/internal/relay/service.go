@@ -41,10 +41,16 @@ type Service struct {
 	opts   Options
 	logger *slog.Logger
 	state  *ChannelState
+	// groupLimit 是分组级的每分钟额度（分组上配的 RPM / TPM）。
+	// 为零值时 Check 直接放行，所以未注入也能正常工作。
+	groupLimit *GroupLimiter
 }
 
 // SetChannelState 注入渠道运行期状态，用于并发闸门与冷却。
 func (s *Service) SetChannelState(st *ChannelState) { s.state = st }
+
+// SetGroupLimiter 注入分组限流器。不注入时分组限额不生效（等价于全部不限）。
+func (s *Service) SetGroupLimiter(l *GroupLimiter) { s.groupLimit = l }
 
 // NewService 构造转发服务。
 func NewService(db *gorm.DB, router *Router, opts Options, logger *slog.Logger) *Service {
@@ -123,6 +129,13 @@ type AttemptTrail struct {
 // ErrNoChannel 表示该模型当前没有可用渠道。
 var ErrNoChannel = errors.New("没有可用的渠道")
 
+// ErrGroupLimited 表示候选渠道都在已达每分钟额度的分组里。
+//
+// 与 ErrNoChannel 分开是必须的：两者的处理方式完全不同 ——
+// 「没有可用渠道」要用户去配渠道，「分组超限」是过一会儿重试就好，
+// 混成一个错误会让用户跑去改一个根本没配错的配置。
+var ErrGroupLimited = errors.New("分组已达每分钟额度")
+
 // noChannelReason 说明为什么没有可用渠道。
 //
 // 特意把「被密钥白名单挡住」讲清楚：否则从「没有可用的渠道: 模型 xxx」
@@ -194,7 +207,31 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 		if err != nil {
 			return nil, err
 		}
+		// 分组限额：把已达每分钟上限的分组这一轮剔掉。
+		//
+		// 必须在这里做，而不是在入口中间件里按密钥的分组白名单做：
+		// 一个密钥可能允许好几个分组，只有选到具体候选才知道这次要走哪个分组。
+		// 也正因为如此，被剔掉的候选不写进 tried —— 下一个重试轮次还要能重新考虑它
+		// （限额是按分钟算的，跨过窗口边界就该恢复）。
+		limitedReason := ""
+		for len(cands) > 0 {
+			ok, reason := s.groupLimit.Check(cands[0].Channel.GroupID, cands[0].GroupRPM, cands[0].GroupTPM, time.Now())
+			if ok {
+				break
+			}
+			limitedReason = reason
+			cands = cands[1:]
+		}
 		if len(cands) == 0 {
+			if limitedReason != "" {
+				if attemptNo == 0 {
+					return nil, fmt.Errorf("%w: %s", ErrGroupLimited, limitedReason)
+				}
+				// 重试途中撞上分组额度：剩下的候选多半也在同一个分组里，
+				// 继续重试只是重复撞墙。跳出循环，把真实的上游错误交给调用方
+				// （直接返回 ErrGroupLimited 会把上游到底报了什么给吞掉）
+				break
+			}
 			if attemptNo == 0 {
 				return nil, fmt.Errorf("%w: %s", ErrNoChannel, req.noChannelReason()+s.availableModelsHint(ctx, req))
 			}
@@ -203,6 +240,8 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 
 		cand := cands[0]
 		tried = append(tried, cand.Channel.ID)
+		// 计数放在「确定要发」这一刻：RPM 统计的是发往上游的请求数，重试也计入
+		s.groupLimit.Record(cand.Channel.GroupID, time.Now())
 
 		acquired := s.state.AcquireWait(ctx, cand.Channel.ID,
 			ChannelMaxConcurrency(cand.Channel.ExtraConfig), channelSlotWait)

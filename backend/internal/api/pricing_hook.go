@@ -16,6 +16,11 @@ func (s *Server) finalizeLog(req *relay.RelayRequest, res *relay.RelayResult, us
 	respBody []byte, respHeader http.Header,
 ) {
 	entry := relay.BuildLog(req, res, usage, status, errMsg, firstByteMs, totalMs)
+	// 分组 TPM 记账：只认上游回报的实际用量（usage.Estimated 为真时是按报文长度
+	// 估的，也一并计入 —— 估出来的值同样代表消耗，不计反而会让限制失效）
+	if s.deps.GroupLimit != nil && entry.GroupID > 0 {
+		s.deps.GroupLimit.AddTokens(entry.GroupID, usage.BillableTokens(), time.Now())
+	}
 	if s.deps.Pricing != nil && entry.ModelRequested != "" {
 		// 必须用**服务器本地时间**：时段倍率（如工作日 9:00-12:00 双倍）
 		// 是按用户看到的钟点填的，传 UTC 会让窗口整体偏 8 小时

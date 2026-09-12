@@ -113,7 +113,13 @@ cleanup()
 
 print("=== 准备：两个分组各一个渠道，同一模型都绑上 ===")
 _, gs = call("GET", "/groups")
-default_gid = [g["id"] for g in gs["items"] if g.get("is_default")][0]
+# 白名单里要写**实际默认分组的名字**，不能写死 "默认分组"：
+# 默认分组是用户可以在界面上改的（实测把它改成 DeepSeek 之后，
+# 这条用例就以 502 失败，看起来像路由坏了，实际是探针假设过时了）。
+# 名字与 id 必须来自同一行记录，否则渠道建在 A 分组、白名单指向 B 分组。
+default_group = [g for g in gs["items"] if g.get("is_default")][0]
+default_gid = default_group["id"]
+default_name = default_group["name"]
 _, gb = call("POST", "/groups", {"name": GROUP_B, "strategy": "weighted"})
 gb_id = gb["id"]
 # 两个分组各建一个测试渠道，都指向同一个可控上游。
@@ -130,14 +136,14 @@ _, cb = call("POST", "/channels", {
     "group_id": gb_id, "weight": 100,
 })
 ca_id, cb_id = ca["id"], cb["id"]
-print("  默认分组 %d -> 渠道 %s(id=%d)" % (default_gid, CHAN_A, ca_id))
+print("  默认分组 %s(%d) -> 渠道 %s(id=%d)" % (default_name, default_gid, CHAN_A, ca_id))
 print("  分组B   %d -> 渠道 %s(id=%d)" % (gb_id, CHAN_B, cb_id))
 
 for cid in (ca_id, cb_id):
     call("POST", "/channels/%d/models" % cid,
          {"public_name": MODEL, "upstream_name": MODEL})
 
-_, a = call("POST", "/keys", {"name": "k-default", "allowed_groups": ["默认分组"]})
+_, a = call("POST", "/keys", {"name": "k-default", "allowed_groups": [default_name]})
 tok_default = a["key"]
 _, b = call("POST", "/keys", {"name": "k-groupb", "allowed_groups": [GROUP_B]})
 tok_groupb = b["key"]

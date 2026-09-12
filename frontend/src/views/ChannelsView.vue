@@ -5,6 +5,7 @@ import { PlusOutlined, ReloadOutlined, DeleteOutlined, EditOutlined, LinkOutline
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import ModelWhitelistEditor, { type WhitelistRow } from '@/components/ModelWhitelistEditor.vue'
+import GroupTag from '@/components/GroupTag.vue'
 import { PROTOCOLS, type Channel, type ChannelGroup, type ChannelBinding } from '@/api/types'
 
 type ChannelRow = Channel & { models?: string[]; model_count?: number }
@@ -40,6 +41,11 @@ const title = computed(() => (editing.value ? '编辑渠道' : '新建渠道'))
 // 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
 // 表格紧接着显示「暂无数据」，用户会以为本来就没有渠道
 const loadError = ref('')
+
+/** 按分组 ID 取分组对象，用于渲染分组胶囊（颜色随分组配置） */
+function groupOf(id: number) {
+  return groups.value.find((g) => g.id === id)
+}
 
 async function load() {
   loading.value = true
@@ -308,9 +314,14 @@ onMounted(load)
           <template #default="{ record }">{{ protocolLabel(record.protocol) }}</template>
         </a-table-column>
         <a-table-column title="地址" data-index="base_url" :width="174" ellipsis />
-        <a-table-column title="分组" :width="90">
+        <a-table-column title="分组" :width="110">
           <template #default="{ record }">
-            {{ groups.find((g) => g.id === record.group_id)?.name ?? record.group_id }}
+            <!-- 分组名用全站统一的胶囊：颜色与分组管理里配的一致，
+                 这样「渠道属于哪个分组」在列表里一眼能认出来 -->
+            <GroupTag
+              :name="groupOf(record.group_id)?.name ?? String(record.group_id)"
+              :color="groupOf(record.group_id)?.color"
+            />
           </template>
         </a-table-column>
         <a-table-column title="权重" data-index="weight" :width="58" />

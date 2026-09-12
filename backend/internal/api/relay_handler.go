@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -201,8 +202,18 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 	defer res.ReleaseSlot()
 	if relayErr != nil {
 		totalMs := int(time.Since(started).Milliseconds())
-		p.writeError(c, http.StatusBadGateway, relayErr.Error(), "upstream_error")
-		s.finalizeLog(req, res, relay.Usage{}, http.StatusBadGateway, relayErr.Error(), 0, totalMs, nil, nil)
+		// 分组超限要回 429 而不是 502：502 会让客户端以为上游坏了而重试，
+		// 而这里恰恰是「你现在不该重试」。带上 Retry-After 说明等多久。
+		//
+		// 只认 ErrGroupLimited / ErrNoChannel 这种明确的语义错误，
+		// 其余（上游不可达等）仍然是 502。
+		status, errType := http.StatusBadGateway, "upstream_error"
+		if errors.Is(relayErr, relay.ErrGroupLimited) {
+			status, errType = http.StatusTooManyRequests, "rate_limit_error"
+			c.Header("Retry-After", "60")
+		}
+		p.writeError(c, status, relayErr.Error(), errType)
+		s.finalizeLog(req, res, relay.Usage{}, status, relayErr.Error(), 0, totalMs, nil, nil)
 		return
 	}
 

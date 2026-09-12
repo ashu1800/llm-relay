@@ -18,6 +18,8 @@
 // 各个模型的文字对比度因此天然一致；换成 hsl 的话黄色会比蓝色亮一大截，
 // 就没法用同一个 L 保证所有模型都达标。
 
+import { hash32 } from './hash'
+
 export interface ModelStyle {
   /** 展示名：就是模型名本身，不做缩写 */
   label: string
@@ -25,27 +27,6 @@ export interface ModelStyle {
   hue: number
   /** oklch 彩度；0 表示中性灰（拿不到模型名时用） */
   chroma: number
-}
-
-// FNV-1a 打底，再过一遍 murmur3 的 fmix32 收尾。
-//
-// 两层都不能省：日志里的模型名高度相似（no-such-model-tz /
-// no-such-model-filter / slow-concurrency-test 这类探针名字只差几个字符），
-// 「h = h*31 + c」那种弱散列会让它们全撞到同一个色相；
-// 而 FNV 单独用也不够 —— 它的低位对短串混合不足，取模前不过 fmix
-// 同样会出现成对的同色。
-function hash32(s: string): number {
-  let h = 0x811c9dc5
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i)
-    h = Math.imul(h, 0x01000193)
-  }
-  h ^= h >>> 16
-  h = Math.imul(h, 0x85ebca6b)
-  h ^= h >>> 13
-  h = Math.imul(h, 0xc2b2ae35)
-  h ^= h >>> 16
-  return h >>> 0
 }
 
 /** 未知模型的彩度：看得出色相，又不至于溢出 sRGB 色域 */
