@@ -424,11 +424,38 @@ func (s *Server) createGroup(c *gin.Context) {
 		p.Strategy = model.StrategyWeighted
 	}
 	p.ID = 0
-	if err := s.deps.Store.DB().Create(&p).Error; err != nil {
+	db := s.deps.Store.DB()
+	// 默认分组只能有一个：strategyFor(0) 取的是第一条 is_default=true 的记录，
+	// 存在多个时选中哪个完全看返回顺序，行为不可预期。
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if p.IsDefault {
+			if err := tx.Model(&model.ChannelGroup{}).
+				Where("is_default = ?", true).
+				Update("is_default", false).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Create(&p).Error
+	})
+	if err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
 	c.JSON(http.StatusOK, p)
+}
+
+// groupUpdatePayload 是编辑分组的入参，所有字段可选。
+//
+// 不能像原来那样直接绑定实体再按「非零值」挑字段：布尔字段没有非零值可判，
+// 于是 is_default / enabled 永远进不了 updates —— 传了返回 200 却不落库，
+// 界面上开关拨过去又弹回来，看起来像「保存失败但没报错」。
+// 字符串字段同样有问题：remark 传空串清不掉。
+type groupUpdatePayload struct {
+	Name      *string `json:"name"`
+	Remark    *string `json:"remark"`
+	Strategy  *string `json:"strategy"`
+	IsDefault *bool   `json:"is_default"`
+	Enabled   *bool   `json:"enabled"`
 }
 
 func (s *Server) updateGroup(c *gin.Context) {
@@ -436,26 +463,49 @@ func (s *Server) updateGroup(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var p model.ChannelGroup
+	var p groupUpdatePayload
 	if err := c.ShouldBindJSON(&p); err != nil {
 		writeUpstreamError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
 		return
 	}
 	updates := map[string]any{}
-	if p.Name != "" {
-		updates["name"] = p.Name
+	if p.Name != nil {
+		name := strings.TrimSpace(*p.Name)
+		if name == "" {
+			writeUpstreamError(c, http.StatusBadRequest, "name 不能为空", "invalid_request_error")
+			return
+		}
+		updates["name"] = name
 	}
-	if p.Strategy != "" {
-		updates["strategy"] = p.Strategy
+	if p.Strategy != nil {
+		updates["strategy"] = *p.Strategy
 	}
-	if p.Remark != "" {
-		updates["remark"] = p.Remark
+	if p.Remark != nil {
+		updates["remark"] = *p.Remark
+	}
+	if p.IsDefault != nil {
+		updates["is_default"] = *p.IsDefault
+	}
+	if p.Enabled != nil {
+		updates["enabled"] = *p.Enabled
 	}
 	if len(updates) == 0 {
 		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
 		return
 	}
-	if err := applyUpdates(s.deps.Store.DB(), &model.ChannelGroup{}, id, updates); err != nil {
+	// 把「设为默认」与「清掉其它分组的默认标记」放进同一个事务，
+	// 否则中途失败会留下两个默认分组或零个默认分组
+	err := s.deps.Store.DB().Transaction(func(tx *gorm.DB) error {
+		if p.IsDefault != nil && *p.IsDefault {
+			if err := tx.Model(&model.ChannelGroup{}).
+				Where("id <> ?", id).
+				Update("is_default", false).Error; err != nil {
+				return err
+			}
+		}
+		return applyUpdates(tx, &model.ChannelGroup{}, id, updates)
+	})
+	if err != nil {
 		writeUpdateError(c, err)
 		return
 	}

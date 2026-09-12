@@ -1,16 +1,28 @@
 <script setup lang="ts">
-import { h, onMounted, reactive, ref } from 'vue'
+import { computed, h, onMounted, reactive, ref } from 'vue'
 import { InputNumber, message, Modal } from 'ant-design-vue'
-import { PlusOutlined, ReloadOutlined, DeleteOutlined, CopyOutlined } from '@ant-design/icons-vue'
+import { PlusOutlined, ReloadOutlined, DeleteOutlined, CopyOutlined, EditOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
-import type { APIKey } from '@/api/types'
+import type { APIKey, ChannelGroup } from '@/api/types'
 
 const loading = ref(false)
 const rows = ref<APIKey[]>([])
+const groups = ref<ChannelGroup[]>([])
 const modalOpen = ref(false)
 const saving = ref(false)
 const createdKey = ref('')
-const form = reactive({ name: '', rate_limit_rpm: 0 })
+const editing = ref<APIKey | null>(null)
+
+const form = reactive({
+  name: '',
+  rate_limit_rpm: 0,
+  enabled: true,
+  // 白名单为空数组表示不限制，与后端 StringList 的语义一致
+  allowed_models: [] as string[],
+  allowed_groups: [] as string[]
+})
+
+const title = computed(() => (editing.value ? '编辑密钥' : '新建密钥'))
 
 async function load() {
   loading.value = true
@@ -24,9 +36,34 @@ async function load() {
   }
 }
 
+// 分组白名单的候选项：用分组名作为值，用户也可以自己输入别的值
+async function loadGroups() {
+  try {
+    const res = await api.get<{ items: ChannelGroup[] }>('/groups')
+    groups.value = res.items || []
+  } catch (e: any) {
+    message.error('分组候选加载失败：' + e.message)
+  }
+}
+
 function openCreate() {
+  editing.value = null
   form.name = ''
   form.rate_limit_rpm = 0
+  form.enabled = true
+  form.allowed_models = []
+  form.allowed_groups = []
+  createdKey.value = ''
+  modalOpen.value = true
+}
+
+function openEdit(row: APIKey) {
+  editing.value = row
+  form.name = row.name
+  form.rate_limit_rpm = row.rate_limit_rpm
+  form.enabled = row.enabled
+  form.allowed_models = [...(row.allowed_models || [])]
+  form.allowed_groups = [...(row.allowed_groups || [])]
   createdKey.value = ''
   modalOpen.value = true
 }
@@ -38,6 +75,17 @@ function limitText(v: number) {
   return v + ' 次/分钟'
 }
 
+// 白名单展示：空表示不限制
+function whitelistText(v: string[] | null) {
+  if (!v || v.length === 0) return '不限'
+  return v.join('、')
+}
+
+// tags 模式可以自由输入，提交前去空白、去重
+function cleanList(v: string[]) {
+  return Array.from(new Set((v || []).map((s) => String(s).trim()).filter(Boolean)))
+}
+
 function setLimit(row: APIKey) {
   let input = String(row.rate_limit_rpm)
   Modal.confirm({
@@ -47,7 +95,9 @@ function setLimit(row: APIKey) {
         h('p', { style: 'font-size:12px;color:#888;margin-bottom:8px' }, [
           '填 0 表示跟随全局默认，填负数表示这把密钥完全不限流（适合本地压测）。'
         ]),
-        h(InputNumber, {
+        // antd 的 InputNumber 组件类型与 h() 的重载对不上（改动前就存在的报错），
+        // 这里显式断言绕开类型检查，运行时行为不变
+        h(InputNumber as any, {
           defaultValue: row.rate_limit_rpm,
           min: -1,
           max: 1000000,
@@ -81,13 +131,24 @@ async function save() {
   }
   saving.value = true
   try {
-    const res = await api.post<{ key: string }>('/keys', {
+    // 白名单始终显式发送：空数组是有效值（表示清空），不传则后端保持原值
+    const body = {
       name: form.name.trim(),
-      rate_limit_rpm: form.rate_limit_rpm
-    })
-    // 明文只返回一次，留在弹窗里等用户复制
-    createdKey.value = res.key
-    await load()
+      rate_limit_rpm: form.rate_limit_rpm,
+      allowed_models: cleanList(form.allowed_models),
+      allowed_groups: cleanList(form.allowed_groups)
+    }
+    if (editing.value) {
+      await api.put('/keys/' + editing.value.id, { ...body, enabled: form.enabled })
+      message.success('已更新')
+      modalOpen.value = false
+      await load()
+    } else {
+      const res = await api.post<{ key: string }>('/keys', { ...body, enabled: form.enabled })
+      // 明文只返回一次，留在弹窗里等用户复制
+      createdKey.value = res.key
+      await load()
+    }
   } catch (e: any) {
     message.error(e.message)
   } finally {
@@ -135,7 +196,10 @@ function fmt(t: string | null) {
   return new Date(t).toLocaleString('zh-CN')
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadGroups()
+})
 </script>
 
 <template>
@@ -150,23 +214,36 @@ onMounted(load)
         <span class="toolbar-hint">共 {{ rows.length }} 个密钥</span>
       </div>
 
-      <a-table :data-source="rows" :loading="loading" :pagination="false" row-key="id" size="small">
-        <a-table-column title="名称" data-index="name" :width="180" />
-        <a-table-column title="密钥前缀" data-index="key_prefix" :width="180" />
-        <a-table-column title="最后使用" :width="200">
+      <a-table :data-source="rows" :loading="loading" :pagination="false" row-key="id" size="small" :scroll="{ x: 1200 }">
+        <a-table-column title="名称" data-index="name" :width="160" />
+        <a-table-column title="密钥前缀" data-index="key_prefix" :width="170" />
+        <a-table-column title="模型白名单" :width="220" ellipsis>
+          <template #default="{ record }">
+            <span v-if="whitelistText(record.allowed_models) === '不限'" class="muted">不限</span>
+            <span v-else>{{ whitelistText(record.allowed_models) }}</span>
+          </template>
+        </a-table-column>
+        <a-table-column title="分组白名单" :width="200" ellipsis>
+          <template #default="{ record }">
+            <span v-if="whitelistText(record.allowed_groups) === '不限'" class="muted">不限</span>
+            <span v-else>{{ whitelistText(record.allowed_groups) }}</span>
+          </template>
+        </a-table-column>
+        <a-table-column title="最后使用" :width="180">
           <template #default="{ record }">{{ fmt(record.last_used_at) }}</template>
         </a-table-column>
         <a-table-column title="限流" :width="130">
           <template #default="{ record }">{{ limitText(record.rate_limit_rpm) }}</template>
         </a-table-column>
-        <a-table-column title="状态" :width="100">
+        <a-table-column title="状态" :width="90">
           <template #default="{ record }">
             <a-tag :color="record.enabled ? 'green' : 'default'">{{ record.enabled ? '启用' : '停用' }}</a-tag>
           </template>
         </a-table-column>
-        <a-table-column title="操作" :width="160" fixed="right">
+        <a-table-column title="操作" :width="240" fixed="right">
           <template #default="{ record }">
             <a-space>
+              <a @click="openEdit(record)"><EditOutlined /> 编辑</a>
               <a @click="setLimit(record)">改限额</a>
               <a @click="toggle(record)">{{ record.enabled ? '停用' : '启用' }}</a>
               <a class="danger-link" @click="confirmDelete(record)"><DeleteOutlined /> 删除</a>
@@ -176,7 +253,7 @@ onMounted(load)
       </a-table>
     </section>
 
-    <a-modal v-model:open="modalOpen" title="新建密钥" :confirm-loading="saving" @ok="save">
+    <a-modal v-model:open="modalOpen" :title="title" :confirm-loading="saving" width="600px" @ok="save">
       <a-form layout="vertical">
         <a-form-item label="名称" required>
           <a-input v-model:value="form.name" placeholder="例如 本地客户端" />
@@ -184,6 +261,29 @@ onMounted(load)
         <a-form-item label="每分钟请求上限">
           <a-input-number v-model:value="form.rate_limit_rpm" :min="-1" :max="1000000" style="width: 100%" />
           <div class="field-hint">0 表示跟随全局默认；负数表示这把密钥完全不限流。</div>
+        </a-form-item>
+        <a-form-item label="允许调用的模型">
+          <a-select
+            v-model:value="form.allowed_models"
+            mode="tags"
+            :token-separators="[',', '，']"
+            placeholder="输入模型名后回车，可填多个"
+          />
+          <div class="field-hint">留空表示不限制；填了则只有列表内的模型可以被这把密钥调用。</div>
+        </a-form-item>
+        <a-form-item label="允许使用的分组">
+          <a-select
+            v-model:value="form.allowed_groups"
+            mode="tags"
+            :token-separators="[',', '，']"
+            placeholder="选择分组名，或直接输入分组名 / 分组 ID"
+          >
+            <a-select-option v-for="g in groups" :key="g.id" :value="g.name">{{ g.name }}</a-select-option>
+          </a-select>
+          <div class="field-hint">留空表示不限制；可选分组名或分组 ID，也支持下拉里没有的取值。</div>
+        </a-form-item>
+        <a-form-item label="启用">
+          <a-switch v-model:checked="form.enabled" />
         </a-form-item>
       </a-form>
 
@@ -211,6 +311,7 @@ onMounted(load)
 .toolbar-left { display: flex; gap: var(--gap); }
 .toolbar-spacer { flex: 1; }
 .toolbar-hint { color: var(--color-text-secondary); font-size: 13px; }
+.muted { color: var(--color-text-secondary); }
 .danger-link { color: var(--color-red); }
 .key-box {
   display: flex;
