@@ -107,6 +107,53 @@ export interface Paged<T> {
   page_size?: number
 }
 
+export interface Pricing {
+  id: number
+  provider_id: number
+  model_key: string
+  match_type: string
+  currency: string
+  input_per_1m: string
+  output_per_1m: string
+  cache_read_per_1m: string
+  cache_write_per_1m: string
+  peak_rules: SlotRule[] | null
+  source: string
+  source_url: string
+  priority: number
+  active: boolean
+  updated_at: string
+}
+
+export interface PricingSyncResult {
+  source: string
+  status: string
+  added: number
+  updated: number
+  unchanged: number
+  skipped_manual: number
+  error?: string
+}
+
+export interface PricingSyncLog extends PricingSyncResult {
+  id: number
+  started_at: string
+  finished_at: string | null
+}
+
+// 定价来源优先级：手工录入最高，不会被自动同步覆盖
+export const PRICE_SOURCES = [
+  { value: 'manual', label: '手工录入' },
+  { value: 'official', label: '官方页面' },
+  { value: 'litellm', label: 'LiteLLM' }
+]
+
+export const SOURCE_META: Record<string, { label: string; color: string }> = {
+  manual: { label: '手工', color: 'purple' },
+  official: { label: '官方', color: 'green' },
+  litellm: { label: 'LiteLLM', color: 'blue' }
+}
+
 // 渠道协议选项，与后端 model.Protocol* 常量保持一致
 export const PROTOCOLS = [
   { value: 'openai-chat', label: 'OpenAI Chat Completions' },

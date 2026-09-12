@@ -32,6 +32,10 @@ func (s *Server) listPricing(c *gin.Context) {
 	if src := c.Query("source"); src != "" {
 		q = q.Where("source = ?", src)
 	}
+	// 外部价格表有数千条，绝大多数与本站无关；只看已绑定到渠道的模型更实用
+	if c.Query("bound_only") == "true" {
+		q = q.Where("model_key IN (SELECT public_name FROM models WHERE enabled = true)")
+	}
 
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
@@ -49,7 +53,8 @@ func (s *Server) listPricing(c *gin.Context) {
 	}
 
 	var items []model.ModelPricing
-	if err := q.Order("model_key").Offset((page - 1) * size).Limit(size).Find(&items).Error; err != nil {
+	// 官方与手工来源优先展示，避免被外部表的无关条目刷屏
+	if err := q.Order("priority DESC, model_key").Offset((page - 1) * size).Limit(size).Find(&items).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
