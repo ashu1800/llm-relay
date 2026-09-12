@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -94,6 +95,14 @@ func isAPIPath(p string) bool {
 		}
 	}
 	return false
+}
+
+// defaultErrorBody 生成 OpenAI 结构的错误响应体。
+func defaultErrorBody(status int, message string) []byte {
+	raw, _ := json.Marshal(map[string]any{
+		"error": map[string]any{"message": message, "type": "upstream_error", "code": status},
+	})
+	return raw
 }
 
 // writeUpstreamError 以 OpenAI 兼容的错误结构返回。

@@ -47,6 +47,9 @@ func (s *Server) Register(r *gin.Engine) {
 	{
 		v1.GET("/models", s.listModels)
 		v1.POST("/chat/completions", s.chatCompletions)
+		v1.POST("/embeddings", s.embeddings)
+		// Anthropic Messages 兼容端点，供 Claude Code 等客户端直连
+		v1.POST("/messages", s.anthropicMessages)
 	}
 
 	// ---- 管理后台 API：本地自用，不做登录 ----

@@ -2,6 +2,7 @@ package api
 
 import (
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -10,9 +11,6 @@ import (
 	"llm-relay/internal/model"
 	"llm-relay/internal/relay"
 )
-
-// 出站路径：入站 /v1/chat/completions 固定映射到上游同名路径。
-const pathChatCompletions = "/v1/chat/completions"
 
 // listModels 返回已启用的对外模型，供客户端做模型探测。
 func (s *Server) listModels(c *gin.Context) {
@@ -36,11 +34,21 @@ func (s *Server) listModels(c *gin.Context) {
 
 // chatCompletions 是 OpenAI 兼容的对话入口。
 func (s *Server) chatCompletions(c *gin.Context) {
-	s.relayRequest(c, pathChatCompletions, "openai-chat")
+	s.relayRequest(c, profileOpenAIChat)
+}
+
+// anthropicMessages 是 Anthropic Messages 入口，供 Claude Code 等客户端使用。
+func (s *Server) anthropicMessages(c *gin.Context) {
+	s.relayRequest(c, profileAnthropic)
+}
+
+// embeddings 是向量化入口，目前与上游同协议透传。
+func (s *Server) embeddings(c *gin.Context) {
+	s.relayRequest(c, profileEmbeddings)
 }
 
 // relayRequest 是转发主流程：读取入参 -> 编排转发 -> 回写响应 -> 异步落库。
-func (s *Server) relayRequest(c *gin.Context, upstreamPath, inboundProto string) {
+func (s *Server) relayRequest(c *gin.Context, p *inboundProfile) {
 	started := time.Now()
 	traceID := relay.NewTraceID()
 	key := apiKeyFromContext(c)
@@ -49,26 +57,33 @@ func (s *Server) relayRequest(c *gin.Context, upstreamPath, inboundProto string)
 	if limitBytes <= 0 {
 		limitBytes = 64 << 20
 	}
-	body, err := io.ReadAll(io.LimitReader(c.Request.Body, limitBytes+1))
+	rawBody, err := io.ReadAll(io.LimitReader(c.Request.Body, limitBytes+1))
 	if err != nil {
-		writeUpstreamError(c, http.StatusBadRequest, "读取请求体失败: "+err.Error(), "invalid_request_error")
+		p.writeError(c, http.StatusBadRequest, "读取请求体失败: "+err.Error(), "invalid_request_error")
 		return
 	}
-	if int64(len(body)) > limitBytes {
-		writeUpstreamError(c, http.StatusRequestEntityTooLarge, "请求体超出限制", "invalid_request_error")
+	if int64(len(rawBody)) > limitBytes {
+		p.writeError(c, http.StatusRequestEntityTooLarge, "请求体超出限制", "invalid_request_error")
+		return
+	}
+
+	// 先把入站载荷归一化成 OpenAI Chat，再交给上游
+	body, err := p.translateBody(rawBody)
+	if err != nil {
+		p.writeError(c, http.StatusBadRequest, "请求体转换失败: "+err.Error(), "invalid_request_error")
 		return
 	}
 
 	publicModel := relay.ExtractModel(body)
 	if publicModel == "" {
-		writeUpstreamError(c, http.StatusBadRequest, "请求体缺少 model 字段", "invalid_request_error")
+		p.writeError(c, http.StatusBadRequest, "请求体缺少 model 字段", "invalid_request_error")
 		return
 	}
 
 	req := &relay.RelayRequest{
 		TraceID:      traceID,
-		InboundProto: inboundProto,
-		UpstreamPath: upstreamPath,
+		InboundProto: p.Name,
+		UpstreamPath: p.UpstreamPath,
 		PublicModel:  publicModel,
 		Body:         body,
 		Headers:      c.Request.Header,
@@ -83,46 +98,46 @@ func (s *Server) relayRequest(c *gin.Context, upstreamPath, inboundProto string)
 	res, relayErr := s.deps.Service.Relay(c.Request.Context(), req)
 	if relayErr != nil {
 		totalMs := int(time.Since(started).Milliseconds())
-		writeUpstreamError(c, http.StatusBadGateway, relayErr.Error(), "upstream_error")
+		p.writeError(c, http.StatusBadGateway, relayErr.Error(), "upstream_error")
 		s.finalizeLog(req, res, relay.Usage{}, http.StatusBadGateway, relayErr.Error(), 0, totalMs)
 		return
 	}
 
 	att := res.Attempt
 	if att == nil {
-		writeUpstreamError(c, http.StatusBadGateway, "上游未返回响应", "upstream_error")
+		p.writeError(c, http.StatusBadGateway, "上游未返回响应", "upstream_error")
 		return
 	}
 
-	// 上游返回不可重试的错误状态：原样透传，保留厂商错误结构便于排障
+	// 上游返回不可重试的错误状态：按入站协议的错误结构回给客户端
 	if att.Stream == nil && att.StatusCode >= 400 {
-		copyHeader(c.Writer.Header(), att.Headers)
-		ct := att.Headers.Get("Content-Type")
-		if ct == "" {
-			ct = "application/json; charset=utf-8"
-		}
-		c.Data(att.StatusCode, ct, att.Body)
+		upMsg := string(att.Body)
+		p.writeError(c, att.StatusCode, upMsg, "upstream_error")
 		s.finalizeLog(req, res, relay.Usage{}, att.StatusCode,
-			string(att.Body), att.HeaderMs, int(time.Since(started).Milliseconds()))
+			upMsg, att.HeaderMs, int(time.Since(started).Milliseconds()))
 		return
 	}
 
 	if att.Stream != nil {
-		s.streamToClient(c, req, res, att, started)
+		s.streamToClient(c, p, req, res, att, started)
 		return
 	}
 
-	// 非流式成功
+	// 非流式成功：经改写器输出，透传协议下即原样写出
 	copyHeader(c.Writer.Header(), att.Headers)
-	ct := att.Headers.Get("Content-Type")
-	if ct == "" {
-		ct = "application/json; charset=utf-8"
+	c.Writer.Header().Set("Content-Type", p.ContentType)
+	c.Status(att.StatusCode)
+	tr := p.translator(c.Writer, publicModel, false)
+	if _, err := tr.Write(att.Body); err != nil {
+		slog.Default().Warn("响应改写失败", "trace_id", traceID, "err", err)
 	}
-	c.Data(att.StatusCode, ct, att.Body)
+	if err := tr.Close(); err != nil {
+		slog.Default().Warn("响应改写收尾失败", "trace_id", traceID, "err", err)
+	}
 	// 上游未回传 usage 时按报文长度兜底估算，避免统计全为零
 	usage := att.Usage
 	if !att.HasUsage {
-		usage = relay.EstimateUsage(len(body), len(att.Body))
+		usage = relay.EstimateUsage(len(rawBody), len(att.Body))
 	}
 	s.finalizeLog(req, res, usage, att.StatusCode, "",
 		att.HeaderMs, int(time.Since(started).Milliseconds()))
@@ -130,19 +145,20 @@ func (s *Server) relayRequest(c *gin.Context, upstreamPath, inboundProto string)
 
 // streamToClient 边转发边旁路抓取用量。
 // 首包时间以真正写出第一个字节为准，而非上游响应头到达时间。
-func (s *Server) streamToClient(c *gin.Context, req *relay.RelayRequest, res *relay.RelayResult, att *relay.Attempt, started time.Time) {
+func (s *Server) streamToClient(c *gin.Context, p *inboundProfile, req *relay.RelayRequest, res *relay.RelayResult, att *relay.Attempt, started time.Time) {
 	defer att.Stream.Close()
 
 	h := c.Writer.Header()
 	copyHeader(h, att.Headers)
-	if h.Get("Content-Type") == "" {
-		h.Set("Content-Type", "text/event-stream")
-	}
+	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
 	h.Set("X-Accel-Buffering", "no")
 
 	c.Status(att.StatusCode)
 	c.Writer.Flush()
+
+	// 协议不同时逐事件改写；相同时是零开销透传
+	tr := p.translator(c.Writer, req.PublicModel, true)
 
 	tee := relay.NewUsageTee(nil)
 	buf := make([]byte, 32*1024)
@@ -155,7 +171,7 @@ func (s *Server) streamToClient(c *gin.Context, req *relay.RelayRequest, res *re
 				firstByteMs = int(time.Since(att.StartedAt).Milliseconds())
 			}
 			_, _ = tee.Write(buf[:n])
-			if _, writeErr := c.Writer.Write(buf[:n]); writeErr != nil {
+			if _, writeErr := tr.Write(buf[:n]); writeErr != nil {
 				break
 			}
 			c.Writer.Flush()
@@ -165,6 +181,9 @@ func (s *Server) streamToClient(c *gin.Context, req *relay.RelayRequest, res *re
 		}
 	}
 
+	if err := tr.Close(); err != nil {
+		slog.Default().Warn("流式改写收尾失败", "trace_id", req.TraceID, "err", err)
+	}
 	tee.Flush()
 	usage, hasUsage := tee.Usage()
 	if !hasUsage {

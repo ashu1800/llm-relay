@@ -12,16 +12,29 @@ import (
 
 const ctxAPIKey = "llm_relay_api_key"
 
+// profileForPath 按请求路径推断入站协议。
+// 鉴权失败发生在协议分发之前，若统一用 OpenAI 错误结构，
+// Anthropic 客户端会因为解析不到 {"type":"error"} 而报出难懂的错。
+func profileForPath(path string) *inboundProfile {
+	if strings.HasPrefix(path, "/v1/messages") {
+		return profileAnthropic
+	}
+	return profileOpenAIChat
+}
+
 // requireAPIKey 校验 Authorization: Bearer sk-xxx。
 // 中转服务面向任意 OpenAI 兼容客户端，因此沿用标准 Bearer 约定。
 func (s *Server) requireAPIKey() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		profile := profileForPath(c.Request.URL.Path)
+
+		// Anthropic 客户端用 x-api-key，OpenAI 客户端用 Authorization: Bearer，两者都接受
 		raw := extractBearer(c.GetHeader("Authorization"))
 		if raw == "" {
 			raw = c.GetHeader("x-api-key")
 		}
 		if raw == "" {
-			writeUpstreamError(c, http.StatusUnauthorized, "缺少 API Key", "invalid_request_error")
+			profile.writeError(c, http.StatusUnauthorized, "缺少 API Key", "invalid_request_error")
 			c.Abort()
 			return
 		}
@@ -31,7 +44,7 @@ func (s *Server) requireAPIKey() gin.HandlerFunc {
 			Where("key_hash = ? AND enabled = ?", secure.HashKey(raw), true).
 			First(&key).Error
 		if err != nil {
-			writeUpstreamError(c, http.StatusUnauthorized, "API Key 无效或已禁用", "invalid_request_error")
+			profile.writeError(c, http.StatusUnauthorized, "API Key 无效或已禁用", "invalid_request_error")
 			c.Abort()
 			return
 		}
