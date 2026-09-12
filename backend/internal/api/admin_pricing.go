@@ -136,8 +136,8 @@ func (s *Server) updatePricing(c *gin.Context) {
 	updates["source"] = pricing.SourceManual
 	updates["priority"] = pricing.PriorityManual
 
-	if err := s.deps.Store.DB().Model(&model.ModelPricing{}).Where("id = ?", id).Updates(updates).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+	if err := applyUpdates(s.deps.Store.DB(), &model.ModelPricing{}, id, updates); err != nil {
+		writeUpdateError(c, err)
 		return
 	}
 	s.refreshPricing()

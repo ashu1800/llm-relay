@@ -1,7 +1,9 @@
 package api
 
 import (
+	"errors"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +14,30 @@ import (
 	"llm-relay/internal/model"
 	"llm-relay/internal/secure"
 )
+
+// applyUpdates 按 id 执行局部更新，没有任何行被命中时返回 ErrRecordNotFound。
+//
+// 不能用 len(updates) 当成功标志：像定价那样总有几个无条件字段，
+// 即使 id 不存在也会返回「更新成功」，把「改错了对象」这件事掩盖过去。
+func applyUpdates(db *gorm.DB, dest any, id uint, updates map[string]any) error {
+	res := db.Model(dest).Where("id = ?", id).Updates(updates)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+// writeUpdateError 把更新失败翻译成响应；找不到记录时给 404 而不是 500。
+func writeUpdateError(c *gin.Context, err error) {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		writeUpstreamError(c, http.StatusNotFound, "记录不存在", "not_found_error")
+		return
+	}
+	writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+}
 
 func parseID(c *gin.Context) (uint, bool) {
 	raw := c.Param("id")
@@ -169,8 +195,8 @@ func (s *Server) updateChannel(c *gin.Context) {
 		return
 	}
 
-	if err := s.deps.Store.DB().Model(&model.Channel{}).Where("id = ?", id).Updates(updates).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+	if err := applyUpdates(s.deps.Store.DB(), &model.Channel{}, id, updates); err != nil {
+		writeUpdateError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates)})
@@ -344,8 +370,8 @@ func (s *Server) updateGroup(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
 		return
 	}
-	if err := s.deps.Store.DB().Model(&model.ChannelGroup{}).Where("id = ?", id).Updates(updates).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+	if err := applyUpdates(s.deps.Store.DB(), &model.ChannelGroup{}, id, updates); err != nil {
+		writeUpdateError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates)})
@@ -397,25 +423,80 @@ func (s *Server) listProviders(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
+// modelPayload 是模型的写入载荷。
+//
+// 除名称外用指针接收：只有客户端真的传了某个字段才更新它。
+// 若直接用值类型，未传的字段会以零值参与更新——只改个名字就会把
+// enabled 悄悄改成 false，或者把模型商改成 0。
+type modelPayload struct {
+	PublicName  string  `json:"public_name"`
+	Description *string `json:"description"`
+	ProviderID  *uint   `json:"provider_id"`
+	Enabled     *bool   `json:"enabled"`
+}
+
+// modelUpdates 把「显式提供」的字段转成更新映射。
+// 抽成纯函数是为了能直接测——这里漏掉一个字段不会报错，
+// 只会表现为界面上改了却没生效。
+func modelUpdates(p modelPayload) map[string]any {
+	updates := map[string]any{}
+	if name := strings.TrimSpace(p.PublicName); name != "" {
+		updates["public_name"] = name
+	}
+	if p.Description != nil {
+		updates["description"] = *p.Description
+	}
+	if p.ProviderID != nil {
+		updates["provider_id"] = *p.ProviderID
+	}
+	if p.Enabled != nil {
+		updates["enabled"] = *p.Enabled
+	}
+	return updates
+}
+
+// providerExists 校验模型商存在，避免模型挂到一个不存在的模型商上。
+func (s *Server) providerExists(id uint) bool {
+	var n int64
+	s.deps.Store.DB().Model(&model.Provider{}).Where("id = ?", id).Count(&n)
+	return n > 0
+}
+
 func (s *Server) createModel(c *gin.Context) {
-	var p model.Model
+	var p modelPayload
 	if err := c.ShouldBindJSON(&p); err != nil {
 		writeUpstreamError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
 		return
 	}
-	if strings.TrimSpace(p.PublicName) == "" {
+	name := strings.TrimSpace(p.PublicName)
+	if name == "" {
 		writeUpstreamError(c, http.StatusBadRequest, "public_name 必填", "invalid_request_error")
 		return
 	}
-	p.ID = 0
-	if p.ProviderID == 0 {
-		p.ProviderID = 1
+	m := model.Model{PublicName: name, ProviderID: 1, Enabled: true}
+	if p.Description != nil {
+		m.Description = *p.Description
 	}
-	if err := s.deps.Store.DB().Create(&p).Error; err != nil {
+	if p.ProviderID != nil {
+		m.ProviderID = *p.ProviderID
+	}
+	if p.Enabled != nil {
+		m.Enabled = *p.Enabled
+	}
+	if !s.providerExists(m.ProviderID) {
+		writeUpstreamError(c, http.StatusBadRequest,
+			"模型商不存在: "+strconv.FormatUint(uint64(m.ProviderID), 10), "invalid_request_error")
+		return
+	}
+	if err := s.deps.Store.DB().Create(&m).Error; err != nil {
+		if isUniqueViolation(err) {
+			writeUpstreamError(c, http.StatusConflict, "模型名已存在: "+name, "invalid_request_error")
+			return
+		}
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
-	c.JSON(http.StatusOK, p)
+	c.JSON(http.StatusOK, m)
 }
 
 func (s *Server) updateModel(c *gin.Context) {
@@ -423,24 +504,36 @@ func (s *Server) updateModel(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var p model.Model
+	var p modelPayload
 	if err := c.ShouldBindJSON(&p); err != nil {
 		writeUpstreamError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
 		return
 	}
-	updates := map[string]any{}
-	if p.PublicName != "" {
-		updates["public_name"] = p.PublicName
-	}
-	if p.Description != "" {
-		updates["description"] = p.Description
-	}
-	updates["enabled"] = p.Enabled
-	if err := s.deps.Store.DB().Model(&model.Model{}).Where("id = ?", id).Updates(updates).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+	updates := modelUpdates(p)
+	if len(updates) == 0 {
+		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates)})
+	if p.ProviderID != nil && !s.providerExists(*p.ProviderID) {
+		writeUpstreamError(c, http.StatusBadRequest,
+			"模型商不存在: "+strconv.FormatUint(uint64(*p.ProviderID), 10), "invalid_request_error")
+		return
+	}
+	if err := applyUpdates(s.deps.Store.DB(), &model.Model{}, id, updates); err != nil {
+		if isUniqueViolation(err) {
+			writeUpstreamError(c, http.StatusConflict, "模型名已存在", "invalid_request_error")
+			return
+		}
+		writeUpdateError(c, err)
+		return
+	}
+	// 如实回报改了哪些字段，便于排查「界面改了没生效」
+	changed := make([]string, 0, len(updates))
+	for k := range updates {
+		changed = append(changed, k)
+	}
+	sort.Strings(changed)
+	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates), "fields": changed})
 }
 
 func (s *Server) deleteModel(c *gin.Context) {
@@ -548,8 +641,8 @@ func (s *Server) updateKey(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
 		return
 	}
-	if err := s.deps.Store.DB().Model(&model.APIKey{}).Where("id = ?", id).Updates(updates).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+	if err := applyUpdates(s.deps.Store.DB(), &model.APIKey{}, id, updates); err != nil {
+		writeUpdateError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates)})
