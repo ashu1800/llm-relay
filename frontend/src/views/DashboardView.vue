@@ -80,7 +80,7 @@ const ranges = [
 const range = ref('today')
 
 // 与 theme.css 的语义色保持一致，保证图表和界面同色系
-const PALETTE = ['#c87864', '#8b5cf5', '#06b6d4', '#10b37d', '#f59e0b', '#ea4343', '#6b7280']
+const PALETTE = ['#c87864', '#8b5cf5', '#06b6d4', '#10b37d', '#f59e0b', '#ea4343', '#6b7280', '#3b82f6']
 
 function n(v: number | undefined) {
   return (v ?? 0).toLocaleString('zh-CN')
@@ -221,6 +221,17 @@ const compositionOption = computed(() => {
 })
 
 // ---- 模型调用分析：横向柱状 ----
+// 模型配色：按 byModel 的原始顺序统一分配，条形图与饼图共用同一份。
+//
+// 两张图必须共用，否则同一个模型会显示成两种颜色：
+// 饼图会先滤掉零消耗的模型，如果它自己按 PALETTE 下标取色，
+// 只要滤掉一个，它后面所有模型的颜色就整体错位了。
+const modelColors = computed(() => {
+  const m = new Map<string, string>()
+  byModel.value.forEach((x, i) => m.set(x.name, PALETTE[i % PALETTE.length]))
+  return m
+})
+
 // ---- 模型调用分析：横向条形，按请求数降序 ----
 // 两处针对性优化：
 //  1. 标签宽度原先交给 containLabel 让 echarts 自己算，窄窗口下算不下时它会
@@ -254,7 +265,7 @@ const modelBarOption = computed(() => {
       {
         type: 'bar',
         barMaxWidth: 16,
-        itemStyle: { color: '#c87864', borderRadius: [0, 4, 4, 0] },
+        itemStyle: { borderRadius: [0, 4, 4, 0] },
         label: {
           show: true,
           position: 'right',
@@ -263,7 +274,11 @@ const modelBarOption = computed(() => {
           formatter: (p: any) =>
             p.value + (total > 0 ? ' · ' + ((p.value / total) * 100).toFixed(1) + '%' : '')
         },
-        data: items.map((x) => x.requests)
+        // 每个模型一个颜色：既能一眼区分，也便于和右侧饼图里的同名模型对上号
+        data: items.map((x) => ({
+          value: x.requests,
+          itemStyle: { color: modelColors.value.get(x.name) || '#c87864' }
+        }))
       }
     ]
   }
@@ -272,7 +287,11 @@ const modelBarOption = computed(() => {
 // ---- 模型消耗占比：按费用 ----
 const modelPieOption = computed(() => {
   const data = byModel.value
-    .map((x) => ({ name: x.name, value: Number(x.cost) }))
+    .map((x) => ({
+      name: x.name,
+      value: Number(x.cost),
+      itemStyle: { color: modelColors.value.get(x.name) || '#c87864' }
+    }))
     .filter((x) => x.value > 0)
   return {
     color: PALETTE,
