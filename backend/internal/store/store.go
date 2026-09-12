@@ -102,6 +102,26 @@ func (s *Store) Seed() error {
 		return fmt.Errorf("初始化默认分组失败: %w", err)
 	}
 
+	// 常见厂商的接入参数做成内置模板，建渠道时不必手抄 base_url 与协议。
+	// 只预置公开的接口地址，不含任何凭据。
+	templates := []model.ChannelTemplate{
+		{Name: "OpenAI 官方", Protocol: model.ProtocolOpenAIChat, BaseURL: "https://api.openai.com/v1"},
+		{Name: "DeepSeek 官方", Protocol: model.ProtocolOpenAIChat, BaseURL: "https://api.deepseek.com/v1"},
+		{Name: "Anthropic 官方", Protocol: model.ProtocolAnthropic, BaseURL: "https://api.anthropic.com/v1"},
+		{Name: "Google Gemini 官方", Protocol: model.ProtocolGemini, BaseURL: "https://generativelanguage.googleapis.com/v1beta"},
+		{Name: "OpenRouter", Protocol: model.ProtocolOpenAIChat, BaseURL: "https://openrouter.ai/api/v1"},
+		{Name: "本地 Ollama", Protocol: model.ProtocolOpenAIChat, BaseURL: "http://host.docker.internal:11434/v1"},
+		{Name: "本地 vLLM", Protocol: model.ProtocolOpenAIChat, BaseURL: "http://host.docker.internal:8000/v1"},
+	}
+	for i := range templates {
+		t := templates[i]
+		if err := s.db.Where(model.ChannelTemplate{Name: t.Name}).
+			Attrs(model.ChannelTemplate{Protocol: t.Protocol, BaseURL: t.BaseURL}).
+			FirstOrCreate(&t).Error; err != nil {
+			return fmt.Errorf("初始化渠道模板 %s 失败: %w", t.Name, err)
+		}
+	}
+
 	defaults := []model.Setting{
 		{Key: "payload_storage_mode", Value: model.JSONMap{"value": model.PayloadStoreErrors}},
 		{Key: "log_retention_days", Value: model.JSONMap{"value": 30}},

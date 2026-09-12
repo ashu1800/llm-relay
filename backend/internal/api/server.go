@@ -73,6 +73,7 @@ func (s *Server) Register(r *gin.Engine) {
 		registerModelRoutes(admin, s)
 		registerKeyRoutes(admin, s)
 		registerLogRoutes(admin, s)
+		registerTemplateRoutes(admin, s)
 		registerRoutingRoutes(admin, s)
 		registerSettingsRoutes(admin, s)
 		registerPricingRoutes(admin, s)

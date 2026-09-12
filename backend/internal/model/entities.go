@@ -56,20 +56,22 @@ type ChannelGroup struct {
 
 // Channel 上游渠道。APIKeyEnc 存放 AES-GCM 密文，不随 JSON 输出。
 type Channel struct {
-	ID            uint       `gorm:"primaryKey" json:"id"`
-	Name          string     `gorm:"size:128;not null" json:"name"`
-	GroupID       uint       `gorm:"index;not null;default:1" json:"group_id"`
-	ProviderID    uint       `gorm:"index;not null;default:1" json:"provider_id"`
-	Protocol      string     `gorm:"size:32;not null;default:openai-chat" json:"protocol"`
-	BaseURL       string     `gorm:"size:512;not null" json:"base_url"`
-	APIKeyEnc     string     `gorm:"size:2048" json:"-"`
-	APIKeyHint    string     `gorm:"size:32" json:"api_key_hint"`
-	Weight        int        `gorm:"not null;default:1" json:"weight"`
-	Enabled       bool       `gorm:"not null;default:true" json:"enabled"`
-	MonitorType   string     `gorm:"size:32;not null;default:none" json:"monitor_type"`
-	Slots         JSONList   `gorm:"type:jsonb" json:"available_slots"`
-	ExtraConfig   JSONMap    `gorm:"type:jsonb" json:"extra_config"`
-	CustomMap     JSONMap    `gorm:"type:jsonb" json:"custom_mapping"`
+	ID          uint     `gorm:"primaryKey" json:"id"`
+	Name        string   `gorm:"size:128;not null" json:"name"`
+	GroupID     uint     `gorm:"index;not null;default:1" json:"group_id"`
+	ProviderID  uint     `gorm:"index;not null;default:1" json:"provider_id"`
+	Protocol    string   `gorm:"size:32;not null;default:openai-chat" json:"protocol"`
+	BaseURL     string   `gorm:"size:512;not null" json:"base_url"`
+	APIKeyEnc   string   `gorm:"size:2048" json:"-"`
+	APIKeyHint  string   `gorm:"size:32" json:"api_key_hint"`
+	Weight      int      `gorm:"not null;default:1" json:"weight"`
+	Enabled     bool     `gorm:"not null;default:true" json:"enabled"`
+	MonitorType string   `gorm:"size:32;not null;default:none" json:"monitor_type"`
+	Slots       JSONList `gorm:"type:jsonb" json:"available_slots"`
+	ExtraConfig JSONMap  `gorm:"type:jsonb" json:"extra_config"`
+	// 列名显式写成 custom_map：字段名与 json 名不一致，
+	// 不显式声明的话写原生列映射时极易误用 custom_mapping
+	CustomMap     JSONMap    `gorm:"column:custom_map;type:jsonb" json:"custom_mapping"`
 	HealthStatus  string     `gorm:"size:32;not null;default:unknown" json:"health_status"`
 	LastError     string     `gorm:"size:1024" json:"last_error"`
 	LastCheckedAt *time.Time `json:"last_checked_at"`
@@ -107,7 +109,7 @@ type ChannelTemplate struct {
 	BaseURL     string    `gorm:"size:512" json:"base_url"`
 	GroupID     uint      `json:"group_id"`
 	ExtraConfig JSONMap   `gorm:"type:jsonb" json:"extra_config"`
-	CustomMap   JSONMap   `gorm:"type:jsonb" json:"custom_mapping"`
+	CustomMap   JSONMap   `gorm:"column:custom_map;type:jsonb" json:"custom_mapping"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
