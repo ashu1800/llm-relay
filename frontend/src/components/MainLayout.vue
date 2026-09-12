@@ -56,12 +56,6 @@ const menus = [
   { key: '/console/system', label: '系统设置', icon: SettingOutlined }
 ]
 
-const topNav = [
-  { key: '/console/dashboard', label: '控制台' },
-  { key: '/console/models-manage', label: '模型' },
-  { key: '/console/system', label: '系统' }
-]
-
 const collapsed = ref(false)
 const isActive = (key: string) => route.path === key
 const go = (key: string) => router.push(key)
@@ -76,23 +70,7 @@ const go = (key: string) => router.push(key)
         <span class="brand-text">LLM Relay</span>
       </div>
 
-      <nav class="nav-actions">
-        <button
-          v-for="n in topNav"
-          :key="n.key"
-          class="nav-link"
-          :class="{ 'is-active': isActive(n.key) }"
-          @click="go(n.key)"
-        >
-          {{ n.label }}
-        </button>
-      </nav>
-
       <div class="nav-spacer" />
-
-      <div class="nav-announcement">
-        <span class="nav-announcement-item">本地中转 · 端口 8888 · 数据不出内网</span>
-      </div>
 
       <button class="nav-icon-btn" :title="themeStore.isDark ? '切换浅色' : '切换深色'" @click="themeStore.toggle()">
         <BulbOutlined v-if="!themeStore.isDark" />
@@ -201,33 +179,6 @@ const go = (key: string) => router.push(key)
   color: var(--color-primary);
 }
 
-.nav-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--gap);
-}
-
-.nav-link {
-  height: var(--size-menu-item-height);
-  padding: 0 12px;
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid transparent;
-  border-radius: var(--radius-pill);
-  background: transparent;
-  color: var(--color-text);
-  font-family: inherit;
-  font-size: var(--font-size-menu);
-  cursor: pointer;
-  transition: background 0.2s var(--ease-expo), color 0.2s var(--ease-expo);
-}
-
-.nav-link:hover,
-.nav-link.is-active {
-  background: var(--color-primary-a20);
-  color: var(--color-primary);
-}
-
 .nav-icon-btn {
   width: 32px;
   height: 32px;
@@ -248,28 +199,6 @@ const go = (key: string) => router.push(key)
 }
 
 .nav-spacer { flex: 1; }
-
-.nav-announcement {
-  display: flex;
-  align-items: center;
-  height: 32px;
-  max-width: 46%;
-  padding: 0 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-pill);
-  color: var(--color-text-secondary);
-  font-size: 13.6px;
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-/* 这个类在模板里用了，但项目里从未定义过 ——
-   文字一长就被外层直接从中间切断。补上截断，让它按原本的意图以省略号收尾。 */
-.nav-announcement-item {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 /* ---------- 侧边栏 ---------- */
 .main-layout-body {
