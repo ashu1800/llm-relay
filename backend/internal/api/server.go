@@ -53,6 +53,12 @@ func (s *Server) Register(r *gin.Engine) {
 		v1.POST("/messages", s.anthropicMessages)
 	}
 
+	// ---- Gemini 兼容端点：模型名写在路径里而不是请求体，故单独一组 ----
+	v1beta := r.Group("/v1beta", s.requireAPIKey())
+	{
+		v1beta.POST("/models/*action", s.geminiGenerateContent)
+	}
+
 	// ---- 管理后台 API：本地自用，不做登录 ----
 	admin := r.Group("/api/admin")
 	{

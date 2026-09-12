@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -34,26 +35,52 @@ func (s *Server) listModels(c *gin.Context) {
 
 // chatCompletions 是 OpenAI 兼容的对话入口。
 func (s *Server) chatCompletions(c *gin.Context) {
-	s.relayRequest(c, profileOpenAIChat)
+	s.relayRequest(c, profileOpenAIChat, "", false)
+}
+
+// geminiGenerateContent 是 Gemini 入口。路径形如 /v1beta/models/{model}:generateContent，
+// 模型名与流式标记都在 URL 里，请求体中没有。
+func (s *Server) geminiGenerateContent(c *gin.Context) {
+	action := strings.TrimPrefix(c.Param("action"), "/")
+	idx := strings.LastIndex(action, ":")
+	if idx <= 0 || idx == len(action)-1 {
+		profileGemini.writeError(c, http.StatusBadRequest,
+			"路径格式应为 /v1beta/models/{model}:generateContent 或 :streamGenerateContent", "invalid_request_error")
+		return
+	}
+	model := action[:idx]
+	method := action[idx+1:]
+
+	stream := false
+	switch method {
+	case "generateContent":
+	case "streamGenerateContent":
+		stream = true
+	default:
+		profileGemini.writeError(c, http.StatusNotImplemented, "暂不支持的 Gemini 方法: "+method, "invalid_request_error")
+		return
+	}
+	s.relayRequest(c, profileGemini, model, stream)
 }
 
 // responses 是 OpenAI Responses 入口。
 func (s *Server) responses(c *gin.Context) {
-	s.relayRequest(c, profileOpenAIResponses)
+	s.relayRequest(c, profileOpenAIResponses, "", false)
 }
 
 // anthropicMessages 是 Anthropic Messages 入口，供 Claude Code 等客户端使用。
 func (s *Server) anthropicMessages(c *gin.Context) {
-	s.relayRequest(c, profileAnthropic)
+	s.relayRequest(c, profileAnthropic, "", false)
 }
 
 // embeddings 是向量化入口，目前与上游同协议透传。
 func (s *Server) embeddings(c *gin.Context) {
-	s.relayRequest(c, profileEmbeddings)
+	s.relayRequest(c, profileEmbeddings, "", false)
 }
 
 // relayRequest 是转发主流程：读取入参 -> 编排转发 -> 回写响应 -> 异步落库。
-func (s *Server) relayRequest(c *gin.Context, p *inboundProfile) {
+// pathModel/pathStream 供模型名写在 URL 里的协议（Gemini）使用，其余协议传空。
+func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel string, pathStream bool) {
 	started := time.Now()
 	traceID := relay.NewTraceID()
 	key := apiKeyFromContext(c)
@@ -73,13 +100,16 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile) {
 	}
 
 	// 先把入站载荷归一化成 OpenAI Chat，再交给上游
-	body, err := p.translateBody(rawBody)
+	body, err := p.translateBody(rawBody, pathModel, pathStream)
 	if err != nil {
 		p.writeError(c, http.StatusBadRequest, "请求体转换失败: "+err.Error(), "invalid_request_error")
 		return
 	}
 
 	publicModel := relay.ExtractModel(body)
+	if publicModel == "" && pathModel != "" {
+		publicModel = pathModel
+	}
 	if publicModel == "" {
 		p.writeError(c, http.StatusBadRequest, "请求体缺少 model 字段", "invalid_request_error")
 		return

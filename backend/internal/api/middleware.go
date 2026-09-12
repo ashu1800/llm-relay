@@ -21,6 +21,8 @@ func profileForPath(path string) *inboundProfile {
 		return profileAnthropic
 	case strings.HasPrefix(path, "/v1/responses"):
 		return profileOpenAIResponses
+	case strings.HasPrefix(path, "/v1beta/models"):
+		return profileGemini
 	default:
 		return profileOpenAIChat
 	}
@@ -32,10 +34,19 @@ func (s *Server) requireAPIKey() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		profile := profileForPath(c.Request.URL.Path)
 
-		// Anthropic 客户端用 x-api-key，OpenAI 客户端用 Authorization: Bearer，两者都接受
+		// 各家的密钥传递方式不同，逐个尝试：
+		//   OpenAI    Authorization: Bearer sk-...
+		//   Anthropic x-api-key: sk-...
+		//   Gemini    x-goog-api-key: ... 或 ?key=...
 		raw := extractBearer(c.GetHeader("Authorization"))
 		if raw == "" {
 			raw = c.GetHeader("x-api-key")
+		}
+		if raw == "" {
+			raw = c.GetHeader("x-goog-api-key")
+		}
+		if raw == "" {
+			raw = c.Query("key")
 		}
 		if raw == "" {
 			profile.writeError(c, http.StatusUnauthorized, "缺少 API Key", "invalid_request_error")

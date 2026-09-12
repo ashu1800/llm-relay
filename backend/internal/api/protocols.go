@@ -23,6 +23,8 @@ type inboundProfile struct {
 	ContentType string
 	// TranslateRequest 把入站载荷转成 OpenAI Chat；nil 表示入站本身就是 OpenAI Chat
 	TranslateRequest func([]byte) ([]byte, error)
+	// TranslateRequestWithModel 供模型名不在请求体里的协议使用（如 Gemini，模型名在 URL 路径）
+	TranslateRequestWithModel func(body []byte, model string, stream bool) ([]byte, error)
 	// NewTranslator 构造响应改写器；nil 表示原样透传
 	NewTranslator func(w io.Writer, model string, stream bool) convert.Translator
 	// ErrorBody 生成错误响应体；nil 表示使用 OpenAI 错误结构
@@ -50,6 +52,15 @@ var (
 		TranslateRequest: convert.AnthropicRequestToOpenAIChat,
 		NewTranslator:    convert.NewAnthropicTranslator,
 		ErrorBody:        convert.AnthropicError,
+	}
+	profileGemini = &inboundProfile{
+		Name:         "gemini-generateContent",
+		UpstreamPath: "/v1/chat/completions",
+		ContentType:  "application/json; charset=utf-8",
+		// Gemini 把模型名和流式标记都放在 URL 里，请求体里没有
+		TranslateRequestWithModel: convert.GeminiRequestToOpenAIChat,
+		NewTranslator:             convert.NewGeminiTranslator,
+		ErrorBody:                 convert.GeminiError,
 	}
 	profileEmbeddings = &inboundProfile{
 		Name:         "openai-embeddings",
@@ -89,7 +100,10 @@ func (p *inboundProfile) writeError(c *gin.Context, status int, message, errType
 }
 
 // translateBody 归一化请求载荷。转换失败时返回错误，由调用方以 400 回给客户端。
-func (p *inboundProfile) translateBody(body []byte) ([]byte, error) {
+func (p *inboundProfile) translateBody(body []byte, model string, stream bool) ([]byte, error) {
+	if p.TranslateRequestWithModel != nil {
+		return p.TranslateRequestWithModel(body, model, stream)
+	}
 	if p.TranslateRequest == nil {
 		return body, nil
 	}
