@@ -58,9 +58,9 @@ function statusColor(code: number) {
   return 'default'
 }
 
-// 缓存命中率分母为全部输入（未命中 + 命中）
+// 命中率分母为全部输入 = 未命中 + 命中 + 缓存写入，与看板口径保持一致
 function cacheRate(row: RequestLog) {
-  const denom = row.prompt_tokens + row.cached_tokens
+  const denom = row.prompt_tokens + row.cached_tokens + row.cache_creation_tokens
   if (denom <= 0) return '-'
   return ((row.cached_tokens / denom) * 100).toFixed(1) + '%'
 }
