@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { ReloadOutlined, DeleteOutlined, SyncOutlined } from '@ant-design/icons-vue'
+import {
+  ReloadOutlined, DeleteOutlined, SyncOutlined,
+  DownloadOutlined, UploadOutlined
+} from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import type { PricingSyncResult } from '@/api/types'
 
@@ -11,6 +14,14 @@ const counts = ref<Record<string, number>>({})
 const span = ref<Record<string, string | null>>({})
 const cleaning = ref(false)
 const syncing = ref(false)
+
+const exporting = ref(false)
+const importing = ref(false)
+const fileInput = ref<HTMLInputElement | null>(null)
+const reportOpen = ref(false)
+const report = ref<{ created: Record<string, number>; skipped: Record<string, number>; warnings: string[] }>({
+  created: {}, skipped: {}, warnings: []
+})
 
 // 运行参数只读：它们来自环境变量与 yaml，进程启动后不可变。
 // 与其做出改了不生效的假开关，不如直接告诉用户改哪里。
@@ -107,6 +118,57 @@ async function runSync() {
   }
 }
 
+// 导出走 fetch 而不是直接开新标签页，这样才能把失败原因显示出来
+async function exportConfig() {
+  exporting.value = true
+  try {
+    const res = await fetch('/api/admin/backup/export')
+    if (!res.ok) throw new Error('导出失败 ' + res.status)
+    const blob = await res.blob()
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = 'llm-relay-backup-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '') + '.json'
+    a.click()
+    URL.revokeObjectURL(a.href)
+    message.success('已导出')
+  } catch (e: any) {
+    message.error(e.message)
+  } finally {
+    exporting.value = false
+  }
+}
+
+function pickFile() {
+  fileInput.value?.click()
+}
+
+async function onFilePicked(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = '' // 允许连续导入同一个文件
+  if (!file) return
+  importing.value = true
+  try {
+    const text = await file.text()
+    const res = await api.post<any>('/backup/import', JSON.parse(text))
+    report.value = {
+      created: res.created || {},
+      skipped: res.skipped || {},
+      warnings: res.warnings || []
+    }
+    reportOpen.value = true
+    await load()
+  } catch (e: any) {
+    message.error(e.message)
+  } finally {
+    importing.value = false
+  }
+}
+
+function sumOf(m: Record<string, number>) {
+  return Object.values(m).reduce((a, b) => a + b, 0)
+}
+
 onMounted(load)
 </script>
 
@@ -165,6 +227,52 @@ onMounted(load)
       </div>
     </section>
 
+    <section class="panel">
+      <div class="panel-title">配置备份</div>
+      <div class="note">
+        导出渠道、模型、绑定、模板、密钥与手工定价，用于换机或重装后快速恢复。
+        调用日志与统计属于运行数据，请直接备份数据库卷。
+      </div>
+      <div class="backup-note">
+        渠道密钥在备份里始终是<strong>密文</strong>，只有同一把
+        <span class="mono">RELAY_SECRET</span> 才能解出原文。备份文件里记有主密钥指纹，
+        导入到不同密钥的实例时会明确提示需要重填上游密钥。
+      </div>
+      <a-space style="margin-top: 12px">
+        <a-button :loading="exporting" @click="exportConfig"><DownloadOutlined /> 导出配置</a-button>
+        <a-button :loading="importing" @click="pickFile"><UploadOutlined /> 导入配置</a-button>
+        <input ref="fileInput" type="file" accept="application/json,.json" style="display: none" @change="onFilePicked" />
+      </a-space>
+    </section>
+
+    <a-modal v-model:open="reportOpen" title="导入结果" :footer="null" width="520px">
+      <a-descriptions :column="1" bordered size="small">
+        <a-descriptions-item label="新增">
+          {{ sumOf(report.created) }} 项
+          <span v-if="sumOf(report.created)" class="dim">
+            （<span v-for="(v, k) in report.created" :key="k">{{ k }} {{ v }} </span>）
+          </span>
+        </a-descriptions-item>
+        <a-descriptions-item label="已存在跳过">
+          {{ sumOf(report.skipped) }} 项
+          <span v-if="sumOf(report.skipped)" class="dim">
+            （<span v-for="(v, k) in report.skipped" :key="k">{{ k }} {{ v }} </span>）
+          </span>
+        </a-descriptions-item>
+      </a-descriptions>
+      <a-alert
+        v-for="(w, i) in report.warnings"
+        :key="i"
+        type="warning"
+        show-icon
+        :message="w"
+        style="margin-top: 8px"
+      />
+      <div class="note" style="margin-top: 12px">
+        已存在的条目一律保留本机版本不覆盖。密钥导入后即可继续使用，无需重新签发。
+      </div>
+    </a-modal>
+
     <section class="panel note-panel">
       <div class="panel-title">关于报文留存</div>
       <div class="note">
@@ -200,4 +308,10 @@ onMounted(load)
 .dim { color: var(--color-text-secondary); font-size: 12px; }
 .db-line { margin-top: 12px; display: flex; align-items: center; gap: 8px; }
 .note-panel .note { font-size: 13px; line-height: 1.9; color: var(--color-text-secondary); }
+.note { font-size: 13px; line-height: 1.9; color: var(--color-text-secondary); }
+.backup-note {
+  margin-top: 8px; padding: 10px 12px; border-radius: 8px;
+  background: var(--color-bg); font-size: 12px; line-height: 1.8;
+  color: var(--color-text-secondary);
+}
 </style>
