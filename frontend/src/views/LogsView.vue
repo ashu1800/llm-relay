@@ -282,7 +282,7 @@ onMounted(load)
         :pagination="pagination"
         row-key="id"
         size="small"
-        :scroll="{ x: 1140 }"
+        :scroll="{ x: 1169 }"
       >
         <template #emptyText>
           <a-empty description="当前筛选条件下没有日志，可放宽筛选条件：把时间范围改成「近 7 天」，或清空模型 / trace_id" />
@@ -290,7 +290,7 @@ onMounted(load)
         <a-table-column title="请求时间" :width="155" fixed="left">
           <template #default="{ record }">{{ fmtTime(record.created_at) }}</template>
         </a-table-column>
-        <a-table-column title="模型" :width="165">
+        <a-table-column title="模型" :width="145">
           <template #default="{ record }">
             <div>{{ record.model_requested }}</div>
             <div

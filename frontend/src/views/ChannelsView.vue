@@ -209,13 +209,15 @@ onMounted(load)
         title="渠道列表加载失败"
         @retry="load"
       >
+      <!-- scroll.x 必须不小于各列宽度之和：声明偏小时，固定在右侧的
+           「操作」列会盖住左边最后一列，表现为表头被截断、内容被压住 -->
       <a-table
         :data-source="rows"
         :loading="loading"
         :pagination="false"
         row-key="id"
         size="small"
-        :scroll="{ x: 1100 }"
+        :scroll="{ x: 1170 }"
       >
         <template #emptyText>
           <a-empty description="还没有渠道，点「新建渠道」添加第一个" />
@@ -230,8 +232,8 @@ onMounted(load)
             />
           </template>
         </a-table-column>
-        <a-table-column title="协议" data-index="protocol" :width="180" />
-        <a-table-column title="地址" data-index="base_url" :width="260" ellipsis />
+        <a-table-column title="协议" data-index="protocol" :width="150" />
+        <a-table-column title="地址" data-index="base_url" :width="220" ellipsis />
         <a-table-column title="分组" :width="90">
           <template #default="{ record }">
             {{ groups.find((g) => g.id === record.group_id)?.name ?? record.group_id }}

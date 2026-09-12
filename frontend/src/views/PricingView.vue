@@ -270,13 +270,13 @@ onMounted(load)
         }"
         row-key="id"
         size="small"
-        :scroll="{ x: 1320 }"
+        :scroll="{ x: 1161 }"
       >
         <template #emptyText>
           <a-empty description="还没有定价记录，点「新增定价」手工添加，或点「同步价格」从官方源拉取" />
         </template>
-        <a-table-column title="模型名" data-index="model_key" :width="220" fixed="left" ellipsis />
-        <a-table-column title="模型商" :width="140">
+        <a-table-column title="模型名" data-index="model_key" :width="180" fixed="left" ellipsis />
+        <a-table-column title="模型商" :width="115">
           <template #default="{ record }">
             <!-- LiteLLM 覆盖数百家模型商，未接入的标 0；显示占位而不是硬凑一个标签 -->
             <ProviderTag
@@ -287,20 +287,20 @@ onMounted(load)
             <span v-else class="unassigned" title="不属于当前已接入的模型商">—</span>
           </template>
         </a-table-column>
-        <a-table-column title="来源" :width="90">
+        <a-table-column title="来源" :width="80">
           <template #default="{ record }">
             <a-tag :color="sourceMeta(record.source).color">{{ sourceMeta(record.source).label }}</a-tag>
           </template>
         </a-table-column>
-        <a-table-column title="输入 /1M" data-index="input_per_1m" :width="105" />
-        <a-table-column title="输出 /1M" data-index="output_per_1m" :width="105" />
-        <a-table-column title="缓存读 /1M" data-index="cache_read_per_1m" :width="115" />
-        <a-table-column title="缓存写 /1M" data-index="cache_write_per_1m" :width="115" />
-        <a-table-column title="峰时" :width="130">
+        <a-table-column title="输入 /1M" data-index="input_per_1m" :width="95" />
+        <a-table-column title="输出 /1M" data-index="output_per_1m" :width="95" />
+        <a-table-column title="缓存读 /1M" data-index="cache_read_per_1m" :width="105" />
+        <a-table-column title="缓存写 /1M" data-index="cache_write_per_1m" :width="105" />
+        <a-table-column title="峰时" :width="105">
           <template #default="{ record }">{{ peakText(record) }}</template>
         </a-table-column>
         <a-table-column title="匹配" data-index="match_type" :width="80" />
-        <a-table-column title="操作" :width="130" fixed="right">
+        <a-table-column title="操作" :width="110" fixed="right">
           <template #default="{ record }">
             <a-space>
               <a @click="openEdit(record)"><EditOutlined /> 改价</a>

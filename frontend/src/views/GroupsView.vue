@@ -155,7 +155,7 @@ onMounted(load)
         :pagination="false"
         row-key="id"
         size="small"
-        :scroll="{ x: 900 }"
+        :scroll="{ x: 960 }"
       >
         <a-table-column title="ID" data-index="id" :width="70" />
         <a-table-column title="名称" data-index="name" :width="180" />

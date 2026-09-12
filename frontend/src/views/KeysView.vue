@@ -228,25 +228,25 @@ onMounted(() => {
         title="密钥列表加载失败"
         @retry="load"
       >
-      <a-table :data-source="rows" :loading="loading" :pagination="false" row-key="id" size="small" :scroll="{ x: 1200 }">
+      <a-table :data-source="rows" :loading="loading" :pagination="false" row-key="id" size="small" :scroll="{ x: 1170 }">
         <template #emptyText>
           <a-empty description="还没有密钥，点「新建密钥」创建第一个；明文只在创建时显示一次" />
         </template>
-        <a-table-column title="名称" data-index="name" :width="160" />
-        <a-table-column title="密钥前缀" data-index="key_prefix" :width="170" />
-        <a-table-column title="模型白名单" :width="220" ellipsis>
+        <a-table-column title="名称" data-index="name" :width="150" />
+        <a-table-column title="密钥前缀" data-index="key_prefix" :width="140" />
+        <a-table-column title="模型白名单" :width="170" ellipsis>
           <template #default="{ record }">
             <span v-if="whitelistText(record.allowed_models) === '不限'" class="muted">不限</span>
             <span v-else>{{ whitelistText(record.allowed_models) }}</span>
           </template>
         </a-table-column>
-        <a-table-column title="分组白名单" :width="200" ellipsis>
+        <a-table-column title="分组白名单" :width="150" ellipsis>
           <template #default="{ record }">
             <span v-if="whitelistText(record.allowed_groups) === '不限'" class="muted">不限</span>
             <span v-else>{{ whitelistText(record.allowed_groups) }}</span>
           </template>
         </a-table-column>
-        <a-table-column title="最后使用" :width="180">
+        <a-table-column title="最后使用" :width="150">
           <template #default="{ record }">{{ fmt(record.last_used_at) }}</template>
         </a-table-column>
         <a-table-column title="限流" :width="130">
@@ -257,7 +257,7 @@ onMounted(() => {
             <a-tag :color="record.enabled ? 'green' : 'default'">{{ record.enabled ? '启用' : '停用' }}</a-tag>
           </template>
         </a-table-column>
-        <a-table-column title="操作" :width="240" fixed="right">
+        <a-table-column title="操作" :width="190" fixed="right">
           <template #default="{ record }">
             <a-space>
               <a @click="openEdit(record)"><EditOutlined /> 编辑</a>
