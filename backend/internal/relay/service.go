@@ -86,6 +86,25 @@ type RelayResult struct {
 	StartedAt time.Time
 	// Trail 记录每一次失败尝试，便于日志中还原故障转移链路。
 	Trail []AttemptTrail
+
+	// releaseSlot 释放本次成功尝试占用的渠道并发名额。
+	//
+	// 名额必须一直持有到响应体转发结束：流式请求在收到响应头时 fwd.Do 就返回了，
+	// 若在那里释放，真正占用上游连接的整段时间里该渠道的 inflight 是 0 ——
+	// max_concurrency 形同虚设，Router 的 Saturated 也永远为 false，
+	// 「渠道饱和就排到后面」这条策略从不生效。
+	releaseSlot func()
+}
+
+// ReleaseSlot 释放渠道并发名额。响应体转发结束后必须调用，重复调用无副作用。
+func (r *RelayResult) ReleaseSlot() {
+	if r == nil || r.releaseSlot == nil {
+		return
+	}
+	// 先清空再调用：重复调用不能把计数减成负数
+	fn := r.releaseSlot
+	r.releaseSlot = nil
+	fn()
 }
 
 // AttemptTrail 是单次失败尝试的摘要。
@@ -137,10 +156,11 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 		}
 
 		attempt, err := s.fwd.Do(ctx, cand, req.UpstreamPath, req.Body, req.Headers, s.opts.InjectStreamUsage)
-		if acquired {
-			s.state.Release(cand.Channel.ID)
-		}
 		if err != nil {
+			// 这一次没成，名额当场归还，让其它请求能用
+			if acquired {
+				s.state.Release(cand.Channel.ID)
+			}
 			res.Trail = append(res.Trail, AttemptTrail{
 				ChannelID: cand.Channel.ID, ChannelName: cand.Channel.Name, Error: err.Error(),
 			})
@@ -150,6 +170,10 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 		}
 
 		if attempt.Retryable() {
+			// 同上：不可用的尝试不占用名额
+			if acquired {
+				s.state.Release(cand.Channel.ID)
+			}
 			s.applyCooldown(cand.Channel.ID, attempt)
 			msg := summarizeErrorBody(attempt.Body)
 			res.Trail = append(res.Trail, AttemptTrail{
@@ -164,11 +188,18 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 			continue
 		}
 
-		// 成功或不可重试的业务错误，直接回给客户端
+		// 成功或不可重试的业务错误，直接回给客户端。
+		//
+		// 名额**不在这里释放**：流式响应此刻只拿到了响应头，正文还在从上游读，
+		// 调用方转发结束后会调 res.ReleaseSlot()。
 		s.markChannelSuccess(cand.Channel.ID)
 		res.Attempt = attempt
 		res.Candidate = cand
 		res.Retries = attemptNo
+		if acquired {
+			channelID := cand.Channel.ID
+			res.releaseSlot = func() { s.state.Release(channelID) }
+		}
 		return res, nil
 	}
 

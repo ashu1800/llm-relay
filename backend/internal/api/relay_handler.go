@@ -152,6 +152,10 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 	defer s.deps.Gate.Release()
 
 	res, relayErr := s.deps.Service.Relay(c.Request.Context(), req)
+	// 渠道并发名额持有到本次响应彻底转发结束（含流式读取），
+	// 否则流式请求只覆盖到「拿到响应头」那一瞬间，并发上限形同虚设。
+	// ReleaseSlot 内部判空且幂等，失败路径上的 res 不会重复归还。
+	defer res.ReleaseSlot()
 	if relayErr != nil {
 		totalMs := int(time.Since(started).Milliseconds())
 		p.writeError(c, http.StatusBadGateway, relayErr.Error(), "upstream_error")

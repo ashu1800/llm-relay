@@ -238,6 +238,17 @@ func (s *ChannelState) Acquire(id uint, max int) bool {
 	return true
 }
 
+// Inflight 返回该渠道当前占用的在途名额数。
+// 除了测试，路由诊断页也可以用它说明「某个渠道正忙」。
+func (s *ChannelState) Inflight(id uint) int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inflight[id]
+}
+
 // Release 释放名额。
 func (s *ChannelState) Release(id uint) {
 	if s == nil {
@@ -251,16 +262,6 @@ func (s *ChannelState) Release(id uint) {
 	if s.inflight[id] == 0 {
 		delete(s.inflight, id)
 	}
-}
-
-// Inflight 返回当前在途请求数，用于展示。
-func (s *ChannelState) Inflight(id uint) int {
-	if s == nil {
-		return 0
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.inflight[id]
 }
 
 // Snapshot 返回所有渠道的运行期状态，供路由分析页展示。
