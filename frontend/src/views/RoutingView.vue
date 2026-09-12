@@ -118,8 +118,23 @@ async function load() {
 // （暗色下就是深灰字压深色底，整条图例只剩图标）。
 const shareOption = computed(() => {
   const names = channels.value.map((c) => c.channel_name)
+  // 条形末端标数值：多数字道的占比只有百分之几，柱子短到看不出量级，
+  // 光靠柱长读不出信息（与「模型调用分析」同一个处理）。
+  // 零值不标 —— 十几行「0.0%」纯属噪音。
+  const barLabel = {
+    show: true,
+    position: 'right',
+    fontSize: 11,
+    color: ct.value.secondary,
+    // 加一圈与面板底色同色的描边：实际占比小于期望占比时，
+    // 数值标签会落在期望那根柱子上，不描边就糊在一起看不清
+    textBorderColor: ct.value.dark ? '#303030' : '#ffffff',
+    textBorderWidth: 2,
+    formatter: (p: any) => (p.value > 0 ? (p.value * 100).toFixed(1) + '%' : '')
+  }
   return {
-    grid: { left: 8, right: 16, top: 34, bottom: 4, containLabel: true },
+    // right 留出条形末端数值标签的位置
+    grid: { left: 8, right: 56, top: 34, bottom: 4, containLabel: true },
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
     legend: {
       data: ['期望占比', '实际占比'],
@@ -139,7 +154,13 @@ const shareOption = computed(() => {
     yAxis: {
       type: 'category',
       data: names,
-      axisLabel: { color: ct.value.secondary, width: 110, overflow: 'truncate' }
+      // 130 是按实际渠道名量出来的：最长 truncate-upstream-test 在 11px 下 119px，
+      // 原来写死 110 会把它截成 truncate-upstream-...
+      //
+      // interval: 0 是必需的：类目轴的 interval 默认 'auto'，echarts 觉得排不下
+      // 就会**隔一个藏一个**，15 个渠道只剩 8 个名字，剩下的柱子没有标签，
+      // 根本认不出是哪条渠道。行高够（202px / 15 ≈ 13.5px，字高 11px）。
+      axisLabel: { color: ct.value.secondary, width: 170, overflow: 'truncate', interval: 0 }
     },
     series: [
       {
@@ -147,14 +168,16 @@ const shareOption = computed(() => {
         type: 'bar',
         data: channels.value.map((c) => c.expected_share || 0),
         itemStyle: { color: '#d9c9b6' },
-        barMaxWidth: 12
+        barMaxWidth: 12,
+        label: barLabel
       },
       {
         name: '实际占比',
         type: 'bar',
         data: channels.value.map((c) => c.actual_share || 0),
         itemStyle: { color: '#c87864' },
-        barMaxWidth: 12
+        barMaxWidth: 12,
+        label: barLabel
       }
     ]
   }
