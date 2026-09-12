@@ -1,0 +1,82 @@
+# LLM Relay 本地部署编排
+# 说明：postgres / redis 仅在内部网络暴露，不映射到宿主端口，
+#       以避免与宿主机上已有的 5432 / 6379（sub2api 在用）冲突。
+name: llm-relay
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: llm-relay-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-llmrelay}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?请在 .env 中设置 DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:-llm_relay}
+      TZ: UTC
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-llmrelay} -d ${DB_NAME:-llm_relay}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [relay]
+
+  redis:
+    image: redis:7-alpine
+    container_name: llm-relay-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [relay]
+
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+    image: llm-relay:local
+    container_name: llm-relay
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8888
+      GIN_MODE: release
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-llmrelay}
+      DB_PASSWORD: ${DB_PASSWORD:?请在 .env 中设置 DB_PASSWORD}
+      DB_NAME: ${DB_NAME:-llm_relay}
+      DB_SSLMODE: disable
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_ENABLED: "true"
+      PRICING_UPDATE_INTERVAL_HOURS: ${PRICING_UPDATE_INTERVAL_HOURS:-24}
+      PRICING_OFFICIAL_SYNC_ENABLED: ${PRICING_OFFICIAL_SYNC_ENABLED:-true}
+      PRICING_PROXY_URL: ${PRICING_PROXY_URL:-}
+      RELAY_PAYLOAD_STORAGE_MODE: ${RELAY_PAYLOAD_STORAGE_MODE:-errors}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-text}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      # 仅绑定 127.0.0.1 也足够（WSL2 localhost 转发），如需局域网访问改为 "8888:8888"
+      - "${BIND_ADDR:-0.0.0.0}:8888:8888"
+    volumes:
+      - ./data/relay:/data
+    networks: [relay]
+
+networks:
+  relay:
+    driver: bridge

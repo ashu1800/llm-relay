@@ -1,0 +1,468 @@
+{
+  "url": "https://llm.ohub.vip/console/dashboard",
+  "title": "数据看板 - OHub",
+  "cssVars": {
+    "--antd-arrow-background-color": "#faad14",
+    "--font-family-base": "\"Harding\", \"STSong\", \"SimSun\", \"Songti SC\", \"宋体\", \"Hiragino Sans GB\", \"STHeiti\", \"WenQuanYi Micro Hei\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, serif",
+    "--color-primary": "#c87864",
+    "--color-secondary": "#afbeaf",
+    "--color-highlight": "#afbeaf",
+    "--color-bg": "#f8f5ee",
+    "--color-fg": "#fff",
+    "--color-fg-shadow": "0 0 .5rem 0 #0000001a",
+    "--color-text": "#303030",
+    "--color-text-secondary": "#303030a6",
+    "--color-border": "#d9d9d9",
+    "--scrollbar-thumb": "#dcdcdc",
+    "--scrollbar-track": "transparent",
+    "--scrollbar-width": ".5rem",
+    "--color-red": "#ea4343",
+    "--color-orange": "#f59e0b",
+    "--color-green": "#10b37d",
+    "--color-blue": "#06b6d4",
+    "--color-purple": "#8b5cf5",
+    "--color-gray": "#6b7280",
+    "--color-icon": "#06b6d4",
+    "--color-icon-hover-bg": "#06b6d41f",
+    "--ease-expo": "cubic-bezier(.2, 1, .3, 1)"
+  },
+  "htmlStyle": {
+    "w": 1249,
+    "h": 1277,
+    "padding": "0px",
+    "margin": "0px",
+    "gap": "normal",
+    "borderRadius": "0px",
+    "background": "rgb(248, 245, 238)",
+    "boxShadow": "none",
+    "border": "0px none rgb(48, 48, 48)",
+    "fontSize": "16px",
+    "fontWeight": "400",
+    "fontFamily": "Harding, STSong, SimSun, \"Songti SC\", 宋体, \"Hiragino Sans GB\", STHeiti, \"WenQuanYi Micro Hei\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, serif",
+    "color": "rgb(48, 48, 48)",
+    "lineHeight": "18.4px",
+    "display": "block"
+  },
+  "bodyStyle": {
+    "w": 1249,
+    "h": 1277,
+    "padding": "0px",
+    "margin": "0px",
+    "gap": "normal",
+    "borderRadius": "0px",
+    "background": "rgb(248, 245, 238)",
+    "boxShadow": "none",
+    "border": "0px none rgb(48, 48, 48)",
+    "fontSize": "16px",
+    "fontWeight": "400",
+    "fontFamily": "Harding, STSong, SimSun, \"Songti SC\", 宋体, \"Hiragino Sans GB\", STHeiti, \"WenQuanYi Micro Hei\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, serif",
+    "color": "rgb(48, 48, 48)",
+    "lineHeight": "18.4px",
+    "display": "block"
+  },
+  "elements": {
+    "sider": null,
+    "siderChildren": null,
+    "menu": null,
+    "menuItem": null,
+    "menuItemSelected": null,
+    "header": null,
+    "content": null,
+    "card": null,
+    "cardHead": null,
+    "cardBody": null,
+    "table": {
+      "selector": ".ant-table",
+      "text": "模型请求数成功 / 失败成功率Token（输入/输出/缓存）消费金额       deepseek-v4.1-flash322322 / 0100.00%1,1",
+      "w": 991,
+      "h": 80,
+      "padding": "0px",
+      "margin": "0px",
+      "gap": "normal",
+      "borderRadius": "8px 8px 0px 0px",
+      "background": "rgba(0, 0, 0, 0)",
+      "boxShadow": "none",
+      "border": "0px none rgb(48, 48, 48)",
+      "fontSize": "14px",
+      "fontWeight": "400",
+      "fontFamily": "Harding, STSong, SimSun, \"Songti SC\", 宋体, \"Hiragino Sans GB\", STHeiti, \"WenQuanYi Micro Hei\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, serif",
+      "color": "rgb(48, 48, 48)",
+      "lineHeight": "22px",
+      "display": "block"
+    },
+    "tableHeadCell": {
+      "selector": ".ant-table-thead > tr > th",
+      "text": "模型",
+      "w": 286,
+      "h": 39,
+      "padding": "8px",
+      "margin": "0px",
+      "gap": "normal",
+      "borderRadius": "8px 0px 0px",
+      "background": "rgb(248, 245, 238)",
+      "boxShadow": "none",
+      "border": "",
+      "fontSize": "14px",
+      "fontWeight": "600",
+      "fontFamily": "Harding, STSong, SimSun, \"Songti SC\", 宋体, \"Hiragino Sans GB\", STHeiti, \"WenQuanYi Micro Hei\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, serif",
+      "color": "rgb(48, 48, 48)",
+      "lineHeight": "22px",
+      "display": "table-cell"
+    },
+    "tableCell": {
+      "selector": ".ant-table-tbody > tr > td",
+      "text": "",
+      "w": 286,
+      "h": 0,
+      "padding": "0px",
+      "margin": "0px",
+      "gap": "normal",
+      "borderRadius": "0px",
+      "background": "rgb(255, 255, 255)",
+      "boxShadow": "none",
+      "border": "",
+      "fontSize": "0px",
+      "fontWeight": "400",
+      "fontFamily": "Harding, STSong, SimSun, \"Songti SC\", 宋体, \"Hiragino Sans GB\", STHeiti, \"WenQuanYi Micro Hei\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, serif",
+      "color": "rgb(48, 48, 48)",
+      "lineHeight": "0px",
+      "display": "table-cell"
+    },
+    "btnPrimary": null,
+    "btn": {
+      "selector": ".ant-btn",
+      "text": "",
+      "w": 32,
+      "h": 32,
+      "padding": "0px",
+      "margin": "0px",
+      "gap": "normal",
+      "borderRadius": "50%",
+      "background": "rgba(0, 0, 0, 0)",
+      "boxShadow": "rgba(48, 48, 48, 0.02) 0px 2px 0px 0px",
+      "border": "1px solid rgb(217, 217, 217)",
+      "fontSize": "14px",
+      "fontWeight": "400",
+      "fontFamily": "Harding, STSong, SimSun, \"Songti SC\", 宋体, \"Hiragino Sans GB\", STHeiti, \"WenQuanYi Micro Hei\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, serif",
+      "color": "rgb(48, 48, 48)",
+      "lineHeight": "14px",
+      "display": "flex"
+    },
+    "tag": {
+      "selector": ".ant-tag",
+      "text": "deepseek-v4.1-flash",
+      "w": 139,
+      "h": 20,
+      "padding": "0px 7px",
+      "margin": "0px",
+      "gap": "normal",
+      "borderRadius": "4px",
+      "background": "color(srgb 0.0627451 0.701961 0.490196 / 0.15)",
+      "boxShadow": "none",
+      "border": "0px none rgb(16, 179, 125)",
+      "fontSize": "12px",
+      "fontWeight": "400",
+      "fontFamily": "Harding, STSong, SimSun, \"Songti SC\", 宋体, \"Hiragino Sans GB\", STHeiti, \"WenQuanYi Micro Hei\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, serif",
+      "color": "rgb(16, 179, 125)",
+      "lineHeight": "20px",
+      "display": "inline-block"
+    },
+    "statTitle": null,
+    "statValue": null,
+    "select": {
+      "selector": ".ant-select-selector",
+      "text": "数据看板",
+      "w": 0,
+      "h": 0,
+      "padding": "0px 11px",
+      "margin": "0px",
+      "gap": "normal",
+      "borderRadius": "6px",
+      "background": "rgb(255, 255, 255)",
+      "boxShadow": "none",
+      "border": "1px solid rgb(217, 217, 217)",
+      "fontSize": "14px",
+      "fontWeight": "400",
+      "fontFamily": "Harding, STSong, SimSun, \"Songti SC\", 宋体, \"Hiragino Sans GB\", STHeiti, \"WenQuanYi Micro Hei\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, serif",
+      "color": "rgb(48, 48, 48)",
+      "lineHeight": "22px",
+      "display": "flex"
+    },
+    "input": null,
+    "pagination": {
+      "selector": ".ant-pagination",
+      "text": "共 1 条记录110 条/页",
+      "w": 276,
+      "h": 24,
+      "padding": "0px",
+      "margin": "0px",
+      "gap": "8px",
+      "borderRadius": "0px",
+      "background": "rgba(0, 0, 0, 0)",
+      "boxShadow": "none",
+      "border": "0px none rgb(48, 48, 48)",
+      "fontSize": "14px",
+      "fontWeight": "400",
+      "fontFamily": "Harding, STSong, SimSun, \"Songti SC\", 宋体, \"Hiragino Sans GB\", STHeiti, \"WenQuanYi Micro Hei\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, serif",
+      "color": "rgb(48, 48, 48)",
+      "lineHeight": "22px",
+      "display": "flex"
+    },
+    "breadcrumb": null,
+    "avatar": null,
+    "tabs": null,
+    "progress": null
+  },
+  "menuItems": [],
+  "tree": {
+    "tag": "div",
+    "cls": "",
+    "kids": [
+      {
+        "tag": "div",
+        "cls": "main-layout",
+        "kids": [
+          {
+            "tag": "header",
+            "cls": "site-nav",
+            "kids": [
+              {
+                "tag": "a",
+                "cls": "router-link-active nav-wordmark",
+                "kids": [
+                  {
+                    "tag": "img",
+                    "cls": "nav-logo",
+                    "kids": []
+                  },
+                  {
+                    "tag": "span",
+                    "cls": "",
+                    "kids": []
+                  }
+                ]
+              },
+              {
+                "tag": "div",
+                "cls": "nav-announcement",
+                "kids": [
+                  {
+                    "tag": "div",
+                    "cls": "nav-announcement-viewport",
+                    "kids": [
+                      {
+                        "tag": "div",
+                        "cls": "nav-announcement-track",
+                        "kids": []
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "nav",
+                "cls": "nav-actions",
+                "kids": [
+                  {
+                    "tag": "a",
+                    "cls": "router-link-active nav-link",
+                    "kids": []
+                  },
+                  {
+                    "tag": "a",
+                    "cls": "nav-link",
+                    "kids": []
+                  },
+                  {
+                    "tag": "a",
+                    "cls": "nav-link",
+                    "kids": []
+                  },
+                  {
+                    "tag": "button",
+                    "cls": "css-1vqtdxy ant-btn ant-btn-circle ant-btn-default ant-btn-sm nav-theme-toggle",
+                    "kids": [
+                      {
+                        "tag": "span",
+                        "cls": "theme-dot",
+                        "kids": []
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "button",
+                    "cls": "css-1vqtdxy ant-btn ant-btn-circle ant-btn-default ant-btn-sm nav-avatar",
+                    "kids": [
+                      {
+                        "tag": "span",
+                        "cls": "",
+                        "kids": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "tag": "div",
+            "cls": "main-layout-body",
+            "kids": [
+              {
+                "tag": "div",
+                "cls": "console-layout",
+                "kids": [
+                  {
+                    "tag": "aside",
+                    "cls": "console-sidebar",
+                    "kids": [
+                      {
+                        "tag": "nav",
+                        "cls": "console-menu-list",
+                        "kids": []
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "div",
+                    "cls": "console-mobile-nav",
+                    "kids": [
+                      {
+                        "tag": "div",
+                        "cls": "ant-select css-1vqtdxy console-page-select ant-select-single ant-select-show-arrow",
+                        "kids": []
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "section",
+                    "cls": "console-content",
+                    "kids": [
+                      {
+                        "tag": "div",
+                        "cls": "dashboard-container",
+                        "kids": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "texts": [
+    "OHub",
+    "DeepSeek V4.1 Flash已上线，价格为官方价格的【六折】，与官方采用一致的峰谷定价策略，DeepSeek V4 Flash已自动调整路由至4.1",
+    "✦",
+    "Claude Code的缓存命中率很低，不推荐使用！",
+    "✦",
+    "使用国内模型时不建议使用科学环境",
+    "✦",
+    "glm-5.3-flash将于2026年9月9日24:00跟随官方取消半价活动，恢复后仍为官方价格的【六折】",
+    "✦",
+    "deepseek-v4-flash将于2026年9月10日12:00跟随官方降价，降价后仍为官方价格的【六折】",
+    "✦",
+    "mimo-v2.5-pro已上线，官方渠道满血",
+    "✦",
+    "本站会尽力维持当前优惠价格避免上涨，请用户们放心",
+    "✦",
+    "系统升级完成，所有用户的TPM限制【从100w提升至200w】，如需进一步提升请工单联系",
+    "✦",
+    "本站承诺所有模型均为官方渠道满血转发，非反代，非自部署，非量化，不调倍率，不改数据，全程透明，所见即所得，欢迎任何形式的监督检查",
+    "✦",
+    "使用中有疑问请随时通过【工单系统】或闲鱼平台联系，会第一时间处理",
+    "✦",
+    "【请求日志】页面为每条请求提供了详细的计费流程和错误详情，点击【👀图标】即可查看",
+    "✦",
+    "文档的【4. 客户端接入】部分增加了多个Agent工具的详细图文教程，供新用户参考",
+    "✦",
+    "请求日志页面已支持导出详细的请求记录至本地文件",
+    "✦",
+    "gpt-5.6-sol上线，价格为官方定价的4折",
+    "✦",
+    "DeepSeek V4.1 Flash已上线，价格为官方价格的【六折】，与官方采用一致的峰谷定价策略，DeepSeek V4 Flash已自动调整路由至4.1",
+    "✦",
+    "Claude Code的缓存命中率很低，不推荐使用！",
+    "✦",
+    "使用国内模型时不建议使用科学环境",
+    "✦",
+    "glm-5.3-flash将于2026年9月9日24:00跟随官方取消半价活动，恢复后仍为官方价格的【六折】",
+    "✦",
+    "deepseek-v4-flash将于2026年9月10日12:00跟随官方降价，降价后仍为官方价格的【六折】",
+    "✦",
+    "mimo-v2.5-pro已上线，官方渠道满血",
+    "✦",
+    "本站会尽力维持当前优惠价格避免上涨，请用户们放心",
+    "✦",
+    "系统升级完成，所有用户的TPM限制【从100w提升至200w】，如需进一步提升请工单联系",
+    "✦",
+    "本站承诺所有模型均为官方渠道满血转发，非反代，非自部署，非量化，不调倍率，不改数据，全程透明，所见即所得，欢迎任何形式的监督检查",
+    "✦",
+    "使用中有疑问请随时通过【工单系统】或闲鱼平台联系，会第一时间处理",
+    "✦",
+    "【请求日志】页面为每条请求提供了详细的计费流程和错误详情，点击【👀图标】即可查看",
+    "✦",
+    "文档的【4. 客户端接入】部分增加了多个Agent工具的详细图文教程，供新用户参考",
+    "✦",
+    "请求日志页面已支持导出详细的请求记录至本地文件",
+    "✦",
+    "gpt-5.6-sol上线，价格为官方定价的4折",
+    "✦",
+    "控制台",
+    "模型",
+    "文档",
+    "A",
+    "数据看板",
+    "密钥信息",
+    "请求日志",
+    "工单系统",
+    "个人信息",
+    "时间范围",
+    "今天",
+    "近3天",
+    "近7天",
+    "近30天",
+    "刷新",
+    "请求数量",
+    "322",
+    "消费金额",
+    "2.6872",
+    "Token 量",
+    "62,624,966",
+    "成功率",
+    "100.00%",
+    "请求热力图",
+    "322 次请求",
+    "0",
+    "3",
+    "6",
+    "9",
+    "12",
+    "15",
+    "18",
+    "21",
+    "09-08",
+    "09-09",
+    "09-10",
+    "09-11",
+    "09-12",
+    "消耗分布",
+    "消耗趋势",
+    "模型调用分析",
+    "模型消耗占比",
+    "模型用量明细",
+    "共 1 条记录",
+    "1",
+    "10 条/页",
+    "模型",
+    "请求数",
+    "成功 / 失败",
+    "成功率",
+    "Token（输入/输出/缓存）",
+    "消费金额",
+    "deepseek-v4.1-flash\t322\t322 / 0\t100.00%\t1,169,480 / 520,190 / 60,935,296\t2.6872"
+  ]
+}

@@ -1,0 +1,42 @@
+# LLM Relay 配置示例
+# Docker 部署下多数项由 .env 环境变量覆盖，此文件供裸机/自定义部署使用。
+server:
+  host: 0.0.0.0
+  port: 8888
+  mode: release
+
+database:
+  host: 127.0.0.1
+  port: 5432
+  user: llmrelay
+  password: ""
+  dbname: llm_relay
+  sslmode: disable
+  timezone: UTC
+
+redis:
+  host: 127.0.0.1
+  port: 6379
+  password: ""
+  db: 0
+  enabled: true
+
+# 模型单价定时同步
+pricing:
+  remote_url: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
+  update_interval_hours: 24
+  official_sync_enabled: true
+  proxy_url: ""
+  sync_on_start: true
+
+relay:
+  upstream_timeout: 300s
+  first_byte_timeout: 120s
+  max_retries: 2
+  max_request_body_mb: 64
+  log_retention_days: 30
+  payload_storage_mode: errors
+
+log:
+  level: info
+  format: text

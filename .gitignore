@@ -1,0 +1,42 @@
+# ===== 密钥与运行时数据（绝不入库）=====
+.env
+.env.local
+deploy/.env
+deploy/data/
+
+# ===== 数据库与本地上传 =====
+*.sqlite
+*.db
+
+# ===== Go =====
+/backend/llm-relay
+/backend/server
+/out/
+*.test
+*.out
+
+# ===== 前端 =====
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# ===== 嵌入式前端产物：由 Dockerfile / npm run build 生成 =====
+# 保留 .gitkeep 占位，否则 //go:embed all:dist 在全新克隆时会编译失败
+backend/internal/web/dist/*
+!backend/internal/web/dist/.gitkeep
+
+# ===== 浏览器调试档案（UI 逆向时产生）=====
+.chrome-profile/
+
+# ===== 日志与临时文件 =====
+*.log
+tmp/
+.cache/
+
+# ===== 编辑器与系统 =====
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

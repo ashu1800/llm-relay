@@ -1,0 +1,134 @@
+/* LLM Relay 主题令牌 —— 全部数值实测自参考站 llm.ohub.vip */
+:root {
+  /* ---- 颜色 ---- */
+  --color-primary: #c87864;
+  --color-secondary: #afbeaf;
+  --color-highlight: #afbeaf;
+  --color-bg: #f8f5ee;
+  --color-fg: #ffffff;
+  --color-fg-shadow: 0 0 0.5rem 0 rgba(0, 0, 0, 0.1);
+  --color-text: #303030;
+  --color-text-secondary: rgba(48, 48, 48, 0.65);
+  --color-border: #d9d9d9;
+
+  --color-red: #ea4343;
+  --color-orange: #f59e0b;
+  --color-green: #10b37d;
+  --color-blue: #06b6d4;
+  --color-purple: #8b5cf5;
+  --color-gray: #6b7280;
+  --color-icon: #06b6d4;
+  --color-icon-hover-bg: rgba(6, 182, 212, 0.12);
+
+  /* 主色 20% 透明：菜单选中态背景 */
+  --color-primary-a20: rgba(200, 120, 100, 0.2);
+
+  /* ---- 布局尺寸（实测）---- */
+  --size-nav-height: 64px;
+  --size-sidebar-width: 224px;
+  --size-menu-item-height: 32px;
+  --size-control-height: 24px;
+  --size-table-row: 39px;
+  --gap: 8px;
+  --pad-panel: 8px;
+
+  /* ---- 圆角 ---- */
+  --radius-panel: 8px;
+  --radius-control: 6px;
+  --radius-pill: 999px;
+
+  /* ---- 字体 ---- */
+  --font-family-base: 'Harding', 'STSong', 'SimSun', 'Songti SC', '宋体',
+    'Hiragino Sans GB', 'STHeiti', 'WenQuanYi Micro Hei', -apple-system,
+    BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, serif;
+  --font-size-base: 16px;
+  --font-size-panel: 14px;
+  --font-size-menu: 14.4px;
+  --line-height-panel: 16.1px;
+
+  /* ---- 动效 ---- */
+  --ease-expo: cubic-bezier(0.2, 1, 0.3, 1);
+
+  /* ---- 滚动条 ---- */
+  --scrollbar-thumb: #dcdcdc;
+  --scrollbar-track: transparent;
+  --scrollbar-width: 0.5rem;
+}
+
+/* 深色主题：实测自参考站 theme.js 的 dark 配置 */
+:root[data-theme='dark'] {
+  --color-bg: #202020;
+  --color-fg: #303030;
+  --color-fg-shadow: 0 0 0.5rem 0 rgba(0, 0, 0, 0.8);
+  --color-text: #c8c8c8;
+  --color-text-secondary: rgba(200, 200, 200, 0.65);
+  --color-border: #424242;
+  --scrollbar-thumb: rgba(100, 100, 100);
+}
+
+html, body, #app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-family-base);
+  font-size: var(--font-size-base);
+  line-height: 1.15;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- 全站统一卡片 / 面板 ---- */
+.panel {
+  background: var(--color-fg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--color-fg-shadow);
+  padding: var(--pad-panel);
+  margin-bottom: var(--gap);
+  font-size: var(--font-size-panel);
+  line-height: var(--line-height-panel);
+}
+
+/* ---- 区块标题 ---- */
+.section-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-primary);
+  margin: 0 0 var(--gap) 0;
+  line-height: 1.15;
+}
+
+/* ---- 栅格：gap 恒为 8px ---- */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+.grid-auto { display: grid; gap: var(--gap); }
+
+/* ---- 工具栏 ---- */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+}
+
+::-webkit-scrollbar { width: var(--scrollbar-width); height: var(--scrollbar-width); }
+::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: calc(var(--scrollbar-width) / 2); }
+
+a { color: var(--color-primary); text-decoration: none; }
+a:hover { opacity: 0.85; }
+
+/* ---- Ant Design Vue 局部覆写，贴合参考站实测值 ---- */
+.ant-table-thead > tr > th {
+  background: var(--color-bg) !important;
+  height: var(--size-table-row);
+}
+.ant-table-tbody > tr > td {
+  height: var(--size-table-row);
+}
+.ant-btn-primary {
+  box-shadow: none;
+}
