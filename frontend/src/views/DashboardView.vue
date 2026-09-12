@@ -332,11 +332,9 @@ const heatOption = computed(() => {
 
 const heatTotal = computed(() => heat.value.reduce((a, b) => a + b.requests, 0))
 
-function switchRange(key: string) {
-  if (range.value === key) return
-  range.value = key
-  load()
-}
+// 时间范围改由 a-radio-group 的 v-model 直接更新，
+// 它的 change 只在取值真的变化时触发，所以这里不需要再判一次重
+
 
 onMounted(load)
 </script>
@@ -345,19 +343,16 @@ onMounted(load)
   <div class="dashboard">
     <!-- 工具栏：时间范围 + 刷新（对齐参考站 dashboard-toolbar） -->
     <PageToolbar label="时间范围">
-      <button
-        v-for="r in ranges"
-        :key="r.key"
-        class="pill-btn"
-        :class="{ active: range === r.key }"
-        @click="switchRange(r.key)"
-      >
-        {{ r.label }}
-      </button>
+      <!-- 用 a-radio-group 而不是手写 <button>：
+           这里原来写的是 class="pill-btn"，但那个类在项目里从未定义过，
+           于是按钮一直是浏览器默认样式（灰底、深色描边、字号偏小），
+           和其余部分完全不像一套东西。
+           换成 Ant Design 的组件还能自动跟随明暗主题与设计令牌。 -->
+      <a-radio-group v-model:value="range" button-style="solid" @change="load">
+        <a-radio-button v-for="r in ranges" :key="r.key" :value="r.key">{{ r.label }}</a-radio-button>
+      </a-radio-group>
       <template #right>
-        <button class="pill-btn" :disabled="loading" @click="load">
-          <ReloadOutlined /> 刷新
-        </button>
+        <a-button :loading="loading" @click="load"><ReloadOutlined /> 刷新</a-button>
       </template>
     </PageToolbar>
 

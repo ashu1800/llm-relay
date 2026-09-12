@@ -263,6 +263,14 @@ const go = (key: string) => router.push(key)
   white-space: nowrap;
 }
 
+/* 这个类在模板里用了，但项目里从未定义过 ——
+   文字一长就被外层直接从中间切断。补上截断，让它按原本的意图以省略号收尾。 */
+.nav-announcement-item {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---------- 侧边栏 ---------- */
 .main-layout-body {
   position: relative;
