@@ -37,6 +37,11 @@ func (s *Server) chatCompletions(c *gin.Context) {
 	s.relayRequest(c, profileOpenAIChat)
 }
 
+// responses 是 OpenAI Responses 入口。
+func (s *Server) responses(c *gin.Context) {
+	s.relayRequest(c, profileOpenAIResponses)
+}
+
 // anthropicMessages 是 Anthropic Messages 入口，供 Claude Code 等客户端使用。
 func (s *Server) anthropicMessages(c *gin.Context) {
 	s.relayRequest(c, profileAnthropic)

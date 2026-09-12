@@ -16,10 +16,14 @@ const ctxAPIKey = "llm_relay_api_key"
 // 鉴权失败发生在协议分发之前，若统一用 OpenAI 错误结构，
 // Anthropic 客户端会因为解析不到 {"type":"error"} 而报出难懂的错。
 func profileForPath(path string) *inboundProfile {
-	if strings.HasPrefix(path, "/v1/messages") {
+	switch {
+	case strings.HasPrefix(path, "/v1/messages"):
 		return profileAnthropic
+	case strings.HasPrefix(path, "/v1/responses"):
+		return profileOpenAIResponses
+	default:
+		return profileOpenAIChat
 	}
-	return profileOpenAIChat
 }
 
 // requireAPIKey 校验 Authorization: Bearer sk-xxx。

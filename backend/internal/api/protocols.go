@@ -35,6 +35,14 @@ var (
 		UpstreamPath: "/v1/chat/completions",
 		ContentType:  "application/json; charset=utf-8",
 	}
+	profileOpenAIResponses = &inboundProfile{
+		Name:             "openai-responses",
+		UpstreamPath:     "/v1/chat/completions",
+		ContentType:      "application/json; charset=utf-8",
+		TranslateRequest: convert.ResponsesRequestToOpenAIChat,
+		NewTranslator:    convert.NewResponsesTranslator,
+		ErrorBody:        convert.ResponsesError,
+	}
 	profileAnthropic = &inboundProfile{
 		Name:             "anthropic-messages",
 		UpstreamPath:     "/v1/chat/completions",
