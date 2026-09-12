@@ -6,9 +6,30 @@
 # 当时 limit.go 里多了一个同名的 Inflight 方法导致编译不过，
 # 并发验证跑在未修复的旧容器上，得出了「修复无效」的错误结论，
 # 白花了一轮排查。
+#
+# 前端产物也要在这里构建并拷进 backend/internal/web/dist：
+# Go 用 go:embed all:dist 把前端打进二进制，而 install.sh 明确排除了
+# ./backend/internal/web/dist（那是构建产物，不该从仓库带过去）。
+# 所以那一步拷贝以前全靠手工 —— 忘了做就是「后端更新了、页面还是旧的」，
+# 而且不会有任何报错。
 set -uo pipefail
 cd "/path/to/llm-relay" || exit 1
 
+# ---- 前端 ----
+if ! (cd frontend && npm run build > /tmp/web-build.log 2>&1); then
+  echo "前端构建失败，最后 25 行日志："
+  tail -25 /tmp/web-build.log
+  exit 1
+fi
+# 只清内容、保留 .gitkeep：它是仓库里唯一让 dist 目录存在的文件，
+# 而 go:embed all:dist 在目录不存在时会直接编译失败 —— 全新克隆就构建不起来
+rm -rf backend/internal/web/dist
+mkdir -p backend/internal/web/dist
+cp -r frontend/dist/. backend/internal/web/dist/
+touch backend/internal/web/dist/.gitkeep
+echo "前端构建完成并已放入嵌入目录"
+
+# ---- 后端 ----
 # 先本地编译一遍：语法与类型错误在这里能直接看到编译器原文，
 # 不用等 docker build 跑完再去 tail 日志
 if ! (cd backend && GOPROXY=https://goproxy.cn,direct GOSUMDB=off go build ./... 2>&1); then

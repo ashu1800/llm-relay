@@ -201,8 +201,15 @@ func (s *Server) importConfig(c *gin.Context) {
 			continue
 		}
 		ch.ID = 0
+		// 映射不到就落到本机默认分组。
+		// 原来是「映射不到就保留旧 ID」—— 那个 ID 在本机可能指向另一个分组，
+		// 或者根本不存在，渠道会因此静默地不参与路由。
 		if mapped, ok := groupIDMap[ch.GroupID]; ok {
 			ch.GroupID = mapped
+		} else {
+			ch.GroupID = defaultGroupID(s)
+			report.Warnings = append(report.Warnings,
+				"渠道 "+ch.Name+" 的原始分组在本机不存在，已归入默认分组")
 		}
 		if err := db.Create(&ch).Error; err != nil {
 			report.Warnings = append(report.Warnings, "渠道 "+ch.Name+" 导入失败: "+err.Error())

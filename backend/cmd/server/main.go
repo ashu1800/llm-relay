@@ -62,6 +62,11 @@ func run() error {
 	if err := st.Seed(); err != nil {
 		return err
 	}
+	// 必须排在 Seed 之后：回填模板分组需要默认分组已经存在，
+	// 否则全新安装时这里找不到分组就直接跳过了，外键一直不会被建出来
+	if err := st.EnsureForeignKeys(); err != nil {
+		return err
+	}
 
 	// ---- 转发内核 ----
 	// 渠道运行期状态（冷却与在途计数）由 Router 与 Service 共享，

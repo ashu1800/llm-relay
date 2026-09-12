@@ -72,8 +72,11 @@ func (r *Router) Candidates(ctx context.Context, q CandidateQuery) ([]Candidate,
 		Select("channels.*, channel_models.upstream_name AS upstream_name, channel_models.id AS binding_id").
 		Joins("JOIN channel_models ON channel_models.channel_id = channels.id AND channel_models.enabled = true").
 		Joins("JOIN models ON models.id = channel_models.model_id AND models.enabled = true").
+		Joins("JOIN channel_groups ON channel_groups.id = channels.group_id").
 		Where("models.public_name = ?", q.PublicModel).
-		Where("channels.enabled = true")
+		Where("channels.enabled = true").
+		// 停用的分组连同它的渠道一起退出候选，否则「停用分组」这个开关毫无作用
+		Where("channel_groups.enabled = true")
 
 	if q.GroupID > 0 {
 		query = query.Where("channels.group_id = ?", q.GroupID)

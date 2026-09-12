@@ -93,9 +93,15 @@ func (s *Server) createTemplate(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, msg, "invalid_request_error")
 		return
 	}
+	// group_id=0 不是合法分组。创建渠道时本来就有这个兜底，
+	// 模板这边漏了：加上外键之后，不兜底会直接写不进去。
+	groupID := p.GroupID
+	if groupID == 0 {
+		groupID = defaultGroupID(s)
+	}
 	tpl := model.ChannelTemplate{
 		Name: p.Name, Protocol: p.Protocol, BaseURL: p.BaseURL,
-		GroupID: p.GroupID, ExtraConfig: p.ExtraConf, CustomMap: p.CustomMap,
+		GroupID: groupID, ExtraConfig: p.ExtraConf, CustomMap: p.CustomMap,
 	}
 	if err := s.deps.Store.DB().Create(&tpl).Error; err != nil {
 		if isUniqueViolation(err) {
@@ -148,6 +154,10 @@ func (s *Server) updateTemplate(c *gin.Context) {
 	}
 	if p.CustomMap != nil {
 		merged.CustomMap = *p.CustomMap
+	}
+	if merged.GroupID == 0 {
+		// 显式传 0 与不传都要落到真实分组上，不能留下悬挂引用
+		merged.GroupID = defaultGroupID(s)
 	}
 	if msg := validateTemplate(&merged); msg != "" {
 		writeUpstreamError(c, http.StatusBadRequest, msg, "invalid_request_error")

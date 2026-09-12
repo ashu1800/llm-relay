@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -104,14 +105,16 @@ func (s *Store) Seed() error {
 
 	// 常见厂商的接入参数做成内置模板，建渠道时不必手抄 base_url 与协议。
 	// 只预置公开的接口地址，不含任何凭据。
+	// 模板必须落在某个分组上：group_id=0 不是合法分组，
+	// 有外键之后这种行根本插不进去，没有外键时则会变成一个查不到归属的悬挂值
 	templates := []model.ChannelTemplate{
-		{Name: "OpenAI 官方", Protocol: model.ProtocolOpenAIChat, BaseURL: "https://api.openai.com/v1"},
-		{Name: "DeepSeek 官方", Protocol: model.ProtocolOpenAIChat, BaseURL: "https://api.deepseek.com/v1"},
-		{Name: "Anthropic 官方", Protocol: model.ProtocolAnthropic, BaseURL: "https://api.anthropic.com/v1"},
-		{Name: "Google Gemini 官方", Protocol: model.ProtocolGemini, BaseURL: "https://generativelanguage.googleapis.com/v1beta"},
-		{Name: "OpenRouter", Protocol: model.ProtocolOpenAIChat, BaseURL: "https://openrouter.ai/api/v1"},
-		{Name: "本地 Ollama", Protocol: model.ProtocolOpenAIChat, BaseURL: "http://host.docker.internal:11434/v1"},
-		{Name: "本地 vLLM", Protocol: model.ProtocolOpenAIChat, BaseURL: "http://host.docker.internal:8000/v1"},
+		{Name: "OpenAI 官方", GroupID: group.ID, Protocol: model.ProtocolOpenAIChat, BaseURL: "https://api.openai.com/v1"},
+		{Name: "DeepSeek 官方", GroupID: group.ID, Protocol: model.ProtocolOpenAIChat, BaseURL: "https://api.deepseek.com/v1"},
+		{Name: "Anthropic 官方", GroupID: group.ID, Protocol: model.ProtocolAnthropic, BaseURL: "https://api.anthropic.com/v1"},
+		{Name: "Google Gemini 官方", GroupID: group.ID, Protocol: model.ProtocolGemini, BaseURL: "https://generativelanguage.googleapis.com/v1beta"},
+		{Name: "OpenRouter", GroupID: group.ID, Protocol: model.ProtocolOpenAIChat, BaseURL: "https://openrouter.ai/api/v1"},
+		{Name: "本地 Ollama", GroupID: group.ID, Protocol: model.ProtocolOpenAIChat, BaseURL: "http://host.docker.internal:11434/v1"},
+		{Name: "本地 vLLM", GroupID: group.ID, Protocol: model.ProtocolOpenAIChat, BaseURL: "http://host.docker.internal:8000/v1"},
 	}
 	for i := range templates {
 		t := templates[i]
@@ -136,6 +139,63 @@ func (s *Store) Seed() error {
 	}
 
 	slog.Info("基线数据就绪")
+	return nil
+}
+
+// EnsureForeignKeys 补齐数据库层面的外键约束，并修复加约束前必须先修好的数据。
+//
+// 为什么会缺这些关系：它们原本只靠应用代码维护，全库零外键。
+// 应用代码一旦漏掉一处（例如备份导入时分组映射失败却保留了旧 ID），
+// 库里就会留下指向不存在行的引用，而且没有任何东西会报错 ——
+// 往后的表现是「渠道莫名其妙不参与路由」这类查不到原因的问题。
+//
+// 必须在 Seed 之后调用：回填模板分组需要默认分组已经存在。
+// 也必须在 AutoMigrate 之后：表得先建出来。
+//
+// 用原生 SQL 而不是 GORM 的 association tag：后者要求给实体加关联字段，
+// 会改变实体的 JSON 形状，还会让 AutoMigrate 的行为取决于字段定义；
+// 直接把要建的约束写清楚更好读。每条都是 DROP IF EXISTS 后重建，可重复执行。
+func (s *Store) EnsureForeignKeys() error {
+	var grp model.ChannelGroup
+	if err := s.db.Order("is_default DESC, id").First(&grp).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// 一个分组都没有，此时加外键也拦不住什么，留到有分组之后再建
+			return nil
+		}
+		return fmt.Errorf("查找默认分组失败: %w", err)
+	}
+
+	// 种子数据里的内置模板没写分组，留下 7 行 group_id=0。
+	// 0 不是合法分组，直接加外键会被这些行挡住，所以先归到默认分组。
+	if err := s.db.Exec(
+		"UPDATE channel_templates SET group_id = ? WHERE group_id = 0 OR group_id NOT IN (SELECT id FROM channel_groups)",
+		grp.ID).Error; err != nil {
+		return fmt.Errorf("回填模板分组失败: %w", err)
+	}
+
+	// ON DELETE 的选择：
+	//   channel_models 是纯关联表，宿主没了就该跟着走 —— CASCADE
+	//   分组被删要拦住而不是连带删除渠道 —— RESTRICT（应用层已有守卫，这里兜底）
+	stmts := []string{
+		"ALTER TABLE channel_models DROP CONSTRAINT IF EXISTS fk_channel_models_channel",
+		`ALTER TABLE channel_models ADD CONSTRAINT fk_channel_models_channel
+			FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE`,
+		"ALTER TABLE channel_models DROP CONSTRAINT IF EXISTS fk_channel_models_model",
+		`ALTER TABLE channel_models ADD CONSTRAINT fk_channel_models_model
+			FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE CASCADE`,
+		"ALTER TABLE channels DROP CONSTRAINT IF EXISTS fk_channels_group",
+		`ALTER TABLE channels ADD CONSTRAINT fk_channels_group
+			FOREIGN KEY (group_id) REFERENCES channel_groups(id) ON DELETE RESTRICT`,
+		"ALTER TABLE channel_templates DROP CONSTRAINT IF EXISTS fk_channel_templates_group",
+		`ALTER TABLE channel_templates ADD CONSTRAINT fk_channel_templates_group
+			FOREIGN KEY (group_id) REFERENCES channel_groups(id) ON DELETE RESTRICT`,
+	}
+	for _, stmt := range stmts {
+		if err := s.db.Exec(stmt).Error; err != nil {
+			return fmt.Errorf("建立外键约束失败: %w", err)
+		}
+	}
+	slog.Info("外键约束就绪")
 	return nil
 }
 
