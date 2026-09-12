@@ -276,11 +276,23 @@ async function doResolve() {
   }
 }
 
-// 倍率列的展示：固定倍率与时段规则分开写，别让人以为只有一个能生效
+// 倍率列的展示：固定倍率与时段规则分开写，别让人以为只有一个能生效。
+//
+// ×1 也要显示：原来把 1 当成「没配倍率」显示成「—」，
+// 结果「这行到底有没有配倍率」在列表里看不出来 —— ×1 至少说明它按原价算。
 function fixedText(row: Pricing) {
   const m = Number(row.multiplier)
-  if (!m || m === 1) return ''
-  return '固定 ×' + m
+  if (!Number.isFinite(m) || m <= 0) return '×1'
+  return '×' + m
+}
+
+// 单价一律带 $ 前缀。
+//
+// 这一列的值都是美元价：界面其它地方（日志里的费用、试算结果）都带 $，
+// 只有列表里是光秃秃的数字，很容易被读成人民币或者倍率。
+function money(v: unknown) {
+  const s = v === null || v === undefined || v === '' ? '0' : String(v)
+  return '$' + s
 }
 
 function peakText(row: Pricing) {
@@ -378,15 +390,20 @@ onMounted(load)
           <a-empty description="还没有定价记录，点「新增定价」录入：单价按每 100 万 token 的美元价填" />
         </template>
         <a-table-column title="模型名" data-index="model_key" :width="180" fixed="left" ellipsis />
-        <a-table-column title="输入 /1M" data-index="input_per_1m" :width="95" />
-        <a-table-column title="输出 /1M" data-index="output_per_1m" :width="95" />
-        <a-table-column title="缓存读 /1M" data-index="cache_read_per_1m" :width="105" />
-        <a-table-column title="缓存写 /1M" data-index="cache_write_per_1m" :width="105" />
+        <a-table-column title="输入 /1M" :width="100">
+          <template #default="{ record }">{{ money(record.input_per_1m) }}</template>
+        </a-table-column>
+        <a-table-column title="输出 /1M" :width="100">
+          <template #default="{ record }">{{ money(record.output_per_1m) }}</template>
+        </a-table-column>
+        <a-table-column title="缓存读 /1M" :width="110">
+          <template #default="{ record }">{{ money(record.cache_read_per_1m) }}</template>
+        </a-table-column>
+        <a-table-column title="缓存写 /1M" :width="110">
+          <template #default="{ record }">{{ money(record.cache_write_per_1m) }}</template>
+        </a-table-column>
         <a-table-column title="固定倍率" :width="100">
-          <template #default="{ record }">
-            <span v-if="fixedText(record)">{{ fixedText(record) }}</span>
-            <span v-else class="unassigned">—</span>
-          </template>
+          <template #default="{ record }">{{ fixedText(record) }}</template>
         </a-table-column>
         <a-table-column title="时段倍率" :width="150">
           <template #default="{ record }">
@@ -527,9 +544,9 @@ onMounted(load)
       <a-descriptions v-if="resolveResult" :column="1" bordered size="small" style="margin-top: 12px">
         <a-descriptions-item label="模型">{{ resolveResult.model_key }}</a-descriptions-item>
         <a-descriptions-item label="生效时刻">{{ resolveResult.resolved_at }}</a-descriptions-item>
-        <a-descriptions-item label="输入 /1M">{{ resolveResult.input_per_1m }}</a-descriptions-item>
-        <a-descriptions-item label="输出 /1M">{{ resolveResult.output_per_1m }}</a-descriptions-item>
-        <a-descriptions-item label="缓存读 /1M">{{ resolveResult.cache_read_per_1m }}</a-descriptions-item>
+        <a-descriptions-item label="输入 /1M">{{ money(resolveResult.input_per_1m) }}</a-descriptions-item>
+        <a-descriptions-item label="输出 /1M">{{ money(resolveResult.output_per_1m) }}</a-descriptions-item>
+        <a-descriptions-item label="缓存读 /1M">{{ money(resolveResult.cache_read_per_1m) }}</a-descriptions-item>
         <a-descriptions-item label="生效倍率">
           {{ resolveResult.multiplier }}
           <a-tag v-if="resolveResult.peak_applied" color="orange" style="margin-left: 6px">
