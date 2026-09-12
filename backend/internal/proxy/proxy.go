@@ -23,6 +23,7 @@ import (
 	xproxy "golang.org/x/net/proxy"
 
 	"llm-relay/internal/model"
+	"llm-relay/internal/secure"
 )
 
 // Config 是构造出站连接所需的全部信息（密码是明文，由调用方解密后传入）。
@@ -161,6 +162,27 @@ func (c Config) Transport(timeout time.Duration) (*http.Transport, error) {
 	return tr, nil
 }
 
+// FromEntity 由库里的代理行构造拨号配置，密文在这里解开。
+//
+// 刻意**不**检查 Enabled：这里只回答「这条记录描述的是哪个代理」。
+// 「停用的代理不许用来转发」是转发侧的规则（见 cmd/server 的 resolver），
+// 而管理界面要能测一个停用中的代理 —— 用户往往就是先停用它、
+// 改完地址再测一次是否修好，测试接口要是也拦，就没法验证修改有没有用。
+func FromEntity(p model.Proxy, c *secure.Cipher) (Config, bool) {
+	cfg := Config{Protocol: p.Protocol, Host: p.Host, Port: p.Port, Username: p.Username}
+	if p.PasswordEnc != "" {
+		if c == nil {
+			return Config{}, false
+		}
+		plain, err := c.Decrypt(p.PasswordEnc)
+		if err != nil {
+			return Config{}, false
+		}
+		cfg.Password = plain
+	}
+	return cfg, true
+}
+
 // TestResult 是一次连通性测试的结果。
 type TestResult struct {
 	OK         bool
@@ -205,7 +227,7 @@ func Test(ctx context.Context, cfg Config, testURL string, timeout time.Duration
 	resp, err := client.Do(req)
 	latency := int(time.Since(start).Milliseconds())
 	if err != nil {
-		return TestResult{LatencyMs: latency, Error: friendlyError(err, cfg)}
+		return TestResult{LatencyMs: latency, Error: FriendlyError(err, cfg)}
 	}
 	defer resp.Body.Close()
 	// 必须把正文读干净：不读会让这条连接无法复用，
@@ -222,11 +244,14 @@ func Test(ctx context.Context, cfg Config, testURL string, timeout time.Duration
 	return TestResult{OK: true, LatencyMs: latency, StatusCode: resp.StatusCode}
 }
 
-// friendlyError 把底层错误翻译成能指导用户下一步动作的中文。
+// FriendlyError 把底层错误翻译成能指导用户下一步动作的中文。
 //
 // 直接把 err.Error() 抛给用户是最省事的做法，但那种消息形如
-// "dial tcp 1.2.3.4:1080: i/o timeout"，用户看不出该改哪一项。
-func friendlyError(err error, cfg Config) string {
+// "dial tcp 1.2.3.4:1080: i/o timeout" 或者
+// "proxyconnect tcp: dial tcp 1.2.3.4:9: connect: connection refused"，
+// 用户看不出该改哪一项。转发路径也用这个：错误会落进请求日志，
+// 那正是排障时唯一能看的东西。
+func FriendlyError(err error, cfg Config) string {
 	msg := err.Error()
 	switch {
 	case errors.Is(err, context.DeadlineExceeded) || strings.Contains(msg, "i/o timeout") || strings.Contains(msg, "timeout"):

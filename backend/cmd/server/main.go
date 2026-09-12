@@ -16,7 +16,9 @@ import (
 
 	"llm-relay/internal/api"
 	"llm-relay/internal/config"
+	"llm-relay/internal/model"
 	"llm-relay/internal/pricing"
+	"llm-relay/internal/proxy"
 	"llm-relay/internal/relay"
 	"llm-relay/internal/secure"
 	"llm-relay/internal/store"
@@ -86,6 +88,19 @@ func run() error {
 	// 后者约束单把密钥，两者都不配就是不限制。
 	groupLimit := relay.NewGroupLimiter()
 	svc.SetGroupLimiter(groupLimit)
+	// 出站代理：渠道（或某个模型）指定走哪个代理时，由它按 id 取配置。
+	// 停用的代理在这里被判为不可用 —— 转发器收到「不可用」会直接让请求失败，
+	// 而不是回退直连：用户配代理往往就是为了不让请求从本机 IP 出去。
+	svc.SetProxyResolver(func(id uint) (proxy.Config, bool) {
+		var p model.Proxy
+		if err := st.DB().First(&p, id).Error; err != nil {
+			return proxy.Config{}, false
+		}
+		if !p.Enabled {
+			return proxy.Config{}, false
+		}
+		return proxy.FromEntity(p, cipher)
+	})
 	gate := relay.NewConcurrencyGate(cfg.Relay.MaxConcurrency)
 	rateLimiter := relay.NewRateLimiter()
 	logs := relay.NewLogWriter(st.DB(), 2048, logger)

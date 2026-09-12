@@ -5,6 +5,8 @@ import { PlusOutlined, ReloadOutlined, DeleteOutlined, EditOutlined, LinkOutline
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import ModelWhitelistEditor, { type WhitelistRow } from '@/components/ModelWhitelistEditor.vue'
+// Proxy 只用于代理下拉的选项类型
+import type { Proxy } from '@/api/types'
 import GroupTag from '@/components/GroupTag.vue'
 import { PROTOCOLS, type Channel, type ChannelGroup, type ChannelBinding } from '@/api/types'
 
@@ -32,9 +34,17 @@ const form = reactive({
   group_id: 0,
   weight: 1,
   enabled: true,
+  // 出站代理：0 = 直连。模型条目上还能单独覆盖（见白名单里的「代理」列）
+  proxy_id: 0,
+  // 单渠道并发上限。新建时给 10：不限并发会让一条渠道把上游打满，
+  // 而用户多半没意识到「不限」就是当前的行为
+  max_concurrency: 10,
   // 白名单随渠道一起提交：新建渠道时就把「能跑哪些模型」填完
   models: [] as WhitelistRow[]
 })
+
+// 代理列表：渠道表单与白名单里的「代理」列共用
+const proxies = ref<Proxy[]>([])
 
 const title = computed(() => (editing.value ? '编辑渠道' : '新建渠道'))
 
@@ -47,16 +57,24 @@ function groupOf(id: number) {
   return groups.value.find((g) => g.id === id)
 }
 
+/** 代理名；直连（0）或代理已被删掉时返回空，列表里就不显示这一行 */
+function proxyName(id: number) {
+  if (!id) return ''
+  return proxies.value.find((p) => p.id === id)?.name || '已删除的代理 #' + id
+}
+
 async function load() {
   loading.value = true
   loadError.value = ''
   try {
-    const [c, g] = await Promise.all([
+    const [c, g, px] = await Promise.all([
       api.get<{ items: ChannelRow[] }>('/channels'),
-      api.get<{ items: ChannelGroup[] }>('/groups')
+      api.get<{ items: ChannelGroup[] }>('/groups'),
+      api.get<{ items: Proxy[] }>('/proxies')
     ])
     rows.value = c.items || []
     groups.value = g.items || []
+    proxies.value = px.items || []
     if (!form.group_id && groups.value.length) {
       form.group_id = groups.value.find((x) => x.is_default)?.id ?? groups.value[0].id
     }
@@ -77,6 +95,8 @@ function openCreate() {
     api_key: '',
     group_id: groups.value.find((x) => x.is_default)?.id ?? groups.value[0]?.id ?? 0,
     weight: 1,
+    proxy_id: 0,
+    max_concurrency: 10,
     enabled: true,
     models: [{ public_name: '', upstream_name: '', enabled: true }]
   })
@@ -93,6 +113,10 @@ async function openEdit(row: ChannelRow) {
     group_id: row.group_id,
     weight: row.weight,
     enabled: row.enabled,
+    proxy_id: row.proxy_id || 0,
+    // 没配过并发上限的渠道读出来是 0（不限制），如实显示 ——
+    // 强行显示成 10 会让用户以为它一直是 10
+    max_concurrency: Number((row.extra_config as any)?.max_concurrency) || 0,
     models: [] as WhitelistRow[]
   })
   modalOpen.value = true
@@ -103,7 +127,8 @@ async function openEdit(row: ChannelRow) {
     form.models = (res.items || []).map((b) => ({
       public_name: b.public_name,
       upstream_name: b.upstream_name === b.public_name ? '' : b.upstream_name,
-      enabled: b.enabled
+      enabled: b.enabled,
+      proxy_id: b.proxy_id || 0
     }))
   } catch (e: any) {
     message.error('读取模型白名单失败：' + e.message)
@@ -116,7 +141,8 @@ function whitelistPayload(): WhitelistRow[] | null {
     .map((r) => ({
       public_name: r.public_name.trim(),
       upstream_name: r.upstream_name.trim(),
-      enabled: r.enabled
+      enabled: r.enabled,
+      proxy_id: r.proxy_id || 0
     }))
     .filter((r) => r.public_name || r.upstream_name)
   const seen = new Set<string>()
@@ -132,6 +158,20 @@ function whitelistPayload(): WhitelistRow[] | null {
     seen.add(r.public_name)
   }
   return rows
+}
+
+// nextExtraConfig 在原有扩展配置上只改并发这一项。
+//
+// 单独提交一个 { max_concurrency } 会把 headers 等键整体覆盖掉 ——
+// 「改个并发把自定义请求头弄没了」是那种当场看不出、过几天才发作的问题。
+function nextExtraConfig(): Record<string, unknown> {
+  const extra: Record<string, unknown> = { ...((editing.value?.extra_config as any) || {}) }
+  if (form.max_concurrency > 0) {
+    extra.max_concurrency = form.max_concurrency
+  } else {
+    delete extra.max_concurrency
+  }
+  return extra
 }
 
 async function save() {
@@ -154,6 +194,10 @@ async function save() {
       group_id: form.group_id,
       weight: form.weight,
       enabled: form.enabled,
+      proxy_id: form.proxy_id || 0,
+      // extra_config 里有别的键（自定义请求头等），必须整个带着走，
+      // 否则改一次并发就把它们抹掉了
+      extra_config: nextExtraConfig(),
       models
     }
     if (form.api_key) payload.api_key = form.api_key
@@ -204,7 +248,8 @@ async function loadBindings() {
       public_name: b.public_name,
       // 上游名与对外名相同时留空显示，避免满屏重复的模型名
       upstream_name: b.upstream_name === b.public_name ? '' : b.upstream_name,
-      enabled: b.enabled
+      enabled: b.enabled,
+      proxy_id: b.proxy_id || 0
     }))
   } catch (e: any) {
     message.error(e.message)
@@ -219,7 +264,8 @@ async function saveBindings() {
     .map((r) => ({
       public_name: r.public_name.trim(),
       upstream_name: r.upstream_name.trim() || r.public_name.trim(),
-      enabled: r.enabled
+      enabled: r.enabled,
+      proxy_id: r.proxy_id || 0
     }))
     .filter((r) => r.public_name)
   if (!items.length) {
@@ -288,14 +334,19 @@ onMounted(load)
         :pagination="false"
         row-key="id"
         size="small"
-        :scroll="{ x: 1170 }"
+        :scroll="{ x: 1190 }"
       >
         <template #emptyText>
           <a-empty description="还没有渠道，点「新建渠道」添加第一个" />
         </template>
-        <a-table-column title="名称" :width="150">
+        <a-table-column title="名称" :width="170">
           <template #default="{ record }">
             <div class="chan-name">{{ record.name }}</div>
+            <!-- 走了代理的渠道要能一眼看出来：排查「为什么这条渠道的错误
+                 和别的渠道不一样」时，第一件事就是确认它的出口 -->
+            <div v-if="proxyName(record.proxy_id)" class="sub-text">
+              经 {{ proxyName(record.proxy_id) }}
+            </div>
           </template>
         </a-table-column>
         <a-table-column title="模型" :width="200" ellipsis>
@@ -344,7 +395,7 @@ onMounted(load)
       </DataState>
     </section>
 
-    <a-modal v-model:open="modalOpen" :title="title" :confirm-loading="saving" width="640px" @ok="save">
+    <a-modal v-model:open="modalOpen" :title="title" :confirm-loading="saving" width="720px" @ok="save">
       <a-form layout="vertical">
         <a-form-item label="渠道名称" required>
           <a-input v-model:value="form.name" placeholder="例如 ohub-deepseek" />
@@ -368,10 +419,31 @@ onMounted(load)
           <div class="field-hint">分组决定路由与权限范围，模型由下面的白名单决定。</div>
         </a-form-item>
 
-        <a-form-item label="模型白名单" required>
-          <ModelWhitelistEditor v-model:items="form.models" />
+        <a-row :gutter="8">
+          <a-col :span="14">
+            <a-form-item label="出站代理">
+              <a-select v-model:value="form.proxy_id">
+                <a-select-option :value="0">直连（不使用代理）</a-select-option>
+                <a-select-option v-for="p in proxies" :key="p.id" :value="p.id">
+                  {{ p.name }}（{{ p.protocol }}://{{ p.host }}:{{ p.port }}）{{ p.enabled ? '' : ' · 已停用' }}
+                </a-select-option>
+              </a-select>
+              <div class="field-hint">代理不可用时请求直接失败，不会悄悄改成直连。</div>
+            </a-form-item>
+          </a-col>
+          <a-col :span="10">
+            <a-form-item label="并发上限">
+              <a-input-number v-model:value="form.max_concurrency" :min="0" style="width: 100%" />
+              <div class="field-hint">0 表示不限制。</div>
+            </a-form-item>
+          </a-col>
+        </a-row>
+
+        <a-form-item label="模型白名单与映射" required>
+          <ModelWhitelistEditor v-model:items="form.models" :proxies="proxies" />
           <div class="field-hint">
-            只有写在这里的模型才会被路由到这条渠道；上游名留空表示与对外名相同。
+            只有写在这里的模型才会被路由到这条渠道。「模型映射」把客户端请求的模型名
+            换成上游真正认识的模型名，留空表示同名；需要单独出口的模型可以在「代理」列覆盖渠道设置。
           </div>
         </a-form-item>
 
@@ -399,7 +471,7 @@ onMounted(load)
               show-icon
               message="对外名是客户端请求时用的名字；上游名是转发给上游时替换成的名字。客户端写错名字是最常见的 502 原因。"
             />
-            <ModelWhitelistEditor v-model:items="bindItems" />
+            <ModelWhitelistEditor v-model:items="bindItems" :proxies="proxies" />
             <a-button type="primary" block :loading="bindSaving" @click="saveBindings">保存白名单</a-button>
           </a-space>
         </a-card>
@@ -425,6 +497,8 @@ onMounted(load)
 .field-hint { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
 .unassigned { color: var(--color-text-secondary); }
 .chan-name { margin-bottom: 2px; }
+/* 名称下方的「经 xxx」代理提示：比正文弱一档，不抢渠道名的注意力 */
+.sub-text { color: var(--color-text-secondary); font-size: 12px; }
 .model-names { color: var(--color-text); }
 .muted { color: var(--color-text-secondary); }
 .danger-link { color: var(--color-red); }

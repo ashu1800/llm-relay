@@ -5,18 +5,24 @@ export interface WhitelistRow {
   public_name: string
   upstream_name: string
   enabled: boolean
+  /** 这一个模型走哪个代理；0 / 不填 = 跟随渠道 */
+  proxy_id?: number
 }
 </script>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { PlusOutlined, DeleteOutlined, SnippetsOutlined } from '@ant-design/icons-vue'
 
 // 这是纯展示型编辑器：数据的保存方式由父组件决定 ——
 // 建/改渠道时随渠道一起提交，抽屉里则单独整表提交。
 // 白名单是模型在系统里的唯一登记处，所以这里不做「先建模型再绑定」的两步操作。
-const props = defineProps<{ items: WhitelistRow[] }>()
+const props = defineProps<{
+  items: WhitelistRow[]
+  /** 可选：传了才显示「代理」列。没有代理可选的场景不必多一列空下拉 */
+  proxies?: { id: number; name: string; enabled: boolean }[]
+}>()
 const emit = defineEmits<{ (e: 'update:items', v: WhitelistRow[]): void }>()
 
 const bulkOpen = ref(false)
@@ -40,6 +46,16 @@ function setField(index: number, field: 'public_name' | 'upstream_name', value: 
   const next = props.items.map((row, i) => (i === index ? { ...row, [field]: value } : row))
   update(next)
 }
+
+function setProxy(index: number, value: number) {
+  const next = props.items.map((row, i) => (i === index ? { ...row, proxy_id: value } : row))
+  update(next)
+}
+
+const proxyOptions = computed(() => [
+  { value: 0, label: '跟随渠道' },
+  ...(props.proxies || []).map((p) => ({ value: p.id, label: p.name + (p.enabled ? '' : '（已停用）') }))
+])
 
 function toggleRow(index: number, value: boolean) {
   const next = props.items.map((row, i) => (i === index ? { ...row, enabled: value } : row))
@@ -88,7 +104,8 @@ function applyBulk() {
   <div class="wl-editor">
     <div v-if="items.length" class="wl-head">
       <span class="wl-col-name">对外模型名（客户端请求用）</span>
-      <span class="wl-col-up">上游模型名（留空同上）</span>
+      <span class="wl-col-up">模型映射（转发时替换成）</span>
+      <span v-if="proxies" class="wl-col-proxy">代理</span>
       <span class="wl-col-on">启用</span>
       <span class="wl-col-op"></span>
     </div>
@@ -104,6 +121,14 @@ function applyBulk() {
         :value="row.upstream_name"
         :placeholder="row.public_name || '同上'"
         @update:value="(v: string) => setField(index, 'upstream_name', v)"
+      />
+      <a-select
+        v-if="proxies"
+        class="wl-col-proxy"
+        size="small"
+        :value="row.proxy_id || 0"
+        :options="proxyOptions"
+        @change="(v: any) => setProxy(index, Number(v) || 0)"
       />
       <span class="wl-col-on">
         <a-switch :checked="row.enabled" size="small" @change="(v: any) => toggleRow(index, !!v)" />
@@ -138,8 +163,9 @@ function applyBulk() {
 .wl-editor { display: flex; flex-direction: column; gap: 6px; }
 .wl-head { display: flex; gap: 6px; font-size: 12px; color: var(--color-text-secondary); }
 .wl-row { display: flex; gap: 6px; align-items: center; }
-.wl-col-name { flex: 1 1 40%; }
-.wl-col-up { flex: 1 1 40%; }
+.wl-col-name { flex: 1 1 34%; }
+.wl-col-up { flex: 1 1 34%; }
+.wl-col-proxy { flex: 0 0 128px; }
 .wl-col-on { flex: 0 0 44px; text-align: center; }
 .wl-col-op { flex: 0 0 24px; text-align: center; }
 .wl-head .wl-col-on, .wl-head .wl-col-op { font-size: 12px; }

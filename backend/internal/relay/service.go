@@ -49,6 +49,13 @@ type Service struct {
 // SetChannelState 注入渠道运行期状态，用于并发闸门与冷却。
 func (s *Service) SetChannelState(st *ChannelState) { s.state = st }
 
+// SetProxyResolver 把「按 id 查代理配置」的能力交给转发器。
+func (s *Service) SetProxyResolver(fn ProxyResolver) { s.fwd.SetProxyResolver(fn) }
+
+// InvalidateProxy 让某个代理缓存的客户端失效。代理的地址/端口/密码一改、
+// 或被删掉时都要调用，否则旧连接会继续按老配置拨下去。
+func (s *Service) InvalidateProxy(id uint) { s.fwd.InvalidateProxy(id) }
+
 // SetGroupLimiter 注入分组限流器。不注入时分组限额不生效（等价于全部不限）。
 func (s *Service) SetGroupLimiter(l *GroupLimiter) { s.groupLimit = l }
 

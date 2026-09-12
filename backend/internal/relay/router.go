@@ -31,6 +31,15 @@ type Candidate struct {
 	GroupTPM int
 }
 
+// EgressProxyID 返回这次请求该走哪个代理：模型条目上的设置优先于渠道级，
+// 都是 0 表示直连。
+func (c Candidate) EgressProxyID() uint {
+	if c.Binding.ProxyID != 0 {
+		return c.Binding.ProxyID
+	}
+	return c.Channel.ProxyID
+}
+
 // Router 负责按分组与模型挑选渠道，并给出故障转移顺序。
 type Router struct {
 	db     *gorm.DB
@@ -69,8 +78,10 @@ func (r *Router) Candidates(ctx context.Context, q CandidateQuery) ([]Candidate,
 		PublicName   string
 		UpstreamName string
 		BindingID    uint
-		GroupRPM     int
-		GroupTPM     int
+		// BindingProxyID 是该模型条目自己的代理（0 = 跟随渠道）
+		BindingProxyID uint
+		GroupRPM       int
+		GroupTPM       int
 	}
 
 	var rows []row
@@ -80,7 +91,7 @@ func (r *Router) Candidates(ctx context.Context, q CandidateQuery) ([]Candidate,
 	// 「没有可用渠道」，而界面上两处看起来都是配好的。
 	query := r.db.WithContext(ctx).
 		Table("channels").
-		Select("channels.*, channel_models.public_name AS public_name, channel_models.upstream_name AS upstream_name, channel_models.id AS binding_id, channel_groups.rpm AS group_rpm, channel_groups.tpm AS group_tpm").
+		Select("channels.*, channel_models.public_name AS public_name, channel_models.upstream_name AS upstream_name, channel_models.id AS binding_id, channel_models.proxy_id AS binding_proxy_id, channel_groups.rpm AS group_rpm, channel_groups.tpm AS group_tpm").
 		Joins("JOIN channel_models ON channel_models.channel_id = channels.id AND channel_models.enabled = true").
 		Joins("JOIN channel_groups ON channel_groups.id = channels.group_id").
 		Where("channel_models.public_name = ?", q.PublicModel).
@@ -118,7 +129,7 @@ func (r *Router) Candidates(ctx context.Context, q CandidateQuery) ([]Candidate,
 		maxConc := ChannelMaxConcurrency(rw.ExtraConfig)
 		c := Candidate{
 			Channel:   rw.Channel,
-			Binding:   model.ChannelModel{ID: rw.BindingID, ChannelID: rw.ID, PublicName: rw.PublicName, UpstreamName: rw.UpstreamName, Enabled: true},
+			Binding:   model.ChannelModel{ID: rw.BindingID, ChannelID: rw.ID, PublicName: rw.PublicName, UpstreamName: rw.UpstreamName, Enabled: true, ProxyID: rw.BindingProxyID},
 			Available: SlotAvailable(rw.Slots, now),
 			Saturated: maxConc > 0 && r.state.Inflight(rw.ID) >= maxConc,
 			GroupRPM:  rw.GroupRPM,

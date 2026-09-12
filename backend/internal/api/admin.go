@@ -70,6 +70,9 @@ type whitelistItem struct {
 	PublicName   string `json:"public_name"`
 	UpstreamName string `json:"upstream_name"`
 	Enabled      *bool  `json:"enabled"`
+	// ProxyID 让这一个模型走自己的代理；0 = 跟随渠道。
+	// 用值类型即可：白名单是整表提交，0 的语义就是「跟随渠道」，不存在歧义。
+	ProxyID uint `json:"proxy_id"`
 }
 
 // channelPayload 是渠道的写入载荷。
@@ -99,6 +102,19 @@ type channelPayload struct {
 	Models    *[]whitelistItem `json:"models"`
 }
 
+// validateWhitelistProxies 校验白名单里引用的代理都存在。
+//
+// 刻意不塞进 normalizeWhitelist：那是个纯函数（有单测直接调），
+// 不该为了查库把单测也拖成数据库测试。
+func (s *Server) validateWhitelistProxies(items []model.ChannelModel) error {
+	for _, it := range items {
+		if err := checkProxyExists(s, it.ProxyID); err != nil {
+			return fmt.Errorf("模型 %s 指定的代理有问题: %w", it.PublicName, err)
+		}
+	}
+	return nil
+}
+
 // normalizeWhitelist 校验并规整白名单：对外名必填、同渠道内不重复、上游名留空则同名。
 func normalizeWhitelist(items []whitelistItem) ([]model.ChannelModel, error) {
 	out := make([]model.ChannelModel, 0, len(items))
@@ -120,7 +136,9 @@ func normalizeWhitelist(items []whitelistItem) ([]model.ChannelModel, error) {
 		if it.Enabled != nil {
 			enabled = *it.Enabled
 		}
-		out = append(out, model.ChannelModel{PublicName: name, UpstreamName: upstream, Enabled: enabled})
+		out = append(out, model.ChannelModel{
+			PublicName: name, UpstreamName: upstream, Enabled: enabled, ProxyID: it.ProxyID,
+		})
 	}
 	return out, nil
 }
@@ -228,6 +246,10 @@ func (s *Server) createChannel(c *gin.Context) {
 			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
 			return
 		}
+		if verr := s.validateWhitelistProxies(items); verr != nil {
+			writeUpstreamError(c, http.StatusBadRequest, verr.Error(), "invalid_request_error")
+			return
+		}
 		whitelist = items
 	}
 
@@ -247,6 +269,9 @@ func (s *Server) createChannel(c *gin.Context) {
 		APIKeyEnc: enc, APIKeyHint: secure.MaskKey(p.APIKey),
 		Weight: p.Weight, Enabled: enabled, MonitorType: orDefault(p.Monitor, "none"),
 		Slots: p.Slots, ExtraConfig: p.ExtraConf, CustomMap: p.CustomMap,
+		// 建渠道时就把代理带上：漏了它的话，界面上选了代理、保存也成功，
+		// 但库里还是 0（直连）—— 表现为「配了代理却不走代理」（实测踩过）
+		ProxyID:      proxyID,
 		HealthStatus: "unknown",
 	}
 	if err := s.deps.Store.DB().Create(&ch).Error; err != nil {
@@ -330,6 +355,10 @@ func (s *Server) updateChannel(c *gin.Context) {
 		items, err := normalizeWhitelist(*p.Models)
 		if err != nil {
 			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+			return
+		}
+		if verr := s.validateWhitelistProxies(items); verr != nil {
+			writeUpstreamError(c, http.StatusBadRequest, verr.Error(), "invalid_request_error")
 			return
 		}
 		whitelist = items
@@ -484,10 +513,14 @@ type bindPayload struct {
 	PublicName   string `json:"public_name"`
 	UpstreamName string `json:"upstream_name"`
 	Enabled      *bool  `json:"enabled"`
+	ProxyID      uint   `json:"proxy_id"`
 }
 
 func (p bindPayload) whitelistItem() whitelistItem {
-	return whitelistItem{PublicName: p.PublicName, UpstreamName: p.UpstreamName, Enabled: p.Enabled}
+	return whitelistItem{
+		PublicName: p.PublicName, UpstreamName: p.UpstreamName,
+		Enabled: p.Enabled, ProxyID: p.ProxyID,
+	}
 }
 
 // replaceChannelModelsAPI 用请求体里的整张白名单替换该渠道的条目。
@@ -506,6 +539,10 @@ func (s *Server) replaceChannelModelsAPI(c *gin.Context) {
 	items, err := normalizeWhitelist(p.Items)
 	if err != nil {
 		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
+	}
+	if verr := s.validateWhitelistProxies(items); verr != nil {
+		writeUpstreamError(c, http.StatusBadRequest, verr.Error(), "invalid_request_error")
 		return
 	}
 	db := s.deps.Store.DB()
@@ -540,6 +577,10 @@ func (s *Server) bindChannelModel(c *gin.Context) {
 	items, err := normalizeWhitelist([]whitelistItem{p.whitelistItem()})
 	if err != nil {
 		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
+	}
+	if verr := s.validateWhitelistProxies(items); verr != nil {
+		writeUpstreamError(c, http.StatusBadRequest, verr.Error(), "invalid_request_error")
 		return
 	}
 	item := items[0]

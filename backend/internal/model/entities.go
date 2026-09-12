@@ -102,6 +102,9 @@ type ChannelModel struct {
 	ChannelID    uint   `gorm:"uniqueIndex:idx_channel_model;not null" json:"channel_id"`
 	PublicName   string `gorm:"size:128;uniqueIndex:idx_channel_model;not null" json:"public_name"`
 	UpstreamName string `gorm:"size:128;not null" json:"upstream_name"`
+	// ProxyID 让单个模型走自己的代理，覆盖渠道级的设置；0 = 跟随渠道。
+	// 「同一个渠道里，便宜的模型直连、贵的走代理」这种需求靠渠道级代理做不到
+	ProxyID uint `gorm:"not null;default:0" json:"proxy_id"`
 	// 不带 gorm default：带默认值的字段在值为零（false）时会被 GORM 从 INSERT
 	// 里省掉，转而去用列默认值 true —— 「停用」就永远存不进去，界面上点了保存、
 	// 库里依然是启用。与渠道的 ProviderID 是同一个坑。

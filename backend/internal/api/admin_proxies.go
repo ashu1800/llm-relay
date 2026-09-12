@@ -224,6 +224,7 @@ func (s *Server) updateProxy(c *gin.Context) {
 			return
 		}
 	}
+	s.invalidateProxyCaches(id)
 	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates)})
 }
 
@@ -245,6 +246,19 @@ func (s *Server) deleteProxy(c *gin.Context) {
 			"还有 "+itoa(int(used))+" 个渠道在用这个代理，请先改成别的代理或直连", "invalid_request_error")
 		return
 	}
+	// 模型级代理也算引用：只查渠道会漏掉「渠道直连、某个模型单独走代理」的配置，
+	// 删掉代理后那个模型要到转发时才失败
+	var usedByModel int64
+	if err := db.Model(&model.ChannelModel{}).Where("proxy_id = ?", id).Count(&usedByModel).Error; err != nil {
+		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		return
+	}
+	if usedByModel > 0 {
+		writeUpstreamError(c, http.StatusConflict,
+			"还有 "+itoa(int(usedByModel))+" 个模型映射在用这个代理，请先改成别的代理或跟随渠道", "invalid_request_error")
+		return
+	}
+	s.invalidateProxyCaches(id)
 	deleteByID(c, db, &model.Proxy{}, id, "代理不存在")
 }
 
@@ -314,16 +328,21 @@ func (s *Server) testProxyDraft(c *gin.Context) {
 }
 
 // proxyConfigOf 把库里的行转成拨号配置（密码在这里解密）。
+//
+// 解不开密文时密码留空、照常往下走：测试会以「认证失败」告终，
+// 比在这里直接报「解密失败」更接近用户能采取的行动（重填一次密码）。
 func (s *Server) proxyConfigOf(p model.Proxy) proxy.Config {
-	cfg := proxy.Config{Protocol: p.Protocol, Host: p.Host, Port: p.Port, Username: p.Username}
-	if p.PasswordEnc != "" {
-		if plain, err := s.deps.Cipher.Decrypt(p.PasswordEnc); err == nil {
-			cfg.Password = plain
-		}
-		// 解不开时留空：测试会以「认证失败」告终，
-		// 比在这里直接报「解密失败」更接近用户能采取的行动（重填密码）
-	}
+	cfg, _ := proxy.FromEntity(p, s.deps.Cipher)
 	return cfg
+}
+
+// invalidateProxyCaches 让转发器丢掉这个代理缓存的客户端。
+// 地址、端口、密码、启用状态一变就要调 —— 否则旧连接会继续按老配置拨下去，
+// 表现为「配置改了却不生效」。
+func (s *Server) invalidateProxyCaches(id uint) {
+	if s.deps.Service != nil {
+		s.deps.Service.InvalidateProxy(id)
+	}
 }
 
 // recordProxyTest 把测试结果写回该行。写失败只记日志，不影响本次测试结论。

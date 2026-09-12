@@ -94,6 +94,8 @@ export interface ChannelBinding {
   public_name: string
   upstream_name: string
   enabled: boolean
+  /** 这一个模型走哪个代理；0 = 跟随渠道 */
+  proxy_id: number
 }
 
 export interface APIKey {

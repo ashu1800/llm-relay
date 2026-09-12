@@ -4,12 +4,28 @@
 # 拿一个不存在的地址去测只能证明失败路径。要证明成功路径，
 # 就得有一个真实可用的代理 —— 而引入一个第三方代理镜像会让
 # 验证脚本依赖外部网络（拉镜像）。
+import os
 import select
 import socket
 import threading
 from urllib.parse import urlparse
 
-PORT = int(__import__("os").environ.get("MINI_PROXY_PORT", "18099"))
+PORT = int(os.environ.get("MINI_PROXY_PORT", "18099"))
+
+# MINI_PROXY_REWRITE="假域名=真实主机,另一个=..." 让这个代理替客户端解析假域名。
+#
+# 它是「请求真的经过代理了吗」这个问题的判据：把渠道的上游地址写成
+# 一个解析不出来的域名，再让代理把它改写到真实上游 ——
+# 只有走了代理的请求才可能成功，直连必然 DNS 失败。
+REWRITES = {}
+for pair in os.environ.get("MINI_PROXY_REWRITE", "").split(","):
+    if "=" in pair:
+        k, v = pair.split("=", 1)
+        REWRITES[k.strip()] = v.strip()
+
+
+def resolve(host):
+    return REWRITES.get(host, host)
 
 
 def pipe(a, b):
@@ -45,12 +61,12 @@ def handle(c):
         method, target = parts[0], parts[1]
         if method.upper() == "CONNECT":
             host, _, port = target.partition(":")
-            up = socket.create_connection((host, int(port or 443)), 10)
+            up = socket.create_connection((resolve(host), int(port or 443)), 10)
             c.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         else:
             # 明文 HTTP 经代理时请求行是绝对 URI，转发前要改回路径形式
             u = urlparse(target)
-            up = socket.create_connection((u.hostname, u.port or 80), 10)
+            up = socket.create_connection((resolve(u.hostname), u.port or 80), 10)
             rest = req.split(b"\r\n", 1)[1]
             path = u.path or "/"
             if u.query:

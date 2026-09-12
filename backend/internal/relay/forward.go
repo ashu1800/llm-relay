@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"llm-relay/internal/model"
+	"llm-relay/internal/proxy"
 	"llm-relay/internal/relay/convert"
 )
 
@@ -26,14 +28,90 @@ type Attempt struct {
 	StartedAt  time.Time
 }
 
+// ProxyResolver 按 id 取出站代理配置。ok=false 表示这个代理当前不可用
+// （不存在、被停用、或密文解不开）。
+type ProxyResolver func(id uint) (proxy.Config, bool)
+
 // Forwarder 执行单次上游调用。
+//
+// 客户端按「出站代理」分开缓存：代理是 per-channel/per-model 的配置，
+// 共用一个 http.Client 就没法让不同的渠道走不同的出口。
+// 每个代理一个 client 也顺带保住了各自的连接池。
 type Forwarder struct {
-	client *http.Client
+	headerTimeout time.Duration
+	base          *http.Client
+
+	mu      sync.Mutex
+	proxied map[uint]*http.Client
+	// proxiedCfg 与 proxied 同步维护：翻译错误信息时要说明连的是哪个代理
+	proxiedCfg map[uint]proxy.Config
+	resolve    ProxyResolver
 }
 
 // NewForwarder 构造转发器。timeout 只约束「等待响应头」，不限制流式响应体时长。
 func NewForwarder(headerTimeout time.Duration) *Forwarder {
-	return &Forwarder{client: BuildClient(headerTimeout)}
+	return &Forwarder{
+		headerTimeout: headerTimeout,
+		base:          BuildClient(headerTimeout),
+		proxied:       make(map[uint]*http.Client),
+		proxiedCfg:    make(map[uint]proxy.Config),
+	}
+}
+
+// SetProxyResolver 注入「按 id 查代理配置」的能力。
+//
+// 用回调而不是直接持有 store：relay 包不该知道数据库长什么样，
+// 而且测试里塞一个假实现就能验证「代理不可用时绝不直连」。
+func (f *Forwarder) SetProxyResolver(fn ProxyResolver) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resolve = fn
+	// 换了数据源，旧的缓存一律作废
+	f.proxied = make(map[uint]*http.Client)
+	f.proxiedCfg = make(map[uint]proxy.Config)
+}
+
+// InvalidateProxy 丢弃某个代理缓存的客户端。
+// 代理的地址、端口、密码一改，必须调用它 —— 否则旧连接会继续按老配置拨下去，
+// 表现为「改了配置却不生效」。
+func (f *Forwarder) InvalidateProxy(id uint) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.proxied, id)
+	delete(f.proxiedCfg, id)
+}
+
+// clientFor 选出这次请求该用的客户端。
+//
+// 代理不可用时**返回错误，绝不回退直连**：用户配代理往往就是为了不让请求
+// 从本机 IP 出去，静默回退会把真实 IP 暴露给上游，而界面上一切正常 ——
+// 这种「看起来在走代理、其实直连」的失败方式是排查不出来的。
+func (f *Forwarder) clientFor(proxyID uint) (*http.Client, proxy.Config, error) {
+	if proxyID == 0 {
+		return f.base, proxy.Config{}, nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if c, ok := f.proxied[proxyID]; ok {
+		return c, f.proxiedCfg[proxyID], nil
+	}
+	if f.resolve == nil {
+		return nil, proxy.Config{}, fmt.Errorf("渠道指定的代理 #%d 无法解析（服务未接入代理配置）", proxyID)
+	}
+	cfg, ok := f.resolve(proxyID)
+	if !ok {
+		return nil, proxy.Config{}, fmt.Errorf("渠道指定的代理 #%d 不存在或已停用", proxyID)
+	}
+	tr, err := cfg.Transport(15 * time.Second)
+	if err != nil {
+		return nil, proxy.Config{}, fmt.Errorf("代理 #%d 配置不可用: %w", proxyID, err)
+	}
+	// 与直连客户端保持同一套超时口径，只换 Transport
+	tr.ResponseHeaderTimeout = f.headerTimeout
+	c := &http.Client{Timeout: 0, Transport: tr}
+	f.proxied[proxyID] = c
+	f.proxiedCfg[proxyID] = cfg
+	return c, cfg, nil
 }
 
 // Do 向上游发起一次请求。
@@ -106,10 +184,21 @@ func (f *Forwarder) Do(
 	ApplyAuth(req, cand.Channel.Protocol, cand.APIKeyPlain, cand.Channel.CustomMap)
 	applyExtraHeaders(req, cand.Channel)
 
+	client, proxyCfg, err := f.clientFor(cand.EgressProxyID())
+	if err != nil {
+		return att, err
+	}
+
 	att.Headers = make(http.Header)
-	resp, err := f.client.Do(req)
+	resp, err := client.Do(req)
 	att.HeaderMs = int(time.Since(att.StartedAt).Milliseconds())
 	if err != nil {
+		if cand.EgressProxyID() != 0 {
+			// 走代理时把底层错误翻译一下：这条错误会落进请求日志，
+			// 而 "proxyconnect tcp: ... connection refused" 没人看得懂
+			return att, fmt.Errorf("请求上游失败（经代理 %s）: %s",
+				proxyCfg.Redacted(), proxy.FriendlyError(err, proxyCfg))
+		}
 		return att, fmt.Errorf("请求上游失败: %w", err)
 	}
 
