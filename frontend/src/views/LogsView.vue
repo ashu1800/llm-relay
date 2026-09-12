@@ -135,6 +135,16 @@ async function openDetail(row: RequestLog) {
   }
 }
 
+// 耗时分级：按长短给颜色，快/中/慢三档。
+// 阈值取 1s / 3s —— 首字节 1s 内算快；超过 3s 用户已经能明显感觉到等待。
+// fmtMs 对 0 与空值都返回 '-'，那种情况不着色，避免把「没有数据」显示成「很快」。
+function latencyClass(ms: number | null | undefined) {
+  if (!ms) return 'lat-none'
+  if (ms < 1000) return 'lat-fast'
+  if (ms < 3000) return 'lat-mid'
+  return 'lat-slow'
+}
+
 function statusColor(code: number) {
   if (code >= 200 && code < 300) return 'green'
   if (code === 429) return 'orange'
@@ -309,7 +319,7 @@ onMounted(load)
         </a-table-column>
         <a-table-column title="模型" :width="145">
           <template #default="{ record }">
-            <div>{{ record.model_requested }}</div>
+            <div class="cell-model">{{ record.model_requested }}</div>
             <div
               v-if="dense === 'full' && record.model_upstream !== record.model_requested"
               class="sub-text"
@@ -323,10 +333,14 @@ onMounted(load)
             <a-tag :color="statusColor(record.status_code)">{{ record.status_code }}</a-tag>
           </template>
         </a-table-column>
-        <a-table-column title="密钥" data-index="api_key_name" :width="105" ellipsis />
+        <a-table-column title="密钥" :width="105" ellipsis>
+          <template #default="{ record }">
+            <span class="cell-key" :title="record.api_key_name">{{ record.api_key_name || '-' }}</span>
+          </template>
+        </a-table-column>
         <a-table-column title="渠道" :width="140">
           <template #default="{ record }">
-            <span>{{ record.channel_name || '-' }}</span>
+            <span class="cell-channel">{{ record.channel_name || '-' }}</span>
             <a-tag v-if="record.retry_count > 0" color="orange" style="margin-left: 4px">
               重试{{ record.retry_count }}
             </a-tag>
@@ -335,7 +349,11 @@ onMounted(load)
         <a-table-column title="词元（输入/输出/缓存）" :width="180">
           <template #default="{ record }">
             <span class="token-cell">
-              {{ record.prompt_tokens }} / {{ record.completion_tokens }} / {{ record.cached_tokens }}
+              <span class="tk tk-in">{{ record.prompt_tokens }}</span>
+              <span class="tk-sep">/</span>
+              <span class="tk tk-out">{{ record.completion_tokens }}</span>
+              <span class="tk-sep">/</span>
+              <span class="tk tk-cache">{{ record.cached_tokens }}</span>
             </span>
             <div v-if="dense === 'full'" class="sub-text">
               命中率 {{ cacheRate(record) }}
@@ -347,10 +365,14 @@ onMounted(load)
           </template>
         </a-table-column>
         <a-table-column title="响应延迟" :width="100">
-          <template #default="{ record }">{{ fmtMs(record.first_byte_ms) }}</template>
+          <template #default="{ record }">
+            <span :class="latencyClass(record.first_byte_ms)">{{ fmtMs(record.first_byte_ms) }}</span>
+          </template>
         </a-table-column>
         <a-table-column title="完成时长" :width="100">
-          <template #default="{ record }">{{ fmtMs(record.total_ms) }}</template>
+          <template #default="{ record }">
+            <span :class="latencyClass(record.total_ms)">{{ fmtMs(record.total_ms) }}</span>
+          </template>
         </a-table-column>
         <a-table-column title="费用" :width="100">
           <template #default="{ record }">{{ fmtCost(record.estimated_cost) }}</template>
@@ -435,6 +457,44 @@ onMounted(load)
 .toolbar-spacer { flex: 1; }
 .sub-text { font-size: 12px; color: var(--color-text-secondary); }
 .token-cell { font-variant-numeric: tabular-nums; }
+
+/* 模型是这一行的主角，比正文稍重一点；密钥是标识符，用等宽并与正文区分开；
+   渠道给一个浅底胶囊，因为它右边还可能跟一个「重试」标签，需要自己的边界。 */
+.cell-model { font-weight: 500; }
+/* 等宽字体比正文宽，密钥名会超出 105px 的列宽。
+   不改窄列宽而是截断：列宽一动，整张表的横向布局都要跟着调。
+   必须显式 nowrap + ellipsis —— 换成 template 渲染后原来列上的 ellipsis 不再作用于
+   这个内层 span，不写就会折行，把那一行撑得比别的行高。 */
+.cell-key {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-family-mono);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.cell-channel {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+/* 词元三段各自的颜色（变量定义见 theme.css，深色主题自动换档） */
+.tk-in { color: var(--token-input); }
+.tk-out { color: var(--token-output); }
+.tk-cache { color: var(--token-cache); }
+.tk-sep { color: var(--color-border); margin: 0 3px; }
+
+/* 耗时分级 */
+.lat-fast { color: var(--latency-fast); }
+.lat-mid { color: var(--latency-mid); }
+.lat-slow { color: var(--latency-slow); font-weight: 500; }
+.lat-none { color: var(--color-text-secondary); }
 .section-title { margin: 16px 0 8px; font-size: 14px; }
 .code-box, .err-box {
   font-family: var(--font-family-mono);

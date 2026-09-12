@@ -1,4 +1,4 @@
-// 确认西文现在到底落在哪个字体上。
+// 量日志表格各列的最终计算颜色，确认样式真的生效且互不相同。
 const ver = await (await fetch('http://127.0.0.1:9222/json/version')).json()
 const ws = new WebSocket(ver.webSocketDebuggerUrl)
 await new Promise((r, j) => { ws.onopen = r; ws.onerror = j })
@@ -26,21 +26,18 @@ await send('Page.navigate', { url: 'http://127.0.0.1:8888/console/logs' }, sessi
 await new Promise((r) => setTimeout(r, 8000))
 
 const expr = '(function(){' +
-  'var td=Array.from(document.querySelectorAll(".ant-table-tbody td")).filter(function(e){return (e.innerText||"").indexOf("2026")>=0})[0];' +
-  'var ctx=document.createElement("canvas").getContext("2d");' +
-  'var s="2026-09-12 13:05:50";' +
-  'function w(f){ctx.font="14px "+f;return Math.round(ctx.measureText(s).width*100)/100}' +
-  'function has(f){return document.fonts.check("14px "+f)}' +
-  'var el=getComputedStyle(td).fontFamily;' +
+  'function col(sel){var e=document.querySelector(sel);if(!e)return "缺失";return getComputedStyle(e).color}' +
+  'var tk=Array.from(document.querySelectorAll(".token-cell")).filter(function(e){return e.innerText.indexOf("31")>=0})[0];' +
+  'var lats=Array.from(document.querySelectorAll(".lat-fast,.lat-mid,.lat-slow")).slice(0,6).map(function(e){' +
+  '  return e.className+"="+e.innerText+" -> "+getComputedStyle(e).color});' +
   'return JSON.stringify({' +
-  '  元素字族: el.slice(0,80),' +
-  '  量_实际: w(el),' +
-  '  量_Palatino: w("Palatino Linotype"),' +
-  '  量_BookAntiqua: w("Book Antiqua"),' +
-  '  量_Times: w("Times New Roman"),' +
-  '  量_SimSun: w("SimSun"),' +
-  '  可用_Palatino: has("Palatino Linotype"),' +
-  '  可用_BookAntiqua: has("Book Antiqua")' +
+  '  模型: col(".cell-model"),' +
+  '  密钥: col(".cell-key"),' +
+  '  渠道: col(".cell-channel"),' +
+  '  词元三段的类: tk?Array.from(tk.children).map(function(c){return c.className+"="+c.innerText}):"无",' +
+  '  词元三段的色: tk?Array.from(tk.children).filter(function(c){return c.innerText.trim()!=="/"}).map(function(c){' +
+  '     return getComputedStyle(c).color}):"无",' +
+  '  耗时样例: lats' +
   '},null,1)})()'
 const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true }, sessionId)
 console.log(r.exceptionDetails ? 'ERR ' + JSON.stringify(r.exceptionDetails).slice(0, 300) : r.result.value)
