@@ -9,11 +9,18 @@ import { groupStyle, groupVars } from '@/utils/groupStyle'
 // 而分组颜色是用户用取色器选的任意值；而且这里要保证「同一个分组在
 // 渠道列表、密钥白名单、请求日志里是同一个颜色」。
 const props = defineProps<{
+  /** 展示的名字（模型名 / 密钥名 / 分组名都行） */
   name?: string | null
+  /** 分组配的颜色；空表示按分组名自动派生 */
   color?: string | null
+  /**
+   * 颜色的来源名。留空时按 name 派生 —— 显示分组名时这就是对的；
+   * 显示模型名/密钥名时**必须**传分组名，否则三个胶囊三种颜色。
+   */
+  colorFrom?: string | null
 }>()
 
-const style = computed(() => groupStyle(props.name, props.color))
+const style = computed(() => groupStyle(props.name, props.color, props.colorFrom))
 const vars = computed(() => groupVars(style.value))
 </script>
 

@@ -4,8 +4,36 @@ import { message } from 'ant-design-vue'
 import { ReloadOutlined, DownloadOutlined, SearchOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
-import ModelTag from '@/components/ModelTag.vue'
-import type { Paged, RequestLog } from '@/api/types'
+import GroupTag from '@/components/GroupTag.vue'
+import type { ChannelGroup, Paged, RequestLog } from '@/api/types'
+
+// 分组表：日志里的模型、密钥、分组三处标签共用该请求所属分组的颜色。
+//
+// 为什么日志要按分组着色而不是按模型名（原来是后者）：
+// 分组是用户自己配的边界（哪个密钥能走哪批渠道），日志里要一眼看出
+// 「这条请求走的是哪个分组」；模型名着色对排障没有帮助，反而多一套颜色规则。
+const groups = ref<ChannelGroup[]>([])
+
+function groupOf(id: number) {
+  return groups.value.find((g) => g.id === id)
+}
+
+/**
+ * 胶囊的颜色参数：同一个分组下的模型 / 密钥 / 分组三个标签共用它。
+ *
+ * colorFrom 必须传分组名 —— 三个标签的展示名各不相同，
+ * 若让它们各自按自己的名字派色，同一行会出现三种颜色（实测踩过）。
+ */
+function tagColorOf(id: number) {
+  const g = groupOf(id)
+  // 找不到分组时（分组已删、或历史日志里 group_id=0）统一用一个固定的来源名：
+  // 否则同一行的三个胶囊会各按自己的名字派色，看起来像三个不同分组
+  return { color: g?.color, colorFrom: g ? g.name : '未知分组' }
+}
+
+function groupName(id: number) {
+  return groupOf(id)?.name ?? (id ? String(id) : '—')
+}
 
 const loading = ref(false)
 const rows = ref<RequestLog[]>([])
@@ -83,6 +111,17 @@ function buildParams(includePaging: boolean): URLSearchParams {
 // 表格紧接着显示「暂无数据」，用户会以为这段时间本来就没有调用
 const loadError = ref('')
 
+// loadGroups 只在首次加载时取一次：分组是低频变更的配置，
+// 跟着每次翻页/刷新去拉一份纯属浪费（日志页刷新很频繁）
+async function loadGroups() {
+  try {
+    const res = await api.get<{ items: ChannelGroup[] }>('/groups')
+    groups.value = res.items || []
+  } catch {
+    // 拿不到分组不影响看日志：标签会退回按名字派生的颜色
+  }
+}
+
 async function load() {
   loading.value = true
   loadError.value = ''
@@ -135,14 +174,27 @@ async function openDetail(row: RequestLog) {
   }
 }
 
-// 耗时分级：按长短给颜色，快/中/慢三档。
-// 阈值取 1s / 3s —— 首字节 1s 内算快；超过 3s 用户已经能明显感觉到等待。
+// 耗时分级：5 秒内绿色、6-15 秒橙黄、15 秒以上红色。
+//
+// 分档按「用户体感」定：5 秒内是正常对话该有的速度，
+// 5-15 秒已经明显在等，超过 15 秒基本可以判定这次调用有问题（上游慢或重试）。
+// 边界取 <=5000 / <=15000 而不是 5000~6000 之间留缝隙：
+// 中间的毫秒必须落进某一档，否则会出现「不着色」的空档。
+//
 // fmtMs 对 0 与空值都返回 '-'，那种情况不着色，避免把「没有数据」显示成「很快」。
 function latencyClass(ms: number | null | undefined) {
   if (!ms) return 'lat-none'
-  if (ms < 1000) return 'lat-fast'
-  if (ms < 3000) return 'lat-mid'
+  if (ms <= 5000) return 'lat-fast'
+  if (ms <= 15000) return 'lat-mid'
   return 'lat-slow'
+}
+
+/** 悬停说明这一档的判据：颜色本身不该是唯一的信息来源 */
+function latencyTitle(ms: number | null | undefined) {
+  if (!ms) return '没有记录到耗时'
+  if (ms <= 5000) return '5 秒内'
+  if (ms <= 15000) return '5-15 秒'
+  return '超过 15 秒'
 }
 
 function statusColor(code: number) {
@@ -288,7 +340,13 @@ const pagination = computed(() => ({
   }
 }))
 
-onMounted(load)
+onMounted(() => {
+  // 分组必须先加载：模型/密钥/分组三列的颜色都取自它，
+  // 拿不到就会退回「按名字派生」，三列出现三种颜色（实测踩过）
+  loadGroups()
+  load()
+  // WebSocket 由 useLogStream 负责，见下方
+})
 </script>
 
 <template>
@@ -343,7 +401,7 @@ onMounted(load)
         :pagination="pagination"
         row-key="id"
         size="small"
-        :scroll="{ x: 1139 }"
+        :scroll="{ x: 1274 }"
       >
         <template #emptyText>
           <a-empty description="当前筛选条件下没有日志，可放宽筛选条件：把时间范围改成「近 7 天」，或清空模型 / trace_id" />
@@ -351,9 +409,11 @@ onMounted(load)
         <a-table-column title="请求时间" :width="155" fixed="left">
           <template #default="{ record }">{{ fmtTime(record.created_at) }}</template>
         </a-table-column>
-        <a-table-column title="模型" :width="145">
+        <a-table-column title="模型" :width="155">
           <template #default="{ record }">
-            <ModelTag :name="record.model_requested" />
+            <!-- 模型、密钥、分组三处用的是同一个组件与同一个颜色：
+                 它们描述的是「这次请求属于哪个分组」，颜色因此必须一致 -->
+            <GroupTag :name="record.model_requested" v-bind="tagColorOf(record.group_id)" />
             <div
               v-if="record.model_upstream && record.model_upstream !== record.model_requested"
               class="sub-text"
@@ -367,9 +427,15 @@ onMounted(load)
             <a-tag :color="statusColor(record.status_code)">{{ record.status_code }}</a-tag>
           </template>
         </a-table-column>
-        <a-table-column title="密钥" :width="105" ellipsis>
+        <a-table-column title="密钥" :width="120" ellipsis>
           <template #default="{ record }">
-            <span class="cell-key" :title="record.api_key_name">{{ record.api_key_name || '-' }}</span>
+            <GroupTag v-if="record.api_key_name" :name="record.api_key_name" v-bind="tagColorOf(record.group_id)" />
+            <span v-else class="muted">—</span>
+          </template>
+        </a-table-column>
+        <a-table-column title="分组" :width="110" ellipsis>
+          <template #default="{ record }">
+            <GroupTag :name="groupName(record.group_id)" v-bind="tagColorOf(record.group_id)" />
           </template>
         </a-table-column>
         <a-table-column title="词元（输入/输出/缓存）" :width="180">
@@ -388,14 +454,18 @@ onMounted(load)
             <span class="cache-hit">{{ cacheRate(record) }}</span>
           </template>
         </a-table-column>
-        <a-table-column title="响应延迟" :width="100">
+        <a-table-column title="首字耗时" :width="100">
           <template #default="{ record }">
-            <span :class="latencyClass(record.first_byte_ms)">{{ fmtMs(record.first_byte_ms) }}</span>
+            <span :class="latencyClass(record.first_byte_ms)" :title="latencyTitle(record.first_byte_ms)">
+              {{ fmtMs(record.first_byte_ms) }}
+            </span>
           </template>
         </a-table-column>
-        <a-table-column title="完成时长" :width="100">
+        <a-table-column title="总共耗时" :width="100">
           <template #default="{ record }">
-            <span :class="latencyClass(record.total_ms)">{{ fmtMs(record.total_ms) }}</span>
+            <span :class="latencyClass(record.total_ms)" :title="latencyTitle(record.total_ms)">
+              {{ fmtMs(record.total_ms) }}
+            </span>
           </template>
         </a-table-column>
         <a-table-column title="费用" :width="100">
@@ -414,11 +484,14 @@ onMounted(load)
       <a-descriptions v-if="current" :column="1" bordered size="small">
         <a-descriptions-item label="Trace ID">{{ current.trace_id }}</a-descriptions-item>
         <a-descriptions-item label="请求模型">
-          <ModelTag :name="current.model_requested" />
+          <GroupTag :name="current.model_requested" v-bind="tagColorOf(current.group_id)" />
         </a-descriptions-item>
         <a-descriptions-item label="上游模型">
-          <ModelTag v-if="current.model_upstream" :name="current.model_upstream" />
+          <GroupTag v-if="current.model_upstream" :name="current.model_upstream" v-bind="tagColorOf(current.group_id)" />
           <template v-else>-</template>
+        </a-descriptions-item>
+        <a-descriptions-item label="分组">
+          <GroupTag :name="groupName(current.group_id)" v-bind="tagColorOf(current.group_id)" />
         </a-descriptions-item>
         <a-descriptions-item label="入站 → 出站协议">
           {{ current.inbound_protocol }} → {{ current.upstream_protocol || '-' }}
@@ -435,9 +508,9 @@ onMounted(load)
         <a-descriptions-item label="重试">
           {{ current.retry_count > 0 ? '重试 ' + current.retry_count + ' 次' : '无' }}
         </a-descriptions-item>
-        <a-descriptions-item label="延迟">
-          首包 {{ fmtMs(current.first_byte_ms) }} · 上游握手 {{ fmtMs(current.upstream_ms) }} ·
-          完成 {{ fmtMs(current.total_ms) }}
+        <a-descriptions-item label="耗时">
+          首字 {{ fmtMs(current.first_byte_ms) }} · 上游握手 {{ fmtMs(current.upstream_ms) }} ·
+          总共 {{ fmtMs(current.total_ms) }}
         </a-descriptions-item>
         <a-descriptions-item label="费用">
           ${{ Number(current.estimated_cost).toFixed(8) }}
@@ -499,38 +572,13 @@ onMounted(load)
 .sub-text { font-size: 12px; color: var(--color-text-secondary); }
 .token-cell { font-variant-numeric: tabular-nums; }
 
-/* 模型与密钥原来只是「加粗一点 / 换成等宽」，太弱，在表里看不出被处理过。
-   现在两列各是一个胶囊，但分工不同：
-     · 模型胶囊见 components/ModelTag.vue —— 颜色随模型名变化，
-       同一个模型永远同色，扫一眼就能看出这一行换没换模型；
-     · 密钥是标识符，不该抢模型的注意力，所以留在这里用中性浅底 + 等宽。
-   两者都要省略号，长名字不会把列撑开。 */
-/* 参考站的做法是「浅色底 + 同色描边 + 同色文字」的小胶囊。
-   那边用的是绿色（它的次要色 #afbeaf）；本站绿色已经被状态、缓存命中、
-   耗时快三处占用，再用会撞语义，所以密钥用中性色，形状与层次照搬。 */
-.cell-key {
-  display: inline-block;
-  max-width: 100%;
-  padding: 1px 8px;
-  border-radius: var(--radius-control);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  vertical-align: middle;
-  line-height: 20px;
-  font-size: 12px;
-}
-/* 等宽字体比正文宽，密钥名会超出 105px 的列宽。
-   不改窄列宽而是截断：列宽一动，整张表的横向布局都要跟着调。
-   必须显式 nowrap + ellipsis —— 换成 template 渲染后原来列上的 ellipsis 不再作用于
-   这个内层 span，不写就会折行，把那一行撑得比别的行高。 */
-.cell-key {
-  background: rgba(200, 120, 100, 0.07);
-  border: 1px solid rgba(200, 120, 100, 0.24);
-  color: var(--color-text-secondary);
-  font-family: var(--font-family-mono);
-}
+/* 模型、密钥、分组三列各是一个胶囊，用的是同一个组件（components/GroupTag.vue）
+   与同一个颜色 —— 该请求所属分组的颜色。
 
+   原来的分工是「模型按模型名着色、密钥用中性色」：那套规则在排障时没用，
+   日志里真正要回答的是「这条请求走的是哪个分组」。三者同色之后，
+   扫一眼就能按颜色把同一分组的请求归到一起，也不必再记住两套配色规则。
+   颜色不是唯一线索：三列里都写着名字。 */
 /* 词元三段各自的颜色（变量定义见 theme.css，深色主题自动换档） */
 .tk-in { color: var(--token-input); }
 .tk-out { color: var(--token-output); }

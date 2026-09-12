@@ -42,15 +42,26 @@ export function normalizeHexColor(raw?: string | null): string {
   return s
 }
 
-/** 取分组样式。任何分组名都有样式，不会没有颜色。 */
-export function groupStyle(name?: string | null, color?: string | null): GroupStyle {
+/**
+ * 取分组样式。任何分组名都有样式，不会没有颜色。
+ *
+ * colorFrom 是**颜色的来源名**，默认与展示名一致。
+ * 需要它是因为日志里同一行有三个胶囊（模型、密钥、分组）：
+ * 它们要同色，而颜色必须由**分组名**决定 —— 若按各自的展示名派生，
+ * 模型名、密钥名、分组名会派出三种颜色，正好违背「样式与分组一致」。
+ */
+export function groupStyle(
+  name?: string | null,
+  color?: string | null,
+  colorFrom?: string | null
+): GroupStyle {
   const label = (name || '').trim() || '未知分组'
   const custom = normalizeHexColor(color)
   if (custom) {
     return { label, hue: 0, chroma: 0, color: custom, auto: false }
   }
-  const bare = label.toLowerCase()
-  return { label, hue: hash32(bare) % 360, chroma: FALLBACK_CHROMA, color: '', auto: true }
+  const source = ((colorFrom || '').trim() || label).toLowerCase()
+  return { label, hue: hash32(source) % 360, chroma: FALLBACK_CHROMA, color: '', auto: true }
 }
 
 /** 把样式转成可内联的 CSS 变量，颜色本身仍由 CSS 决定（便于适配深色主题）。 */
