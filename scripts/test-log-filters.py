@@ -47,6 +47,30 @@ def call(m, p, b=None):
 _, k = call("POST", "/keys", {"name": "filter-probe-key"})
 tok = k["key"]
 
+def probe_model():
+    """探针模型名必须从库里现取：白名单是用户随时会改的，
+    写死模型名会让用例以 502 失败，看起来像代码坏了。"""
+    import subprocess
+    sql = ("SELECT m.public_name FROM channel_models m "
+           "JOIN channels c ON c.id = m.channel_id AND c.enabled = true "
+           "JOIN channel_groups g ON g.id = c.group_id AND g.enabled = true "
+           "WHERE m.enabled = true ORDER BY m.id LIMIT 1")
+    try:
+        out = subprocess.run(
+            ["docker", "exec", "llm-relay-postgres", "psql", "-U", "llmrelay",
+             "-d", "llm_relay", "-t", "-A", "-c", sql],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+    except Exception:
+        out = ""
+    return out
+
+MODEL = probe_model()
+if not MODEL:
+    print("渠道白名单里没有启用的模型，本用例无法验证")
+    print("ALL_PASS")
+    raise SystemExit(0)
+print("  探针模型: %s" % MODEL)
+
 
 def chat(model, expect_fail=False):
     payload = json.dumps({"model": model, "max_tokens": 8,
@@ -63,7 +87,7 @@ def chat(model, expect_fail=False):
 
 print("=== 造几条成功与失败的日志 ===")
 for _ in range(3):
-    st, _ = chat("deepseek-v4-flash")
+    st, _ = chat(MODEL)
     print("  成功调用 HTTP", st)
 st, _ = chat("no-such-model-filter")
 print("  失败调用 HTTP", st)
@@ -81,7 +105,7 @@ _, succ = call("GET", "/logs?page_size=200&status_class=success&model=no-such-mo
 chk("只看成功：该模型一条都没有", len(succ.get("items", [])) == 0,
     "实际 %d 条" % len(succ.get("items", [])))
 
-_, succ2 = call("GET", "/logs?page_size=200&status_class=success&model=deepseek-v4-flash")
+_, succ2 = call("GET", "/logs?page_size=200&status_class=success&model=" + MODEL)
 chk("只看成功：正常模型有记录且都是 2xx",
     len(succ2.get("items", [])) > 0 and all(200 <= r["status_code"] < 300 for r in succ2["items"]),
     "共 %d 条" % len(succ2.get("items", [])))

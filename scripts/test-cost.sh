@@ -4,10 +4,24 @@ BASE="http://127.0.0.1:8888"
 SK=$(curl -s "$BASE/api/admin/keys" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['items'][0]['name'])" 2>/dev/null)
 echo "使用密钥名: $SK"
 
+# 模型名从渠道白名单现取：写死的话，用户一改白名单这个用例就变成
+# 「请求 502、费用恒为 0」，看起来像计价坏了，其实只是模型没配
+MODEL=$(docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c \
+  "SELECT m.public_name FROM channel_models m
+     JOIN channels c ON c.id = m.channel_id AND c.enabled = true
+     JOIN channel_groups g ON g.id = c.group_id AND g.enabled = true
+    WHERE m.enabled = true ORDER BY m.id LIMIT 1" | tr -d '[:space:]')
+if [ -z "$MODEL" ]; then
+  echo "渠道白名单里没有启用的模型，本用例无法验证"
+  echo DONE
+  exit 0
+fi
+echo "探针模型: $MODEL"
+
 echo
-echo "===== 1. 查 deepseek-v4-flash 是否可解析 ====="
+echo "===== 1. 查 $MODEL 是否可解析 ====="
 curl -s -X POST "$BASE/api/admin/pricing/resolve" -H 'Content-Type: application/json' \
-  -d '{"model":"deepseek-v4-flash"}' | python3 -c "
+  -d "{\"model\":\"$MODEL\"}" | python3 -c "
 import sys,json;d=json.load(sys.stdin)
 print('  可解析:', d.get('found'))
 if d.get('found'):
@@ -18,7 +32,7 @@ echo "===== 2. 发一次真实请求 ====="
 # 从数据库取回刚创建的密钥明文不可行（只存哈希），改用重新创建的密钥
 NEWKEY=$(curl -s -X POST "$BASE/api/admin/keys" -H 'Content-Type: application/json' -d '{"name":"pricing-check"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['key'])")
 curl -s -m 90 "$BASE/v1/chat/completions" -H "Authorization: Bearer $NEWKEY" -H 'Content-Type: application/json' \
-  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"只回复:OK"}],"max_tokens":20}' \
+  -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"只回复:OK\"}],\"max_tokens\":20}" \
   | python3 -c "import sys,json;d=json.load(sys.stdin);u=d.get('usage',{});print('  上游返回用量: 输入',u.get('prompt_tokens'),'输出',u.get('completion_tokens'))"
 
 echo
@@ -40,10 +54,12 @@ else:
 "
 echo
 echo "===== 4. 手工核验一遍算数 ====="
-python3 - <<'PY'
-import json,urllib.request
-req=urllib.request.Request('http://127.0.0.1:8888/api/admin/logs?page_size=1')
-it=json.load(urllib.request.urlopen(req))['items'][0]
+python3 - "$MODEL" <<'PY'
+import json,sys,urllib.request
+model=sys.argv[1]
+req=urllib.request.Request('http://127.0.0.1:8888/api/admin/logs?page_size=20')
+items=json.load(urllib.request.urlopen(req))['items']
+it=next((x for x in items if x.get('model_requested')==model), items[0])
 s=it.get('pricing_snapshot') or {}
 if s:
     inp=float(s['input_per_1m']); out=float(s['output_per_1m']); cr=float(s.get('cache_read_per_1m',0))

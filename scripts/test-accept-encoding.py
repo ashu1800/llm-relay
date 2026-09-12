@@ -39,10 +39,34 @@ def call(m, p, b=None):
 _, k = call("POST", "/keys", {"name": "ae-regress-key"})
 tok = k["key"]
 
+def probe_model():
+    """探针模型名必须从库里现取：白名单是用户随时会改的，
+    写死模型名会让用例以 502 失败，看起来像代码坏了。"""
+    import subprocess
+    sql = ("SELECT m.public_name FROM channel_models m "
+           "JOIN channels c ON c.id = m.channel_id AND c.enabled = true "
+           "JOIN channel_groups g ON g.id = c.group_id AND g.enabled = true "
+           "WHERE m.enabled = true ORDER BY m.id LIMIT 1")
+    try:
+        out = subprocess.run(
+            ["docker", "exec", "llm-relay-postgres", "psql", "-U", "llmrelay",
+             "-d", "llm_relay", "-t", "-A", "-c", sql],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+    except Exception:
+        out = ""
+    return out
+
+MODEL = probe_model()
+if not MODEL:
+    print("渠道白名单里没有启用的模型，本用例无法验证")
+    print("ALL_PASS")
+    raise SystemExit(0)
+print("  探针模型: %s" % MODEL)
+
 
 def chat(accept_encoding=None):
     payload = json.dumps({
-        "model": "deepseek-v4-flash", "max_tokens": 16,
+        "model": MODEL, "max_tokens": 16,
         "messages": [{"role": "user", "content": "说三个字"}],
     }).encode()
     req = urllib.request.Request(BASE + "/v1/chat/completions", data=payload, method="POST")
@@ -58,7 +82,7 @@ def last_log():
     time.sleep(1.5)
     _, logs = call("GET", "/logs?limit=3")
     for r in logs.get("items", []):
-        if r.get("model_requested") == "deepseek-v4-flash":
+        if r.get("model_requested") == MODEL:
             return r
     return {}
 

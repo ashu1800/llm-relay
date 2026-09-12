@@ -101,7 +101,7 @@ PID=$(curl -s -X POST "$API/pricing" -H 'Content-Type: application/json' -d "{
 }" | jqg "d['id']")
 R=$(call_and_cost)
 chk "原价 = (1×10 + 2×5)/1e6" "0.00002" "$(cost_of "$R")"
-chk "快照记下倍率来源" "\"multiplier_source\": \"none\"" "$(echo "$(snap_of "$R")" | python3 -c "import sys,json;d=json.load(sys.stdin);print(json.dumps({k:d[k] for k in ['multiplier_source']})[1:-1], end='')" 2>/dev/null || echo "")"
+chk "快照记下倍率来源" "none" "$(echo "$(snap_of "$R")" | jqg "d['multiplier_source']")"
 chk "快照里的生效倍率" "1" "$(echo "$(snap_of "$R")" | jqg "d['multiplier']")"
 
 echo

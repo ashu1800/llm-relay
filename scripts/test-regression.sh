@@ -31,9 +31,24 @@ cleanup() {
 trap cleanup EXIT
 HOST="http://127.0.0.1:8888"
 
-CHAT='{"model":"deepseek-v4-flash","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}'
-ANTH='{"model":"deepseek-v4-flash","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}'
-RESP='{"model":"deepseek-v4-flash","input":"hi","max_output_tokens":5}'
+# 探测用的模型名必须**从库里现取**，不能写死：
+# 白名单是用户随时会改的（实测只留 deepseek-v4.1-flash 就把写死 deepseek-v4-flash
+# 的探针全变成 502），写死的话每次改白名单都会误报成「协议转换坏了」
+PROBE_MODEL=$(docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c \
+  "SELECT m.public_name FROM channel_models m
+     JOIN channels c ON c.id = m.channel_id AND c.enabled = true
+     JOIN channel_groups g ON g.id = c.group_id AND g.enabled = true
+    WHERE m.enabled = true ORDER BY m.id LIMIT 1" | tr -d '[:space:]')
+if [ -z "$PROBE_MODEL" ]; then
+  echo "  没有任何启用的渠道模型白名单，协议探针无法验证（先给渠道配一个模型）"
+  echo DONE
+  exit 0
+fi
+echo "  探针模型（取自渠道白名单）: $PROBE_MODEL"
+
+CHAT="{\"model\":\"$PROBE_MODEL\",\"max_tokens\":5,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+ANTH="{\"model\":\"$PROBE_MODEL\",\"max_tokens\":5,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+RESP="{\"model\":\"$PROBE_MODEL\",\"input\":\"hi\",\"max_output_tokens\":5}"
 GEMI='{"contents":[{"parts":[{"text":"hi"}]}],"generationConfig":{"maxOutputTokens":5}}'
 
 probe() {
@@ -48,5 +63,5 @@ probe() {
 probe "openai-chat"      "$HOST/v1/chat/completions"                          "$CHAT"
 probe "anthropic"        "$HOST/v1/messages"                                  "$ANTH"
 probe "openai-responses" "$HOST/v1/responses"                                 "$RESP"
-probe "gemini"           "$HOST/v1beta/models/deepseek-v4-flash:generateContent" "$GEMI"
+probe "gemini"           "$HOST/v1beta/models/$PROBE_MODEL:generateContent"      "$GEMI"
 echo DONE
