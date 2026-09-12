@@ -3,6 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 站点图标：主色与 styles/theme.css 的 --color-primary 一致（#c87864）。
+         用 SVG 而不是打包几张 PNG：矢量在任何缩放与深色工具栏下都清晰，
+         也不用为 16/32/180 各维护一份。 -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="mask-icon" href="/favicon.svg" color="#c87864" />
+    <!-- 移动端浏览器地址栏/状态栏跟着站点主色，避免出现一条突兀的白带 -->
+    <meta name="theme-color" content="#c87864" />
     <title>LLM Relay</title>
   </head>
   <body>
