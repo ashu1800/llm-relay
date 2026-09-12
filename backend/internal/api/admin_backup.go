@@ -14,7 +14,7 @@ import (
 
 // registerBackupRoutes 挂载配置备份接口。
 //
-// 备份的是「配置」而不是「数据」：渠道、模型、绑定、模板、密钥与手工定价。
+// 备份的是「配置」而不是「数据」：渠道、模型、绑定、密钥与手工定价。
 // 调用日志与统计属于运行数据，随数据库卷一起备份更合适，不做进这里。
 func registerBackupRoutes(g *gin.RouterGroup, s *Server) {
 	r := g.Group("/backup")
@@ -51,10 +51,11 @@ type backupBundle struct {
 	// Bindings 就是渠道的模型白名单。老备份里还带着 models/providers 两个数组，
 	// 结构体里已经没有了 —— Go 解析时会忽略不认识的字段，所以旧备份仍能导入，
 	// 只是其中的 models 不会再生效（绑定的 public_name 已经随白名单落库）。
-	Bindings  []model.ChannelModel    `json:"channel_models"`
-	Templates []model.ChannelTemplate `json:"channel_templates"`
-	APIKeys   []apiKeyExport          `json:"api_keys"`
-	Pricings  []model.ModelPricing    `json:"pricings"`
+	Bindings []model.ChannelModel `json:"channel_models"`
+	// Templates 字段随模板管理一起下线。旧备份里仍然带着 channel_templates 数组，
+	// Go 解析时会忽略不认识的字段：旧备份照样能导入，只是其中的模板不再生效
+	APIKeys  []apiKeyExport       `json:"api_keys"`
+	Pricings []model.ModelPricing `json:"pricings"`
 	// ManualPricings 是旧备份文件里的字段名，只为能继续读出来
 	ManualPricings []model.ModelPricing `json:"manual_pricings"`
 }
@@ -92,7 +93,6 @@ func (s *Server) exportConfig(c *gin.Context) {
 			},
 		},
 		{"模型白名单", func() error { return db.Order("id").Find(&b.Bindings).Error }},
-		{"渠道模板", func() error { return db.Order("id").Find(&b.Templates).Error }},
 		{
 			"密钥", func() error {
 				var rows []model.APIKey
@@ -236,21 +236,6 @@ func (s *Server) importConfig(c *gin.Context) {
 			continue
 		}
 		report.Created["模型白名单"]++
-	}
-
-	for i := range b.Templates {
-		t := b.Templates[i]
-		var exist model.ChannelTemplate
-		if err := db.Where("name = ?", t.Name).First(&exist).Error; err == nil {
-			report.Skipped["渠道模板"]++
-			continue
-		}
-		t.ID = 0
-		if err := db.Create(&t).Error; err != nil {
-			report.Warnings = append(report.Warnings, "模板 "+t.Name+" 导入失败: "+err.Error())
-			continue
-		}
-		report.Created["渠道模板"]++
 	}
 
 	// 密钥只有哈希，本身无法找回明文；导入后原密钥可直接继续使用

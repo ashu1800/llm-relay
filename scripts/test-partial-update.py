@@ -28,50 +28,9 @@ def chk(name, want, got):
         bad += 1
         print("  [失败] %-40s 期望 %s 实际 %s" % (name, want, got))
 
-print("=== 模板：只改名字，其它字段必须原样保留 ===")
-_, gs = call("GET", "/groups")
-gid = gs["items"][0]["id"]
-name = "audit-tpl-partial"
-# 先清掉可能的残留
-_, lst = call("GET", "/channel-templates")
-for t in lst.get("items", []):
-    if t["name"] == name:
-        call("DELETE", "/channel-templates/%d" % t["id"])
-
-code, tpl = call("POST", "/channel-templates", {
-    "name": name, "protocol": "custom", "base_url": "https://example.test/v1",
-    "group_id": gid,
-    "extra_config": {"headers": {"X-Custom": "1"}, "max_concurrency": 3},
-    "custom_mapping": {"auth_header": "X-Key", "auth_prefix": ""},
-})
-chk("创建模板", 200, code)
-tid = tpl["id"]
-print("    group_id=%s extra_config=%s custom_mapping=%s" % (
-    tpl["group_id"], tpl["extra_config"], tpl["custom_mapping"]))
-
-code, _ = call("PUT", "/channel-templates/%d" % tid, {"name": name + "-renamed"})
-chk("只改名字", 200, code)
-_, after = call("GET", "/channel-templates")
-row = [t for t in after["items"] if t["id"] == tid][0]
-chk("名字已改", name + "-renamed", row["name"])
-chk("group_id 未被清成 0", gid, row["group_id"])
-chk("extra_config 未丢", {"headers": {"X-Custom": "1"}, "max_concurrency": 3}, row["extra_config"])
-chk("custom_mapping 未丢", {"auth_header": "X-Key", "auth_prefix": ""}, row["custom_mapping"])
-
-print()
-print("=== 模板：显式传空对象应当能清空（区分没传与传空）===")
-code, _ = call("PUT", "/channel-templates/%d" % tid, {"extra_config": {}})
-chk("显式清空 extra_config", 200, code)
-_, after2 = call("GET", "/channel-templates")
-row2 = [t for t in after2["items"] if t["id"] == tid][0]
-chk("extra_config 已清空", {}, row2["extra_config"])
-chk("custom_mapping 仍未受影响", {"auth_header": "X-Key", "auth_prefix": ""}, row2["custom_mapping"])
-
-print()
-print("=== 模板：空载荷应被拒 ===")
-code, _ = call("PUT", "/channel-templates/%d" % tid, {})
-chk("空载荷", 400, code)
-call("DELETE", "/channel-templates/%d" % tid)
+# 模板管理整个功能已下线（菜单、接口、表都删了），
+# 原本这里的「模板部分更新」用例随之删除；同样的语义由下面的密钥用例覆盖。
+# 需要渠道维度的部分更新用例时可参照 test-payload.sh 的写法另加。
 
 print()
 print("=== 密钥：白名单必须能改 ===")

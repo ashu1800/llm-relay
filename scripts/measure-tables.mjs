@@ -5,8 +5,7 @@ const pages = [
   ['分组管理', '/console/groups'],
   ['密钥信息', '/console/keys'],
   ['请求日志', '/console/logs'],
-  ['模型定价', '/console/pricing'],
-  ['模板管理', '/console/channel-templates']
+  ['模型定价', '/console/pricing']
 ]
 const ver = await (await fetch('http://127.0.0.1:9222/json/version')).json()
 const ws = new WebSocket(ver.webSocketDebuggerUrl)

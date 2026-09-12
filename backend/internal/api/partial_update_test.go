@@ -10,32 +10,9 @@ import (
 // 这两条一旦退化成值类型，表现就是「只改名字把别的字段清空」——
 // 而且因为 JSONMap 的 Valuer 把 nil map 写成 "{}" 而不是 NULL，
 // 事后从数据上看不出被清过。
-func TestTemplateUpdatePayloadDistinguishesOmittedFromEmpty(t *testing.T) {
-	var omitted templateUpdatePayload
-	if err := json.Unmarshal([]byte(`{"name":"改名"}`), &omitted); err != nil {
-		t.Fatalf("解析失败: %v", err)
-	}
-	if omitted.ExtraConf != nil || omitted.CustomMap != nil || omitted.GroupID != nil {
-		t.Error("没传的字段必须解析成 nil，否则会被当成「显式清空」")
-	}
-	if omitted.Name == nil || *omitted.Name != "改名" {
-		t.Error("传了的字段必须解析出来")
-	}
-
-	var explicit templateUpdatePayload
-	if err := json.Unmarshal([]byte(`{"extra_config":{},"group_id":0,"custom_mapping":{}}`), &explicit); err != nil {
-		t.Fatalf("解析失败: %v", err)
-	}
-	if explicit.ExtraConf == nil {
-		t.Error("显式传 {} 必须解析成非 nil，否则「清空」会被当成「没传」")
-	}
-	if explicit.GroupID == nil || *explicit.GroupID != 0 {
-		t.Error("显式传 0 必须能与「没传」区分开")
-	}
-	if explicit.CustomMap == nil {
-		t.Error("显式传 {} 必须解析成非 nil")
-	}
-}
+//
+// 原来这条用的是 templateUpdatePayload；模板管理下线后改用 groupUpdatePayload，
+// 同样是「所有字段可选」的载荷（渠道维度的同类断言见 groups_test.go）。
 
 // 密钥白名单同理：空数组是有效值（清空白名单），不能与「没传」混为一谈。
 func TestKeyPayloadWhitelistOmittedVsEmpty(t *testing.T) {

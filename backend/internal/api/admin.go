@@ -743,16 +743,6 @@ func (s *Server) deleteGroup(c *gin.Context) {
 		writeUpstreamError(c, http.StatusConflict, "该分组下仍有渠道，请先迁移", "invalid_request_error")
 		return
 	}
-	// 模板也带 group_id，漏掉它会留下指向已删分组的模板
-	var tplCount int64
-	if err := db.Model(&model.ChannelTemplate{}).Where("group_id = ?", id).Count(&tplCount).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
-		return
-	}
-	if tplCount > 0 {
-		writeUpstreamError(c, http.StatusConflict, "该分组下仍有模板，请先迁移", "invalid_request_error")
-		return
-	}
 	deleteByID(c, db, &model.ChannelGroup{}, id, "分组不存在")
 }
 

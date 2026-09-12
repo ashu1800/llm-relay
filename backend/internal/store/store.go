@@ -73,7 +73,6 @@ func (s *Store) Migrate() error {
 		&model.ChannelGroup{},
 		&model.Channel{},
 		&model.ChannelModel{},
-		&model.ChannelTemplate{},
 		&model.APIKey{},
 		&model.RequestLog{},
 		&model.RequestPayload{},
@@ -180,6 +179,9 @@ func (s *Store) migrateLegacySchema() error {
 		"ALTER TABLE model_pricings DROP COLUMN IF EXISTS priority",
 		"ALTER TABLE request_logs DROP COLUMN IF EXISTS provider_id",
 		"DROP TABLE IF EXISTS pricing_sync_logs",
+		// 模板管理整个功能已下线：菜单、接口、实体都删了，
+		// 表留着只会在备份/排查时让人以为它还在生效
+		"DROP TABLE IF EXISTS channel_templates",
 		"DROP TABLE IF EXISTS models",
 		"DROP TABLE IF EXISTS providers",
 	} {
@@ -197,28 +199,6 @@ func (s *Store) Seed() error {
 		Attrs(model.ChannelGroup{Strategy: model.StrategyWeighted, IsDefault: true, Enabled: true}).
 		FirstOrCreate(&group).Error; err != nil {
 		return fmt.Errorf("初始化默认分组失败: %w", err)
-	}
-
-	// 常见厂商的接入参数做成内置模板，建渠道时不必手抄 base_url 与协议。
-	// 只预置公开的接口地址，不含任何凭据。
-	// 模板必须落在某个分组上：group_id=0 不是合法分组，
-	// 有外键之后这种行根本插不进去，没有外键时则会变成一个查不到归属的悬挂值
-	templates := []model.ChannelTemplate{
-		{Name: "OpenAI 官方", GroupID: group.ID, Protocol: model.ProtocolOpenAIChat, BaseURL: "https://api.openai.com/v1"},
-		{Name: "DeepSeek 官方", GroupID: group.ID, Protocol: model.ProtocolOpenAIChat, BaseURL: "https://api.deepseek.com/v1"},
-		{Name: "Anthropic 官方", GroupID: group.ID, Protocol: model.ProtocolAnthropic, BaseURL: "https://api.anthropic.com/v1"},
-		{Name: "Google Gemini 官方", GroupID: group.ID, Protocol: model.ProtocolGemini, BaseURL: "https://generativelanguage.googleapis.com/v1beta"},
-		{Name: "OpenRouter", GroupID: group.ID, Protocol: model.ProtocolOpenAIChat, BaseURL: "https://openrouter.ai/api/v1"},
-		{Name: "本地 Ollama", GroupID: group.ID, Protocol: model.ProtocolOpenAIChat, BaseURL: "http://host.docker.internal:11434/v1"},
-		{Name: "本地 vLLM", GroupID: group.ID, Protocol: model.ProtocolOpenAIChat, BaseURL: "http://host.docker.internal:8000/v1"},
-	}
-	for i := range templates {
-		t := templates[i]
-		if err := s.db.Where(model.ChannelTemplate{Name: t.Name}).
-			Attrs(model.ChannelTemplate{Protocol: t.Protocol, BaseURL: t.BaseURL}).
-			FirstOrCreate(&t).Error; err != nil {
-			return fmt.Errorf("初始化渠道模板 %s 失败: %w", t.Name, err)
-		}
 	}
 
 	defaults := []model.Setting{
@@ -261,13 +241,11 @@ func (s *Store) EnsureForeignKeys() error {
 		return fmt.Errorf("查找默认分组失败: %w", err)
 	}
 
-	// 种子数据里的内置模板没写分组，留下 7 行 group_id=0。
-	// 0 不是合法分组，直接加外键会被这些行挡住，所以先归到默认分组。
-	if err := s.db.Exec(
-		"UPDATE channel_templates SET group_id = ? WHERE group_id = 0 OR group_id NOT IN (SELECT id FROM channel_groups)",
-		grp.ID).Error; err != nil {
-		return fmt.Errorf("回填模板分组失败: %w", err)
-	}
+	// 注意：这里曾经有一段「回填 channel_templates.group_id」的语句
+	// （种子数据里的内置模板没写分组，留下 7 行 group_id=0，加外键前要先归到默认分组）。
+	// 模板管理下线、表被 DROP 之后，它变成了对已删表的 UPDATE —— 实测直接让
+	// 应用启动失败：relation "channel_templates" does not exist。
+	// 删功能时要把引用它的地方一起找干净，包括这种「只在迁移里出现一次」的语句。
 
 	// ON DELETE 的选择：
 	//   channel_models 是纯关联表，宿主没了就该跟着走 —— CASCADE
@@ -278,9 +256,6 @@ func (s *Store) EnsureForeignKeys() error {
 			FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE`,
 		"ALTER TABLE channels DROP CONSTRAINT IF EXISTS fk_channels_group",
 		`ALTER TABLE channels ADD CONSTRAINT fk_channels_group
-			FOREIGN KEY (group_id) REFERENCES channel_groups(id) ON DELETE RESTRICT`,
-		"ALTER TABLE channel_templates DROP CONSTRAINT IF EXISTS fk_channel_templates_group",
-		`ALTER TABLE channel_templates ADD CONSTRAINT fk_channel_templates_group
 			FOREIGN KEY (group_id) REFERENCES channel_groups(id) ON DELETE RESTRICT`,
 	}
 	for _, stmt := range stmts {

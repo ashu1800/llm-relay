@@ -57,7 +57,6 @@ for path, label in [
     ("/groups/%d" % GHOST, "分组"),
     ("/keys/%d" % GHOST, "密钥"),
     ("/pricing/%d" % GHOST, "定价"),
-    ("/channel-templates/%d" % GHOST, "渠道模板"),
 ]:
     code, body = call("DELETE", path)
     chk("删除不存在的%s" % label, 404, code)
@@ -88,23 +87,6 @@ else:
     code, body = call("DELETE", "/groups/%d" % occupied)
     chk("删除仍有渠道的分组（期望 409）", 409, code)
     print("       提示: %s" % body.get("error", {}).get("message", body))
-
-# 建一个「只有模板、没有渠道」的分组，验证模板占用也会拦住删除
-_, g = call("POST", "/groups", {"name": "delete-semantics-group"})
-gid = g["id"]
-_, tpl = call("POST", "/channel-templates", {
-    "name": "delete-semantics-tpl", "protocol": "openai-chat",
-    "base_url": "https://example.test", "group_id": gid,
-})
-code, body = call("DELETE", "/groups/%d" % gid)
-chk("删除仍有模板的分组（期望 409）", 409, code)
-print("       提示: %s" % body.get("error", {}).get("message", body))
-
-# 模板挪走后应当能删
-call("PUT", "/channel-templates/%d" % tpl["id"], {"group_id": 1})
-code, _ = call("DELETE", "/groups/%d" % gid)
-chk("模板迁走后可以删分组", 200, code)
-call("DELETE", "/channel-templates/%d" % tpl["id"])
 
 print()
 print("=== 4. 删渠道要一并清掉模型白名单，且不能留下悬挂 ===")

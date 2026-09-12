@@ -18,16 +18,21 @@ echo "=== 不存在的 ID 更新应返回 404 ==="
 probe "渠道"   "channels/999999"  '{"name":"x"}'
 probe "分组"   "groups/999999"    '{"name":"x"}'
 probe "密钥"   "keys/999999"      '{"name":"x"}'
-probe "模型"   "models/999999"    '{"provider_id":1}'
 probe "定价"   "pricing/999999"   '{"match_type":"exact"}'
-probe "模板"   "channel-templates/999999" '{"name":"x","protocol":"openai-chat"}'
 python3 -c "import json;print('  错误信息示例:', json.load(open('/tmp/u404.json')).get('error',{}).get('message','?'))"
 
 echo
 echo "=== 存在的 ID 仍应正常更新 ==="
-MID=$(curl -s "$BASE/models" | python3 -c "import sys,json;print(json.load(sys.stdin)['items'][0]['id'])")
-code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$BASE/models/$MID" -H 'Content-Type: application/json' -d '{"provider_id":1}')
-chk "模型正常更新" "200" "$code"
+# 原来这里用 /models，那是「模型商 + 模型目录」时代就有的脚本；
+# 那个功能整体下线后，改成用分组做同样的验证（改成原名，幂等、不动真实数据）
+read -r GID GNAME <<<"$(curl -s "$BASE/groups" | python3 -c "
+import sys,json
+g=json.load(sys.stdin)['items'][0]
+print(g['id'], g['name'])
+")"
+code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$BASE/groups/$GID" \
+  -H 'Content-Type: application/json' -d "{\"name\":\"$GNAME\"}")
+chk "分组正常更新" "200" "$code"
 
 echo
 echo "=== 全接口回归 ==="

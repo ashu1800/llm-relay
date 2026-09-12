@@ -14,14 +14,11 @@ P "DELETE FROM channels WHERE name = 'fk-cascade-probe'" >/dev/null
 echo
 echo "=== 1. 外键是否建起来了 ==="
 P "SELECT conname FROM pg_constraint WHERE contype='f' ORDER BY conname"
-# 三条：渠道->分组、白名单->渠道、模板->分组。
-# 原来还有一条 白名单->模型 的外键，模型表被删除后它也随之消失。
-chk "外键数量" "3" "$(P "SELECT count(*) FROM pg_constraint WHERE contype='f'")"
-
-echo
-echo "=== 2. 模板分组是否已回填（不应再有 0 或悬挂）==="
-chk "group_id=0 的模板数" "0" "$(P 'SELECT count(*) FROM channel_templates WHERE group_id=0')"
-chk "指向不存在分组的模板数" "0" "$(P 'SELECT count(*) FROM channel_templates t LEFT JOIN channel_groups g ON g.id=t.group_id WHERE g.id IS NULL')"
+# 两条：渠道->分组、白名单->渠道。
+# 白名单->模型 的外键随模型表消失，模板->分组 的外键随模板管理下线消失，
+# 每删一个功能都要回来改这个数字，否则会以「外键数量不对」误报
+chk "外键数量" "2" "$(P "SELECT count(*) FROM pg_constraint WHERE contype='f'")"
+chk "channel_templates 表已删除" "0" "$(P "SELECT count(*) FROM information_schema.tables WHERE table_name='channel_templates'")"
 
 echo
 echo "=== 3. 外键必须拦住孤儿数据 ==="

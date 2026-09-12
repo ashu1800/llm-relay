@@ -11,7 +11,7 @@ b = json.load(open('/tmp/backup.json'))
 print('  版本:', b['version'], '| 应用:', b['app'])
 print('  主密钥指纹:', b['secret_fingerprint'])
 for k in ['channel_groups','channels','channel_models',
-          'channel_templates','api_keys','pricings']:
+          'api_keys','pricings']:
     print('    %-18s %d' % (k, len(b.get(k) or [])))
 PY
 
@@ -45,21 +45,15 @@ print('  跳过合计:', sum(d['skipped'].values()))
 print('  告警:', d['warnings'] or '(无)')
 PY
 echo "  渠道数: $(curl -s "$BASE/channels" | python3 -c "import sys,json;print(json.load(sys.stdin)['total'])")"
-echo "  模板数: $(curl -s "$BASE/channel-templates" | python3 -c "import sys,json;print(json.load(sys.stdin)['total'])")"
 
 echo
-echo "=== 4. 删掉一个模板后再导入：应被恢复 ==="
-TID=$(curl -s "$BASE/channel-templates" | python3 -c "
-import sys,json
-for t in json.load(sys.stdin)['items']:
-    if t['name']=='OpenRouter': print(t['id'])
-")
-curl -s -o /dev/null -w "  删除 OpenRouter 模板 HTTP %{http_code}\n" -X DELETE "$BASE/channel-templates/$TID"
-echo "  删除后模板数: $(curl -s "$BASE/channel-templates" | python3 -c "import sys,json;print(json.load(sys.stdin)['total'])")"
-curl -s -X POST "$BASE/backup/import" -H 'Content-Type: application/json' \
-  --data-binary @"$OUT" -o /tmp/imp2.json -w "  导入 HTTP %{http_code}\n"
-python3 -c "import json;d=json.load(open('/tmp/imp2.json'));print('  本次新增:', d['created'])"
-echo "  导入后模板数: $(curl -s "$BASE/channel-templates" | python3 -c "import sys,json;print(json.load(sys.stdin)['total'])")"
+echo "=== 4. 备份里不应再有已下线功能的残留 ==="
+python3 -c "
+import json
+b = json.load(open('/tmp/backup.json'))
+gone = [k for k in ('channel_templates',) if k in b]
+print('  已下线字段仍在备份里:', gone or '(无)')
+"
 
 echo
 echo "=== 5. 非本应用的文件应被拒绝 ==="

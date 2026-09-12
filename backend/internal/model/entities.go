@@ -94,19 +94,6 @@ type ChannelModel struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// ChannelTemplate 渠道模板，用于快速填充常见供应商配置。
-type ChannelTemplate struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
-	Name        string    `gorm:"size:128;uniqueIndex;not null" json:"name"`
-	Protocol    string    `gorm:"size:32;not null" json:"protocol"`
-	BaseURL     string    `gorm:"size:512" json:"base_url"`
-	GroupID     uint      `json:"group_id"`
-	ExtraConfig JSONMap   `gorm:"type:jsonb" json:"extra_config"`
-	CustomMap   JSONMap   `gorm:"column:custom_map;type:jsonb" json:"custom_mapping"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-}
-
 // APIKey 对外下发的调用密钥。只存哈希与展示前缀，明文仅在创建时返回一次。
 type APIKey struct {
 	ID            uint       `gorm:"primaryKey" json:"id"`
