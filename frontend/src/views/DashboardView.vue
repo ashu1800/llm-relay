@@ -370,7 +370,7 @@ onMounted(load)
         <StatCard label="请求数量" :value="n(summary?.requests)" tone="purple" :hint="'失败 ' + n(summary?.errors) + ' 次'">
           <template #icon><ApiOutlined /></template>
         </StatCard>
-        <StatCard label="预估金额" :value="'$' + money(summary?.estimated_cost)" tone="orange" hint="按官方单价折算，非实际扣费">
+        <StatCard label="预估金额" :value="'$' + money(summary?.estimated_cost)" tone="orange" hint="仅供参考，非实际扣费">
           <template #icon><DollarOutlined /></template>
         </StatCard>
         <StatCard label="Token 量" :value="n(summary?.total_tokens)" tone="blue" :hint="'命中率 ' + ((summary?.cache_hit_rate ?? 0) * 100).toFixed(1) + '%'">
