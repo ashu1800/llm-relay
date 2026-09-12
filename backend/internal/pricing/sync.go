@@ -301,6 +301,40 @@ func (s *Syncer) fetchDeepSeekOfficial(ctx context.Context) ([]Entry, error) {
 	return entries, nil
 }
 
+// officialBucket 累积官方表格里某一列的谷时/峰时价格。
+type officialBucket struct {
+	offInput, peakInput   decimal.Decimal
+	offOutput, peakOutput decimal.Decimal
+	offCache, peakCache   decimal.Decimal
+}
+
+// validateOfficialBucket 校验单列价格是否可信，不可信就整体拒绝。
+//
+// 为什么必须拦：官方源与已入库的官方行优先级相同（都是 PriorityOfficial=50），
+// 而 upsert 的跳过条件是 existing.Priority > priority —— 同优先级不跳过。
+// 所以一旦官方页面改版把某个价格解析成 0、或串到别的列上，错值会直接覆盖
+// 已入库的正确值，而同步历史仍显示 ok。
+//
+// 实测过的两种改版形态（用真实页面做变异）：
+//   - 删掉「CACHE MISS 的 OFF-PEAK」行，输入价变 0
+//   - 「CACHE MISS」改名「CACHE READ」，指标沿用上一行，输入价被写进缓存列、输入价归 0
+//
+// 下面两条不变式正好覆盖它们。宁可这次整体不更新，也不能写错。
+func validateOfficialBucket(name string, b officialBucket) error {
+	if b.offInput.LessThanOrEqual(decimal.Zero) {
+		return fmt.Errorf("%s 的输入价解析为 %s，疑似页面结构变化", name, b.offInput)
+	}
+	if b.offOutput.LessThanOrEqual(decimal.Zero) {
+		return fmt.Errorf("%s 的输出价解析为 %s，疑似页面结构变化", name, b.offOutput)
+	}
+	// 缓存命中一定比缓存未命中便宜；不满足说明指标行没被认出来、价格串列了
+	if !b.offCache.IsZero() && !b.offCache.LessThan(b.offInput) {
+		return fmt.Errorf("%s 的缓存命中价 %s 不低于输入价 %s，疑似列错位",
+			name, b.offCache, b.offInput)
+	}
+	return nil
+}
+
 // footnoteAliases 返回「表头第几列 -> 该列模型的遗留别名」。
 //
 // 为什么需要它：官方给 deepseek-flash 挂了脚注 (1)，正文写明
@@ -384,12 +418,7 @@ func parseDeepSeekTable(body []byte) ([]Entry, error) {
 		names = append(names, strings.TrimSpace(footnoteRe.ReplaceAllString(n, "")))
 	}
 
-	type acc struct {
-		offInput, peakInput   decimal.Decimal
-		offOutput, peakOutput decimal.Decimal
-		offCache, peakCache   decimal.Decimal
-	}
-	buckets := make([]acc, len(names))
+	buckets := make([]officialBucket, len(names))
 
 	metric := ""
 	mode := ""
@@ -446,10 +475,19 @@ func parseDeepSeekTable(body []byte) ([]Entry, error) {
 		if b.offInput.IsZero() && b.offOutput.IsZero() {
 			continue
 		}
+		if err := validateOfficialBucket(name, b); err != nil {
+			return nil, err
+		}
 		rules := DeepSeekPeakRules()
 		if !b.peakInput.IsZero() && !b.offInput.IsZero() && !b.peakInput.Equal(b.offInput) {
 			// 用官方实际倍率替换硬编码值，价格调整时自动跟随
 			mult, _ := b.peakInput.Div(b.offInput).Float64()
+			// 倍率必须是个合理的放大系数：官方是 2。
+			// 解析错位时会得到 0、负数或离谱的值，这种要拦下来而不是照写。
+			if mult <= 1 || mult > 10 {
+				return nil, fmt.Errorf("%s 的峰时倍率解析为 %.4f（峰时 %s / 谷时 %s），疑似页面结构变化",
+					name, mult, b.peakInput, b.offInput)
+			}
 			rules = scaleRules(rules, mult)
 		}
 		base := Entry{
@@ -503,6 +541,23 @@ func parsePrices(s string) []decimal.Decimal {
 	return vals
 }
 
+// litellmEntryPolicy 决定一条 LiteLLM 条目该不该写、要不要额外写派生的裸名。
+//
+// 为什么要单独抽出来：这条策略写错时的表现很隐蔽 —— 每轮同步「先写 341 条、
+// 紧接着 pruneOrphanBareNames 又清理 341 条」，总数不变，
+// 但同步历史里永远显示「新增 341」，看起来像价格表在持续增长。
+//
+// 两种键形态：
+//   - 带前缀（deepseek/deepseek-v4-flash）：全名总是保留，派生裸名只给已接入的模型商
+//   - 无前缀（gpt-4o、command-r-plus）：键本身就是裸名，未接入的模型商一律不写
+func litellmEntryPolicy(key string, providerID uint) (writeSelf, writeBare bool) {
+	idx := strings.Index(key, "/")
+	if idx <= 0 {
+		return providerID > 0, false
+	}
+	return true, providerID > 0
+}
+
 // ============================ LiteLLM ============================
 
 // fetchLiteLLM 拉取 LiteLLM 社区维护的价格表。
@@ -540,6 +595,7 @@ func (s *Syncer) fetchLiteLLM(ctx context.Context) ([]Entry, error) {
 	// 裸名的归属登记，见下方写入处的说明
 	bareOwner := map[string]string{}
 	bareConflicts := 0
+	foreignBare := 0
 	var entries []Entry
 	for _, k := range keys {
 		item := raw[k]
@@ -574,10 +630,16 @@ func (s *Syncer) fetchLiteLLM(ctx context.Context) ([]Entry, error) {
 			cacheWrite = in
 		}
 
-		// 同时写入带 provider 前缀与裸名两种键，便于用任一种写法命中
 		// 只有已接入的模型商才标 id，其余留 0 表示「不属于已接入的模型商」，
 		// 而不是一律算到 OpenAI 头上
 		pid := ids[strings.ToLower(provider)]
+		writeSelf, writeBare := litellmEntryPolicy(k, pid)
+		if !writeSelf {
+			// 未接入模型商的裸名不写：与 pruneOrphanBareNames 保持一致，
+			// 否则写进去当轮就被清掉，形成每轮一次的无效往返
+			foreignBare++
+			continue
+		}
 		entries = append(entries, Entry{
 			ProviderID: pid, ModelKey: k, InputPer1M: in, OutputPer1M: out,
 			CacheReadPer1M: cacheRead, CacheWritePer1M: cacheWrite, PeakRules: rules,
@@ -591,8 +653,8 @@ func (s *Syncer) fetchLiteLLM(ctx context.Context) ([]Entry, error) {
 		//
 		// 已接入的模型商之间若仍撞名，用 bareOwner 记住先写入者（键已排序，
 		// 结果确定），后来者跳过，避免同一轮同步里自相覆盖。
-		if idx := strings.Index(k, "/"); idx > 0 && pid > 0 {
-			bare := k[idx+1:]
+		if writeBare {
+			bare := k[strings.Index(k, "/")+1:]
 			if owner, taken := bareOwner[bare]; !taken {
 				bareOwner[bare] = k
 				entries = append(entries, Entry{
@@ -610,6 +672,10 @@ func (s *Syncer) fetchLiteLLM(ctx context.Context) ([]Entry, error) {
 	if bareConflicts > 0 {
 		s.logger.Info("LiteLLM 裸名冲突已按来源保留首个",
 			"跳过", bareConflicts, "说明", "同一裸名被多个已接入模型商提供")
+	}
+	if foreignBare > 0 {
+		s.logger.Info("跳过未接入模型商的裸名",
+			"条数", foreignBare, "说明", "只保留已接入模型商的裸名，全名不受影响")
 	}
 	return entries, nil
 }
