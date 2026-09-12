@@ -637,6 +637,15 @@ func (s *Server) updateKey(c *gin.Context) {
 	if p.RateLimitRPM != nil {
 		updates["rate_limit_rpm"] = *p.RateLimitRPM
 	}
+	// 白名单此前只有创建路径会写，更新路径静默丢弃：
+	// 传 {enabled:true, allowed_models:[...]} 会返回 updated:1 但白名单纹丝不动。
+	// 用 nil 判断「没传」—— 空数组是有效值（表示清空白名单），不能当成没传。
+	if p.AllowedModels != nil {
+		updates["allowed_models"] = p.AllowedModels
+	}
+	if p.AllowedGroups != nil {
+		updates["allowed_groups"] = p.AllowedGroups
+	}
 	if len(updates) == 0 {
 		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
 		return

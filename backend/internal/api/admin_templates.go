@@ -35,6 +35,23 @@ type templatePayload struct {
 	CustomMap model.JSONMap `json:"custom_mapping"`
 }
 
+// templateUpdatePayload 是编辑模板的入参。
+//
+// 与创建不同，这里每个字段都是可选的：只写客户端真正提供的字段。
+// 原实现无条件写 6 个字段，而前端只发 3 个（name/protocol/base_url），
+// 于是「只改个名字」会把 group_id 清成 0、extra_config 与 custom_map 清成 {} ——
+// 而 custom_map 是自定义鉴权渠道的唯一来源，extra_config 决定并发上限。
+// 更麻烦的是 JSONMap 的 Valuer 把 nil map 序列化成 "{}" 而不是 NULL，
+// 事后从数据上看不出被清过。
+type templateUpdatePayload struct {
+	Name      *string        `json:"name"`
+	Protocol  *string        `json:"protocol"`
+	BaseURL   *string        `json:"base_url"`
+	GroupID   *uint          `json:"group_id"`
+	ExtraConf *model.JSONMap `json:"extra_config"`
+	CustomMap *model.JSONMap `json:"custom_mapping"`
+}
+
 func (s *Server) listTemplates(c *gin.Context) {
 	var items []model.ChannelTemplate
 	if err := s.deps.Store.DB().Order("id").Find(&items).Error; err != nil {
@@ -96,35 +113,84 @@ func (s *Server) updateTemplate(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var p templatePayload
+	var p templateUpdatePayload
 	if err := c.ShouldBindJSON(&p); err != nil {
 		writeUpstreamError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
 		return
 	}
-	if msg := validateTemplate(&p); msg != "" {
-		writeUpstreamError(c, http.StatusBadRequest, msg, "invalid_request_error")
-		return
-	}
+
 	var tpl model.ChannelTemplate
 	if err := s.deps.Store.DB().First(&tpl, id).Error; err != nil {
 		writeUpstreamError(c, http.StatusNotFound, "模板不存在", "not_found_error")
 		return
 	}
-	// 列名由 GORM 从 Go 字段名推导：CustomMap 对应 custom_map，
-	// 与 API 上的 custom_mapping 不是一回事。写成 JSON 名会报列不存在。
-	err := s.deps.Store.DB().Model(&tpl).Updates(map[string]any{
-		"name": p.Name, "protocol": p.Protocol, "base_url": p.BaseURL,
-		"group_id": p.GroupID, "extra_config": p.ExtraConf, "custom_map": p.CustomMap,
-	}).Error
-	if err != nil {
-		if isUniqueViolation(err) {
-			writeUpstreamError(c, http.StatusConflict, "模板名已存在: "+p.Name, "invalid_request_error")
-			return
-		}
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+
+	// 用「库里现有值 + 本次提供的字段」合成一份完整载荷走同一套校验，
+	// 这样「只改名字」也能校验出与其它字段冲突的组合，且复用归一化逻辑
+	merged := templatePayload{
+		Name: tpl.Name, Protocol: tpl.Protocol, BaseURL: tpl.BaseURL,
+		GroupID: tpl.GroupID, ExtraConf: tpl.ExtraConfig, CustomMap: tpl.CustomMap,
+	}
+	if p.Name != nil {
+		merged.Name = *p.Name
+	}
+	if p.Protocol != nil {
+		merged.Protocol = *p.Protocol
+	}
+	if p.BaseURL != nil {
+		merged.BaseURL = *p.BaseURL
+	}
+	if p.GroupID != nil {
+		merged.GroupID = *p.GroupID
+	}
+	if p.ExtraConf != nil {
+		merged.ExtraConf = *p.ExtraConf
+	}
+	if p.CustomMap != nil {
+		merged.CustomMap = *p.CustomMap
+	}
+	if msg := validateTemplate(&merged); msg != "" {
+		writeUpstreamError(c, http.StatusBadRequest, msg, "invalid_request_error")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"id": id, "updated": true})
+
+	// 只写客户端真正提供的字段；写归一化后的值（merged），不是原始入参
+	//
+	// 列名由 GORM 从 Go 字段名推导：CustomMap 对应 custom_map，
+	// 与 API 上的 custom_mapping 不是一回事。写成 JSON 名会报列不存在。
+	updates := map[string]any{}
+	if p.Name != nil {
+		updates["name"] = merged.Name
+	}
+	if p.Protocol != nil {
+		updates["protocol"] = merged.Protocol
+	}
+	if p.BaseURL != nil {
+		updates["base_url"] = merged.BaseURL
+	}
+	if p.GroupID != nil {
+		updates["group_id"] = merged.GroupID
+	}
+	if p.ExtraConf != nil {
+		updates["extra_config"] = merged.ExtraConf
+	}
+	if p.CustomMap != nil {
+		updates["custom_map"] = merged.CustomMap
+	}
+	if len(updates) == 0 {
+		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
+		return
+	}
+
+	if err := applyUpdates(s.deps.Store.DB(), &model.ChannelTemplate{}, id, updates); err != nil {
+		if isUniqueViolation(err) {
+			writeUpstreamError(c, http.StatusConflict, "模板名已存在: "+merged.Name, "invalid_request_error")
+			return
+		}
+		writeUpdateError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates)})
 }
 
 func (s *Server) deleteTemplate(c *gin.Context) {
