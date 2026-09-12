@@ -12,6 +12,7 @@ import PageToolbar from '@/components/PageToolbar.vue'
 import PanelCard from '@/components/PanelCard.vue'
 import StatCard from '@/components/StatCard.vue'
 import EChart from '@/components/EChart.vue'
+import { useChartTheme } from '@/utils/chartTheme'
 import DataState from '@/components/DataState.vue'
 
 type Summary = {
@@ -80,6 +81,9 @@ const ranges = [
 const range = ref('today')
 
 // 与 theme.css 的语义色保持一致，保证图表和界面同色系
+// 图表配色跟着主题走：option 里不再写死颜色（详见 utils/chartTheme.ts）
+const ct = useChartTheme()
+
 const PALETTE = ['#c87864', '#8b5cf5', '#06b6d4', '#10b37d', '#f59e0b', '#ea4343', '#6b7280', '#3b82f6']
 
 function n(v: number | undefined) {
@@ -156,28 +160,28 @@ const trendOption = computed(() => {
     itemStyle: { color: '#fff', borderColor: color, borderWidth: 2 },
     data
   })
-  const axisName = { color: '#8c8c8c', fontSize: 11 }
+  const axisName = { color: ct.value.secondary, fontSize: 11 }
   return {
     tooltip: { trigger: 'axis' },
-    legend: { data: ['消费金额', '请求数'], top: 0, left: 'center' },
+    legend: { data: ['消费金额', '请求数'], top: 0, left: 'center', textStyle: { color: ct.value.text } },
     grid: { left: 54, right: 56, top: 46, bottom: 28 },
     xAxis: {
       type: 'category',
       data: labels,
       // 曲线要从左边缘起笔，不能像柱状图那样两侧留白
       boundaryGap: false,
-      axisLine: { lineStyle: { color: '#d9d9d9' } },
+      axisLine: { lineStyle: { color: ct.value.border } },
       axisTick: { show: false },
-      axisLabel: { color: '#8c8c8c', fontSize: 11 }
+      axisLabel: { color: ct.value.secondary, fontSize: 11 }
     },
     yAxis: [
       {
         type: 'value',
         name: '金额',
         nameTextStyle: axisName,
-        splitLine: { lineStyle: { color: '#f0f0f0', type: 'dashed' } },
+        splitLine: { lineStyle: { color: ct.value.split, type: 'dashed' } },
         axisLine: { show: false },
-        axisLabel: { color: '#8c8c8c', fontSize: 11 }
+        axisLabel: { color: ct.value.secondary, fontSize: 11 }
       },
       {
         type: 'value',
@@ -185,7 +189,7 @@ const trendOption = computed(() => {
         nameTextStyle: axisName,
         splitLine: { show: false },
         axisLine: { show: false },
-        axisLabel: { color: '#8c8c8c', fontSize: 11 }
+        axisLabel: { color: ct.value.secondary, fontSize: 11 }
       }
     ],
     series: [
@@ -224,7 +228,7 @@ const compositionOption = computed(() => {
     .map((x) => ({ ...x, itemStyle: { color: TOKEN_PARTS.find((p) => p.name === x.name)?.color } }))
   return {
     tooltip: { trigger: 'item', valueFormatter: (v: number) => n(v) + ' 词元' },
-    legend: { bottom: 0, icon: 'circle', textStyle: { fontSize: 12 } },
+    legend: { bottom: 0, icon: 'circle', textStyle: { fontSize: 12, color: ct.value.text } },
     series: [
       {
         type: 'pie',
@@ -267,17 +271,17 @@ const modelBarOption = computed(() => {
     grid: { left: 142, right: 78, top: 8, bottom: 8 },
     xAxis: {
       type: 'value',
-      splitLine: { lineStyle: { color: '#f0f0f0', type: 'dashed' } },
+      splitLine: { lineStyle: { color: ct.value.split, type: 'dashed' } },
       axisLine: { show: false },
       axisTick: { show: false },
-      axisLabel: { color: '#8c8c8c', fontSize: 11 }
+      axisLabel: { color: ct.value.secondary, fontSize: 11 }
     },
     yAxis: {
       type: 'category',
       data: items.map((x) => x.name),
       axisLine: { show: false },
       axisTick: { show: false },
-      axisLabel: { color: '#595959', fontSize: 11, width: 132, overflow: 'truncate' }
+      axisLabel: { color: ct.value.text, fontSize: 11, width: 132, overflow: 'truncate' }
     },
     series: [
       {
@@ -287,7 +291,7 @@ const modelBarOption = computed(() => {
         label: {
           show: true,
           position: 'right',
-          color: '#8c8c8c',
+          color: ct.value.secondary,
           fontSize: 11,
           formatter: (p: any) =>
             p.value + (total > 0 ? ' · ' + ((p.value / total) * 100).toFixed(1) + '%' : '')
@@ -314,14 +318,14 @@ const modelPieOption = computed(() => {
   return {
     color: PALETTE,
     tooltip: { trigger: 'item', valueFormatter: (v: number) => '$' + v.toFixed(6) },
-    legend: { type: 'scroll', bottom: 0, icon: 'circle', textStyle: { fontSize: 12 } },
+    legend: { type: 'scroll', bottom: 0, icon: 'circle', textStyle: { fontSize: 12, color: ct.value.text } },
     series: [
       {
         type: 'pie',
         radius: '66%',
         center: ['50%', '44%'],
         minShowLabelAngle: 1,
-        label: { formatter: '{b} {d}%', fontSize: 11, color: '#595959' },
+        label: { formatter: '{b} {d}%', fontSize: 11, color: ct.value.text },
         labelLine: { length: 8, length2: 8 },
         data: data.length ? data : [{ name: '暂无数据', value: 0 }]
       }

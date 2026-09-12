@@ -4,6 +4,7 @@ import { message } from 'ant-design-vue'
 import { ReloadOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import EChart from '@/components/EChart.vue'
+import { useChartTheme } from '@/utils/chartTheme'
 import DataState from '@/components/DataState.vue'
 
 interface ChannelRow {
@@ -43,7 +44,8 @@ const summary = ref<Record<string, any>>({})
 const channels = ref<ChannelRow[]>([])
 const models = ref<any[]>([])
 const incidents = ref<Incident[]>([])
-const shareOption = ref<Record<string, any>>({})
+// 图表配色跟着主题走（详见 utils/chartTheme.ts）
+const ct = useChartTheme()
 
 // 加载失败必须留下痕迹：这一页所有数字都来自同一个接口，
 // 失败后如果只是弹个 message，统计卡会显示成「0 次请求」，被读成「这段时间没有流量」
@@ -102,7 +104,6 @@ async function load() {
     channels.value = res.channels || []
     models.value = res.models || []
     incidents.value = res.incidents || []
-    renderShare()
   } catch (e: any) {
     loadError.value = e.message || '加载失败'
     message.error(e.message)
@@ -111,14 +112,35 @@ async function load() {
   }
 }
 
-function renderShare() {
+// 图表配置改为 computed。
+// 原来是 renderShare() 命令式赋值、只在数据加载完调用一次 ——
+// 切换主题时不会重算，图例与坐标轴标签会停在旧主题的颜色上
+// （暗色下就是深灰字压深色底，整条图例只剩图标）。
+const shareOption = computed(() => {
   const names = channels.value.map((c) => c.channel_name)
-  shareOption.value = {
+  return {
     grid: { left: 8, right: 16, top: 34, bottom: 4, containLabel: true },
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    legend: { data: ['期望占比', '实际占比'], right: 0, top: 0, itemWidth: 12, itemHeight: 8 },
-    xAxis: { type: 'value', axisLabel: { formatter: (v: number) => (v * 100).toFixed(0) + '%' } },
-    yAxis: { type: 'category', data: names, axisLabel: { width: 110, overflow: 'truncate' } },
+    legend: {
+      data: ['期望占比', '实际占比'],
+      right: 0,
+      top: 0,
+      itemWidth: 12,
+      itemHeight: 8,
+      textStyle: { color: ct.value.text }
+    },
+    xAxis: {
+      type: 'value',
+      axisLabel: {
+        color: ct.value.secondary,
+        formatter: (v: number) => (v * 100).toFixed(0) + '%'
+      }
+    },
+    yAxis: {
+      type: 'category',
+      data: names,
+      axisLabel: { color: ct.value.secondary, width: 110, overflow: 'truncate' }
+    },
     series: [
       {
         name: '期望占比',
@@ -136,7 +158,7 @@ function renderShare() {
       }
     ]
   }
-}
+})
 
 onMounted(load)
 </script>
