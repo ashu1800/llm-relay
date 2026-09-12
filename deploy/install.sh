@@ -204,7 +204,9 @@ ENV_FILE="$INSTALL_DIR/deploy/.env"
 if [[ ! -f "$ENV_FILE" ]]; then
   log "生成 $ENV_FILE"
   DB_PASSWORD="$(openssl rand -hex 24)"
+  RELAY_SECRET="$(openssl rand -hex 24)"
   sed -e "s|^DB_PASSWORD=.*|DB_PASSWORD=$DB_PASSWORD|" \
+      -e "s|^RELAY_SECRET=.*|RELAY_SECRET=$RELAY_SECRET|" \
       "$INSTALL_DIR/deploy/.env.example" > "$ENV_FILE"
   chmod 600 "$ENV_FILE"
 elif ! grep -q '^DB_PASSWORD=.\+' "$ENV_FILE"; then
@@ -218,7 +220,16 @@ elif ! grep -q '^DB_PASSWORD=.\+' "$ENV_FILE"; then
   # 保留用户已改的键，只补齐缺失的
   TMP_ENV="$(mktemp)"
   cp "$ENV_FILE" "$TMP_ENV"
+  # 主密钥只补缺失，绝不为已有配置重新生成——换掉它会让全部渠道密钥解不开
+  if grep -q '^RELAY_SECRET=.\+' "$TMP_ENV"; then
+    RELAY_SECRET="$(grep '^RELAY_SECRET=' "$TMP_ENV" | head -1 | cut -d= -f2-)"
+  else
+    RELAY_SECRET="$(openssl rand -hex 24)"
+    warn "补齐了缺失的 RELAY_SECRET（原配置里没有）"
+    warn "若渠道已用内置默认密钥加密过，需要运行轮换工具迁移，否则渠道会认证失败"
+  fi
   sed -e "s|^DB_PASSWORD=.*|DB_PASSWORD=$DB_PASSWORD|" \
+      -e "s|^RELAY_SECRET=.*|RELAY_SECRET=$RELAY_SECRET|" \
       "$INSTALL_DIR/deploy/.env.example" > "$ENV_FILE"
   while IFS= read -r line; do
     key="${line%%=*}"
@@ -229,6 +240,12 @@ elif ! grep -q '^DB_PASSWORD=.\+' "$ENV_FILE"; then
   chmod 600 "$ENV_FILE"
 else
   log "复用已存在的 $ENV_FILE"
+  # 老版本安装的 .env 没有 RELAY_SECRET，缺了会退回公开的内置默认值
+  if ! grep -q '^RELAY_SECRET=.\+' "$ENV_FILE"; then
+    printf 'RELAY_SECRET=%s\n' "$(openssl rand -hex 24)" >> "$ENV_FILE"
+    warn "已为 $ENV_FILE 补上 RELAY_SECRET（此前缺失，渠道密钥用的是公开默认密钥）"
+    warn "已有渠道需要用 scripts/rotate-secret 迁移，否则会认证失败"
+  fi
 fi
 
 # ---------- 6. 构建并启动 ----------

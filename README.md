@@ -10,7 +10,11 @@
 - **精细计量**：输入 / 输出 / 缓存命中 / 缓存写入 / 推理 Token，区分「子集型」与「并列型」缓存口径
 - **模型定价与预估金额**：定时同步官方价格（OpenAI / DeepSeek），支持 DeepSeek **峰谷双价**；金额仅作成本感知，**不做任何扣减**
 - **详尽的请求日志**：首包时间、总耗时、渠道与模型映射、状态码、原始报文、计费过程还原、导出
-- **渠道管理**：分组、权重、可用时段（支持跨午夜）、模型映射、模板、连通性测试
+- **渠道管理**：分组、权重、可用时段（支持跨午夜）、模型映射、内置模板一键建渠道
+- **限流与并发**：密钥级每分钟配额、渠道并发上限、全局在途闸门；上游 429 按
+  `Retry-After` 自动冷却并切走，不再把已限流的上游打得更惨
+- **报文留存**：`all` / `errors` / `none` 三档，按体积截断，凭据类请求头自动脱敏
+- **配置备份**：一键导出/导入渠道、模型、密钥与手工定价，渠道密钥以密文保存
 - **无登录 / 无充值 / 无金额系统**：纯本地运行
 
 ## 目录结构
@@ -38,7 +42,8 @@ llm-relay/
 │   ├── Dockerfile              多阶段构建（前端 → 后端 → 运行时）
 │   ├── docker-compose.yml      app + postgres + redis
 │   ├── .env.example            部署配置模板
-│   └── install.sh              一键部署脚本
+│   ├── install.sh              一键部署脚本（Docker）
+│   └── install-bare.sh         无 Docker 部署脚本（systemd 直跑）
 ├── scripts/
 │   ├── capture-ui.mjs          CDP 抓取参考站计算样式
 │   ├── capture-layout.mjs      CDP 深度抓取 DOM 与 class 规格
@@ -80,6 +85,42 @@ sudo bash deploy/install.sh
 | `USE_PROXY` | `auto` | `auto` / `yes` / `no` |
 | `UPSTREAM_SOCKS` | 见脚本 | socks5 上游（优先使用） |
 | `UPSTREAM_HTTP` | 见脚本 | http 代理（备用） |
+
+## 无 Docker 部署
+
+不支持容器、或不想为一个服务常驻容器的场景：
+
+```bash
+sudo bash deploy/install-bare.sh
+```
+
+脚本会自行装齐 Go / Node / PostgreSQL，本机编译前端与后端，产出单个二进制
+交由 systemd 托管（不需要 Redis —— 后端从未使用它，编排里也已移除）。
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `BIND_ADDR` | `127.0.0.1` | 监听地址，对应应用的 `SERVER_HOST` |
+| `PORT` | `8888` | 端口 |
+| `DB_NAME` / `DB_USER` | `llm_relay` / `llmrelay` | 数据库 |
+
+> 应用的绑定变量是 `SERVER_HOST` / `SERVER_PORT`。脚本里写成 `BIND_ADDR` / `PORT`
+> 只是为了和其他部署方式统一，生成 `.env` 时会转成前者——名字写错不会报错，
+> 只在非默认端口时静默失效。
+
+## 密钥管理（重要）
+
+渠道里的上游密钥以 **AES-256-GCM** 加密后存库，密钥由 `RELAY_SECRET` 派生。
+
+- `install.sh` / `install-bare.sh` 首次安装会自动生成 48 位随机 `RELAY_SECRET`
+- **重装或换机必须沿用同一个值**，否则渠道密钥解不开，表现为渠道全部认证失败
+- 备份文件里存的是密文，因此**备份与 `RELAY_SECRET` 要分开保管**：
+  只拿到备份解不开密钥，只拿到主密钥也拿不到密文
+
+如果已经在用内置默认密钥（老版本部署过），用轮换工具迁移，不必重填上游密钥：
+
+```bash
+bash scripts/rotate-secret.sh          # 内部会先 dry-run 再正式迁移
+```
 
 ### 常用命令
 
@@ -155,6 +196,11 @@ rm -rf backend/internal/web/dist && cp -r frontend/dist backend/internal/web/dis
 | `PRICING_UPDATE_INTERVAL_HOURS` | `24` | 单价同步间隔 |
 | `PRICING_OFFICIAL_SYNC_ENABLED` | `true` | 是否抓取官方定价页（含峰谷双价） |
 | `RELAY_PAYLOAD_STORAGE_MODE` | `errors` | 报文留存：`all` / `errors` / `none` |
+| `RELAY_PAYLOAD_MAX_KB` | `256` | 单条报文留存上限，超出截断并标注 |
+| `RELAY_MAX_CONCURRENCY` | `64` | 全局在途请求上限，超出排队（最多 60 秒）；`0` 不限 |
+| `RELAY_DEFAULT_RPM` | `0` | 密钥默认每分钟配额；单把密钥可覆盖，负数表示该密钥不限 |
+| `RELAY_SECRET` | 无 | 渠道密钥的加密主密钥，**必须显式设置** |
+| `BIND_ADDR` | `127.0.0.1` | 仅 Docker 部署：宿主侧端口绑定地址 |
 
 ## UI 还原说明
 
@@ -168,8 +214,23 @@ rm -rf backend/internal/web/dist && cp -r frontend/dist backend/internal/web/dis
 
 - [x] Phase 0 项目骨架：Go+Gin 服务、Vue3+AntdV 前端、Docker 多阶段构建、一键脚本
 - [x] Phase 1 UI 逆向与设计系统：CDP 抓取、`ui-spec.md`、主题令牌、MainLayout、看板骨架
-- [ ] Phase 2 数据层与转发内核
-- [ ] Phase 3 计量、成本与定价同步
-- [ ] Phase 4 全协议与页面完善
-- [ ] Phase 5 健壮性与可观测
-- [ ] Phase 6 部署固化与冷启动验收
+- [x] Phase 2 数据层与转发内核：实体与迁移、渠道路由（加权/轮询/故障转移）、协议适配
+- [x] Phase 3 计量、成本与定价同步：Token 计量归一化、LiteLLM + 官方定价、峰谷双价
+- [x] Phase 4 全协议与页面完善：Chat / Responses / Anthropic / Gemini / Embeddings 入站
+- [x] Phase 5 健壮性与可观测：报文留存、限流与并发、渠道模板、配置备份
+- [x] Phase 6 部署固化与冷启动验收：`install-bare.sh`、密钥轮换、冷启动实测
+
+## 验证脚本
+
+`scripts/` 下均为可直接运行的端到端验证，密钥从环境变量取：
+
+| 脚本 | 验证内容 |
+|---|---|
+| `test-regression.sh` | 全部管理接口 + 四种协议端点连通性 |
+| `test-ratelimit.sh` | 密钥级 RPM 放行/拒绝、`Retry-After` |
+| `test-payload.sh` | 报文留存三档模式与凭据脱敏 |
+| `test-templates.sh` | 渠道模板 CRUD、重名冲突、一键建渠道 |
+| `test-backup.sh` | 备份导出/导入、明文泄漏检查 |
+| `test-backup-roundtrip.sh` | 删除渠道后从备份恢复并真实调用 |
+| `test-coldstart.sh` | 拆除容器与镜像后从零重建，核对数据完好 |
+| `check-secrets.sh` | 扫描仓库与提交历史中的明文凭据 |

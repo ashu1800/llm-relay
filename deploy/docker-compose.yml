@@ -1,5 +1,5 @@
 # LLM Relay 本地部署编排
-# 说明：postgres / redis 仅在内部网络暴露，不映射到宿主端口，
+# 说明：postgres 仅在内部网络暴露，不映射到宿主端口，
 #       以避免与宿主机上已有的 5432 / 6379（sub2api 在用）冲突。
 name: llm-relay
 
@@ -22,19 +22,9 @@ services:
       retries: 12
     networks: [relay]
 
-  redis:
-    image: redis:7-alpine
-    container_name: llm-relay-redis
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
-    volumes:
-      - ./data/redis:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-    networks: [relay]
+  # 这里曾经挂过一个 redis 容器，但后端从未接入任何 Redis 客户端
+  # （go.mod 里没有依赖，main.go 也不连接），它只是占资源、多一个故障面。
+  # 将来真要加缓存时再连回来，那时记得同时补上真实使用。
 
   app:
     build:
@@ -48,11 +38,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
     environment:
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: 8888
+      # 渠道密钥的加密主密钥。缺失会退回内置默认值（公开可知），
+      # 因此这里不给默认值，让配置缺失在安装阶段就暴露出来。
+      RELAY_SECRET: ${RELAY_SECRET:?请在 .env 中设置 RELAY_SECRET}
       GIN_MODE: release
       DB_HOST: postgres
       DB_PORT: 5432
@@ -60,9 +51,6 @@ services:
       DB_PASSWORD: ${DB_PASSWORD:?请在 .env 中设置 DB_PASSWORD}
       DB_NAME: ${DB_NAME:-llm_relay}
       DB_SSLMODE: disable
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_ENABLED: "true"
       PRICING_UPDATE_INTERVAL_HOURS: ${PRICING_UPDATE_INTERVAL_HOURS:-24}
       PRICING_OFFICIAL_SYNC_ENABLED: ${PRICING_OFFICIAL_SYNC_ENABLED:-true}
       PRICING_PROXY_URL: ${PRICING_PROXY_URL:-}
