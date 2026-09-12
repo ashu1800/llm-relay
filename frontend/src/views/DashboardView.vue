@@ -405,7 +405,7 @@ onMounted(load)
         <StatCard label="预估金额" :value="'$' + money(summary?.estimated_cost)" tone="orange" hint="仅供参考，非实际扣费">
           <template #icon><DollarOutlined /></template>
         </StatCard>
-        <StatCard label="Token 量" :value="n(summary?.total_tokens)" tone="blue" :hint="'命中率 ' + ((summary?.cache_hit_rate ?? 0) * 100).toFixed(1) + '%'">
+        <StatCard label="词元数量" :value="n(summary?.total_tokens)" tone="blue" :hint="'命中率 ' + ((summary?.cache_hit_rate ?? 0) * 100).toFixed(1) + '%'">
           <template #icon><ThunderboltOutlined /></template>
         </StatCard>
         <StatCard
@@ -452,7 +452,7 @@ onMounted(load)
             <div class="heat-tip-time">{{ heatTip.day }} {{ heatTip.hour }}:00</div>
             <div>{{ heatTip.requests }} 次请求</div>
             <div>消费 ${{ money(heatTip.cost) }}</div>
-            <div>Token {{ n(heatTip.tokens) }}</div>
+            <div>词元 {{ n(heatTip.tokens) }}</div>
           </div>
         </div>
       </PanelCard>
