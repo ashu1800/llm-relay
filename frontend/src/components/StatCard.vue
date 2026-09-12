@@ -61,6 +61,7 @@ withDefaults(defineProps<{
 }
 
 .summary-value {
+  font-family: var(--font-family-display);
   font-size: 24px;
   font-weight: 600;
   line-height: 1.3;

@@ -38,9 +38,28 @@
   --radius-pill: 999px;
 
   /* ---- 字体 ---- */
-  --font-family-base: 'Harding', 'STSong', 'SimSun', 'Songti SC', '宋体',
-    'Hiragino Sans GB', 'STHeiti', 'WenQuanYi Micro Hei', -apple-system,
-    BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, serif;
+  /* 界面正文：现代无衬线中文。
+     参考站的观感来自它自带的 Web 字体 Harding，那份字体是商业授权、无法随本项目分发；
+     而它的回退链在 Windows 上会落到宋体——为印刷设计的点阵时代字体，
+     在 12–14px 的界面尺寸下笔画细且发虚，这是之前字体难看的根因。
+     改为以系统 UI 字体为主，中文优先微软雅黑，屏幕可读性明显更好。 */
+  --font-family-base: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI',
+    'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC', 'Hiragino Sans GB',
+    'Noto Sans CJK SC', 'Source Han Sans SC', 'WenQuanYi Micro Hei', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+
+  /* 展示型文字（品牌名、统计数值）：保留参考站的衬线编辑感。
+     衬线只对西文与数字生效，中文会自动落到上面的无衬线族，
+     因此不会再退化成宋体。 */
+  --font-family-display: 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Georgia,
+    'Times New Roman', var(--font-family-base);
+
+  /* 等宽：报文与密钥需要等宽才便于对齐阅读。
+     等宽字体通常不含中文字形，后面必须显式补上中文回退，
+     否则 JSON 里的中文会落到浏览器默认字体。 */
+  --font-family-mono: 'Cascadia Mono', 'JetBrains Mono', Consolas, 'SF Mono', Menlo,
+    'DejaVu Sans Mono', 'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC',
+    'Noto Sans CJK SC', monospace;
   --font-size-base: 16px;
   --font-size-panel: 14px;
   --font-size-menu: 14.4px;

@@ -317,6 +317,7 @@ onMounted(load)
 .token-cell { font-variant-numeric: tabular-nums; }
 .section-title { margin: 16px 0 8px; font-size: 14px; }
 .code-box, .err-box {
+  font-family: var(--font-family-mono);
   max-height: 320px;
   overflow: auto;
   padding: 8px;

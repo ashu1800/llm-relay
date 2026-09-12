@@ -222,5 +222,5 @@ onMounted(load)
   border-radius: var(--radius-control);
   word-break: break-all;
 }
-.key-box code { flex: 1; font-size: 12px; }
+.key-box code { flex: 1; font-family: var(--font-family-mono); font-size: 12px; }
 </style>

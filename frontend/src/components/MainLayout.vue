@@ -160,6 +160,7 @@ const go = (key: string) => router.push(key)
 }
 
 .brand-text {
+  font-family: var(--font-family-display);
   font-size: 17px;
   font-weight: 600;
   color: var(--color-primary);

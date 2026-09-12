@@ -34,8 +34,6 @@ const DARK = {
   scrollbarTrack: 'transparent'
 }
 
-const FONT_FAMILY = "'Harding', 'STSong', 'SimSun', 'Songti SC', '宋体', 'Hiragino Sans GB', 'STHeiti', 'WenQuanYi Micro Hei', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, serif"
-
 export const useThemeStore = defineStore('theme', () => {
   const mode = ref<ThemeMode>((localStorage.getItem(STORAGE_KEY) as ThemeMode) || 'light')
   const isDark = ref(mode.value === 'dark')
@@ -44,7 +42,8 @@ export const useThemeStore = defineStore('theme', () => {
     const t = next === 'dark' ? DARK : LIGHT
     const root = document.documentElement
     root.setAttribute('data-theme', next)
-    root.style.setProperty('--font-family-base', FONT_FAMILY)
+    // 字体栈只在 theme.css 里定义一处。此前这里也写了一份并在运行时覆盖，
+    // 两份定义一旦不同步就会出现「改了 CSS 不生效」的怪象。
     root.style.setProperty('--color-primary', t.primary)
     root.style.setProperty('--color-secondary', t.secondary)
     root.style.setProperty('--color-highlight', t.highlight)
