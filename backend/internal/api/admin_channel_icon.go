@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"llm-relay/internal/model"
+	"llm-relay/internal/proxy"
 )
 
 // 图标大小与超时。上游的 favicon 通常 1-5KB；
@@ -68,6 +69,12 @@ func (s *Server) channelIcon(c *gin.Context) {
 		}
 		icon = fetched
 	}
+	// 手工填的图标同样要有上限：抓取路径限了 64KB，这里不限的话
+	// 可以往 channels.icon（text）里塞任意大的内容，渠道列表与备份跟着膨胀
+	if len(icon) > maxIconBytes*2 {
+		writeUpstreamError(c, http.StatusBadRequest, "图标太大了（上限 128KB，抓取来的图标通常只有几 KB）", "invalid_request_error")
+		return
+	}
 	if err := db.Model(&model.Channel{}).Where("id = ?", id).Update("icon", icon).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
@@ -89,15 +96,50 @@ func (s *Server) fetchUpstreamIcon(ctx context.Context, ch model.Channel) (strin
 		return "", errors.New("只支持从 http/https 的上游地址抓图标")
 	}
 
+	// 总超时：6 个候选地址各 8 秒，最坏情况要跑将近一分钟，
+	// 而用户点的是「从上游获取」，等 10 秒以上就是坏了
+	ctx, cancel := context.WithTimeout(ctx, iconFetchTimeout*3)
+	defer cancel()
+
 	client := &http.Client{Timeout: iconFetchTimeout}
-	// 候选地址：站点根目录下的常见图标，以及 BaseURL 自己那一层
+	// 与转发链路一致：渠道配了代理就必须走代理。
+	// 直连抓图标会把本机真实 IP 暴露给上游 —— 用户配代理正是为了避免这件事，
+	// 而且「直连不通、必须走代理」的上游在这里会永远抓不到图标
+	if ch.ProxyID != 0 {
+		var p model.Proxy
+		if err := s.deps.Store.DB().First(&p, ch.ProxyID).Error; err != nil {
+			return "", fmt.Errorf("这条渠道配了出站代理 #%d，但它不存在", ch.ProxyID)
+		}
+		if !p.Enabled {
+			return "", fmt.Errorf("这条渠道的出站代理 %s 已停用", p.Name)
+		}
+		cfg, err := proxy.FromEntity(p, s.deps.Cipher)
+		if err != nil {
+			return "", err
+		}
+		tr, err := cfg.Transport(iconFetchTimeout)
+		if err != nil {
+			return "", err
+		}
+		defer tr.CloseIdleConnections()
+		client.Transport = tr
+	}
+
+	// 候选地址：站点根目录下的常见图标，以及 BaseURL 自己那一层。
+	// 用 url.URL 拼而不是字符串拼接：BaseURL 带 query 时（如 /v1?k=1），
+	// 字符串拼接会把图标路径塞进 query 里，请求就发到别的地方去了
+	clean := *base
+	clean.RawQuery = ""
+	clean.Fragment = ""
+	root := &url.URL{Scheme: clean.Scheme, Host: clean.Host}
+	underBase := clean
+	underBase.Path = strings.TrimRight(clean.Path, "/")
 	candidates := make([]string, 0, len(iconPaths)*2)
-	root := &url.URL{Scheme: base.Scheme, Host: base.Host}
 	for _, p := range iconPaths {
 		candidates = append(candidates, root.String()+p)
 	}
 	for _, p := range iconPaths {
-		candidates = append(candidates, strings.TrimRight(base.String(), "/")+p)
+		candidates = append(candidates, underBase.String()+p)
 	}
 
 	var lastErr string

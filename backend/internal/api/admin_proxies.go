@@ -199,8 +199,10 @@ func (s *Server) updateProxy(c *gin.Context) {
 		// 凭据变了，上一次的测试结论就不再代表这份配置
 		updates["last_status"] = "unknown"
 	}
-	// 连接参数变了同理：旧的成功记录不能继续显示
-	if p.Protocol != nil || p.Host != nil || p.Port != nil {
+	// 连接参数变了同理：旧的成功记录不能继续显示。
+	// 用户名也算凭据 —— 只改用户名同样会让原来的成功结论失效
+	// （实测：改成错的用户名后列表还显示「正常」，而实际转发已经 401）
+	if p.Protocol != nil || p.Host != nil || p.Port != nil || p.Username != nil {
 		updates["last_status"] = "unknown"
 	}
 	if len(updates) == 0 {
@@ -274,7 +276,12 @@ func (s *Server) testProxySaved(c *gin.Context) {
 		writeUpstreamError(c, http.StatusNotFound, "代理不存在", "not_found_error")
 		return
 	}
-	cfg := s.proxyConfigOf(row)
+	cfg, cfgErr := s.proxyConfigOf(row)
+	if cfgErr != nil {
+		// 解不开密码就没法真正验证这条链路，如实说明而不是拿空配置去拨号
+		c.JSON(http.StatusOK, proxyTestView(proxy.TestResult{Error: cfgErr.Error()}))
+		return
+	}
 	var body struct {
 		TestURL string `json:"test_url"`
 	}
@@ -295,9 +302,13 @@ func (s *Server) testProxyDraft(c *gin.Context) {
 		Protocol string `json:"protocol"`
 		Host     string `json:"host"`
 		Port     int    `json:"port"`
-		Username string `json:"username"`
-		Password string `json:"password"`
-		TestURL  string `json:"test_url"`
+		// 用户名与密码都是三态：nil = 这次没提交这个字段（沿用库里的），
+		// 空串 = 用户明确清空了它。原来用户名是值类型，
+		// 「清空用户名换成免认证代理」时会被回填成旧用户名，
+		// 于是「测通了」但保存后根本用不了
+		Username *string `json:"username"`
+		Password *string `json:"password"`
+		TestURL  string  `json:"test_url"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		writeUpstreamError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
@@ -305,17 +316,20 @@ func (s *Server) testProxyDraft(c *gin.Context) {
 	}
 	cfg := proxy.Config{
 		Protocol: body.Protocol, Host: strings.TrimSpace(body.Host),
-		Port: body.Port, Username: strings.TrimSpace(body.Username),
-		Password: body.Password,
+		Port: body.Port, Username: strings.TrimSpace(derefString(body.Username)),
+		Password: derefString(body.Password),
 	}
-	// 编辑已有代理时密码留空表示「沿用原密码」：这里补上解密后的值，
-	// 否则用户会看到「明明没改密码却测不通」
-	if cfg.Password == "" && body.ID > 0 {
+	// 编辑已有代理时没提交的凭据沿用库里的：否则用户会看到
+	// 「明明没改密码却测不通」
+	if body.ID > 0 && (body.Password == nil || body.Username == nil) {
 		var row model.Proxy
 		if err := s.deps.Store.DB().First(&row, body.ID).Error; err == nil {
-			cfg.Password = s.proxyConfigOf(row).Password
-			if cfg.Username == "" {
-				cfg.Username = row.Username
+			stored, _ := s.proxyConfigOf(row)
+			if body.Password == nil {
+				cfg.Password = stored.Password
+			}
+			if body.Username == nil {
+				cfg.Username = stored.Username
 			}
 		}
 	}
@@ -329,11 +343,11 @@ func (s *Server) testProxyDraft(c *gin.Context) {
 
 // proxyConfigOf 把库里的行转成拨号配置（密码在这里解密）。
 //
-// 解不开密文时密码留空、照常往下走：测试会以「认证失败」告终，
-// 比在这里直接报「解密失败」更接近用户能采取的行动（重填一次密码）。
-func (s *Server) proxyConfigOf(p model.Proxy) proxy.Config {
-	cfg, _ := proxy.FromEntity(p, s.deps.Cipher)
-	return cfg
+// 解不开密文（换过主密钥）时把原因带出去：原来这里是 `cfg, _ :=` 直接吞掉，
+// 于是测试接口拿着一个协议/地址全空的配置去拨号，最后报
+// 「不支持的代理协议 ""」—— 用户会去检查协议下拉框，而真正的问题是主密钥。
+func (s *Server) proxyConfigOf(p model.Proxy) (proxy.Config, error) {
+	return proxy.FromEntity(p, s.deps.Cipher)
 }
 
 // invalidateProxyCaches 让转发器丢掉这个代理缓存的客户端。
@@ -352,12 +366,14 @@ func (s *Server) recordProxyTest(db *gorm.DB, id uint, res proxy.TestResult) {
 		status = "ok"
 	}
 	now := time.Now()
-	if err := db.Model(&model.Proxy{}).Where("id = ?", id).Updates(map[string]any{
+	err := db.Model(&model.Proxy{}).Where("id = ?", id).Updates(map[string]any{
 		"last_status": status, "last_latency_ms": res.LatencyMs,
 		"last_error": res.Error, "last_tested_at": &now,
-	}).Error; err != nil {
-		// 结果已经拿到了，写不进去只说明这一列没更新，不该让测试本身失败
-		return
+	}).Error
+	if err != nil {
+		// 结果已经拿到了，写不进去只说明这一列没更新，不该让测试本身失败 ——
+		// 但也不能完全静默：列表上会一直显示上一次的结论，不说一声就无从查起
+		s.logger().Warn("写回代理测试结果失败", "proxy_id", id, "err", err)
 	}
 }
 

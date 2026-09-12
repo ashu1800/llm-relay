@@ -91,13 +91,14 @@ func run() error {
 	// 出站代理：渠道（或某个模型）指定走哪个代理时，由它按 id 取配置。
 	// 停用的代理在这里被判为不可用 —— 转发器收到「不可用」会直接让请求失败，
 	// 而不是回退直连：用户配代理往往就是为了不让请求从本机 IP 出去。
-	svc.SetProxyResolver(func(id uint) (proxy.Config, bool) {
+	svc.SetProxyResolver(func(id uint) (proxy.Config, error) {
 		var p model.Proxy
 		if err := st.DB().First(&p, id).Error; err != nil {
-			return proxy.Config{}, false
+			// 与「停用」「解不开」分开报：三种情况的下一步动作完全不同
+			return proxy.Config{}, fmt.Errorf("不存在")
 		}
 		if !p.Enabled {
-			return proxy.Config{}, false
+			return proxy.Config{}, fmt.Errorf("已被停用")
 		}
 		return proxy.FromEntity(p, cipher)
 	})

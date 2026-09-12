@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"math"
 	"net/http"
 	"strconv"
@@ -83,6 +84,12 @@ func (s *Server) statsSummary(c *gin.Context) {
 // 看板上的数字与 WebSocket 推来的数字必须来自同一个查询，
 // 否则「刚刷新是 A、两秒后自己变成 B」这种不一致会让人怀疑看板本身。
 func (s *Server) summarySnapshot(start, end time.Time) (gin.H, error) {
+	return s.summarySnapshotCtx(context.Background(), start, end)
+}
+
+// summarySnapshotCtx 是带 ctx 的版本：实时推送循环要用它，
+// 这样关停与单次超时都能真的打断查询（没有 ctx 的查询只能干等）。
+func (s *Server) summarySnapshotCtx(ctx context.Context, start, end time.Time) (gin.H, error) {
 	const q = `SELECT
 		COUNT(*)::bigint AS requests,
 		COUNT(*) FILTER (WHERE status_code >= 200 AND status_code < 300)::bigint AS success,
@@ -98,7 +105,7 @@ func (s *Server) summarySnapshot(start, end time.Time) (gin.H, error) {
 	FROM request_logs WHERE created_at >= ? AND created_at <= ?`
 
 	var row summaryRow
-	if err := s.deps.Store.DB().Raw(q, start, end).Scan(&row).Error; err != nil {
+	if err := s.deps.Store.DB().WithContext(ctx).Raw(q, start, end).Scan(&row).Error; err != nil {
 		return nil, err
 	}
 

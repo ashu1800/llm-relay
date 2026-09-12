@@ -51,15 +51,21 @@ print('true' if m and int(m.group(1)) > 0 else 'false')")"
 
 echo
 echo "=== 2. 发一次真实请求，日志应当被推过来 ==="
-# 监听 10 秒，第 3 秒发请求
-python3 "$ROOT/scripts/ws-listen.py" 10 > /tmp/ws2.txt 2>&1 &
+# 监听窗口必须罩住「请求真正跑完」的那一刻，而不是拍一个固定秒数：
+# 上游慢的时候请求可能要十几秒才返回，日志推送就落到窗口之外了 ——
+# 实测在 verify-all 里偶发失败，单独跑却总是通过，就是这种时序问题。
+# 现在的做法是「请求完成后最多再等 12 秒」：日志落库后最迟 1 秒内就会被推。
+# -u 是关键：python 输出重定向到文件时是块缓冲，
+# 进程被杀掉时缓冲区里的 TYPES 行会整个丢掉。
+python3 -u "$ROOT/scripts/ws-listen.py" 40 logs > /tmp/ws2.txt 2>&1 &
 WSPID=$!
-sleep 3
+sleep 2
 BEFORE=$($PG "SELECT COALESCE(MAX(id),0) FROM request_logs")
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8888/v1/chat/completions \
   -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
   -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8}")
 chk "探针请求成功" "200" "$CODE"
+# 监听端收到 logs 会自己退出；这里等它（最多 40 秒，够覆盖一次慢上游）
 wait $WSPID
 cat /tmp/ws2.txt | sed 's/^/  /'
 chk_has "收到了 logs 推送" '"logs"' "$(cat /tmp/ws2.txt)"

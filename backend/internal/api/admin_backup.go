@@ -248,6 +248,19 @@ func (s *Server) importConfig(c *gin.Context) {
 			report.Warnings = append(report.Warnings,
 				"渠道 "+ch.Name+" 的原始分组在本机不存在，已归入默认分组")
 		}
+		// 代理同样要重新映射。不映射的话，备份里指向代理 #2 的渠道
+		// 恢复后会指向本机的 #2 —— 那是另一条线路，流量会从非预期的出口出去，
+		// 而界面上只显示一个代理名，看不出问题；映射不到就置 0（直连）并报警，
+		// 因为「直连」至少是可见的
+		if ch.ProxyID != 0 {
+			if mapped, ok := proxyIDMap[ch.ProxyID]; ok {
+				ch.ProxyID = mapped
+			} else {
+				ch.ProxyID = 0
+				report.Warnings = append(report.Warnings,
+					"渠道 "+ch.Name+" 的出站代理在本机不存在，已改为直连")
+			}
+		}
 		if err := db.Create(&ch).Error; err != nil {
 			report.Warnings = append(report.Warnings, "渠道 "+ch.Name+" 导入失败: "+err.Error())
 			continue
@@ -281,6 +294,16 @@ func (s *Server) importConfig(c *gin.Context) {
 		bd.ChannelID = newCh
 		if strings.TrimSpace(bd.UpstreamName) == "" {
 			bd.UpstreamName = bd.PublicName
+		}
+		// 模型级的出站代理同理：映射不到就回到「跟随渠道」
+		if bd.ProxyID != 0 {
+			if mapped, ok := proxyIDMap[bd.ProxyID]; ok {
+				bd.ProxyID = mapped
+			} else {
+				bd.ProxyID = 0
+				report.Warnings = append(report.Warnings,
+					"模型 "+bd.PublicName+" 单独指定的出站代理在本机不存在，已改为跟随渠道")
+			}
 		}
 		if err := db.Create(&bd).Error; err != nil {
 			report.Warnings = append(report.Warnings, "模型白名单导入失败: "+err.Error())

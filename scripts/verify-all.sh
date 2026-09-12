@@ -9,6 +9,11 @@ set -uo pipefail
 cd "/path/to/llm-relay" || exit 1
 
 fail=0
+
+# 开跑前先清一次：上一次跑到一半中断时会留下测试日志
+bash scripts/purge-test-logs.sh
+echo
+
 for s in test-regression.sh test-foreign-keys.sh; do
   echo "########## $s ##########"
   bash "scripts/$s" 2>&1 | tail -3 || fail=1
@@ -59,6 +64,12 @@ for s in test-model-whitelist.sh test-upstream-protocol.sh test-upstream-gemini.
   fi
   echo
 done
+
+# 收尾清理：测试请求会污染看板的今日统计（实测跑一轮会多出上千条），
+# 必须在这一轮结束时擦干净，而不是留给用户
+echo "########## 清理测试日志 ##########"
+bash scripts/purge-test-logs.sh
+echo
 
 if [ "$fail" -eq 0 ]; then echo "全部验证通过"; else echo "有验证未通过"; fi
 exit "$fail"

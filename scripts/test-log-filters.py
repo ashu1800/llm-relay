@@ -53,10 +53,12 @@ def call(m, p, b=None):
 _, k = call("POST", "/keys", {"name": "filter-probe-key"})
 tok = k["key"]
 
+import subprocess
+
+
 def probe_model():
     """探针模型名必须从库里现取：白名单是用户随时会改的，
     写死模型名会让用例以 502 失败，看起来像代码坏了。"""
-    import subprocess
     sql = ("SELECT m.public_name FROM channel_models m "
            "JOIN channels c ON c.id = m.channel_id AND c.enabled = true "
            "JOIN channel_groups g ON g.id = c.group_id AND g.enabled = true "
@@ -155,6 +157,19 @@ chk("since 设为一小时前：有记录", some.get("total", 0) > 0, "共 %s �
 
 print()
 print("=== 导出必须是全量，不是当前页 ===")
+# 先自己造出超过一页的记录：这条断言（导出条数 > 单页条数）原本依赖
+# 「库里已经攒了很多日志」，于是清一次历史数据它就会失败 ——
+# 测试不该依赖跑之前环境里恰好有什么。用 SQL 直接补齐，跑完再删干净。
+fill = subprocess.run(
+    ["docker", "exec", "-i", "llm-relay-postgres", "psql", "-U", "llmrelay",
+     "-d", "llm_relay", "-t", "-A", "-c",
+     "INSERT INTO request_logs (trace_id, model_requested, api_key_name, status_code, is_stream, retry_count, created_at) "
+     "SELECT 'export-fill-%s' || g, 'export-fill-model', 'export-fill-key', 200, false, 0, now() "
+     "FROM generate_series(1, 60) g"],
+    capture_output=True, text=True)
+if fill.returncode != 0:
+    print("  造数据失败: %s" % fill.stderr.strip()[:200])
+
 _, allp = call("GET", "/logs?page=1&page_size=50")
 page_count = len(allp.get("items", []))
 total_count = allp.get("total", 0)
@@ -206,6 +221,13 @@ _, ks = call("GET", "/keys")
 for x in ks.get("items", []):
     if x["name"] == "filter-probe-key":
         call("DELETE", "/keys/%d" % x["id"])
+
+# 探针数据必须自己收干净：留着 60 条假日志会把看板的今日统计顶上去
+subprocess.run(
+    ["docker", "exec", "-i", "llm-relay-postgres", "psql", "-U", "llmrelay",
+     "-d", "llm_relay", "-t", "-A", "-c",
+     "DELETE FROM request_logs WHERE trace_id LIKE 'export-fill-%'"],
+    capture_output=True, text=True)
 
 print()
 print("通过 %d 项，失败 %d 项" % (ok, bad))

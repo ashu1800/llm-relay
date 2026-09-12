@@ -1136,7 +1136,9 @@ func (s *Server) exportLogs(c *gin.Context) {
 	// 加 BOM，Excel 才会按 UTF-8 识别。
 	// 这里必须写转义序列：直接嵌入 BOM 字符会让 Go 源码在词法分析阶段就报错
 	b.WriteString("\ufeff")
-	b.WriteString("请求时间,模型,状态,密钥,渠道,输入Token,输出Token,缓存命中,缓存写入,推理Token,首包延迟(ms),完成时长(ms),费用USD,trace_id\n")
+	// 表头文案与界面保持一致（首字耗时 / 总共耗时）：
+	// 同一个数在页面叫一个名字、导出来又叫另一个名字，对不上账时最难查
+	b.WriteString("请求时间,模型,状态,密钥,渠道,输入Token,输出Token,缓存命中,缓存写入,推理Token,首字耗时(ms),总共耗时(ms),费用USD,trace_id\n")
 	for i := range items {
 		r := &items[i]
 		row := []string{

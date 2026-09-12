@@ -21,7 +21,14 @@
   也可以填 0.5 做折扣），时段按**服务器本地时区**判断，命中时段时以时段倍率优先；
   列表会点名「渠道白名单里有、但还没定价」的模型；金额仅作成本感知，**不做任何扣减**
 - **详尽的请求日志**：首包时间、总耗时、渠道与模型映射、状态码、原始报文、计费过程还原、导出
-- **渠道管理**：分组、权重、可用时段（支持跨午夜）、**模型白名单（对外名 → 上游名映射）**、内置模板一键建渠道
+- **渠道管理**：分组、权重、可用时段（支持跨午夜）、**模型白名单（对外名 → 上游名映射）**、
+  渠道图标（可从上游抓 favicon，也可填 emoji）、**发一句 "hi" 测连通性**
+- **出站代理**：socks5 / http / https，可测连通性与延迟；
+  渠道级与**模型级**都能指定（优先级：模型 > 渠道 > 直连），
+  **代理不可用时直接失败、绝不回退直连** —— 静默回退会把本机真实 IP 暴露给上游，
+  而界面上一切正常
+- **实时推送**：WebSocket 推送看板数值与请求日志，数字用滚动动画过渡、
+  日志插到第一行，都不重绘整页
 - **限流与并发**：密钥级每分钟配额、渠道并发上限、全局在途闸门；上游 429 按
   `Retry-After` 自动冷却并切走，不再把已限流的上游打得更惨
 - **报文留存**：`all` / `errors` / `none` 三档，按体积截断，凭据类请求头自动脱敏
@@ -41,9 +48,10 @@ llm-relay/
 │       ├── store/              数据库与缓存
 │       ├── relay/              协议适配与转发内核
 │       ├── pricing/            单价解析与成本计算
+│       ├── proxy/              出站代理（socks5/http/https）与连通性测试
 │       ├── usage/              Token 计量
 │       └── web/                前端产物 embed
-├── frontend/                   Vue 3 + Vite + Ant Design Vue 5
+├── frontend/                   Vue 3 + Vite + Ant Design Vue 4
 │   └── src/
 │       ├── components/         MainLayout / PanelCard / StatCard / PageToolbar
 │       ├── views/              各功能页面
@@ -225,7 +233,7 @@ rm -rf backend/internal/web/dist && cp -r frontend/dist backend/internal/web/dis
 - [x] Phase 2 数据层与转发内核：实体与迁移、渠道路由（加权/轮询/故障转移）、协议适配
 - [x] Phase 3 计量与成本：Token 计量归一化、手工定价、时段倍率（价格不再自动同步）
 - [x] Phase 4 全协议与页面完善：Chat / Responses / Anthropic / Gemini / Embeddings 入站
-- [x] Phase 5 健壮性与可观测：报文留存、限流与并发、渠道模板、配置备份
+- [x] Phase 5 健壮性与可观测：报文留存、限流与并发、配置备份
 - [x] Phase 6 部署固化与冷启动验收：`install-bare.sh`、密钥轮换、冷启动实测
 
 ## 验证脚本
@@ -237,8 +245,24 @@ rm -rf backend/internal/web/dist && cp -r frontend/dist backend/internal/web/dis
 | `test-regression.sh` | 全部管理接口 + 四种协议端点连通性 |
 | `test-ratelimit.sh` | 密钥级 RPM 放行/拒绝、`Retry-After` |
 | `test-payload.sh` | 报文留存三档模式与凭据脱敏 |
-| `test-templates.sh` | 渠道模板 CRUD、重名冲突、一键建渠道 |
+| `test-pricing-filter.sh` | 定价筛选、时段倍率优先于固定倍率 |
+| `test-group-quota.sh` | 分组 RPM / TPM 配额放行与拒绝 |
+| `test-proxies.sh` | 代理 CRUD、连通性与延迟测试、被引用时禁止删除 |
+| `test-egress-proxy.sh` | **请求确实经代理出网**（假域名 + 代理改写证明） |
+| `test-live.sh` | WebSocket 握手、统计快照、新请求的日志推送 |
+| `test-cost.sh` | 计费口径：缓存读写、推理 Token、子集型与并列型缓存 |
+| `test-legacy-column-add.sh` | 老库缺列时自动补列并恢复可用（会短暂重启应用） |
 | `test-backup.sh` | 备份导出/导入、明文泄漏检查 |
 | `test-backup-roundtrip.sh` | 删除渠道后从备份恢复并真实调用 |
 | `test-coldstart.sh` | 拆除容器与镜像后从零重建，核对数据完好 |
 | `check-secrets.sh` | 扫描仓库与提交历史中的明文凭据 |
+| `purge-test-logs.sh` | 清掉验证脚本产生的请求日志（否则会污染看板的今日统计） |
+
+另有一批 python 用例（`test-group-update.py`、`test-key-whitelist.py`、
+`test-delete-semantics.py`、`test-accept-encoding.py`、`test-log-filters.py`、
+`test-csrf.py`），覆盖分组更新、密钥白名单、删除语义、压缩协商、
+日志筛选与同源校验。
+
+`scripts/verify-all.sh` 会按顺序跑完上面这些可离线执行的用例并汇总，
+最后打印 `ALL_PASS`；日常改完代码跑它一次就够。
+（`test-coldstart.sh` 要拆容器与镜像，不在其中。）

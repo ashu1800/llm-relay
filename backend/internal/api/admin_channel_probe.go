@@ -106,6 +106,11 @@ func (s *Server) testChannel(c *gin.Context) {
 		})
 		return
 	}
+	// 上游可能无视 stream:false 直接回 SSE（转发器无条件带 Accept: text/event-stream）：
+	// 那种情况下正文在 Stream 里，Body 是空的。不关会让连接无法复用、FD 悬挂
+	if att.Stream != nil {
+		defer att.Stream.Close()
+	}
 	if att.StatusCode >= 400 {
 		// 上游的错误体是排障的关键信息（密钥错、模型名不存在、余额不足
 		// 都靠它区分），截断后原样回给用户

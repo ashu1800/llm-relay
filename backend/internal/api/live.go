@@ -69,10 +69,20 @@ func (h *liveHub) broadcast(payload []byte) {
 		select {
 		case ch <- payload:
 		default:
-			// 队列满：丢掉这条而不是等待。实时数值下一条马上就到，
-			// 卡住广播方则会让所有连接一起变慢
+			// 队列满：丢掉**最旧**的一帧，再把新的放进去。
+			// 直接丢弃新帧（最省事的写法）会让这个订阅者的数字永久停在旧值：
+			// 统计只在变化时推，被丢掉的那一帧不会再补发。
+			// 卡住广播方同样不行 —— 一个慢标签页会拖慢所有连接。
+			select {
+			case <-ch:
+			default:
+			}
+			select {
+			case ch <- payload:
+			default:
+			}
 			if h.logger != nil {
-				h.logger.Warn("实时推送队列已满，丢弃一帧", "subscriber", id)
+				h.logger.Warn("实时推送队列已满，丢弃最旧一帧", "subscriber", id)
 			}
 		}
 	}
@@ -94,6 +104,14 @@ type liveMessage struct {
 // 慢一拍没人会察觉）；日志每 1 秒查一次增量（它是「实时」的主要观感）。
 const liveStatsInterval = 2 * time.Second
 const liveLogsInterval = time.Second
+
+// 单帧写入的超时。正常帧只有几百字节，10 秒足够；
+// 超时说明这个客户端已经不消费数据了，断开比无限等更合适。
+const liveWriteTimeout = 10 * time.Second
+
+// 单次查询的超时。聚合查询再慢也不该拖过推送间隔，
+// 否则循环会一个接一个地堆积查询。
+const liveQueryTimeout = 3 * time.Second
 
 // StartLive 启动实时推送循环，直到 ctx 结束。
 func (s *Server) StartLive(ctx context.Context) {
@@ -119,7 +137,9 @@ func (s *Server) liveStatsLoop(ctx context.Context) {
 			continue
 		}
 		start, end, _ := resolveRange("today")
-		data, err := s.summarySnapshot(start, end)
+		qctx, cancel := context.WithTimeout(ctx, liveQueryTimeout)
+		data, err := s.summarySnapshotCtx(qctx, start, end)
+		cancel()
 		if err != nil {
 			continue
 		}
@@ -137,7 +157,8 @@ func (s *Server) liveStatsLoop(ctx context.Context) {
 func (s *Server) liveLogsLoop(ctx context.Context) {
 	ticker := time.NewTicker(liveLogsInterval)
 	defer ticker.Stop()
-	db := s.deps.Store.DB()
+	// 绑定 ctx：关停时正在跑的查询会被取消，而不是让进程干等它查完
+	db := s.deps.Store.DB().WithContext(ctx)
 
 	// 起点是「当前最大 id」：不这么做的话，第一次连上来就会把历史日志
 	// 当成新日志灌给前端
@@ -199,21 +220,46 @@ func (s *Server) liveSocket(c *gin.Context) {
 		id, ch := s.deps.Live.subscribe()
 		defer s.deps.Live.unsubscribe(id)
 
+		// 必须有人读：x/net/websocket 只在 Read/Receive 路径里处理
+		// 控制帧（Ping → Pong、Close），只写不读的话客户端的关闭帧
+		// 永远不被处理，订阅会一直留着 —— 而广播是「有变化才推」，
+		// 空闲时可能几小时不推一次，靠 Send 失败来发现断线是不可靠的。
+		//
+		// 这个通道上没有需要客户端上报的东西，读到的内容一律丢弃。
+		closed := make(chan struct{})
+		go func() {
+			defer close(closed)
+			var discard string
+			for {
+				if err := websocket.Message.Receive(ws, &discard); err != nil {
+					return
+				}
+			}
+		}()
+
 		// 连上先补一份当前快照：不然要等到下一次变化才有东西显示，
 		// 而「打开页面后数字是空的」看起来就像坏了
-		if start, end, _ := resolveRange("today"); true {
-			if data, err := s.summarySnapshot(start, end); err == nil {
-				_ = websocket.Message.Send(ws, string(mustJSON(liveMessage{Type: "stats", Data: data})))
-			}
+		start, end, _ := resolveRange("today")
+		if data, err := s.summarySnapshot(start, end); err == nil {
+			_ = websocket.Message.Send(ws, string(mustJSON(liveMessage{Type: "stats", Data: data})))
 		}
 
 		// WebSocket 连接不允许并发写，所以写只在这个 goroutine 里做
-		for payload := range ch {
-			if err := websocket.Message.Send(ws, string(payload)); err != nil {
-				if s.logger() != nil {
-					s.logger().Warn("实时推送发送失败，断开该订阅", "err", err)
-				}
+		for {
+			select {
+			case <-closed:
 				return
+			case payload, ok := <-ch:
+				if !ok {
+					return
+				}
+				// 写超时：客户端 TCP 缓冲区满时（比如标签页被挂起）
+				// 没有 deadline 的 Send 会把这条 goroutine 永久堵住
+				_ = ws.SetWriteDeadline(time.Now().Add(liveWriteTimeout))
+				if err := websocket.Message.Send(ws, string(payload)); err != nil {
+					s.logger().Warn("实时推送发送失败，断开该订阅", "err", err)
+					return
+				}
 			}
 		}
 	}).ServeHTTP(c.Writer, c.Request)

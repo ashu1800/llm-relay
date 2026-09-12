@@ -58,6 +58,15 @@ func (c Config) Validate() error {
 		// 直接拒绝并说清楚，比让它变成一个永远连不上的配置好
 		return errors.New("代理地址只填主机名或 IP，不要带协议前缀或路径")
 	}
+	if strings.Contains(c.Host, ":") {
+		// 另一个常见写法：把 "1.2.3.4:1080" 整个填进地址栏（端口另有输入框）。
+		// 不拦的话 Address() 会拼成 "[1.2.3.4:1080]:1080"，
+		// 用户拿到一条看不懂的拨号错误 —— 正是这个函数想避免的那类现象。
+		// IPv6 字面量允许带冒号（[::1]），所以只在没有方括号时判定
+		if !strings.HasPrefix(c.Host, "[") {
+			return errors.New("代理地址不要带端口，端口请填在旁边的端口框里")
+		}
+	}
 	return nil
 }
 
@@ -90,28 +99,20 @@ func (c Config) DialContext(timeout time.Duration) (func(ctx context.Context, ne
 			return nil, fmt.Errorf("构造 SOCKS5 拨号器失败: %w", err)
 		}
 		// SOCKS5 的握手与 CONNECT 都发生在 Dial 里：
-		// 用户名密码错误会在这里返回，而不是在 HTTP 层
-		if cd, ok := d.(xproxy.ContextDialer); ok {
-			return cd.DialContext, nil
+		// 用户名密码错误会在这里返回，而不是在 HTTP 层。
+		//
+		// 这里必须自己套一层超时：net.Dialer 的 Timeout 只管「连上代理本身」，
+		// 握手/认证/CONNECT 阶段只跟随 ctx 取消，而转发侧传进来的是
+		// 请求的 ctx（没有 deadline）。一个「接受 TCP 但不回应」的代理
+		// （典型：端口填错指到了别的服务）会让请求一直挂到客户端断开。
+		cd, ok := d.(xproxy.ContextDialer)
+		if !ok {
+			return nil, errors.New("当前 SOCKS5 实现不支持带超时的拨号")
 		}
 		return func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// 老版本只有无 context 的 Dial：用 goroutine + select 补上取消语义，
-			// 否则请求被取消时这个拨号会一直挂着
-			type res struct {
-				conn net.Conn
-				err  error
-			}
-			ch := make(chan res, 1)
-			go func() {
-				conn, err := d.Dial(network, addr)
-				ch <- res{conn, err}
-			}()
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case r := <-ch:
-				return r.conn, r.err
-			}
+			dialCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			return cd.DialContext(dialCtx, network, addr)
 		}, nil
 	case model.ProxyProtocolHTTP, model.ProxyProtocolHTTPS:
 		// HTTP/HTTPS 代理由 Transport 自己的 Proxy 字段处理，
@@ -168,19 +169,24 @@ func (c Config) Transport(timeout time.Duration) (*http.Transport, error) {
 // 「停用的代理不许用来转发」是转发侧的规则（见 cmd/server 的 resolver），
 // 而管理界面要能测一个停用中的代理 —— 用户往往就是先停用它、
 // 改完地址再测一次是否修好，测试接口要是也拦，就没法验证修改有没有用。
-func FromEntity(p model.Proxy, c *secure.Cipher) (Config, bool) {
+// 第二个返回值是错误而不是 bool：调用方需要区分「代理不存在/停用」
+// 与「密码解不开」—— 两者的排障方向完全不同。解不开密文时仍然把
+// 已填的协议/地址/用户名带回去，界面上的测试按钮才能给出
+// 「密码解密失败」而不是「不支持的代理协议 ""」这种莫名其妙的结论。
+func FromEntity(p model.Proxy, c *secure.Cipher) (Config, error) {
 	cfg := Config{Protocol: p.Protocol, Host: p.Host, Port: p.Port, Username: p.Username}
-	if p.PasswordEnc != "" {
-		if c == nil {
-			return Config{}, false
-		}
-		plain, err := c.Decrypt(p.PasswordEnc)
-		if err != nil {
-			return Config{}, false
-		}
-		cfg.Password = plain
+	if p.PasswordEnc == "" {
+		return cfg, nil
 	}
-	return cfg, true
+	if c == nil {
+		return cfg, errors.New("没有可用的主密钥，无法解开代理密码")
+	}
+	plain, err := c.Decrypt(p.PasswordEnc)
+	if err != nil {
+		return cfg, errors.New("代理密码解密失败（主密钥是否变过？）")
+	}
+	cfg.Password = plain
+	return cfg, nil
 }
 
 // TestResult 是一次连通性测试的结果。
@@ -256,14 +262,20 @@ func FriendlyError(err error, cfg Config) string {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded) || strings.Contains(msg, "i/o timeout") || strings.Contains(msg, "timeout"):
 		return fmt.Sprintf("连接超时：%s 在超时时间内没有响应（地址/端口是否正确？代理是否在运行？）", cfg.Address())
-	case strings.Contains(msg, "authentication") || strings.Contains(msg, "auth"):
+	// TLS 判断必须排在认证之前：x509 的证书错误原文是
+	// "certificate signed by unknown authority"，里面有 "authority"，
+	// 用子串 "auth" 匹配认证会把它整条吃掉 —— 用户看到「用户名或密码不对」
+	// 就会去反复改密码，而真正的问题是代理用了自签证书。
+	case strings.Contains(msg, "certificate") || strings.Contains(msg, "x509") || strings.Contains(msg, "tls:"):
+		return "TLS 握手失败：如果代理本身不是 TLS 的，协议要选 http 而不是 https"
+	case strings.Contains(msg, "authentication failed") || strings.Contains(msg, "auth failed") ||
+		strings.Contains(msg, "invalid username") || strings.Contains(msg, "invalid password") ||
+		strings.Contains(msg, "username/password"):
 		return "认证失败：用户名或密码不对"
 	case strings.Contains(msg, "connection refused"):
 		return fmt.Sprintf("连接被拒绝：%s 上没有服务在监听", cfg.Address())
 	case strings.Contains(msg, "no such host"):
 		return fmt.Sprintf("域名解析失败：找不到 %s", cfg.Host)
-	case strings.Contains(msg, "certificate") || strings.Contains(msg, "tls"):
-		return "TLS 握手失败：如果代理本身不是 TLS 的，协议要选 http 而不是 https"
 	case errors.Is(err, context.Canceled):
 		return "测试被取消"
 	}

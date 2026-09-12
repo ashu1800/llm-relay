@@ -28,9 +28,13 @@ type Attempt struct {
 	StartedAt  time.Time
 }
 
-// ProxyResolver 按 id 取出站代理配置。ok=false 表示这个代理当前不可用
-// （不存在、被停用、或密文解不开）。
-type ProxyResolver func(id uint) (proxy.Config, bool)
+// ProxyResolver 按 id 取出站代理配置。
+//
+// 失败时返回 error 而不是 bool：不存在、被停用、密码解不开这三种情况
+// 的排障方向完全不同，压成一个 bool 之后用户只会看到
+// 「代理 #N 不存在或已停用」，然后跑去代理列表里找一个其实存在、
+// 只是密文解不开的代理。
+type ProxyResolver func(id uint) (proxy.Config, error)
 
 // Forwarder 执行单次上游调用。
 //
@@ -64,11 +68,25 @@ func NewForwarder(headerTimeout time.Duration) *Forwarder {
 // 而且测试里塞一个假实现就能验证「代理不可用时绝不直连」。
 func (f *Forwarder) SetProxyResolver(fn ProxyResolver) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
+	old := f.proxied
 	f.resolve = fn
 	// 换了数据源，旧的缓存一律作废
 	f.proxied = make(map[uint]*http.Client)
 	f.proxiedCfg = make(map[uint]proxy.Config)
+	f.mu.Unlock()
+	closeIdle(old)
+}
+
+// closeIdle 关掉被丢弃的客户端的空闲连接。
+//
+// 只从 map 里删掉是不够的：旧 Transport 的空闲连接要等 IdleConnTimeout（90 秒）
+// 才回收，反复改代理配置会短时间堆出一批多余的连接与 goroutine。
+func closeIdle(clients map[uint]*http.Client) {
+	for _, c := range clients {
+		if tr, ok := c.Transport.(*http.Transport); ok {
+			tr.CloseIdleConnections()
+		}
+	}
 }
 
 // InvalidateProxy 丢弃某个代理缓存的客户端。
@@ -76,9 +94,13 @@ func (f *Forwarder) SetProxyResolver(fn ProxyResolver) {
 // 表现为「改了配置却不生效」。
 func (f *Forwarder) InvalidateProxy(id uint) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
+	c := f.proxied[id]
 	delete(f.proxied, id)
 	delete(f.proxiedCfg, id)
+	f.mu.Unlock()
+	if c != nil {
+		closeIdle(map[uint]*http.Client{id: c})
+	}
 }
 
 // clientFor 选出这次请求该用的客户端。
@@ -91,16 +113,22 @@ func (f *Forwarder) clientFor(proxyID uint) (*http.Client, proxy.Config, error) 
 		return f.base, proxy.Config{}, nil
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if c, ok := f.proxied[proxyID]; ok {
-		return c, f.proxiedCfg[proxyID], nil
+		cfg := f.proxiedCfg[proxyID]
+		f.mu.Unlock()
+		return c, cfg, nil
 	}
-	if f.resolve == nil {
+	resolve := f.resolve
+	f.mu.Unlock()
+
+	// 查库放在锁外：resolve 会走一次数据库查询，持锁做它会把
+	// 所有走代理的请求以及 InvalidateProxy 一起卡住
+	if resolve == nil {
 		return nil, proxy.Config{}, fmt.Errorf("渠道指定的代理 #%d 无法解析（服务未接入代理配置）", proxyID)
 	}
-	cfg, ok := f.resolve(proxyID)
-	if !ok {
-		return nil, proxy.Config{}, fmt.Errorf("渠道指定的代理 #%d 不存在或已停用", proxyID)
+	cfg, err := resolve(proxyID)
+	if err != nil {
+		return nil, proxy.Config{}, fmt.Errorf("渠道指定的代理 #%d 不可用: %w", proxyID, err)
 	}
 	tr, err := cfg.Transport(15 * time.Second)
 	if err != nil {
@@ -109,8 +137,18 @@ func (f *Forwarder) clientFor(proxyID uint) (*http.Client, proxy.Config, error) 
 	// 与直连客户端保持同一套超时口径，只换 Transport
 	tr.ResponseHeaderTimeout = f.headerTimeout
 	c := &http.Client{Timeout: 0, Transport: tr}
+
+	f.mu.Lock()
+	// 双检：并发请求可能已经填过同一个代理，后到的那个直接复用并丢掉自己这份
+	if existing, ok := f.proxied[proxyID]; ok {
+		existingCfg := f.proxiedCfg[proxyID]
+		f.mu.Unlock()
+		tr.CloseIdleConnections()
+		return existing, existingCfg, nil
+	}
 	f.proxied[proxyID] = c
 	f.proxiedCfg[proxyID] = cfg
+	f.mu.Unlock()
 	return c, cfg, nil
 }
 

@@ -13,6 +13,17 @@ import time
 HOST = os.environ.get("LIVE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("LIVE_PORT", "8888"))
 SECONDS = float(sys.argv[1]) if len(sys.argv) > 1 else 6.0
+# 可选：收到这类消息就立刻退出。调用方要等的是「某件事发生了」，
+# 而不是「等满 N 秒」—— 固定窗口要么不够（上游一慢，推送就落在窗口外，
+# 用例偶发失败），要么白等（已经拿到结果还继续挂着）。
+STOP_ON = sys.argv[2] if len(sys.argv) > 2 else ""
+
+# 输出重定向到文件时 python 默认块缓冲，进程被 kill 时缓冲区里的结果会丢掉。
+# 调用方（test-live.sh）也加了 -u，这里是双保险。
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 
 def read_exact(sock, n, buf):
@@ -96,6 +107,8 @@ def main():
             stats_fields = len(msg["data"])
         if t == "logs" and isinstance(msg.get("data"), list):
             log_ids.extend(x.get("id") for x in msg["data"])
+        if STOP_ON and t == STOP_ON:
+            break
 
     print("TYPES " + json.dumps(counts, ensure_ascii=False))
     print("STATS_FIELDS %d" % stats_fields)

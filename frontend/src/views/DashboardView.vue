@@ -506,7 +506,7 @@ onMounted(load)
           label="成功率"
           :value="summary ? (summary.success_rate * 100).toFixed(1) + '%' : '--'"
           tone="green"
-          :hint="'平均首包 ' + Math.round(summary?.avg_first_byte_ms ?? 0) + 'ms'"
+          :hint="'平均首字耗时 ' + Math.round(summary?.avg_first_byte_ms ?? 0) + 'ms'"
         >
           <template #value>
             <AnimatedNumber :value="rateValue" format="percent" />

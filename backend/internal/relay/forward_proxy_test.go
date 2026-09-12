@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -24,9 +25,9 @@ func TestForwarderRefusesToFallBackToDirect(t *testing.T) {
 	defer up.Close()
 
 	f := NewForwarder(5 * time.Second)
-	f.SetProxyResolver(func(id uint) (proxy.Config, bool) {
-		// 解析不出来 = 代理不存在或已停用
-		return proxy.Config{}, false
+	f.SetProxyResolver(func(id uint) (proxy.Config, error) {
+		// 解析不出来 = 代理不存在、被停用，或密码解不开
+		return proxy.Config{}, errors.New("不存在")
 	})
 
 	cand := Candidate{
@@ -38,8 +39,10 @@ func TestForwarderRefusesToFallBackToDirect(t *testing.T) {
 	if err == nil {
 		t.Fatal("代理不可用时不该成功")
 	}
-	if !strings.Contains(err.Error(), "不存在或已停用") {
-		t.Errorf("错误应当指出代理不可用，实际 %v", err)
+	// 错误里要带上**具体原因**：不存在 / 被停用 / 密码解不开，
+	// 三种情况的下一步动作完全不同，只报「不可用」会让人白跑一趟
+	if !strings.Contains(err.Error(), "不存在") {
+		t.Errorf("错误应当带上解析失败的具体原因，实际 %v", err)
 	}
 }
 
