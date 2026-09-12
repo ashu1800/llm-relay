@@ -2,8 +2,14 @@
 import { WebSocket } from 'ws'
 
 const url = process.argv[2]
-const expr = process.argv[3]
-if (!url || !expr) { console.error('用法: node eval-page.mjs <url> <js表达式>'); process.exit(1) }
+// 表达式可以内联，也可以传 @文件名 —— 复杂表达式里有引号、感叹号时
+// 经过 PowerShell 参数解析容易被截断，走文件更可靠
+let expr = process.argv[3]
+if (!url || !expr) { console.error('用法: node eval-page.mjs <url> <js表达式|@文件>'); process.exit(1) }
+if (expr.startsWith('@')) {
+  const fs = await import('node:fs')
+  expr = fs.readFileSync(expr.slice(1), 'utf8')
+}
 
 const ver = await (await fetch('http://127.0.0.1:9222/json/version')).json()
 const ws = new WebSocket(ver.webSocketDebuggerUrl, { maxPayload: 256 * 1024 * 1024 })

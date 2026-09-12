@@ -181,15 +181,17 @@ type RequestPayload struct {
 // ModelPricing 模型单价。金额按每 100 万 token 的美元价存储，便于与官网口径对齐。
 // PeakRules 描述峰谷时段，例如 DeepSeek 的 peak 时段价格翻倍。
 type ModelPricing struct {
-	ID              uint            `gorm:"primaryKey" json:"id"`
-	ProviderID      uint            `gorm:"index;not null" json:"provider_id"`
-	ModelKey        string          `gorm:"size:128;uniqueIndex;not null" json:"model_key"`
-	MatchType       string          `gorm:"size:16;not null;default:exact" json:"match_type"`
-	Currency        string          `gorm:"size:8;not null;default:USD" json:"currency"`
-	InputPer1M      decimal.Decimal `gorm:"type:numeric(18,8);default:0" json:"input_per_1m"`
-	OutputPer1M     decimal.Decimal `gorm:"type:numeric(18,8);default:0" json:"output_per_1m"`
-	CacheReadPer1M  decimal.Decimal `gorm:"type:numeric(18,8);default:0" json:"cache_read_per_1m"`
-	CacheWritePer1M decimal.Decimal `gorm:"type:numeric(18,8);default:0" json:"cache_write_per_1m"`
+	ID         uint   `gorm:"primaryKey" json:"id"`
+	ProviderID uint   `gorm:"index;not null" json:"provider_id"`
+	ModelKey   string `gorm:"size:128;uniqueIndex;not null" json:"model_key"`
+	MatchType  string `gorm:"size:16;not null;default:exact" json:"match_type"`
+	Currency   string `gorm:"size:8;not null;default:USD" json:"currency"`
+	// 列名见 columns.go：GORM 推导出的是 per1_m，与 json 名 per_1m 不同，
+	// 这里显式声明以便和原生映射对得上
+	InputPer1M      decimal.Decimal `gorm:"column:input_per1_m;type:numeric(18,8);default:0" json:"input_per_1m"`
+	OutputPer1M     decimal.Decimal `gorm:"column:output_per1_m;type:numeric(18,8);default:0" json:"output_per_1m"`
+	CacheReadPer1M  decimal.Decimal `gorm:"column:cache_read_per1_m;type:numeric(18,8);default:0" json:"cache_read_per_1m"`
+	CacheWritePer1M decimal.Decimal `gorm:"column:cache_write_per1_m;type:numeric(18,8);default:0" json:"cache_write_per_1m"`
 	PeakRules       JSONList        `gorm:"type:jsonb" json:"peak_rules"`
 	Source          string          `gorm:"size:16;not null;default:litellm" json:"source"`
 	SourceURL       string          `gorm:"size:512" json:"source_url"`

@@ -12,7 +12,10 @@ import {
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import { PRICE_SOURCES, SOURCE_META, type Pricing, type PricingSyncLog, type PricingSyncResult } from '@/api/types'
+import { useProviderStore } from '@/stores/providers'
+import ProviderTag from '@/components/ProviderTag.vue'
 
+const providerStore = useProviderStore()
 const loading = ref(false)
 const rows = ref<Pricing[]>([])
 const total = ref(0)
@@ -54,6 +57,8 @@ async function load() {
     const res = await api.get<{ items: Pricing[]; total: number }>('/pricing?' + p.toString())
     rows.value = res.items || []
     total.value = res.total || 0
+    // 模型商列表用于给每行打上对应标识；失败不阻塞定价列表
+    await providerStore.ensure()
   } catch (e: any) {
     message.error(e.message)
   } finally {
@@ -251,9 +256,20 @@ onMounted(load)
         }"
         row-key="id"
         size="small"
-        :scroll="{ x: 1180 }"
+        :scroll="{ x: 1320 }"
       >
-        <a-table-column title="模型名" data-index="model_key" :width="230" fixed="left" ellipsis />
+        <a-table-column title="模型名" data-index="model_key" :width="220" fixed="left" ellipsis />
+        <a-table-column title="模型商" :width="140">
+          <template #default="{ record }">
+            <!-- LiteLLM 覆盖数百家模型商，未接入的标 0；显示占位而不是硬凑一个标签 -->
+            <ProviderTag
+              v-if="providerStore.byId(record.provider_id)"
+              :code="providerStore.byId(record.provider_id)?.code"
+              :name="providerStore.byId(record.provider_id)?.name"
+            />
+            <span v-else class="unassigned" title="不属于当前已接入的模型商">—</span>
+          </template>
+        </a-table-column>
         <a-table-column title="来源" :width="90">
           <template #default="{ record }">
             <a-tag :color="sourceMeta(record.source).color">{{ sourceMeta(record.source).label }}</a-tag>
@@ -419,6 +435,7 @@ onMounted(load)
 
 <style scoped>
 .manage-container { padding: var(--gap); }
+.unassigned { color: var(--color-text-secondary); }
 .manage-panel { padding: 0; overflow: hidden; }
 .manage-toolbar {
   display: flex;

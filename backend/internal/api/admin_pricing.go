@@ -115,9 +115,12 @@ func (s *Server) updatePricing(c *gin.Context) {
 	if p.MatchType != "" {
 		updates["match_type"] = p.MatchType
 	}
+	// 列名用常量而非 json 名，二者不一样，写错会在更新时报「列不存在」
 	for k, v := range map[string]string{
-		"input_per_1m": p.InputPer1M, "output_per_1m": p.OutputPer1M,
-		"cache_read_per_1m": p.CacheReadPer1M, "cache_write_per_1m": p.CacheWritePer1M,
+		model.ColPricingInputPer1M:      p.InputPer1M,
+		model.ColPricingOutputPer1M:     p.OutputPer1M,
+		model.ColPricingCacheReadPer1M:  p.CacheReadPer1M,
+		model.ColPricingCacheWritePer1M: p.CacheWritePer1M,
 	} {
 		if strings.TrimSpace(v) == "" {
 			continue

@@ -3,9 +3,12 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { PlusOutlined, ReloadOutlined, DeleteOutlined, EditOutlined, LinkOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
+import { useProviderStore } from '@/stores/providers'
+import ProviderTag from '@/components/ProviderTag.vue'
 import { PROTOCOLS, type Channel, type ChannelGroup, type ChannelBinding } from '@/api/types'
 
 const loading = ref(false)
+const providerStore = useProviderStore()
 const rows = ref<Channel[]>([])
 const groups = ref<ChannelGroup[]>([])
 
@@ -35,7 +38,8 @@ async function load() {
   try {
     const [c, g] = await Promise.all([
       api.get<{ items: Channel[] }>('/channels'),
-      api.get<{ items: ChannelGroup[] }>('/groups')
+      api.get<{ items: ChannelGroup[] }>('/groups'),
+      providerStore.ensure()
     ])
     rows.value = c.items || []
     groups.value = g.items || []
@@ -199,7 +203,16 @@ onMounted(load)
         size="small"
         :scroll="{ x: 1100 }"
       >
-        <a-table-column title="名称" data-index="name" :width="180" />
+        <a-table-column title="名称" :width="200">
+          <template #default="{ record }">
+            <div class="chan-name">{{ record.name }}</div>
+            <ProviderTag
+              v-if="providerStore.byId(record.provider_id)"
+              :code="providerStore.byId(record.provider_id)?.code"
+              :name="providerStore.byId(record.provider_id)?.name"
+            />
+          </template>
+        </a-table-column>
         <a-table-column title="协议" data-index="protocol" :width="180" />
         <a-table-column title="地址" data-index="base_url" :width="260" ellipsis />
         <a-table-column title="分组" :width="90">
@@ -299,5 +312,6 @@ onMounted(load)
 .toolbar-left { display: flex; gap: var(--gap); }
 .toolbar-spacer { flex: 1; }
 .toolbar-hint { color: var(--color-text-secondary); font-size: 13px; }
+.chan-name { margin-bottom: 2px; }
 .danger-link { color: var(--color-red); }
 </style>

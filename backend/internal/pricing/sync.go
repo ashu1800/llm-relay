@@ -38,12 +38,31 @@ const (
 
 // Entry 是解析自外部源的一条定价，单价统一为「每 100 万 token 的美元价」。
 type Entry struct {
+	// ProviderID 是这条价格所属的模型商。为 0 表示不属于当前已接入的模型商
+	// （LiteLLM 覆盖数百家，绝大多数我们并没有接入）。
+	// 此前这个字段是写死的 1，导致 DeepSeek 官方价被标成了 OpenAI。
+	ProviderID      uint
 	ModelKey        string
 	InputPer1M      decimal.Decimal
 	OutputPer1M     decimal.Decimal
 	CacheReadPer1M  decimal.Decimal
 	CacheWritePer1M decimal.Decimal
 	PeakRules       model.JSONList
+}
+
+// providerIDs 返回「模型商编码 -> id」的映射，用于给定价标注归属。
+// 查表而不是写死 id，避免模型商 id 变动后静默标错。
+func (s *Syncer) providerIDs() map[string]uint {
+	var rows []model.Provider
+	if err := s.db.Find(&rows).Error; err != nil {
+		s.logger.Warn("读取模型商列表失败，定价归属将留空", "err", err)
+		return map[string]uint{}
+	}
+	out := make(map[string]uint, len(rows))
+	for _, p := range rows {
+		out[strings.ToLower(strings.TrimSpace(p.Code))] = p.ID
+	}
+	return out
 }
 
 // Syncer 负责把外部价格同步进库。
@@ -147,7 +166,7 @@ func (s *Syncer) upsert(e Entry, source string, priority int, url string) (int, 
 
 	if err == gorm.ErrRecordNotFound {
 		row := model.ModelPricing{
-			ProviderID: 1, ModelKey: e.ModelKey, MatchType: "exact", Currency: "USD",
+			ProviderID: e.ProviderID, ModelKey: e.ModelKey, MatchType: "exact", Currency: "USD",
 			InputPer1M: e.InputPer1M, OutputPer1M: e.OutputPer1M,
 			CacheReadPer1M: e.CacheReadPer1M, CacheWritePer1M: e.CacheWritePer1M,
 			PeakRules: e.PeakRules, Source: source, SourceURL: url,
@@ -169,22 +188,29 @@ func (s *Syncer) upsert(e Entry, source string, priority int, url string) (int, 
 		return 0, 0, 0, 1
 	}
 
-	if existing.InputPer1M.Equal(e.InputPer1M) &&
+	// 归属也要纳入「是否变化」：价格没变但模型商标错了（例如官方价此前
+	// 统一记成了 OpenAI），重跑一次同步就应该把它纠正过来。
+	unchanged := existing.InputPer1M.Equal(e.InputPer1M) &&
 		existing.OutputPer1M.Equal(e.OutputPer1M) &&
 		existing.CacheReadPer1M.Equal(e.CacheReadPer1M) &&
-		existing.CacheWritePer1M.Equal(e.CacheWritePer1M) {
+		existing.CacheWritePer1M.Equal(e.CacheWritePer1M) &&
+		existing.ProviderID == e.ProviderID
+	if unchanged {
 		return 0, 0, 1, 0
 	}
 
+	// 列名必须用 model 里的常量：GORM 推导出的是 per1_m 而不是 per_1m，
+	// 照 json 名写会报「列不存在」，而且只在更新已有行时才暴露
 	updates := map[string]any{
-		"input_per_1m":       e.InputPer1M,
-		"output_per_1m":      e.OutputPer1M,
-		"cache_read_per_1m":  e.CacheReadPer1M,
-		"cache_write_per_1m": e.CacheWritePer1M,
-		"peak_rules":         e.PeakRules,
-		"source":             source,
-		"source_url":         url,
-		"priority":           priority,
+		"provider_id":                   e.ProviderID,
+		model.ColPricingInputPer1M:      e.InputPer1M,
+		model.ColPricingOutputPer1M:     e.OutputPer1M,
+		model.ColPricingCacheReadPer1M:  e.CacheReadPer1M,
+		model.ColPricingCacheWritePer1M: e.CacheWritePer1M,
+		"peak_rules":                    e.PeakRules,
+		"source":                        source,
+		"source_url":                    url,
+		"priority":                      priority,
 	}
 	if err := s.db.Model(&model.ModelPricing{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
 		s.logger.Warn("更新定价失败", "model", e.ModelKey, "err", err)
@@ -227,7 +253,16 @@ func (s *Syncer) fetchDeepSeekOfficial(ctx context.Context) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseDeepSeekTable(body)
+	entries, err := parseDeepSeekTable(body)
+	if err != nil {
+		return nil, err
+	}
+	// 这个页面只覆盖 DeepSeek，归属固定；查表取 id 而不是写死数字
+	id := s.providerIDs()["deepseek"]
+	for i := range entries {
+		entries[i].ProviderID = id
+	}
+	return entries, nil
 }
 
 // parseDeepSeekTable 解析官方定价表。抽成纯函数以便用固定样本测试。
@@ -402,6 +437,7 @@ func (s *Syncer) fetchLiteLLM(ctx context.Context) ([]Entry, error) {
 	}
 	sort.Strings(keys)
 
+	ids := s.providerIDs()
 	var entries []Entry
 	for _, k := range keys {
 		item := raw[k]
@@ -437,14 +473,17 @@ func (s *Syncer) fetchLiteLLM(ctx context.Context) ([]Entry, error) {
 		}
 
 		// 同时写入带 provider 前缀与裸名两种键，便于用任一种写法命中
+		// 只有已接入的模型商才标 id，其余留 0 表示「不属于已接入的模型商」，
+		// 而不是一律算到 OpenAI 头上
+		pid := ids[strings.ToLower(provider)]
 		entries = append(entries, Entry{
-			ModelKey: k, InputPer1M: in, OutputPer1M: out,
+			ProviderID: pid, ModelKey: k, InputPer1M: in, OutputPer1M: out,
 			CacheReadPer1M: cacheRead, CacheWritePer1M: cacheWrite, PeakRules: rules,
 		})
 		if idx := strings.Index(k, "/"); idx > 0 {
 			bare := k[idx+1:]
 			entries = append(entries, Entry{
-				ModelKey: bare, InputPer1M: in, OutputPer1M: out,
+				ProviderID: pid, ModelKey: bare, InputPer1M: in, OutputPer1M: out,
 				CacheReadPer1M: cacheRead, CacheWritePer1M: cacheWrite, PeakRules: rules,
 			})
 		}

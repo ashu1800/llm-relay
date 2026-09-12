@@ -3,11 +3,13 @@ import { onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { PlusOutlined, ReloadOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
-import type { ModelItem, Provider } from '@/api/types'
+import type { ModelItem } from '@/api/types'
+import { useProviderStore } from '@/stores/providers'
+import ProviderTag from '@/components/ProviderTag.vue'
 
+const providerStore = useProviderStore()
 const loading = ref(false)
 const rows = ref<ModelItem[]>([])
-const providers = ref<Provider[]>([])
 const modalOpen = ref(false)
 const saving = ref(false)
 const editing = ref<ModelItem | null>(null)
@@ -16,12 +18,11 @@ const form = reactive({ public_name: '', description: '', provider_id: 1, enable
 async function load() {
   loading.value = true
   try {
-    const [m, p] = await Promise.all([
+    const [m] = await Promise.all([
       api.get<{ items: ModelItem[] }>('/models'),
-      api.get<{ items: Provider[] }>('/models/providers')
+      providerStore.ensure()
     ])
     rows.value = m.items || []
-    providers.value = p.items || []
   } catch (e: any) {
     message.error(e.message)
   } finally {
@@ -31,7 +32,11 @@ async function load() {
 
 function openCreate() {
   editing.value = null
-  Object.assign(form, { public_name: '', description: '', provider_id: providers.value[0]?.id ?? 1, enabled: true })
+  Object.assign(form, {
+    public_name: '', description: '',
+    provider_id: providerStore.items[0]?.id ?? 1,
+    enabled: true
+  })
   modalOpen.value = true
 }
 
@@ -103,9 +108,12 @@ onMounted(load)
 
       <a-table :data-source="rows" :loading="loading" :pagination="false" row-key="id" size="small">
         <a-table-column title="对外模型名" data-index="public_name" :width="240" />
-        <a-table-column title="模型商" :width="120">
+        <a-table-column title="模型商" :width="150">
           <template #default="{ record }">
-            {{ providers.find((p) => p.id === record.provider_id)?.name ?? '-' }}
+            <ProviderTag
+              :code="providerStore.byId(record.provider_id)?.code"
+              :name="providerStore.byId(record.provider_id)?.name"
+            />
           </template>
         </a-table-column>
         <a-table-column title="备注" data-index="description" ellipsis />
@@ -137,8 +145,13 @@ onMounted(load)
         </a-form-item>
         <a-form-item label="模型商">
           <a-select v-model:value="form.provider_id">
-            <a-select-option v-for="p in providers" :key="p.id" :value="p.id">{{ p.name }}</a-select-option>
+            <a-select-option v-for="p in providerStore.items" :key="p.id" :value="p.id">
+              <ProviderTag :code="p.code" :name="p.name" />
+            </a-select-option>
           </a-select>
+          <div class="field-hint">
+            模型商决定该模型用哪一套单价；改错会取不到对应模型商的价格。
+          </div>
         </a-form-item>
         <a-form-item label="备注">
           <a-input v-model:value="form.description" />
@@ -158,5 +171,6 @@ onMounted(load)
 .toolbar-left { display: flex; gap: var(--gap); }
 .toolbar-spacer { flex: 1; }
 .toolbar-hint { color: var(--color-text-secondary); font-size: 13px; }
+.field-hint { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
 .danger-link { color: var(--color-red); }
 </style>
