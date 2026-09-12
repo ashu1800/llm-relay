@@ -25,6 +25,7 @@ const runtimeRows = [
   { key: 'max_request_body_mb', label: '请求体上限（MB）', hint: 'RELAY_MAX_REQUEST_BODY_MB' },
   { key: 'log_retention_days', label: '日志保留天数', hint: 'RELAY_LOG_RETENTION_DAYS' },
   { key: 'payload_storage_mode', label: '报文留存模式', hint: 'RELAY_PAYLOAD_STORAGE_MODE' },
+  { key: 'payload_max_kb', label: '单条报文上限（KB）', hint: 'RELAY_PAYLOAD_MAX_KB' },
   { key: 'pricing_interval_hours', label: '价格同步间隔（小时）', hint: 'RELAY_PRICING_INTERVAL_HOURS' },
   { key: 'official_sync_enabled', label: '启用官方价格源', hint: 'RELAY_PRICING_OFFICIAL' },
   { key: 'sync_on_start', label: '启动时同步价格', hint: 'RELAY_PRICING_SYNC_ON_START' },
@@ -167,7 +168,9 @@ onMounted(load)
       <div class="note">
         当前模式为 <span class="mono">{{ runtime.payload_storage_mode }}</span>。
         留存的请求与响应原文会写入 <span class="mono">request_payloads</span> 表，
-        在「请求日志」页点开单条记录即可查看。
+        在「请求日志」页点开单条记录即可查看；凭据类请求头（Authorization、各类 api-key）
+        一律以 <span class="mono">[已隐藏]</span> 落库，不会明文保存。
+        超过 <span class="mono">{{ runtime.payload_max_kb }}</span> KB 的报文会被截断并标注。
         想保留全部调用可设为 <span class="mono">all</span>，只留出错调用设为
         <span class="mono">errors</span>，完全不留存设为 <span class="mono">none</span>。
       </div>

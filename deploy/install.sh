@@ -183,6 +183,7 @@ mkdir -p "$INSTALL_DIR"
 if [[ "$SRC_DIR" != "$INSTALL_DIR" ]]; then
   # 先清掉旧源码目录：tar 只覆盖不删除，残留的已删除文件会导致编译报重复声明。
   # 注意保留 deploy/data（数据库卷）与 deploy/.env（密钥）。
+  # deploy/.env 必须在下面的 exclude 里：它是运行期配置，覆盖掉会让数据库密码丢失。
   rm -rf "$INSTALL_DIR/backend" "$INSTALL_DIR/frontend" \
          "$INSTALL_DIR/scripts" "$INSTALL_DIR/docs"
   tar -C "$SRC_DIR" \
@@ -190,6 +191,7 @@ if [[ "$SRC_DIR" != "$INSTALL_DIR" ]]; then
       --exclude='./frontend/dist' \
       --exclude='./backend/internal/web/dist' \
       --exclude='./deploy/data' \
+      --exclude='./deploy/.env' \
       --exclude='./.git' \
       --exclude='./.chrome-profile' \
       --exclude='./docs/shots' \
@@ -204,6 +206,26 @@ if [[ ! -f "$ENV_FILE" ]]; then
   DB_PASSWORD="$(openssl rand -hex 24)"
   sed -e "s|^DB_PASSWORD=.*|DB_PASSWORD=$DB_PASSWORD|" \
       "$INSTALL_DIR/deploy/.env.example" > "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+elif ! grep -q '^DB_PASSWORD=.\+' "$ENV_FILE"; then
+  # 走到这里说明 .env 被覆盖或写坏了。直接生成新密码会让已有数据库连不上，
+  # 所以只补默认值并明确告警，由用户决定是否回填原密码。
+  warn "$ENV_FILE 缺少 DB_PASSWORD，可能被源码目录的同名文件覆盖过"
+  warn "已从 .env.example 补齐缺失项并生成新密码"
+  warn "若数据库此前已初始化，请把 DB_PASSWORD 改回原值，否则会连不上："
+  warn "  docker inspect llm-relay-postgres --format '{{range .Config.Env}}{{println .}}{{end}}' | grep POSTGRES_PASSWORD"
+  DB_PASSWORD="$(openssl rand -hex 24)"
+  # 保留用户已改的键，只补齐缺失的
+  TMP_ENV="$(mktemp)"
+  cp "$ENV_FILE" "$TMP_ENV"
+  sed -e "s|^DB_PASSWORD=.*|DB_PASSWORD=$DB_PASSWORD|" \
+      "$INSTALL_DIR/deploy/.env.example" > "$ENV_FILE"
+  while IFS= read -r line; do
+    key="${line%%=*}"
+    [[ -z "$key" || "$key" == \#* ]] && continue
+    grep -q "^${key}=" "$ENV_FILE" || printf '%s\n' "$line" >> "$ENV_FILE"
+  done < "$TMP_ENV"
+  rm -f "$TMP_ENV"
   chmod 600 "$ENV_FILE"
 else
   log "复用已存在的 $ENV_FILE"

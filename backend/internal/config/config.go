@@ -91,6 +91,7 @@ type RelayConfig struct {
 	MaxRequestBodyMB   int           `yaml:"max_request_body_mb"`
 	LogRetentionDays   int           `yaml:"log_retention_days"`
 	PayloadStorageMode string        `yaml:"payload_storage_mode"` // all | errors | none
+	PayloadMaxKB       int           `yaml:"payload_max_kb"`       // 单条报文留存上限
 }
 
 type LogConfig struct {
@@ -121,6 +122,7 @@ func Default() *Config {
 			MaxRequestBodyMB:   64,
 			LogRetentionDays:   30,
 			PayloadStorageMode: "errors",
+			PayloadMaxKB:       256,
 		},
 		Log: LogConfig{Level: "info", Format: "text"},
 	}
@@ -174,6 +176,7 @@ func applyEnv(c *Config) {
 
 	setInt(&c.Relay.MaxRetries, "RELAY_MAX_RETRIES")
 	setStr(&c.Relay.PayloadStorageMode, "RELAY_PAYLOAD_STORAGE_MODE")
+	setInt(&c.Relay.PayloadMaxKB, "RELAY_PAYLOAD_MAX_KB")
 
 	setStr(&c.Security.Secret, "RELAY_SECRET")
 

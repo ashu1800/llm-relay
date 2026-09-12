@@ -616,8 +616,12 @@ func (s *Server) logDetail(c *gin.Context) {
 		writeUpstreamError(c, http.StatusNotFound, "日志不存在", "not_found_error")
 		return
 	}
-	var payload model.RequestPayload
-	_ = s.deps.Store.DB().Where("log_id = ?", id).First(&payload).Error
+	// 未留存时报文返回 null，前端据此区分「没有留存」与「留存了空内容」
+	var stored model.RequestPayload
+	var payload *model.RequestPayload
+	if err := s.deps.Store.DB().Where("log_id = ?", id).First(&stored).Error; err == nil {
+		payload = &stored
+	}
 	c.JSON(http.StatusOK, gin.H{"log": entry, "payload": payload})
 }
 

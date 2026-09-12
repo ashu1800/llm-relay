@@ -53,12 +53,14 @@ type RelayRequest struct {
 	UpstreamPath string
 	PublicModel  string
 	GroupID      uint
-	Body         []byte
-	Headers      http.Header
-	APIKeyID     uint
-	APIKeyName   string
-	ClientIP     string
-	Stream       bool
+	// Body 是归一化后发给上游的载荷；InboundBody 是客户端原始报文，仅用于留存排障
+	Body        []byte
+	InboundBody []byte
+	Headers     http.Header
+	APIKeyID    uint
+	APIKeyName  string
+	ClientIP    string
+	Stream      bool
 }
 
 // RelayResult 是编排结果。

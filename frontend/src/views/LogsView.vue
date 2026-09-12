@@ -10,7 +10,13 @@ const rows = ref<RequestLog[]>([])
 const total = ref(0)
 const detailOpen = ref(false)
 const current = ref<RequestLog | null>(null)
-const payload = ref<{ request_body?: string; response_body?: string } | null>(null)
+interface LogPayload {
+  request_body?: string
+  response_body?: string
+  request_headers?: Record<string, string>
+  response_headers?: Record<string, string>
+}
+const payload = ref<LogPayload | null>(null)
 // 简略 / 详细 切换，对应参考站的 segmented 控件
 const dense = ref<string>('brief')
 
@@ -37,6 +43,26 @@ async function load() {
 function search() {
   query.page = 1
   load()
+}
+
+// 结构化报文格式化后展示；SSE 流不是合法 JSON，原样返回
+function pretty(s?: string) {
+  if (!s) return '（空）'
+  const t = s.trim()
+  if (!t.startsWith('{') && !t.startsWith('[')) return s
+  try {
+    return JSON.stringify(JSON.parse(t), null, 2)
+  } catch {
+    return s
+  }
+}
+
+function prettyHeaders(h?: Record<string, string>) {
+  if (!h) return '（无）'
+  return Object.entries(h)
+    .map(([k, v]) => k + ': ' + v)
+    .sort()
+    .join('\n')
 }
 
 async function openDetail(row: RequestLog) {
@@ -248,14 +274,28 @@ onMounted(load)
         </a-descriptions-item>
       </a-descriptions>
 
-      <template v-if="payload && payload.request_body">
+      <template v-if="payload">
         <h4 class="section-title">请求报文</h4>
-        <pre class="code-box">{{ payload.request_body }}</pre>
-      </template>
-      <template v-if="payload && payload.response_body">
+        <pre class="code-box">{{ pretty(payload.request_body) }}</pre>
         <h4 class="section-title">响应报文</h4>
-        <pre class="code-box">{{ payload.response_body }}</pre>
+        <pre class="code-box">{{ pretty(payload.response_body) }}</pre>
+        <a-collapse ghost class="hdr-collapse">
+          <a-collapse-panel key="req" header="请求头（凭据字段已隐藏）">
+            <pre class="code-box small">{{ prettyHeaders(payload.request_headers) }}</pre>
+          </a-collapse-panel>
+          <a-collapse-panel key="resp" header="响应头">
+            <pre class="code-box small">{{ prettyHeaders(payload.response_headers) }}</pre>
+          </a-collapse-panel>
+        </a-collapse>
       </template>
+      <a-alert
+        v-else
+        type="info"
+        show-icon
+        class="no-payload"
+        message="本次调用未留存报文"
+        description="留存模式为 errors 时只保留出错的调用。想查看全部调用，把部署配置里的 RELAY_PAYLOAD_STORAGE_MODE 改为 all 后重新部署即可。"
+      />
     </a-drawer>
   </div>
 </template>
@@ -289,4 +329,9 @@ onMounted(load)
   border-radius: var(--radius-control);
 }
 .err-box { color: var(--color-red); max-height: 160px; }
+.code-box.small { max-height: 200px; font-size: 11px; }
+.hdr-collapse { margin-top: 12px; border-top: 1px solid var(--color-border); }
+.hdr-collapse :deep(.ant-collapse-header) { padding-left: 0; font-size: 13px; }
+.hdr-collapse :deep(.ant-collapse-content-box) { padding: 0 0 8px; }
+.no-payload { margin-top: 16px; }
 </style>

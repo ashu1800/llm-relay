@@ -121,6 +121,7 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 		UpstreamPath: p.UpstreamPath,
 		PublicModel:  publicModel,
 		Body:         body,
+		InboundBody:  rawBody,
 		Headers:      c.Request.Header,
 		ClientIP:     c.ClientIP(),
 		Stream:       relay.ExtractStream(body),
@@ -134,7 +135,7 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 	if relayErr != nil {
 		totalMs := int(time.Since(started).Milliseconds())
 		p.writeError(c, http.StatusBadGateway, relayErr.Error(), "upstream_error")
-		s.finalizeLog(req, res, relay.Usage{}, http.StatusBadGateway, relayErr.Error(), 0, totalMs)
+		s.finalizeLog(req, res, relay.Usage{}, http.StatusBadGateway, relayErr.Error(), 0, totalMs, nil, nil)
 		return
 	}
 
@@ -149,7 +150,7 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 		upMsg := string(att.Body)
 		p.writeError(c, att.StatusCode, upMsg, "upstream_error")
 		s.finalizeLog(req, res, relay.Usage{}, att.StatusCode,
-			upMsg, att.HeaderMs, int(time.Since(started).Milliseconds()))
+			upMsg, att.HeaderMs, int(time.Since(started).Milliseconds()), att.Body, att.Headers)
 		return
 	}
 
@@ -175,7 +176,7 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 		usage = relay.EstimateUsage(len(rawBody), len(att.Body))
 	}
 	s.finalizeLog(req, res, usage, att.StatusCode, "",
-		att.HeaderMs, int(time.Since(started).Milliseconds()))
+		att.HeaderMs, int(time.Since(started).Milliseconds()), att.Body, att.Headers)
 }
 
 // streamToClient 边转发边旁路抓取用量。
@@ -199,6 +200,13 @@ func (s *Server) streamToClient(c *gin.Context, p *inboundProfile, req *relay.Re
 	buf := make([]byte, 32*1024)
 	firstByteMs := 0
 
+	// 报文留存用：只留前若干字节，长流不能无限攒在内存里
+	captureLimit := s.deps.Config.Relay.PayloadMaxKB << 10
+	if captureLimit <= 0 {
+		captureLimit = relay.DefaultPayloadMaxBytes
+	}
+	var streamCapture []byte
+
 	for {
 		n, readErr := att.Stream.Read(buf)
 		if n > 0 {
@@ -206,6 +214,15 @@ func (s *Server) streamToClient(c *gin.Context, p *inboundProfile, req *relay.Re
 				firstByteMs = int(time.Since(att.StartedAt).Milliseconds())
 			}
 			_, _ = tee.Write(buf[:n])
+			// 留存模式下才捕获，none 模式不做任何额外拷贝
+			if relay.ShouldStorePayload(s.deps.Config.Relay.PayloadStorageMode, att.StatusCode) &&
+				len(streamCapture) < captureLimit {
+				room := captureLimit - len(streamCapture)
+				if room > n {
+					room = n
+				}
+				streamCapture = append(streamCapture, buf[:room]...)
+			}
 			if _, writeErr := tr.Write(buf[:n]); writeErr != nil {
 				break
 			}
@@ -226,5 +243,5 @@ func (s *Server) streamToClient(c *gin.Context, p *inboundProfile, req *relay.Re
 		usage = relay.EstimateUsage(len(req.Body), tee.Bytes()/4)
 	}
 	s.finalizeLog(req, res, usage, att.StatusCode, "",
-		firstByteMs, int(time.Since(started).Milliseconds()))
+		firstByteMs, int(time.Since(started).Milliseconds()), streamCapture, att.Headers)
 }

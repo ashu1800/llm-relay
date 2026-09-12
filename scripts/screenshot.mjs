@@ -1,5 +1,6 @@
 // CDP 截图工具：为指定 URL 新建标签页并截图，不影响已有标签
-// 用法: node scripts/screenshot.mjs <url> <输出png> [宽] [高]
+// 用法: node scripts/screenshot.mjs <url> <输出png> [宽] [高] [截图前执行的JS] [执行后再等待毫秒]
+// 例: node scripts/screenshot.mjs http://127.0.0.1:8888/console/logs a.png 1440 900 "document.querySelector('.ant-table-row a').click()" 2500
 import { writeFileSync, mkdirSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import http from 'node:http'
@@ -8,7 +9,10 @@ const url = process.argv[2]
 const outPng = resolve(process.argv[3])
 const width = parseInt(process.argv[4] || '1440', 10)
 const height = parseInt(process.argv[5] || '900', 10)
-if (!url || !outPng) { console.error('用法: node screenshot.mjs <url> <out.png> [w] [h]'); process.exit(1) }
+// 需要在页面上点一下才能看到的内容（例如抽屉、折叠面板）靠这个参数打开
+const preScript = process.argv[6] || ''
+const settleMs = parseInt(process.argv[7] || '2500', 10)
+if (!url || !outPng) { console.error('用法: node screenshot.mjs <url> <out.png> [w] [h] [js] [waitMs]'); process.exit(1) }
 
 function httpReq(method, path) {
   return new Promise((ok, fail) => {
@@ -57,6 +61,13 @@ async function main() {
   await send(ws, 'Page.enable', {})
   await send(ws, 'Emulation.setDeviceMetricsOverride', { width: width, height: height, deviceScaleFactor: 1, mobile: false })
   await new Promise((r) => setTimeout(r, 6000))
+  if (preScript) {
+    const res = await send(ws, 'Runtime.evaluate', { expression: preScript, awaitPromise: true, returnByValue: true })
+    if (res && res.exceptionDetails) {
+      console.error('页面脚本执行出错: ' + JSON.stringify(res.exceptionDetails).slice(0, 300))
+    }
+    await new Promise((r) => setTimeout(r, settleMs))
+  }
   const shot = await send(ws, 'Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
   mkdirSync(dirname(outPng), { recursive: true })
   writeFileSync(outPng, Buffer.from(shot.data, 'base64'))
