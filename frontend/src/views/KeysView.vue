@@ -3,6 +3,7 @@ import { computed, h, onMounted, reactive, ref } from 'vue'
 import { InputNumber, message, Modal } from 'ant-design-vue'
 import { PlusOutlined, ReloadOutlined, DeleteOutlined, CopyOutlined, EditOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
+import DataState from '@/components/DataState.vue'
 import type { APIKey, ChannelGroup } from '@/api/types'
 
 const loading = ref(false)
@@ -24,12 +25,18 @@ const form = reactive({
 
 const title = computed(() => (editing.value ? '编辑密钥' : '新建密钥'))
 
+// 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
+// 表格紧接着显示「暂无数据」，用户会以为密钥本来就没有
+const loadError = ref('')
+
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const res = await api.get<{ items: APIKey[] }>('/keys')
     rows.value = res.items || []
   } catch (e: any) {
+    loadError.value = e.message || '加载失败'
     message.error(e.message)
   } finally {
     loading.value = false
@@ -214,7 +221,17 @@ onMounted(() => {
         <span class="toolbar-hint">共 {{ rows.length }} 个密钥</span>
       </div>
 
+      <DataState
+        :error="loadError"
+        :has-data="rows.length > 0"
+        :loading="loading"
+        title="密钥列表加载失败"
+        @retry="load"
+      >
       <a-table :data-source="rows" :loading="loading" :pagination="false" row-key="id" size="small" :scroll="{ x: 1200 }">
+        <template #emptyText>
+          <a-empty description="还没有密钥，点「新建密钥」创建第一个；明文只在创建时显示一次" />
+        </template>
         <a-table-column title="名称" data-index="name" :width="160" />
         <a-table-column title="密钥前缀" data-index="key_prefix" :width="170" />
         <a-table-column title="模型白名单" :width="220" ellipsis>
@@ -251,6 +268,7 @@ onMounted(() => {
           </template>
         </a-table-column>
       </a-table>
+      </DataState>
     </section>
 
     <a-modal v-model:open="modalOpen" :title="title" :confirm-loading="saving" width="600px" @ok="save">

@@ -47,8 +47,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("初始化加密模块失败: %w", err)
 	}
-	if cfg.Security.Secret == "llm-relay-dev-secret-change-me" {
-		logger.Warn("正在使用默认加密密钥，请通过 RELAY_SECRET 环境变量覆盖")
+	if api.UsingDefaultSecret(cfg.Security.Secret) {
+		logger.Warn("正在使用默认加密密钥，渠道密钥的加密形同虚设；请通过 RELAY_SECRET 环境变量覆盖。" +
+			"管理后台首页也会持续提示这一点")
 	}
 
 	// ---- 数据库 ----

@@ -16,18 +16,17 @@ set -uo pipefail
 cd "/path/to/llm-relay" || exit 1
 
 # ---- 前端 ----
-if ! (cd frontend && npm run build > /tmp/web-build.log 2>&1); then
-  echo "前端构建失败，最后 25 行日志："
-  tail -25 /tmp/web-build.log
+# 只做类型检查，不在这里构建产物。
+# 真正的前端产物由 deploy/Dockerfile 的 Stage 1 构建并 COPY 进嵌入目录，
+# 本地再怎么构建都会被它覆盖 —— 这里构建纯属重复劳动。
+# 但类型检查要留着：它和下面的 go build 一样，能在本地就把错误拦下来，
+# 不用等 docker build 跑完再去翻日志。
+if ! (cd frontend && npm run type-check > /tmp/web-typecheck.log 2>&1); then
+  echo "前端类型检查未通过，已中止部署（容器仍运行旧版本）："
+  tail -25 /tmp/web-typecheck.log
   exit 1
 fi
-# 只清内容、保留 .gitkeep：它是仓库里唯一让 dist 目录存在的文件，
-# 而 go:embed all:dist 在目录不存在时会直接编译失败 —— 全新克隆就构建不起来
-rm -rf backend/internal/web/dist
-mkdir -p backend/internal/web/dist
-cp -r frontend/dist/. backend/internal/web/dist/
-touch backend/internal/web/dist/.gitkeep
-echo "前端构建完成并已放入嵌入目录"
+echo "前端类型检查通过"
 
 # ---- 后端 ----
 # 先本地编译一遍：语法与类型错误在这里能直接看到编译器原文，

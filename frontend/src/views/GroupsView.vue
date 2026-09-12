@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { PlusOutlined, ReloadOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
+import DataState from '@/components/DataState.vue'
 import type { ChannelGroup } from '@/api/types'
 
 // 路由策略选项：value 与后端 model.Strategy* 常量一致，label 同时用于下拉与表格展示
@@ -38,9 +39,10 @@ async function load() {
     const res = await api.get<{ items: ChannelGroup[] }>('/groups')
     rows.value = res.items || []
   } catch (e: any) {
-    // 加载失败时清空列表并留下可重试的提示，避免白屏或停留在旧数据上
+    // 失败时仍然清空列表：旧数据配上错误提示容易被当成「当前真实的分组」，
+    // 清空后由 DataState 统一呈现「加载失败 + 重试」，不会退化成「暂无数据」
     rows.value = []
-    loadError.value = e.message
+    loadError.value = e.message || '加载失败'
     message.error(e.message)
   } finally {
     loading.value = false
@@ -140,18 +142,13 @@ onMounted(load)
         <span class="toolbar-hint">共 {{ rows.length }} 个分组</span>
       </div>
 
-      <a-alert
-        v-if="loadError"
-        type="error"
-        show-icon
-        :message="'分组加载失败：' + loadError"
-        style="margin: 0 var(--gap) var(--gap)"
+      <DataState
+        :error="loadError"
+        :has-data="rows.length > 0"
+        :loading="loading"
+        title="分组列表加载失败"
+        @retry="load"
       >
-        <template #action>
-          <a @click="load">重试</a>
-        </template>
-      </a-alert>
-
       <a-table
         :data-source="rows"
         :loading="loading"
@@ -196,6 +193,7 @@ onMounted(load)
           <a-empty description="还没有分组，点「新建分组」创建第一个" />
         </template>
       </a-table>
+      </DataState>
     </section>
 
     <a-modal v-model:open="modalOpen" :title="title" :confirm-loading="saving" width="560px" @ok="save">

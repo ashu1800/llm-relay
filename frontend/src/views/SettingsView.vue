@@ -6,9 +6,16 @@ import {
   DownloadOutlined, UploadOutlined
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
+import DataState from '@/components/DataState.vue'
 import type { PricingSyncResult } from '@/api/types'
 
 const loading = ref(false)
+// 这一页加载的是「多项设置」而不是列表，没有 length 可数，
+// 于是用「是否成功加载过一次」来区分首次加载失败与刷新失败
+const loaded = ref(false)
+// 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
+// 计数卡与运行参数会显示成 0 和空值，被读成「本来就没有数据」
+const loadError = ref('')
 const runtime = ref<Record<string, any>>({})
 const counts = ref<Record<string, number>>({})
 const span = ref<Record<string, string | null>>({})
@@ -68,12 +75,15 @@ function fmtTime(t: string | null | undefined) {
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const res = await api.get<any>('/settings')
     runtime.value = res.runtime || {}
     counts.value = res.counts || {}
     span.value = res.log_span || {}
+    loaded.value = true
   } catch (e: any) {
+    loadError.value = e.message || '加载失败'
     message.error(e.message)
   } finally {
     loading.value = false
@@ -188,6 +198,14 @@ onMounted(load)
       </div>
     </section>
 
+    <DataState
+      :error="loadError"
+      :has-data="loaded"
+      :loading="loading"
+      title="系统设置加载失败"
+      hint="这一页的数据来自后端 /settings 接口，请确认后端服务是否正常，然后重试。"
+      @retry="load"
+    >
     <section class="panel">
       <div class="panel-title">数据概览</div>
       <div class="count-grid">
@@ -217,6 +235,9 @@ onMounted(load)
           </template>
         </a-table-column>
         <a-table-column title="修改位置" data-index="hint" />
+        <template #emptyText>
+          <a-empty description="运行参数列表为空，请确认后端版本与前端的参数项一致，然后点「刷新」重试" />
+        </template>
       </a-table>
 
       <div class="db-line">
@@ -244,6 +265,20 @@ onMounted(load)
         <input ref="fileInput" type="file" accept="application/json,.json" style="display: none" @change="onFilePicked" />
       </a-space>
     </section>
+
+    <section class="panel note-panel">
+      <div class="panel-title">关于报文留存</div>
+      <div class="note">
+        当前模式为 <span class="mono">{{ runtime.payload_storage_mode }}</span>。
+        留存的请求与响应原文会写入 <span class="mono">request_payloads</span> 表，
+        在「请求日志」页点开单条记录即可查看；凭据类请求头（Authorization、各类 api-key）
+        一律以 <span class="mono">[已隐藏]</span> 落库，不会明文保存。
+        超过 <span class="mono">{{ runtime.payload_max_kb }}</span> KB 的报文会被截断并标注。
+        想保留全部调用可设为 <span class="mono">all</span>，只留出错调用设为
+        <span class="mono">errors</span>，完全不留存设为 <span class="mono">none</span>。
+      </div>
+    </section>
+    </DataState>
 
     <a-modal v-model:open="reportOpen" title="导入结果" :footer="null" width="520px">
       <a-descriptions :column="1" bordered size="small">
@@ -273,18 +308,6 @@ onMounted(load)
       </div>
     </a-modal>
 
-    <section class="panel note-panel">
-      <div class="panel-title">关于报文留存</div>
-      <div class="note">
-        当前模式为 <span class="mono">{{ runtime.payload_storage_mode }}</span>。
-        留存的请求与响应原文会写入 <span class="mono">request_payloads</span> 表，
-        在「请求日志」页点开单条记录即可查看；凭据类请求头（Authorization、各类 api-key）
-        一律以 <span class="mono">[已隐藏]</span> 落库，不会明文保存。
-        超过 <span class="mono">{{ runtime.payload_max_kb }}</span> KB 的报文会被截断并标注。
-        想保留全部调用可设为 <span class="mono">all</span>，只留出错调用设为
-        <span class="mono">errors</span>，完全不留存设为 <span class="mono">none</span>。
-      </div>
-    </section>
   </div>
 </template>
 

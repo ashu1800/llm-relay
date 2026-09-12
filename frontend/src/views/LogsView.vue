@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { ReloadOutlined, DownloadOutlined, SearchOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
+import DataState from '@/components/DataState.vue'
 import type { Paged, RequestLog } from '@/api/types'
 
 const loading = ref(false)
@@ -78,13 +79,19 @@ function buildParams(includePaging: boolean): URLSearchParams {
   return params
 }
 
+// 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
+// 表格紧接着显示「暂无数据」，用户会以为这段时间本来就没有调用
+const loadError = ref('')
+
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const res = await api.get<Paged<RequestLog>>('/logs?' + buildParams(true).toString())
     rows.value = res.items || []
     total.value = res.total || 0
   } catch (e: any) {
+    loadError.value = e.message || '加载失败'
     message.error(e.message)
   } finally {
     loading.value = false
@@ -262,6 +269,13 @@ onMounted(load)
         />
       </div>
 
+      <DataState
+        :error="loadError"
+        :has-data="rows.length > 0"
+        :loading="loading"
+        title="请求日志加载失败"
+        @retry="load"
+      >
       <a-table
         :data-source="rows"
         :loading="loading"
@@ -270,6 +284,9 @@ onMounted(load)
         size="small"
         :scroll="{ x: 1140 }"
       >
+        <template #emptyText>
+          <a-empty description="当前筛选条件下没有日志，可放宽筛选条件：把时间范围改成「近 7 天」，或清空模型 / trace_id" />
+        </template>
         <a-table-column title="请求时间" :width="155" fixed="left">
           <template #default="{ record }">{{ fmtTime(record.created_at) }}</template>
         </a-table-column>
@@ -327,6 +344,7 @@ onMounted(load)
           </template>
         </a-table-column>
       </a-table>
+      </DataState>
     </section>
 
     <a-drawer v-model:open="detailOpen" title="调用详情" width="720">

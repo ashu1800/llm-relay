@@ -3,6 +3,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { PlusOutlined, ReloadOutlined, EditOutlined, DeleteOutlined, ThunderboltOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
+import DataState from '@/components/DataState.vue'
 import { PROTOCOLS } from '@/api/types'
 
 interface Template {
@@ -32,14 +33,20 @@ const applying = ref(false)
 const applyTarget = ref<Template | null>(null)
 const applyForm = reactive({ name: '', api_key: '', base_url: '', group_id: 0, weight: 1 })
 
+// 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
+// 表格紧接着显示「暂无数据」，用户会以为模板本来就没有
+const loadError = ref('')
+
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const res = await api.get<{ items: Template[] }>('/channel-templates')
     rows.value = res.items || []
     const g = await api.get<{ items: Group[] }>('/groups')
     groups.value = g.items || []
   } catch (e: any) {
+    loadError.value = e.message || '加载失败'
     message.error(e.message)
   } finally {
     loading.value = false
@@ -157,7 +164,17 @@ onMounted(load)
         <span class="toolbar-hint">共 {{ rows.length }} 个模板</span>
       </div>
 
+      <DataState
+        :error="loadError"
+        :has-data="rows.length > 0"
+        :loading="loading"
+        title="渠道模板加载失败"
+        @retry="load"
+      >
       <a-table :data-source="rows" :loading="loading" :pagination="false" row-key="id" size="small">
+        <template #emptyText>
+          <a-empty description="还没有模板，点「新建模板」把常用的上游地址存下来" />
+        </template>
         <a-table-column title="模板名" data-index="name" :width="200" />
         <a-table-column title="协议" :width="200">
           <template #default="{ record }">
@@ -175,6 +192,7 @@ onMounted(load)
           </template>
         </a-table-column>
       </a-table>
+      </DataState>
     </section>
 
     <a-modal

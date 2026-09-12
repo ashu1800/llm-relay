@@ -12,6 +12,7 @@ import PageToolbar from '@/components/PageToolbar.vue'
 import PanelCard from '@/components/PanelCard.vue'
 import StatCard from '@/components/StatCard.vue'
 import EChart from '@/components/EChart.vue'
+import DataState from '@/components/DataState.vue'
 
 type Health = { status: string; uptime: string }
 type SystemInfo = { version: string; port: number; pricing_sync: number; payload_store: string }
@@ -57,8 +58,20 @@ const series = ref<SeriesPoint[]>([])
 const byModel = ref<GroupItem[]>([])
 const byChannel = ref<GroupItem[]>([])
 const heat = ref<HeatItem[]>([])
-const error = ref('')
 const loading = ref(false)
+// 这一页没有表格，但「加载失败」同样不能只留一条转瞬即逝的消息：
+// 失败后卡片会显示成 0，被读成「这段时间没有流量」
+const loadError = ref('')
+
+// 「是否已有统计数据」：任一数据源拿到过内容就算有。
+// 用它区分首次加载失败（整块换成错误说明）与刷新失败（保留图表只提示）
+const hasStats = computed(
+  () =>
+    summary.value !== null ||
+    series.value.length > 0 ||
+    byModel.value.length > 0 ||
+    heat.value.length > 0
+)
 // 趋势图分桶粒度，由后端按时间范围决定（今天/近3天按小时，更长的按天）
 const seriesBucket = ref('hour')
 
@@ -103,6 +116,7 @@ function dayKey(d: Date) {
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const q = '?range=' + range.value
     const [h, i, s, ts, m, ch, hm] = await Promise.all([
@@ -122,9 +136,8 @@ async function load() {
     byModel.value = m.items || []
     byChannel.value = ch.items || []
     heat.value = hm.items || []
-    error.value = ''
   } catch (e: any) {
-    error.value = e.message || String(e)
+    loadError.value = e.message || '加载失败'
   } finally {
     loading.value = false
   }
@@ -348,8 +361,14 @@ onMounted(load)
       </template>
     </PageToolbar>
 
-    <a-alert v-if="error" type="error" :message="error" show-icon style="margin-bottom: 8px" />
-
+    <DataState
+      :error="loadError"
+      :has-data="hasStats"
+      :loading="loading"
+      title="看板数据加载失败"
+      hint="看板数据来自后端统计接口，请确认后端服务是否正常，然后重试。"
+      @retry="load"
+    >
     <!-- 概览四卡 -->
     <section class="overview-row">
       <div class="summary-grid">
@@ -409,6 +428,7 @@ onMounted(load)
         <a-descriptions-item label="报文留存">{{ info?.payload_store ?? '-' }}</a-descriptions-item>
       </a-descriptions>
     </PanelCard>
+    </DataState>
   </div>
 </template>
 
@@ -438,6 +458,10 @@ onMounted(load)
   color: var(--color-text-secondary);
   font-size: 13px;
 }
+
+/* DataState 的错误提示自带左右外边距（为列表页的面板布局设计），
+   这里外层已经有内边距，去掉以免出现双重缩进 */
+.dashboard :deep(.ds-alert) { margin: 0 0 var(--gap); }
 
 @media (max-width: 1100px) {
   .overview-row,

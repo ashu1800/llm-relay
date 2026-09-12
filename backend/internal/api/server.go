@@ -65,7 +65,10 @@ func (s *Server) Register(r *gin.Engine) {
 	}
 
 	// ---- 管理后台 API：本地自用，不做登录 ----
-	admin := r.Group("/api/admin")
+	//
+	// 不做登录不等于可以不做来源校验：没有这道中间件，浏览器里任意一个网页
+	// 都能用表单提交触发管理操作（详见 sameOriginOnly 的说明）
+	admin := r.Group("/api/admin", sameOriginOnly())
 	{
 		admin.GET("/system/info", s.systemInfo)
 		registerChannelRoutes(admin, s)
@@ -133,6 +136,17 @@ func (s *Server) readyz(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ready"})
 }
 
+// defaultSecret 是仓库里公开的占位密钥。
+//
+// 用它在启动日志里警告一次是不够的：容器日志一滚就看不见了，
+// 而渠道密钥的加密主密钥就是它 —— 也就是说数据库或备份文件落到别人手里时，
+// 里面的上游密钥等于明文。加密看起来生效了，实际没有提供任何保护。
+// 所以把它作为一项状态暴露出去，让界面能持续提醒。
+const defaultSecret = "llm-relay-dev-secret-change-me"
+
+// UsingDefaultSecret 供 main 与接口共用同一份判断。
+func UsingDefaultSecret(secret string) bool { return secret == defaultSecret }
+
 func (s *Server) systemInfo(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"name":          "llm-relay",
@@ -141,6 +155,8 @@ func (s *Server) systemInfo(c *gin.Context) {
 		"started_at":    s.startedAt.UTC().Format(time.RFC3339),
 		"pricing_sync":  s.deps.Config.Pricing.UpdateIntervalHours,
 		"payload_store": s.deps.Config.Relay.PayloadStorageMode,
+		// 前端据此显示持久告警，而不是只在启动日志里提一句
+		"using_default_secret": UsingDefaultSecret(s.deps.Config.Security.Secret),
 	})
 }
 

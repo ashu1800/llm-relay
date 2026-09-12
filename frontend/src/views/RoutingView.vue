@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { ReloadOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import EChart from '@/components/EChart.vue'
+import DataState from '@/components/DataState.vue'
 
 interface ChannelRow {
   channel_id: number
@@ -44,6 +45,20 @@ const models = ref<any[]>([])
 const incidents = ref<Incident[]>([])
 const shareOption = ref<Record<string, any>>({})
 
+// 加载失败必须留下痕迹：这一页所有数字都来自同一个接口，
+// 失败后如果只是弹个 message，统计卡会显示成「0 次请求」，被读成「这段时间没有流量」
+const loadError = ref('')
+
+// 只要有任意一块统计拿到了数据，就说明「已经有内容可看」：
+// 此时刷新失败只在顶部提示，不把用户正在看的图表整块换成错误面板
+const hasStats = computed(
+  () =>
+    (summary.value?.requests ?? 0) > 0 ||
+    channels.value.length > 0 ||
+    models.value.length > 0 ||
+    incidents.value.length > 0
+)
+
 const ranges = [
   { value: 'today', label: '今天' },
   { value: '3d', label: '近 3 天' },
@@ -80,6 +95,7 @@ function deviationText(v: number) {
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const res = await api.get<any>('/routing/analysis?range=' + range.value)
     summary.value = res.summary || {}
@@ -88,6 +104,7 @@ async function load() {
     incidents.value = res.incidents || []
     renderShare()
   } catch (e: any) {
+    loadError.value = e.message || '加载失败'
     message.error(e.message)
   } finally {
     loading.value = false
@@ -136,6 +153,14 @@ onMounted(load)
       </div>
     </section>
 
+    <DataState
+      :error="loadError"
+      :has-data="hasStats"
+      :loading="loading"
+      title="路由分析加载失败"
+      hint="这一页的统计来自后端 /routing/analysis 接口，请确认后端服务是否正常，然后重试。"
+      @retry="load"
+    >
     <div class="stat-grid">
       <div class="panel stat-card">
         <div class="stat-value">{{ summary.requests ?? 0 }}</div>
@@ -170,6 +195,9 @@ onMounted(load)
     <section class="panel table-panel">
       <div class="panel-title">渠道明细</div>
       <a-table :data-source="channels" :loading="loading" :pagination="false" row-key="channel_id" size="small">
+        <template #emptyText>
+          <a-empty description="区间内没有渠道流量，确认渠道已启用，并在这个时间范围内发起过请求" />
+        </template>
         <a-table-column title="渠道" data-index="channel_name" :width="180" />
         <a-table-column title="权重" data-index="weight" :width="70" />
         <a-table-column title="期望占比" :width="95">
@@ -212,6 +240,9 @@ onMounted(load)
     <section class="panel table-panel">
       <div class="panel-title">模型 → 渠道分布</div>
       <a-table :data-source="models" :pagination="false" row-key="model" size="small">
+        <template #emptyText>
+          <a-empty description="区间内没有模型调用记录，发起一次请求后这里会显示模型走过了哪些渠道" />
+        </template>
         <a-table-column title="模型" data-index="model" :width="200" />
         <a-table-column title="请求" data-index="requests" :width="90" />
         <a-table-column title="走过的渠道">
@@ -229,6 +260,9 @@ onMounted(load)
     <section class="panel table-panel">
       <div class="panel-title">重试与失败记录（近 30 条）</div>
       <a-table :data-source="incidents" :pagination="false" row-key="trace_id" size="small" :scroll="{ x: 900 }">
+        <template #emptyText>
+          <a-empty description="区间内没有重试或失败记录，说明这段时间的调用都成功了" />
+        </template>
         <a-table-column title="时间" :width="170">
           <template #default="{ record }">{{ fmtTime(record.created_at) }}</template>
         </a-table-column>
@@ -245,8 +279,8 @@ onMounted(load)
         </a-table-column>
         <a-table-column title="错误" data-index="error" ellipsis />
       </a-table>
-      <a-empty v-if="!incidents.length" description="区间内没有重试或失败记录" />
     </section>
+    </DataState>
   </div>
 </template>
 
@@ -263,4 +297,7 @@ onMounted(load)
 .chart-panel, .table-panel { padding: 16px 18px; }
 .panel-title { font-weight: 600; margin-bottom: 8px; }
 .hint { margin-top: 8px; font-size: 12px; color: var(--color-text-secondary); line-height: 1.7; }
+/* DataState 的错误提示自带左右外边距（为列表页的面板布局设计），
+   这里外层 .page 已经有内边距，去掉以免出现双重缩进 */
+.page :deep(.ds-alert) { margin: 0 0 var(--gap); }
 </style>

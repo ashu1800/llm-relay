@@ -6,6 +6,7 @@ import { api } from '@/api/client'
 import type { ModelItem } from '@/api/types'
 import { useProviderStore } from '@/stores/providers'
 import ProviderTag from '@/components/ProviderTag.vue'
+import DataState from '@/components/DataState.vue'
 
 const providerStore = useProviderStore()
 const loading = ref(false)
@@ -15,8 +16,13 @@ const saving = ref(false)
 const editing = ref<ModelItem | null>(null)
 const form = reactive({ public_name: '', description: '', provider_id: 1, enabled: true })
 
+// 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
+// 表格紧接着显示「暂无数据」，用户会以为本来就没有模型
+const loadError = ref('')
+
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const [m] = await Promise.all([
       api.get<{ items: ModelItem[] }>('/models'),
@@ -24,6 +30,7 @@ async function load() {
     ])
     rows.value = m.items || []
   } catch (e: any) {
+    loadError.value = e.message || '加载失败'
     message.error(e.message)
   } finally {
     loading.value = false
@@ -106,7 +113,17 @@ onMounted(load)
         <span class="toolbar-hint">共 {{ rows.length }} 个模型</span>
       </div>
 
+      <DataState
+        :error="loadError"
+        :has-data="rows.length > 0"
+        :loading="loading"
+        title="模型列表加载失败"
+        @retry="load"
+      >
       <a-table :data-source="rows" :loading="loading" :pagination="false" row-key="id" size="small">
+        <template #emptyText>
+          <a-empty description="还没有模型，点「新建模型」添加第一个" />
+        </template>
         <a-table-column title="对外模型名" data-index="public_name" :width="240" />
         <a-table-column title="模型商" :width="150">
           <template #default="{ record }">
@@ -131,6 +148,7 @@ onMounted(load)
           </template>
         </a-table-column>
       </a-table>
+      </DataState>
     </section>
 
     <a-modal

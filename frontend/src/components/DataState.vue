@@ -1,0 +1,95 @@
+<script setup lang="ts">
+// 统一的「加载中 / 加载失败 / 空」三态呈现。
+//
+// 之前各页面写法不一，问题最大的是 ChannelsView 和 ModelsView：
+// 加载失败时只弹一个转瞬即逝的 message，表格随即显示 antd 的「暂无数据」——
+// 用户会把失败读成「本来就没有数据」，然后去别处找原因。
+//
+// 这里区分两种失败，因为它们的正确处理方式不同：
+//   - 首次加载就失败：没有任何数据可看，给一整块说明 + 重试按钮，
+//     而不是显示一个空表格
+//   - 已有数据后刷新失败：保留用户正在看的内容，只在顶部提示，
+//     把表格清空反而是帮倒忙
+withDefaults(
+  defineProps<{
+    // 非空即表示加载失败
+    error?: string
+    // 当前是否已经有数据可显示；用它区分上面两种失败
+    hasData?: boolean
+    // 首次加载、还没有任何数据时的占位
+    loading?: boolean
+    title?: string
+    // 失败时给用户的下一步建议
+    hint?: string
+  }>(),
+  {
+    error: '',
+    hasData: false,
+    loading: false,
+    title: '加载失败',
+    hint: '请确认后端服务是否正常，然后重试。'
+  }
+)
+
+const emit = defineEmits<{ retry: [] }>()
+</script>
+
+<template>
+  <!-- 已有数据时刷新失败：保留表格，只在顶部说明 -->
+  <a-alert
+    v-if="error && hasData"
+    type="error"
+    show-icon
+    class="ds-alert"
+    :message="error"
+  >
+    <template #action>
+      <a @click="emit('retry')">重试</a>
+    </template>
+  </a-alert>
+
+  <!-- 首次加载失败：绝不能显示成空列表 -->
+  <div v-else-if="error" class="ds-panel">
+    <div class="ds-title">{{ title }}</div>
+    <div class="ds-msg">{{ error }}</div>
+    <div class="ds-hint">{{ hint }}</div>
+    <a-button type="primary" @click="emit('retry')">重试</a-button>
+  </div>
+
+  <!-- 首次加载中：给一个明确的加载态，而不是先闪一下「暂无数据」 -->
+  <div v-else-if="loading && !hasData" class="ds-panel">
+    <a-spin />
+    <div class="ds-hint">加载中…</div>
+  </div>
+
+  <slot v-else />
+</template>
+
+<style scoped>
+.ds-alert {
+  margin: 0 var(--gap) var(--gap);
+}
+.ds-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 56px var(--gap);
+  text-align: center;
+}
+.ds-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-red);
+}
+.ds-msg {
+  max-width: 560px;
+  color: var(--color-text-primary);
+  word-break: break-all;
+}
+.ds-hint {
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+</style>

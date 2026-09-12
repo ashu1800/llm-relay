@@ -6,7 +6,17 @@
 ## 特性
 
 - **多协议入站**：OpenAI Chat Completions / Responses、Anthropic Messages、Gemini generateContent、Embeddings
-- **多协议出站**：渠道可选 `openai-chat`、`openai-responses`、`anthropic-messages`、`gemini`、`custom`（可配置适配器，无需写代码即可接入任意站点）
+- **渠道协议与鉴权**：所有渠道的上游报文统一为 OpenAI Chat Completions 格式，
+  渠道上的 `protocol` 决定用哪种鉴权方式：
+  `openai-chat` / `openai-responses` / `openai-embeddings` 用 `Authorization: Bearer`，
+  `anthropic-messages` 用 `x-api-key`（并补 `anthropic-version`），
+  `gemini` 用 `x-goog-api-key`，
+  `custom` 可用 `auth_header` / `auth_prefix` 指定任意鉴权头
+
+  > 注意：`anthropic-messages` 与 `gemini` 目前**只改变鉴权头**，请求体与路径仍是
+  > OpenAI 格式的 `/v1/chat/completions`。也就是说它们适用于「OpenAI 兼容、
+  > 但要求这两种鉴权方式」的站点；要接 Anthropic / Gemini 的**原生端点**，
+  > 需要上游本身提供 OpenAI 兼容入口。真正的出站协议转换尚未实现。
 - **精细计量**：输入 / 输出 / 缓存命中 / 缓存写入 / 推理 Token，区分「子集型」与「并列型」缓存口径
 - **模型定价与预估金额**：定时同步官方价格（OpenAI / DeepSeek），支持 DeepSeek **峰谷双价**；金额仅作成本感知，**不做任何扣减**
 - **详尽的请求日志**：首包时间、总耗时、渠道与模型映射、状态码、原始报文、计费过程还原、导出

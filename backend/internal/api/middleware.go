@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +12,46 @@ import (
 	"llm-relay/internal/model"
 	"llm-relay/internal/secure"
 )
+
+// sameOriginOnly 拦掉来自其它网页的跨站请求。
+//
+// 管理接口是本地自用、没有登录态的，于是浏览器里的**任何**网页都能对 localhost
+// 发起请求。一个
+//
+//	<form method="post" action="http://127.0.0.1:8888/api/admin/settings/cleanup">
+//
+// 就足以触发清库这类操作：表单提交属于「简单请求」，不触发预检，
+// 浏览器不会拦，服务端收到的报文与正常请求也没有区别。
+// 这不是推测 —— 实测用 application/x-www-form-urlencoded 提交确实返回 200 并执行了。
+//
+// 判断依据用 Origin 头，理由：
+//   - 浏览器对所有跨站请求都会带上 Origin，页面脚本改不了它
+//   - 同源请求也带，值与本服务地址一致，放行
+//   - 命令行客户端（curl、各家 SDK）通常不带 Origin，放行，
+//     免得把「本地自用」最常见的调试方式一并挡掉
+//
+// 覆盖不到的情况：不带 Origin 的请求无法区分（例如 DNS rebinding）。
+// 但把「随便打开一个网页就能打管理接口」这条最现实的路径堵上了。
+func sameOriginOnly() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		origin := c.GetHeader("Origin")
+		if origin == "" {
+			c.Next()
+			return
+		}
+		u, err := url.Parse(origin)
+		// Origin: null（沙箱 iframe、file:// 页面）解析出来 Host 为空，会走拒绝分支
+		if err != nil || !strings.EqualFold(u.Host, c.Request.Host) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": gin.H{
+				"code":    http.StatusForbidden,
+				"message": "拒绝跨站请求：管理接口只接受来自本服务页面的调用",
+				"type":    "forbidden_error",
+			}})
+			return
+		}
+		c.Next()
+	}
+}
 
 const ctxAPIKey = "llm_relay_api_key"
 

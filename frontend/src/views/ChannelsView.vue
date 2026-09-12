@@ -5,6 +5,7 @@ import { PlusOutlined, ReloadOutlined, DeleteOutlined, EditOutlined, LinkOutline
 import { api } from '@/api/client'
 import { useProviderStore } from '@/stores/providers'
 import ProviderTag from '@/components/ProviderTag.vue'
+import DataState from '@/components/DataState.vue'
 import { PROTOCOLS, type Channel, type ChannelGroup, type ChannelBinding } from '@/api/types'
 
 const loading = ref(false)
@@ -33,8 +34,13 @@ const form = reactive({
 
 const title = computed(() => (editing.value ? '编辑渠道' : '新建渠道'))
 
+// 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
+// 表格紧接着显示「暂无数据」，用户会以为本来就没有渠道
+const loadError = ref('')
+
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const [c, g] = await Promise.all([
       api.get<{ items: Channel[] }>('/channels'),
@@ -47,6 +53,7 @@ async function load() {
       form.group_id = groups.value.find((x) => x.is_default)?.id ?? groups.value[0].id
     }
   } catch (e: any) {
+    loadError.value = e.message || '加载失败'
     message.error(e.message)
   } finally {
     loading.value = false
@@ -195,6 +202,13 @@ onMounted(load)
         <span class="toolbar-hint">共 {{ rows.length }} 个渠道</span>
       </div>
 
+      <DataState
+        :error="loadError"
+        :has-data="rows.length > 0"
+        :loading="loading"
+        title="渠道列表加载失败"
+        @retry="load"
+      >
       <a-table
         :data-source="rows"
         :loading="loading"
@@ -203,6 +217,9 @@ onMounted(load)
         size="small"
         :scroll="{ x: 1100 }"
       >
+        <template #emptyText>
+          <a-empty description="还没有渠道，点「新建渠道」添加第一个" />
+        </template>
         <a-table-column title="名称" :width="200">
           <template #default="{ record }">
             <div class="chan-name">{{ record.name }}</div>
@@ -237,6 +254,7 @@ onMounted(load)
           </template>
         </a-table-column>
       </a-table>
+      </DataState>
     </section>
 
     <a-modal v-model:open="modalOpen" :title="title" :confirm-loading="saving" width="640px" @ok="save">

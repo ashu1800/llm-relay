@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { api } from '@/api/client'
 import {
   DashboardOutlined,
   FileTextOutlined,
@@ -22,6 +23,23 @@ import { useThemeStore } from '@/stores/theme'
 const route = useRoute()
 const router = useRouter()
 const themeStore = useThemeStore()
+
+// 默认加密密钥的提示。
+//
+// 用默认密钥时渠道密钥的加密等于没有：主密钥是从这个公开占位串推出来的，
+// 数据库或备份文件落到别人手里就能直接解开。
+// 原来只在启动日志里警告一句，容器日志一滚就看不见了 ——
+// 这种事必须持续可见，所以放在界面上。
+const usingDefaultSecret = ref(false)
+
+onMounted(async () => {
+  try {
+    const info = await api.get<{ using_default_secret?: boolean }>('/system/info')
+    usingDefaultSecret.value = !!info.using_default_secret
+  } catch {
+    // 拿不到系统信息不影响正常使用，静默即可
+  }
+})
 
 // 侧边栏菜单：对齐参考站 console-menu-list 的项目与顺序，
 // 剔除其面向多用户的登录/工单/订单/兑换/礼品/邮件/公告模块
@@ -111,6 +129,20 @@ const go = (key: string) => router.push(key)
 
         <section class="console-content">
           <div class="content-inner">
+            <a-alert
+              v-if="usingDefaultSecret"
+              type="warning"
+              show-icon
+              banner
+              class="secret-banner"
+              message="正在使用默认加密密钥，渠道密钥的加密形同虚设"
+            >
+              <template #description>
+                请设置环境变量 <code>RELAY_SECRET</code> 为一段随机字符串后重启服务。
+                注意：更换密钥后，已保存的渠道密钥需要用原密钥重新加密，否则会解不开。
+                <router-link to="/console/system">前往系统设置</router-link>
+              </template>
+            </a-alert>
             <router-view />
           </div>
         </section>
@@ -120,6 +152,9 @@ const go = (key: string) => router.push(key)
 </template>
 
 <style scoped>
+.secret-banner {
+  margin-bottom: var(--gap);
+}
 .main-layout {
   display: flex;
   flex-direction: column;

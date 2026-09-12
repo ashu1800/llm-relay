@@ -14,6 +14,7 @@ import { api } from '@/api/client'
 import { PRICE_SOURCES, SOURCE_META, type Pricing, type PricingSyncLog, type PricingSyncResult } from '@/api/types'
 import { useProviderStore } from '@/stores/providers'
 import ProviderTag from '@/components/ProviderTag.vue'
+import DataState from '@/components/DataState.vue'
 
 const providerStore = useProviderStore()
 const loading = ref(false)
@@ -45,8 +46,13 @@ const resolveForm = reactive({ model: '', at: '' })
 const resolveResult = ref<Record<string, any> | null>(null)
 const resolveMiss = ref(false)
 
+// 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
+// 表格紧接着显示「暂无数据」，用户会以为这个模型本来就没有定价
+const loadError = ref('')
+
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const p = new URLSearchParams()
     p.set('page', String(query.page))
@@ -60,6 +66,7 @@ async function load() {
     // 模型商列表用于给每行打上对应标识；失败不阻塞定价列表
     await providerStore.ensure()
   } catch (e: any) {
+    loadError.value = e.message || '加载失败'
     message.error(e.message)
   } finally {
     loading.value = false
@@ -242,6 +249,13 @@ onMounted(load)
         <a-button type="primary" @click="search">查询</a-button>
       </div>
 
+      <DataState
+        :error="loadError"
+        :has-data="rows.length > 0"
+        :loading="loading"
+        title="定价列表加载失败"
+        @retry="load"
+      >
       <a-table
         :data-source="rows"
         :loading="loading"
@@ -258,6 +272,9 @@ onMounted(load)
         size="small"
         :scroll="{ x: 1320 }"
       >
+        <template #emptyText>
+          <a-empty description="还没有定价记录，点「新增定价」手工添加，或点「同步价格」从官方源拉取" />
+        </template>
         <a-table-column title="模型名" data-index="model_key" :width="220" fixed="left" ellipsis />
         <a-table-column title="模型商" :width="140">
           <template #default="{ record }">
@@ -292,6 +309,7 @@ onMounted(load)
           </template>
         </a-table-column>
       </a-table>
+      </DataState>
     </section>
 
     <!-- 新增 / 改价 -->
