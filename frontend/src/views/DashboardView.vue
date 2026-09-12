@@ -204,24 +204,24 @@ const trendOption = computed(() => {
 // 「输入（未命中）」又是「deepseek-v4-flash」。
 // 深浅阶还顺带表达了输入 -> 缓存 -> 输出的先后关系。
 //
-// 颜色按类别名固定分配，**不能按数组下标**：
+// 颜色随类别一起定义，**不能按数组下标取色**：
 // 下面会滤掉为 0 的类别，按下标取色的话滤掉一个后面就全部错位
 // （模型饼图正是踩了这个坑：gpt-5.6-sol 在两图里显示成两种颜色）。
-const TOKEN_COLORS: Record<string, string> = {
-  '输入（未命中）': '#c87864',
-  缓存命中: '#e0a090',
-  输出: '#f2d3c9'
-}
+//
+// 名称、颜色、取值三样写在同一项里，是为了让它们不可能对不上：
+// 早先的写法把颜色放在一张按名称索引的表里，靠字符串在另一处再匹配一次，
+// 改了一处的名字而忘了另一处就会静默退回默认色，不会有任何报错。
+const TOKEN_PARTS: { name: string; color: string; pick: (s: Summary | null) => number }[] = [
+  { name: '输入（未命中）', color: '#c87864', pick: (s) => s?.prompt_tokens ?? 0 },
+  { name: '缓存命中', color: '#e0a090', pick: (s) => s?.cached_tokens ?? 0 },
+  { name: '输出', color: '#f2d3c9', pick: (s) => s?.completion_tokens ?? 0 }
+]
 
 const compositionOption = computed(() => {
   const s = summary.value
-  const data = [
-    { name: '输入（未命中）', value: s?.prompt_tokens ?? 0 },
-    { name: '缓存命中', value: s?.cached_tokens ?? 0 },
-    { name: '输出', value: s?.completion_tokens ?? 0 }
-  ]
+  const data = TOKEN_PARTS.map((p) => ({ name: p.name, value: p.pick(s) }))
     .filter((x) => x.value > 0)
-    .map((x) => ({ ...x, itemStyle: { color: TOKEN_COLORS[x.name] } }))
+    .map((x) => ({ ...x, itemStyle: { color: TOKEN_PARTS.find((p) => p.name === x.name)?.color } }))
   return {
     tooltip: { trigger: 'item', valueFormatter: (v: number) => n(v) + ' 词元' },
     legend: { bottom: 0, icon: 'circle', textStyle: { fontSize: 12 } },
