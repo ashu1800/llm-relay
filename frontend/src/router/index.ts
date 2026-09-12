@@ -14,7 +14,6 @@ const routes: RouteRecordRaw[] = [
       { path: 'channels', name: 'channels', component: () => import('@/views/ChannelsView.vue'), meta: { title: '渠道管理' } },
       { path: 'groups', name: 'groups', component: () => import('@/views/GroupsView.vue'), meta: { title: '分组管理' } },
         { path: 'pricing', name: 'pricing', component: () => import('@/views/PricingView.vue'), meta: { title: '模型定价' } },
-      { path: 'route-analysis', name: 'route-analysis', component: () => import('@/views/RoutingView.vue'), meta: { title: '路由分析' } },
       { path: 'system', name: 'system', component: () => import('@/views/SettingsView.vue'), meta: { title: '系统设置' } }
     ]
   },

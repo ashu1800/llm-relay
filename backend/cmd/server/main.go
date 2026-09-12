@@ -107,7 +107,9 @@ func run() error {
 
 		RateLimiter: rateLimiter,
 		Gate:        gate,
-		State:       state,
+		// 渠道运行期状态（冷却 / 在途）由 Router 与 Service 自己持有，
+		// 不经过 HTTP 层：原来这里的 State 字段没有任何读取方，
+		// 是路由分析页留下的最后一点残留
 	})
 	srv.Register(engine)
 

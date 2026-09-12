@@ -39,7 +39,7 @@ echo
 
 # python 用例：统一以 ALL_PASS 作为通过标志
 for s in test-group-update.py test-key-whitelist.py test-delete-semantics.py \
-         test-accept-encoding.py test-log-filters.py test-time-consistency.py test-csrf.py; do
+         test-accept-encoding.py test-log-filters.py test-csrf.py; do
   echo "########## $s ##########"
   out=$(python3 "scripts/$s" 2>&1)
   echo "$out" | tail -1
@@ -49,7 +49,7 @@ done
 # bash 用例：没有统一的通过标志，按「没有 HAS_FAILURE」判定
 # test-legacy-column-add.sh 会删列并重启应用（约 10 秒不可用），放在最后跑
 for s in test-model-whitelist.sh test-upstream-protocol.sh test-upstream-gemini.sh test-pricing.sh test-pricing-rules.sh test-pricing-backup.sh test-pricing-filter.sh \
-         test-cost.sh test-routing.sh test-legacy-column-add.sh; do
+         test-cost.sh test-legacy-column-add.sh; do
   echo "########## $s ##########"
   out=$(bash "scripts/$s" 2>&1)
   echo "$out" | tail -1

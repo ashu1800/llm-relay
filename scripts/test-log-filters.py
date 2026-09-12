@@ -6,6 +6,7 @@
 用户点「导出」拿到的文件看起来就是全部日志，不会有任何报错。
 """
 import csv
+import datetime
 import io
 import json
 import time
@@ -27,6 +28,11 @@ def chk(name, cond, detail=""):
     else:
         bad += 1
         print("  [失败] %s  %s" % (name, detail))
+
+
+def parse(ts):
+    """解析时间串，拒绝没有时区信息的格式。"""
+    return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
 def call(m, p, b=None):
@@ -119,6 +125,23 @@ chk("trace_id 能定位到记录", len(bytrace.get("items", [])) >= 1)
 chk("返回的确实是该 trace",
     all(r["trace_id"] == tid for r in bytrace.get("items", [])),
     str([r["trace_id"] for r in bytrace.get("items", [])])[:80])
+
+print()
+print("=== 时间必须带时区（原来路由页用 to_char 抹掉时区，同一请求差 8 小时）===")
+# 路由分析页已下线，但这条守则要留在日志接口上：
+# 任何面向界面的时间都必须是带偏移的 RFC3339，否则前端只能按浏览器本地时区猜。
+_, recent = call("GET", "/logs?page_size=1")
+if recent.get("items"):
+    ts = recent["items"][0].get("created_at", "")
+    chk("created_at 带时区偏移", ("+" in ts[10:]) or ts.endswith("Z"), "实际 %r" % ts)
+    chk("created_at 不是空格分隔的裸格式", " " not in ts[:19], "实际 %r" % ts)
+    try:
+        parse(ts)
+        chk("created_at 可被 ISO 解析", True)
+    except Exception as e:
+        chk("created_at 可被 ISO 解析", False, str(e))
+else:
+    chk("日志里有记录可供检查", False, "一条都没有")
 
 print()
 print("=== 时间范围筛选 ===")

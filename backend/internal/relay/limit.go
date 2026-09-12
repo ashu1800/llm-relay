@@ -264,28 +264,6 @@ func (s *ChannelState) Release(id uint) {
 	}
 }
 
-// Snapshot 返回所有渠道的运行期状态，供路由分析页展示。
-func (s *ChannelState) Snapshot(now time.Time) map[uint]map[string]any {
-	outMap := map[uint]map[string]any{}
-	if s == nil {
-		return outMap
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for id, until := range s.until {
-		if until.After(now) {
-			outMap[id] = map[string]any{"cooldown_ms": until.Sub(now).Milliseconds()}
-		}
-	}
-	for id, n := range s.inflight {
-		if outMap[id] == nil {
-			outMap[id] = map[string]any{}
-		}
-		outMap[id]["inflight"] = n
-	}
-	return outMap
-}
-
 // ============================ 全局并发闸门 ============================
 
 // ConcurrencyGate 限制进程内同时进行的在途请求数。

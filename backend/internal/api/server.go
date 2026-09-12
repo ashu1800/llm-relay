@@ -27,7 +27,6 @@ type Deps struct {
 	// 限流与并发控制
 	RateLimiter *relay.RateLimiter
 	Gate        *relay.ConcurrencyGate
-	State       *relay.ChannelState
 }
 
 // Server 持有 HTTP 层状态。
@@ -75,7 +74,6 @@ func (s *Server) Register(r *gin.Engine) {
 		registerKeyRoutes(admin, s)
 		registerLogRoutes(admin, s)
 		registerBackupRoutes(admin, s)
-		registerRoutingRoutes(admin, s)
 		registerSettingsRoutes(admin, s)
 		registerPricingRoutes(admin, s)
 		registerStatsRoutes(admin, s)
