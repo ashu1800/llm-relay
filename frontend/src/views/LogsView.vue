@@ -4,6 +4,7 @@ import { message } from 'ant-design-vue'
 import { ReloadOutlined, DownloadOutlined, SearchOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
+import ModelTag from '@/components/ModelTag.vue'
 import type { Paged, RequestLog } from '@/api/types'
 
 const loading = ref(false)
@@ -313,7 +314,7 @@ onMounted(load)
         </a-table-column>
         <a-table-column title="模型" :width="145">
           <template #default="{ record }">
-            <div class="cell-model">{{ record.model_requested }}</div>
+            <ModelTag :name="record.model_requested" />
             <div
               v-if="record.model_upstream && record.model_upstream !== record.model_requested"
               class="sub-text"
@@ -373,8 +374,13 @@ onMounted(load)
     <a-drawer v-model:open="detailOpen" title="调用详情" width="720">
       <a-descriptions v-if="current" :column="1" bordered size="small">
         <a-descriptions-item label="Trace ID">{{ current.trace_id }}</a-descriptions-item>
-        <a-descriptions-item label="请求模型">{{ current.model_requested }}</a-descriptions-item>
-        <a-descriptions-item label="上游模型">{{ current.model_upstream || '-' }}</a-descriptions-item>
+        <a-descriptions-item label="请求模型">
+          <ModelTag :name="current.model_requested" />
+        </a-descriptions-item>
+        <a-descriptions-item label="上游模型">
+          <ModelTag v-if="current.model_upstream" :name="current.model_upstream" />
+          <template v-else>-</template>
+        </a-descriptions-item>
         <a-descriptions-item label="入站 → 出站协议">
           {{ current.inbound_protocol }} → {{ current.upstream_protocol || '-' }}
         </a-descriptions-item>
@@ -445,13 +451,14 @@ onMounted(load)
 .token-cell { font-variant-numeric: tabular-nums; }
 
 /* 模型与密钥原来只是「加粗一点 / 换成等宽」，太弱，在表里看不出被处理过。
-   改成两个看得见的胶囊：模型用主色浅底（它是这一行的主角），
-   密钥用中性浅底 + 等宽（它是标识符，不该抢模型的注意力）。
-   两者都加了省略号，长名字不会把列撑开。 */
+   现在两列各是一个胶囊，但分工不同：
+     · 模型胶囊见 components/ModelTag.vue —— 颜色随模型名变化，
+       同一个模型永远同色，扫一眼就能看出这一行换没换模型；
+     · 密钥是标识符，不该抢模型的注意力，所以留在这里用中性浅底 + 等宽。
+   两者都要省略号，长名字不会把列撑开。 */
 /* 参考站的做法是「浅色底 + 同色描边 + 同色文字」的小胶囊。
    那边用的是绿色（它的次要色 #afbeaf）；本站绿色已经被状态、缓存命中、
-   耗时快三处占用，再用会撞语义，所以换成本站主色，形状与层次照搬。 */
-.cell-model,
+   耗时快三处占用，再用会撞语义，所以密钥用中性色，形状与层次照搬。 */
 .cell-key {
   display: inline-block;
   max-width: 100%;
@@ -463,13 +470,6 @@ onMounted(load)
   vertical-align: middle;
   line-height: 20px;
   font-size: 12px;
-}
-.cell-model {
-  background: rgba(200, 120, 100, 0.13);
-  border: 1px solid rgba(200, 120, 100, 0.38);
-  /* 文字用加深的陶土色而不是 --color-primary：主色压在同色浅底上只有 3.1:1 左右 */
-  color: var(--text-terracotta);
-  font-weight: 500;
 }
 /* 等宽字体比正文宽，密钥名会超出 105px 的列宽。
    不改窄列宽而是截断：列宽一动，整张表的横向布局都要跟着调。

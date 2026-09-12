@@ -31,7 +31,7 @@ const expr = '(function(){' +
   'var lats=Array.from(document.querySelectorAll(".lat-fast,.lat-mid,.lat-slow")).slice(0,6).map(function(e){' +
   '  return e.className+"="+e.innerText+" -> "+getComputedStyle(e).color});' +
   'return JSON.stringify({' +
-  '  模型: col(".cell-model"),' +
+  '  模型: col(".model-tag"),' +
   '  密钥: col(".cell-key"),' +
   '  渠道: col(".cell-channel"),' +
   '  词元三段的类: tk?Array.from(tk.children).map(function(c){return c.className+"="+c.innerText}):"无",' +

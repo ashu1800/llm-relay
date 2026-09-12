@@ -1,0 +1,72 @@
+// 模型身份的视觉标识（请求日志里那个模型胶囊的颜色来源）。
+//
+// 色相只由模型名决定：同一个模型名永远得到同一种颜色，不同模型名互相独立。
+//
+// 这里**不做**「按厂商家族取色」。那个方案看着更聪明，实测更糟：
+// 家族锚定会把同一家的型号全塞进家族色相左右 ±28° 的小区间里，
+// 散列再均匀也只有几十个格子 —— 实测量 deepseek-chat / deepseek-reasoner
+// 会直接落到同一个色相上，而这正是这个功能要避免的结果。
+// 模型商的身份由模型名本身和渠道 / 模型管理页的模型商标签承担，
+// 日志里要一眼分辨的是「哪个模型」，所以色相铺满整个色相环。
+//
+// 设计约束（与 providerStyle.ts 是同一套，改这里时请一并守住）：
+//   1. 颜色只在这一处定义 —— 换算法只改这个文件，组件里不写死颜色
+//   2. 胶囊文字对底色的对比度不低于 4.5:1（WCAG AA 正文标准）
+//   3. 不靠颜色单独区分 —— 胶囊里始终写着模型名，色盲用户与黑白打印
+//      同样能分辨；颜色只负责「扫一眼看出换没换模型」
+//
+// 色相用 oklch 的 H 分量：oklch 感知均匀，同一个 L 在不同色相下看起来一样亮，
+// 各个模型的文字对比度因此天然一致；换成 hsl 的话黄色会比蓝色亮一大截，
+// 就没法用同一个 L 保证所有模型都达标。
+
+export interface ModelStyle {
+  /** 展示名：就是模型名本身，不做缩写 */
+  label: string
+  /** oklch 色相角（0-360） */
+  hue: number
+  /** oklch 彩度；0 表示中性灰（拿不到模型名时用） */
+  chroma: number
+}
+
+// FNV-1a 打底，再过一遍 murmur3 的 fmix32 收尾。
+//
+// 两层都不能省：日志里的模型名高度相似（no-such-model-tz /
+// no-such-model-filter / slow-concurrency-test 这类探针名字只差几个字符），
+// 「h = h*31 + c」那种弱散列会让它们全撞到同一个色相；
+// 而 FNV 单独用也不够 —— 它的低位对短串混合不足，取模前不过 fmix
+// 同样会出现成对的同色。
+function hash32(s: string): number {
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  h ^= h >>> 16
+  h = Math.imul(h, 0x85ebca6b)
+  h ^= h >>> 13
+  h = Math.imul(h, 0xc2b2ae35)
+  h ^= h >>> 16
+  return h >>> 0
+}
+
+/** 未知模型的彩度：看得出色相，又不至于溢出 sRGB 色域 */
+const FALLBACK_CHROMA = 0.12
+
+/** 取模型样式。任何模型名都有样式，不会没有颜色。 */
+export function modelStyle(name?: string | null): ModelStyle {
+  const raw = (name || '').trim()
+  if (!raw) {
+    // 拿不到模型名时给中性灰：不占用任何色相，也就不会被误读成某个模型
+    return { label: '未知', hue: 0, chroma: 0 }
+  }
+
+  // 大小写与命名空间前缀（openai/gpt-4o、models/gemini-1.5-pro）不参与取色：
+  // 同一个模型换个写法必须还是同一种颜色
+  const bare = raw.toLowerCase().split('/').pop()?.trim() || raw.toLowerCase()
+  return { label: raw, hue: hash32(bare) % 360, chroma: FALLBACK_CHROMA }
+}
+
+/** 把样式转成可内联的 CSS 变量，颜色本身仍由 CSS 决定（便于适配深色主题）。 */
+export function modelVars(s: ModelStyle): Record<string, string> {
+  return { '--mt-h': String(Math.round(s.hue)), '--mt-c': String(s.chroma) }
+}
