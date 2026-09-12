@@ -444,20 +444,42 @@ onMounted(load)
 .sub-text { font-size: 12px; color: var(--color-text-secondary); }
 .token-cell { font-variant-numeric: tabular-nums; }
 
-/* 模型是这一行的主角，比正文稍重一点；密钥是标识符，用等宽并与正文区分开。 */
-.cell-model { font-weight: 500; }
+/* 模型与密钥原来只是「加粗一点 / 换成等宽」，太弱，在表里看不出被处理过。
+   改成两个看得见的胶囊：模型用主色浅底（它是这一行的主角），
+   密钥用中性浅底 + 等宽（它是标识符，不该抢模型的注意力）。
+   两者都加了省略号，长名字不会把列撑开。 */
+/* 参考站的做法是「浅色底 + 同色描边 + 同色文字」的小胶囊。
+   那边用的是绿色（它的次要色 #afbeaf）；本站绿色已经被状态、缓存命中、
+   耗时快三处占用，再用会撞语义，所以换成本站主色，形状与层次照搬。 */
+.cell-model,
+.cell-key {
+  display: inline-block;
+  max-width: 100%;
+  padding: 1px 8px;
+  border-radius: var(--radius-control);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+  line-height: 20px;
+  font-size: 12px;
+}
+.cell-model {
+  background: rgba(200, 120, 100, 0.13);
+  border: 1px solid rgba(200, 120, 100, 0.38);
+  /* 文字用加深的陶土色而不是 --color-primary：主色压在同色浅底上只有 3.1:1 左右 */
+  color: var(--text-terracotta);
+  font-weight: 500;
+}
 /* 等宽字体比正文宽，密钥名会超出 105px 的列宽。
    不改窄列宽而是截断：列宽一动，整张表的横向布局都要跟着调。
    必须显式 nowrap + ellipsis —— 换成 template 渲染后原来列上的 ellipsis 不再作用于
    这个内层 span，不写就会折行，把那一行撑得比别的行高。 */
 .cell-key {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font-family-mono);
-  font-size: 12px;
+  background: rgba(200, 120, 100, 0.07);
+  border: 1px solid rgba(200, 120, 100, 0.24);
   color: var(--color-text-secondary);
+  font-family: var(--font-family-mono);
 }
 
 /* 词元三段各自的颜色（变量定义见 theme.css，深色主题自动换档） */

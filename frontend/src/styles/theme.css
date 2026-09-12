@@ -200,8 +200,10 @@ a:hover { opacity: 0.85; }
   background: var(--color-bg) !important;
   height: var(--size-table-row);
   /* 表头与单元格一律居中。只作用于 .ant-table-*，
-     详情面板 a-descriptions 内部虽然也是 <table>，但类名不同，不受影响。 */
-  text-align: center;
+     详情面板 a-descriptions 内部虽然也是 <table>，但类名不同，不受影响。
+     表头这条必须加 !important：antd 用 CSS-in-JS 在运行时往 head 里插样式，
+     排在主题样式之后，同权重下会把 text-align 覆盖回 start。 */
+  text-align: center !important;
 }
 .ant-table-tbody > tr > td {
   height: var(--size-table-row);
