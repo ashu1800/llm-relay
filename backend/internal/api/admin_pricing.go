@@ -152,12 +152,11 @@ func (s *Server) deletePricing(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := s.deps.Store.DB().Delete(&model.ModelPricing{}, id).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+	if !deleteByID(c, s.deps.Store.DB(), &model.ModelPricing{}, id, "定价不存在") {
 		return
 	}
+	// 删掉后要让定价引擎重新加载，否则已删的单价还在内存里生效
 	s.refreshPricing()
-	c.JSON(http.StatusOK, gin.H{"id": id, "deleted": true})
 }
 
 // syncPricing 触发一次全量同步。耗时取决于外网速度，给足超时。

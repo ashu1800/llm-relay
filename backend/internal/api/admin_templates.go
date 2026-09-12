@@ -198,16 +198,9 @@ func (s *Server) deleteTemplate(c *gin.Context) {
 	if !ok {
 		return
 	}
-	res := s.deps.Store.DB().Delete(&model.ChannelTemplate{}, id)
-	if res.Error != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, res.Error.Error(), "internal_error")
-		return
-	}
-	if res.RowsAffected == 0 {
-		writeUpstreamError(c, http.StatusNotFound, "模板不存在", "not_found_error")
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"deleted": res.RowsAffected})
+	// 这是六个删除接口里唯一原本就检查 RowsAffected 的；改用共用助手后
+	// 连同返回体也统一成 {"id":..,"deleted":true}
+	deleteByID(c, s.deps.Store.DB(), &model.ChannelTemplate{}, id, "模板不存在")
 }
 
 // applyTemplatePayload 是「用模板建渠道」的入参。

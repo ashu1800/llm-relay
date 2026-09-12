@@ -202,17 +202,46 @@ func (s *Server) updateChannel(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates)})
 }
 
+// deleteByID 删除主表行，并按 RowsAffected 区分「删掉了」与「本来就没有」。
+//
+// 原来五个删除接口对不存在的 ID 一律返回 {"deleted":true}，调用方（含前端）
+// 分不清「删除成功」和「这个 ID 根本不存在」：幂等重试、并发删除、
+// 传错 ID 全被当成成功，问题被静默吞掉。六个接口里只有 deleteTemplate 做对了，
+// 这里统一成一致的行为。
+func deleteByID(c *gin.Context, db *gorm.DB, dest any, id uint, notFound string) bool {
+	res := db.Delete(dest, id)
+	if res.Error != nil {
+		writeUpstreamError(c, http.StatusInternalServerError, res.Error.Error(), "internal_error")
+		return false
+	}
+	if res.RowsAffected == 0 {
+		writeUpstreamError(c, http.StatusNotFound, notFound, "not_found_error")
+		return false
+	}
+	c.JSON(http.StatusOK, gin.H{"id": id, "deleted": true})
+	return true
+}
+
 func (s *Server) deleteChannel(c *gin.Context) {
 	id, ok := parseID(c)
 	if !ok {
 		return
 	}
 	db := s.deps.Store.DB()
-	if err := db.Where("channel_id = ?", id).Delete(&model.ChannelModel{}).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+	// 先确认主表行存在，再动关联表：否则会删掉绑定却没删渠道，
+	// 调用方还收到一个「成功」
+	var ch model.Channel
+	if err := db.First(&ch, id).Error; err != nil {
+		writeUpstreamError(c, http.StatusNotFound, "渠道不存在", "not_found_error")
 		return
 	}
-	if err := db.Delete(&model.Channel{}, id).Error; err != nil {
+	// 关联行与主表行必须在同一个事务里：中途失败会留下没有归属的绑定
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("channel_id = ?", id).Delete(&model.ChannelModel{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&model.Channel{}, id).Error
+	}); err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
@@ -222,6 +251,14 @@ func (s *Server) deleteChannel(c *gin.Context) {
 func (s *Server) listChannelModels(c *gin.Context) {
 	id, ok := parseID(c)
 	if !ok {
+		return
+	}
+	// 渠道不存在时直接 404，而不是回一个空列表。
+	// 空列表会被读成「这个渠道一条绑定都没有」，与「渠道根本不存在」是两回事，
+	// 排查故障时很容易被误导。
+	var ch model.Channel
+	if err := s.deps.Store.DB().First(&ch, id).Error; err != nil {
+		writeUpstreamError(c, http.StatusNotFound, "渠道不存在", "not_found_error")
 		return
 	}
 	var rows []struct {
@@ -382,16 +419,31 @@ func (s *Server) deleteGroup(c *gin.Context) {
 	if !ok {
 		return
 	}
+	db := s.deps.Store.DB()
+
+	// 原来写的是 err == nil && count > 0：查询失败时条件为假，
+	// 于是「查不出来」被当成「没有渠道占用」，直接把一个仍在使用的分组删掉。
+	// 查不出来就不该往下删。
 	var count int64
-	if err := s.deps.Store.DB().Model(&model.Channel{}).Where("group_id = ?", id).Count(&count).Error; err == nil && count > 0 {
-		writeUpstreamError(c, http.StatusConflict, "该分组下仍有渠道，请先迁移", "invalid_request_error")
-		return
-	}
-	if err := s.deps.Store.DB().Delete(&model.ChannelGroup{}, id).Error; err != nil {
+	if err := db.Model(&model.Channel{}).Where("group_id = ?", id).Count(&count).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"id": id, "deleted": true})
+	if count > 0 {
+		writeUpstreamError(c, http.StatusConflict, "该分组下仍有渠道，请先迁移", "invalid_request_error")
+		return
+	}
+	// 模板也带 group_id，漏掉它会留下指向已删分组的模板
+	var tplCount int64
+	if err := db.Model(&model.ChannelTemplate{}).Where("group_id = ?", id).Count(&tplCount).Error; err != nil {
+		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		return
+	}
+	if tplCount > 0 {
+		writeUpstreamError(c, http.StatusConflict, "该分组下仍有模板，请先迁移", "invalid_request_error")
+		return
+	}
+	deleteByID(c, db, &model.ChannelGroup{}, id, "分组不存在")
 }
 
 // ============================ 模型 ============================
@@ -542,11 +594,18 @@ func (s *Server) deleteModel(c *gin.Context) {
 		return
 	}
 	db := s.deps.Store.DB()
-	if err := db.Where("model_id = ?", id).Delete(&model.ChannelModel{}).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+	// 同 deleteChannel：先确认主表行存在，关联行与主表行同一个事务
+	var m model.Model
+	if err := db.First(&m, id).Error; err != nil {
+		writeUpstreamError(c, http.StatusNotFound, "模型不存在", "not_found_error")
 		return
 	}
-	if err := db.Delete(&model.Model{}, id).Error; err != nil {
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("model_id = ?", id).Delete(&model.ChannelModel{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&model.Model{}, id).Error
+	}); err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
@@ -662,11 +721,7 @@ func (s *Server) deleteKey(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := s.deps.Store.DB().Delete(&model.APIKey{}, id).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"id": id, "deleted": true})
+	deleteByID(c, s.deps.Store.DB(), &model.APIKey{}, id, "密钥不存在")
 }
 
 // ============================ 日志 ============================

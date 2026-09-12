@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""验证删除接口的语义：不存在的 ID 必须明确报 404，不能假装成功。
+
+原来六个删除接口里有五个对不存在的 ID 返回 {"deleted":true}，
+调用方（含前端）分不清「删除成功」和「这个 ID 根本不存在」：
+幂等重试、并发删除、传错 ID 全被当成成功，问题被静默吞掉。
+"""
+import json
+import urllib.error
+import urllib.request
+
+ADMIN = "http://127.0.0.1:8888/api/admin"
+ok = 0
+bad = 0
+
+
+def call(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(ADMIN + path, data=data, method=method)
+    if data:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, json.loads(r.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode() or "{}")
+        except Exception:
+            return e.code, {}
+
+
+def chk(name, want, got):
+    global ok, bad
+    if want == got:
+        ok += 1
+        print("  [通过] %-46s %s" % (name, got))
+    else:
+        bad += 1
+        print("  [失败] %-46s 期望 %s 实际 %s" % (name, want, got))
+
+
+print("=== 1. 对不存在的 ID，六个删除接口都必须报 404 ===")
+GHOST = 999999
+for path, label in [
+    ("/channels/%d" % GHOST, "渠道"),
+    ("/groups/%d" % GHOST, "分组"),
+    ("/models/%d" % GHOST, "模型"),
+    ("/keys/%d" % GHOST, "密钥"),
+    ("/pricing/%d" % GHOST, "定价"),
+    ("/channel-templates/%d" % GHOST, "渠道模板"),
+]:
+    code, body = call("DELETE", path)
+    chk("删除不存在的%s" % label, 404, code)
+    if code != 404:
+        print("       返回体: %s" % body)
+
+print()
+print("=== 2. 真删一次应当成功，再删一次应当 404 ===")
+_, k = call("POST", "/keys", {"name": "delete-semantics-key"})
+kid = k["id"]
+code, body = call("DELETE", "/keys/%d" % kid)
+chk("第一次删除", 200, code)
+chk("返回体仍带 id", kid, body.get("id"))
+code, _ = call("DELETE", "/keys/%d" % kid)
+chk("第二次删除（幂等重试不该报成功）", 404, code)
+
+print()
+print("=== 3. 分组占用守卫 ===")
+_, chans = call("GET", "/channels")
+occupied = None
+for c in chans.get("items", []):
+    if c.get("group_id"):
+        occupied = c["group_id"]
+        break
+if occupied is None:
+    print("  [跳过] 没有带分组的渠道，无法验证")
+else:
+    code, body = call("DELETE", "/groups/%d" % occupied)
+    chk("删除仍有渠道的分组（期望 409）", 409, code)
+    print("       提示: %s" % body.get("error", {}).get("message", body))
+
+# 建一个「只有模板、没有渠道」的分组，验证模板占用也会拦住删除
+_, g = call("POST", "/groups", {"name": "delete-semantics-group"})
+gid = g["id"]
+_, tpl = call("POST", "/channel-templates", {
+    "name": "delete-semantics-tpl", "protocol": "openai-chat",
+    "base_url": "https://example.test", "group_id": gid,
+})
+code, body = call("DELETE", "/groups/%d" % gid)
+chk("删除仍有模板的分组（期望 409）", 409, code)
+print("       提示: %s" % body.get("error", {}).get("message", body))
+
+# 模板挪走后应当能删
+call("PUT", "/channel-templates/%d" % tpl["id"], {"group_id": 1})
+code, _ = call("DELETE", "/groups/%d" % gid)
+chk("模板迁走后可以删分组", 200, code)
+call("DELETE", "/channel-templates/%d" % tpl["id"])
+
+print()
+print("=== 4. 删渠道要一并清掉绑定，且不能留下悬挂 ===")
+_, ch = call("POST", "/channels", {
+    "name": "delete-semantics-chan", "protocol": "openai-chat",
+    "base_url": "http://slow-upstream:9999/v1", "api_key": "k",
+    "group_id": 1, "weight": 1,
+})
+cid = ch["id"]
+call("POST", "/channels/%d/models" % cid, {"public_name": "delete-semantics-model"})
+_, bindings = call("GET", "/channels/%d/models" % cid)
+chk("绑定已建立", 1, len(bindings.get("items", [])))
+code, _ = call("DELETE", "/channels/%d" % cid)
+chk("删除渠道", 200, code)
+code, _ = call("GET", "/channels/%d/models" % cid)
+chk("渠道已不存在", 404, code)
+
+# 模型本身还在，但不应再有指向已删渠道的绑定
+_, ms = call("GET", "/models")
+for m in ms.get("items", []):
+    if m["public_name"] == "delete-semantics-model":
+        call("DELETE", "/models/%d" % m["id"])
+
+print()
+print("通过 %d 项，失败 %d 项" % (ok, bad))
+print("ALL_PASS" if bad == 0 else "HAS_FAILURE")
