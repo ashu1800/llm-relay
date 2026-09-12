@@ -221,28 +221,48 @@ const compositionOption = computed(() => {
 })
 
 // ---- 模型调用分析：横向柱状 ----
+// ---- 模型调用分析：横向条形，按请求数降序 ----
+// 两处针对性优化：
+//  1. 标签宽度原先交给 containLabel 让 echarts 自己算，窄窗口下算不下时它会
+//     把文字直接切在字母中间（截图里出现过 no-such-model- / slow-concurrency-t）。
+//     改为固定宽度 + truncate，宁可显示省略号也不要半个字母；
+//     112px 足够放下最长的模型名（实测 slow-concurrency-test 在 11px 下 114px，
+//     差 2px 时出省略号，比硬切可读）。
+//  2. 数据是极端长尾（179 对 2~18），只显示计数的话除首项外都读不出量级，
+//     所以在数值后补一个占比。
 const modelBarOption = computed(() => {
   const items = [...byModel.value].reverse()
+  const total = items.reduce((a, b) => a + b.requests, 0)
   return {
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    grid: { left: 8, right: 40, top: 10, bottom: 10, containLabel: true },
+    grid: { left: 142, right: 78, top: 8, bottom: 8 },
     xAxis: {
       type: 'value',
-      splitLine: { lineStyle: { color: '#f0f0f0' } },
+      splitLine: { lineStyle: { color: '#f0f0f0', type: 'dashed' } },
+      axisLine: { show: false },
+      axisTick: { show: false },
       axisLabel: { color: '#8c8c8c', fontSize: 11 }
     },
     yAxis: {
       type: 'category',
       data: items.map((x) => x.name),
-      axisLine: { lineStyle: { color: '#d9d9d9' } },
-      axisLabel: { color: '#595959', fontSize: 11 }
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: { color: '#595959', fontSize: 11, width: 132, overflow: 'truncate' }
     },
     series: [
       {
         type: 'bar',
-        barMaxWidth: 14,
-        itemStyle: { color: '#c87864', borderRadius: [0, 3, 3, 0] },
-        label: { show: true, position: 'right', color: '#8c8c8c', fontSize: 11 },
+        barMaxWidth: 16,
+        itemStyle: { color: '#c87864', borderRadius: [0, 4, 4, 0] },
+        label: {
+          show: true,
+          position: 'right',
+          color: '#8c8c8c',
+          fontSize: 11,
+          formatter: (p: any) =>
+            p.value + (total > 0 ? ' · ' + ((p.value / total) * 100).toFixed(1) + '%' : '')
+        },
         data: items.map((x) => x.requests)
       }
     ]
