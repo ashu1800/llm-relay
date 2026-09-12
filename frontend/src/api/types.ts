@@ -59,6 +59,8 @@ export interface ChannelBinding {
 }
 
 export interface APIKey {
+  // 0 表示沿用全局默认；负数表示这把密钥完全不限流
+  rate_limit_rpm: number
   id: number
   name: string
   key_prefix: string

@@ -64,12 +64,19 @@ func run() error {
 	}
 
 	// ---- 转发内核 ----
+	// 渠道运行期状态（冷却与在途计数）由 Router 与 Service 共享，
+	// 这样「选定渠道」和「转发出去」看到的是同一份事实。
+	state := relay.NewChannelState()
 	router := relay.NewRouter(st.DB(), cipher)
+	router.SetChannelState(state)
 	svc := relay.NewService(st.DB(), router, relay.Options{
 		MaxRetries:        cfg.Relay.MaxRetries,
 		UpstreamTimeout:   cfg.Relay.FirstByteTimeout,
 		InjectStreamUsage: true,
 	}, logger)
+	svc.SetChannelState(state)
+	gate := relay.NewConcurrencyGate(cfg.Relay.MaxConcurrency)
+	rateLimiter := relay.NewRateLimiter()
 	logs := relay.NewLogWriter(st.DB(), 2048, logger)
 	defer logs.Close()
 
@@ -90,6 +97,10 @@ func run() error {
 		Logs:    logs,
 		Pricing: priceEngine,
 		Syncer:  syncer,
+
+		RateLimiter: rateLimiter,
+		Gate:        gate,
+		State:       state,
 	})
 	srv.Register(engine)
 

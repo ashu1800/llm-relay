@@ -68,6 +68,8 @@ func (s *Server) getSettings(c *gin.Context) {
 			"log_retention_days":     cfg.Relay.LogRetentionDays,
 			"payload_storage_mode":   cfg.Relay.PayloadStorageMode,
 			"payload_max_kb":         cfg.Relay.PayloadMaxKB,
+			"max_concurrency":        cfg.Relay.MaxConcurrency,
+			"default_rpm":            cfg.Relay.DefaultRPM,
 			"pricing_interval_hours": cfg.Pricing.UpdateIntervalHours,
 			"official_sync_enabled":  cfg.Pricing.OfficialSyncEnabled,
 			"sync_on_start":          cfg.Pricing.SyncOnStart,

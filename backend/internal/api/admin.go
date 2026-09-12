@@ -484,6 +484,8 @@ type keyPayload struct {
 	Enabled       *bool            `json:"enabled"`
 	AllowedModels model.StringList `json:"allowed_models"`
 	AllowedGroups model.StringList `json:"allowed_groups"`
+	// 用指针区分「没传」与「显式设为 0」
+	RateLimitRPM *int `json:"rate_limit_rpm"`
 }
 
 // createKey 只在创建时返回一次明文，之后只保留哈希与掩码。
@@ -508,6 +510,9 @@ func (s *Server) createKey(c *gin.Context) {
 	}
 	if p.Enabled != nil {
 		k.Enabled = *p.Enabled
+	}
+	if p.RateLimitRPM != nil {
+		k.RateLimitRPM = *p.RateLimitRPM
 	}
 	if err := s.deps.Store.DB().Create(&k).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
@@ -535,6 +540,9 @@ func (s *Server) updateKey(c *gin.Context) {
 	}
 	if p.Enabled != nil {
 		updates["enabled"] = *p.Enabled
+	}
+	if p.RateLimitRPM != nil {
+		updates["rate_limit_rpm"] = *p.RateLimitRPM
 	}
 	if len(updates) == 0 {
 		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")

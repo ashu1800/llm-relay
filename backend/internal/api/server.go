@@ -24,6 +24,11 @@ type Deps struct {
 	Logs    *relay.LogWriter
 	Pricing *pricing.Engine
 	Syncer  *pricing.Syncer
+
+	// 限流与并发控制
+	RateLimiter *relay.RateLimiter
+	Gate        *relay.ConcurrencyGate
+	State       *relay.ChannelState
 }
 
 // Server 持有 HTTP 层状态。

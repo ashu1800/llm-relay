@@ -23,6 +23,16 @@ type Options struct {
 	InjectStreamUsage bool
 }
 
+// 渠道名额等待上限。等不到也照发：并发是软约束，
+// 不应该把「上游压力大」直接变成「用户的请求失败」。
+const (
+	channelSlotWait = 3 * time.Second
+	// 上游给了 429 但没带 Retry-After 时的默认退避时长
+	defaultRateLimitCooldown = 30 * time.Second
+	// 上游 5xx 时的短退避，避免立刻把同一个故障实例再打一遍
+	defaultServerErrorCooldown = 5 * time.Second
+)
+
 // Service 编排一次中转：选渠道 -> 转发 -> 失败转移。
 type Service struct {
 	router *Router
@@ -30,7 +40,11 @@ type Service struct {
 	db     *gorm.DB
 	opts   Options
 	logger *slog.Logger
+	state  *ChannelState
 }
+
+// SetChannelState 注入渠道运行期状态，用于并发闸门与冷却。
+func (s *Service) SetChannelState(st *ChannelState) { s.state = st }
 
 // NewService 构造转发服务。
 func NewService(db *gorm.DB, router *Router, opts Options, logger *slog.Logger) *Service {
@@ -112,7 +126,20 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 		cand := cands[0]
 		tried = append(tried, cand.Channel.ID)
 
+		acquired := s.state.AcquireWait(ctx, cand.Channel.ID,
+			ChannelMaxConcurrency(cand.Channel.ExtraConfig), channelSlotWait)
+		if !acquired && ctx.Err() != nil {
+			return res, ctx.Err() // 客户端已断开，没必要继续
+		}
+		if !acquired {
+			s.logger.Warn("渠道并发已满，仍继续转发",
+				"channel_id", cand.Channel.ID, "channel", cand.Channel.Name)
+		}
+
 		attempt, err := s.fwd.Do(ctx, cand, req.UpstreamPath, req.Body, req.Headers, s.opts.InjectStreamUsage)
+		if acquired {
+			s.state.Release(cand.Channel.ID)
+		}
 		if err != nil {
 			res.Trail = append(res.Trail, AttemptTrail{
 				ChannelID: cand.Channel.ID, ChannelName: cand.Channel.Name, Error: err.Error(),
@@ -123,6 +150,7 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 		}
 
 		if attempt.Retryable() {
+			s.applyCooldown(cand.Channel.ID, attempt)
 			msg := summarizeErrorBody(attempt.Body)
 			res.Trail = append(res.Trail, AttemptTrail{
 				ChannelID: cand.Channel.ID, ChannelName: cand.Channel.Name,
@@ -148,6 +176,37 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 		lastErr = ErrNoChannel
 	}
 	return res, lastErr
+}
+
+// applyCooldown 按上游的限流/故障信号把渠道暂时摘掉。
+//
+// 这段是「上游已经在限流，我们却还在往上打」的解法：
+// 收到 429 后带 Retry-After 就按它退避，没带就按默认值，
+// 让后续流量自动去别的渠道，而不是把同一个上游打得更惨。
+func (s *Service) applyCooldown(channelID uint, attempt *Attempt) {
+	if s.state == nil || attempt == nil {
+		return
+	}
+	var wait time.Duration
+	switch {
+	case attempt.StatusCode == http.StatusTooManyRequests:
+		wait = ParseRetryAfter(attempt.Headers.Get("Retry-After"), time.Now())
+		if wait <= 0 {
+			wait = defaultRateLimitCooldown
+		}
+	case attempt.StatusCode == http.StatusServiceUnavailable:
+		wait = ParseRetryAfter(attempt.Headers.Get("Retry-After"), time.Now())
+		if wait <= 0 {
+			wait = defaultServerErrorCooldown
+		}
+	case attempt.StatusCode == http.StatusBadGateway || attempt.StatusCode == http.StatusGatewayTimeout:
+		wait = defaultServerErrorCooldown // 5xx 短暂退避，换渠道重试
+	default:
+		return
+	}
+	s.state.Cooldown(channelID, wait)
+	s.logger.Warn("渠道进入冷却",
+		"channel_id", channelID, "status", attempt.StatusCode, "cooldown", wait.String())
 }
 
 // markChannelFailure 记录渠道异常，供后台展示与后续调度参考。

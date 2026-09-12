@@ -22,6 +22,9 @@ type Candidate struct {
 	APIKeyPlain string
 	// Available 表示当前时刻是否在渠道的可用时段内。
 	Available bool
+	// Saturated 表示该渠道的在途请求已达自身上限。它只是被排到后面，
+	// 不出局——全部渠道都饱和时仍然要能发出去。
+	Saturated bool
 }
 
 // Router 负责按分组与模型挑选渠道，并给出故障转移顺序。
@@ -31,7 +34,13 @@ type Router struct {
 
 	mu       sync.Mutex
 	rrCursor map[uint]int // 分组 ID -> 轮询游标
+
+	// state 为运行期渠道状态，可为空（未接入时限流能力自动关闭）
+	state *ChannelState
 }
+
+// SetChannelState 注入渠道运行期状态，用于冷却过滤与并发饱和判定。
+func (r *Router) SetChannelState(st *ChannelState) { r.state = st }
 
 // NewRouter 构造路由器。
 func NewRouter(db *gorm.DB, cipher *secure.Cipher) *Router {
@@ -74,10 +83,16 @@ func (r *Router) Candidates(ctx context.Context, groupID uint, publicModel strin
 		if excluded[rw.ID] {
 			continue
 		}
+		// 冷却中的渠道直接出局：上游明确要求退避，继续打只会让限流更久
+		if _, cooling := r.state.InCooldown(rw.ID, now); cooling {
+			continue
+		}
+		maxConc := ChannelMaxConcurrency(rw.ExtraConfig)
 		c := Candidate{
 			Channel:   rw.Channel,
 			Binding:   model.ChannelModel{ID: rw.BindingID, ChannelID: rw.ID, UpstreamName: rw.UpstreamName, Enabled: true},
 			Available: SlotAvailable(rw.Slots, now),
+			Saturated: maxConc > 0 && r.state.Inflight(rw.ID) >= maxConc,
 		}
 		if plain, err := r.cipher.Decrypt(rw.APIKeyEnc); err == nil {
 			c.APIKeyPlain = plain
@@ -107,12 +122,12 @@ func (r *Router) strategyFor(ctx context.Context, groupID uint) string {
 
 // sortCandidates 依据策略重排候选，第一个即首选渠道。
 func sortCandidates(cands []Candidate, strategy string, r *Router) {
-	// 可用时段内的渠道永远优先
+	// 可用时段内且未达并发上限的渠道优先
 	sort.SliceStable(cands, func(i, j int) bool {
 		if cands[i].Available != cands[j].Available {
 			return cands[i].Available
 		}
-		return false
+		return !cands[i].Saturated && cands[j].Saturated
 	})
 
 	switch strategy {

@@ -120,6 +120,8 @@ type APIKey struct {
 	KeyPrefix     string     `gorm:"size:32" json:"key_prefix"`
 	Enabled       bool       `gorm:"not null;default:true" json:"enabled"`
 	AllowedModels StringList `gorm:"type:jsonb" json:"allowed_models"`
+	// RateLimitRPM 是该密钥每分钟允许的请求数；0 表示用全局默认值，负值表示不限
+	RateLimitRPM  int        `gorm:"not null;default:0" json:"rate_limit_rpm"`
 	AllowedGroups StringList `gorm:"type:jsonb" json:"allowed_groups"`
 	LastUsedAt    *time.Time `json:"last_used_at"`
 	CreatedAt     time.Time  `json:"created_at"`

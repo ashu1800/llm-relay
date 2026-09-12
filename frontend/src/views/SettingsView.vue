@@ -26,6 +26,8 @@ const runtimeRows = [
   { key: 'log_retention_days', label: '日志保留天数', hint: 'RELAY_LOG_RETENTION_DAYS' },
   { key: 'payload_storage_mode', label: '报文留存模式', hint: 'RELAY_PAYLOAD_STORAGE_MODE' },
   { key: 'payload_max_kb', label: '单条报文上限（KB）', hint: 'RELAY_PAYLOAD_MAX_KB' },
+  { key: 'max_concurrency', label: '上游并发上限', hint: 'RELAY_MAX_CONCURRENCY' },
+  { key: 'default_rpm', label: '默认每分钟请求上限', hint: 'RELAY_DEFAULT_RPM' },
   { key: 'pricing_interval_hours', label: '价格同步间隔（小时）', hint: 'RELAY_PRICING_INTERVAL_HOURS' },
   { key: 'official_sync_enabled', label: '启用官方价格源', hint: 'RELAY_PRICING_OFFICIAL' },
   { key: 'sync_on_start', label: '启动时同步价格', hint: 'RELAY_PRICING_SYNC_ON_START' },

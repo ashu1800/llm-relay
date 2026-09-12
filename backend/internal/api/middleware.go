@@ -2,7 +2,9 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -60,6 +62,24 @@ func (s *Server) requireAPIKey() gin.HandlerFunc {
 			First(&key).Error
 		if err != nil {
 			profile.writeError(c, http.StatusUnauthorized, "API Key 无效或已禁用", "invalid_request_error")
+			c.Abort()
+			return
+		}
+
+		// 密钥级限流：先看该密钥自己的额度，没配就用全局默认值。
+		// 负值表示这把密钥不限流，便于本地脚本或压测单独放行。
+		limit := key.RateLimitRPM
+		if limit == 0 {
+			limit = s.deps.Config.Relay.DefaultRPM
+		}
+		if ok, wait := s.deps.RateLimiter.Allow(key.ID, limit, time.Now()); !ok {
+			secs := int(wait.Seconds())
+			if secs < 1 {
+				secs = 1
+			}
+			c.Header("Retry-After", strconv.Itoa(secs))
+			profile.writeError(c, http.StatusTooManyRequests,
+				"请求过于频繁，密钥 "+key.Name+" 的限制为每分钟 "+strconv.Itoa(limit)+" 次", "rate_limit_error")
 			c.Abort()
 			return
 		}

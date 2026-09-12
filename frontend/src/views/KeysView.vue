@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
-import { message, Modal } from 'ant-design-vue'
+import { h, onMounted, reactive, ref } from 'vue'
+import { InputNumber, message, Modal } from 'ant-design-vue'
 import { PlusOutlined, ReloadOutlined, DeleteOutlined, CopyOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import type { APIKey } from '@/api/types'
@@ -10,7 +10,7 @@ const rows = ref<APIKey[]>([])
 const modalOpen = ref(false)
 const saving = ref(false)
 const createdKey = ref('')
-const form = reactive({ name: '' })
+const form = reactive({ name: '', rate_limit_rpm: 0 })
 
 async function load() {
   loading.value = true
@@ -26,8 +26,52 @@ async function load() {
 
 function openCreate() {
   form.name = ''
+  form.rate_limit_rpm = 0
   createdKey.value = ''
   modalOpen.value = true
+}
+
+// 限流额度的展示：0 表示跟随全局默认，负数表示不限
+function limitText(v: number) {
+  if (v === 0) return '跟随全局默认'
+  if (v < 0) return '不限'
+  return v + ' 次/分钟'
+}
+
+function setLimit(row: APIKey) {
+  let input = String(row.rate_limit_rpm)
+  Modal.confirm({
+    title: '设置每分钟请求上限 · ' + row.name,
+    content: () =>
+      h('div', [
+        h('p', { style: 'font-size:12px;color:#888;margin-bottom:8px' }, [
+          '填 0 表示跟随全局默认，填负数表示这把密钥完全不限流（适合本地压测）。'
+        ]),
+        h(InputNumber, {
+          defaultValue: row.rate_limit_rpm,
+          min: -1,
+          max: 1000000,
+          style: 'width:100%',
+          'onUpdate:value': (v: number) => {
+            input = String(v ?? 0)
+          }
+        })
+      ]),
+    async onOk() {
+      const n = parseInt(input, 10)
+      if (!isFinite(n) || n < -1) {
+        message.warning('请填 0 或正整数，-1 表示不限')
+        return
+      }
+      try {
+        await api.put('/keys/' + row.id, { rate_limit_rpm: n })
+        message.success('已更新')
+        await load()
+      } catch (e: any) {
+        message.error(e.message)
+      }
+    }
+  })
 }
 
 async function save() {
@@ -37,7 +81,10 @@ async function save() {
   }
   saving.value = true
   try {
-    const res = await api.post<{ key: string }>('/keys', { name: form.name.trim() })
+    const res = await api.post<{ key: string }>('/keys', {
+      name: form.name.trim(),
+      rate_limit_rpm: form.rate_limit_rpm
+    })
     // 明文只返回一次，留在弹窗里等用户复制
     createdKey.value = res.key
     await load()
@@ -109,6 +156,9 @@ onMounted(load)
         <a-table-column title="最后使用" :width="200">
           <template #default="{ record }">{{ fmt(record.last_used_at) }}</template>
         </a-table-column>
+        <a-table-column title="限流" :width="130">
+          <template #default="{ record }">{{ limitText(record.rate_limit_rpm) }}</template>
+        </a-table-column>
         <a-table-column title="状态" :width="100">
           <template #default="{ record }">
             <a-tag :color="record.enabled ? 'green' : 'default'">{{ record.enabled ? '启用' : '停用' }}</a-tag>
@@ -117,6 +167,7 @@ onMounted(load)
         <a-table-column title="操作" :width="160" fixed="right">
           <template #default="{ record }">
             <a-space>
+              <a @click="setLimit(record)">改限额</a>
               <a @click="toggle(record)">{{ record.enabled ? '停用' : '启用' }}</a>
               <a class="danger-link" @click="confirmDelete(record)"><DeleteOutlined /> 删除</a>
             </a-space>
@@ -129,6 +180,10 @@ onMounted(load)
       <a-form layout="vertical">
         <a-form-item label="名称" required>
           <a-input v-model:value="form.name" placeholder="例如 本地客户端" />
+        </a-form-item>
+        <a-form-item label="每分钟请求上限">
+          <a-input-number v-model:value="form.rate_limit_rpm" :min="-1" :max="1000000" style="width: 100%" />
+          <div class="field-hint">0 表示跟随全局默认；负数表示这把密钥完全不限流。</div>
         </a-form-item>
       </a-form>
 
@@ -152,6 +207,7 @@ onMounted(load)
 .manage-container { padding: var(--gap); }
 .manage-panel { padding: 0; overflow: hidden; }
 .manage-toolbar { display: flex; align-items: center; gap: var(--gap); padding: var(--gap); min-height: 64px; }
+.field-hint { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
 .toolbar-left { display: flex; gap: var(--gap); }
 .toolbar-spacer { flex: 1; }
 .toolbar-hint { color: var(--color-text-secondary); font-size: 13px; }

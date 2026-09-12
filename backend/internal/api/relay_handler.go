@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -78,6 +80,10 @@ func (s *Server) embeddings(c *gin.Context) {
 	s.relayRequest(c, profileEmbeddings, "", false)
 }
 
+// gateWaitTimeout 是全局并发闸门的最长排队时间。
+// 超过它说明本地确实过载了，此时快速失败比让客户端无限等待更有用。
+const gateWaitTimeout = 60 * time.Second
+
 // relayRequest 是转发主流程：读取入参 -> 编排转发 -> 回写响应 -> 异步落库。
 // pathModel/pathStream 供模型名写在 URL 里的协议（Gemini）使用，其余协议传空。
 func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel string, pathStream bool) {
@@ -130,6 +136,20 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 		req.APIKeyID = key.ID
 		req.APIKeyName = key.Name
 	}
+
+	// 全局并发闸门：排队等待，而不是把压力一股脑推给上游。
+	// 客户端断开时排队立即结束，不会留下空转的等待者。
+	gateCtx, cancelGate := context.WithTimeout(c.Request.Context(), gateWaitTimeout)
+	defer cancelGate()
+	if err := s.deps.Gate.Acquire(gateCtx); err != nil {
+		if c.Request.Context().Err() != nil {
+			return // 客户端已断开
+		}
+		p.writeError(c, http.StatusTooManyRequests,
+			"本地并发已达上限（"+strconv.Itoa(s.deps.Gate.Max())+"），请稍后重试", "rate_limit_error")
+		return
+	}
+	defer s.deps.Gate.Release()
 
 	res, relayErr := s.deps.Service.Relay(c.Request.Context(), req)
 	if relayErr != nil {
