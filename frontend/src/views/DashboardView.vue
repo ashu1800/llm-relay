@@ -196,16 +196,34 @@ const trendOption = computed(() => {
 })
 
 // ---- 消耗分布：输入未命中 / 缓存命中 / 输出 ----
+// 词元构成的配色：用主色的深浅阶。
+//
+// 不复用 PALETTE —— 模型图的颜色表示「身份」（这是哪个模型），
+// 这里的颜色表示「构成」（同一批词元分成哪几部分），两套语义共用调色板，
+// 会让同一屏上出现「同一个颜色指两件事」：改之前 #c87864 既是
+// 「输入（未命中）」又是「deepseek-v4-flash」。
+// 深浅阶还顺带表达了输入 -> 缓存 -> 输出的先后关系。
+//
+// 颜色按类别名固定分配，**不能按数组下标**：
+// 下面会滤掉为 0 的类别，按下标取色的话滤掉一个后面就全部错位
+// （模型饼图正是踩了这个坑：gpt-5.6-sol 在两图里显示成两种颜色）。
+const TOKEN_COLORS: Record<string, string> = {
+  '输入（未命中）': '#c87864',
+  缓存命中: '#e0a090',
+  输出: '#f2d3c9'
+}
+
 const compositionOption = computed(() => {
   const s = summary.value
   const data = [
     { name: '输入（未命中）', value: s?.prompt_tokens ?? 0 },
     { name: '缓存命中', value: s?.cached_tokens ?? 0 },
     { name: '输出', value: s?.completion_tokens ?? 0 }
-  ].filter((x) => x.value > 0)
+  ]
+    .filter((x) => x.value > 0)
+    .map((x) => ({ ...x, itemStyle: { color: TOKEN_COLORS[x.name] } }))
   return {
-    color: ['#c87864', '#10b37d', '#06b6d4'],
-    tooltip: { trigger: 'item', valueFormatter: (v: number) => n(v) + ' tokens' },
+    tooltip: { trigger: 'item', valueFormatter: (v: number) => n(v) + ' 词元' },
     legend: { bottom: 0, icon: 'circle', textStyle: { fontSize: 12 } },
     series: [
       {
@@ -442,7 +460,7 @@ onMounted(load)
         <StatCard label="请求数量" :value="n(summary?.requests)" tone="purple" :hint="'失败 ' + n(summary?.errors) + ' 次'">
           <template #icon><ApiOutlined /></template>
         </StatCard>
-        <StatCard label="消耗金额" :value="'$' + money(summary?.estimated_cost)" tone="orange" hint="仅供参考，非实际扣费">
+        <StatCard label="消耗金额" :value="'$' + money(summary?.estimated_cost)" tone="orange" hint="按官方单价折算">
           <template #icon><DollarOutlined /></template>
         </StatCard>
         <StatCard label="词元数量" :value="n(summary?.total_tokens)" tone="blue" :hint="'命中率 ' + ((summary?.cache_hit_rate ?? 0) * 100).toFixed(1) + '%'">
