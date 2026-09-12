@@ -55,7 +55,7 @@ func (f *Forwarder) Do(
 
 	// 出站协议转换：站内统一是 OpenAI Chat，渠道声明的是上游协议。
 	// 路径也要一起换（Anthropic 是 /v1/messages，Gemini 的模型名在路径里）。
-	path, body, err := convert.UpstreamRequest(cand.Channel.Protocol, upstreamPath, body)
+	path, body, err := convert.UpstreamRequest(cand.Channel.Protocol, upstreamPath, body, cand.Binding.UpstreamName)
 	if err != nil {
 		return nil, fmt.Errorf("转换上游请求失败: %w", err)
 	}

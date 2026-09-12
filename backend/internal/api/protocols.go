@@ -17,7 +17,9 @@ import (
 type inboundProfile struct {
 	// Name 写入请求日志的入站协议名
 	Name string
-	// UpstreamPath 上游路径。当前所有协议都收敛到 OpenAI 兼容端点
+	// UpstreamPath 默认的上游路径。这是「上游是 OpenAI 形状」时的路径；
+	// 渠道若声明了别的上游协议（Anthropic / Gemini），由 relay/convert 的
+	// UpstreamRequest 换成对应的方法路径。
 	UpstreamPath string
 	// ContentType 响应内容类型
 	ContentType string

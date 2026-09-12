@@ -9,6 +9,8 @@
 - **渠道协议 = 上游协议**：客户端用哪种协议请求都行，站内先归一成 OpenAI Chat，
   再按渠道上的 `protocol` 转成上游格式发出，响应转回来后再改写回客户端协议。
   `anthropic-messages` 会改写成 Anthropic Messages 并请求 `/v1/messages`；
+  `gemini-generateContent` 会改写成 Gemini 的 `contents` 结构并请求
+  `/v1beta/models/{模型}:generateContent`（流式加 `:streamGenerateContent?alt=sse`）；
   `openai-chat` / `openai-responses` / `openai-embeddings` 走 OpenAI 端点；
   `custom` 可用 `auth_header` / `auth_prefix` 指定任意鉴权头。
   鉴权按协议自动选择：`anthropic-messages` 用 `x-api-key`（并补 `anthropic-version`），

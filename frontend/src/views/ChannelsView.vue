@@ -238,6 +238,12 @@ async function saveBindings() {
   }
 }
 
+// protocolLabel 把协议常量显示成选项里的中文/英文名，
+// 列表里直接摊开 anthropic-messages 这种常量对用户没有意义
+function protocolLabel(value: string) {
+  return PROTOCOLS.find((p) => p.value === value)?.label ?? value
+}
+
 function healthTag(row: Channel) {
   if (!row.enabled) return { color: 'default', text: '已禁用' }
   if (row.health_status === 'healthy') return { color: 'green', text: '正常' }
@@ -298,7 +304,9 @@ onMounted(load)
             </span>
           </template>
         </a-table-column>
-        <a-table-column title="协议" data-index="protocol" :width="125" />
+        <a-table-column title="上游协议" :width="125">
+          <template #default="{ record }">{{ protocolLabel(record.protocol) }}</template>
+        </a-table-column>
         <a-table-column title="地址" data-index="base_url" :width="174" ellipsis />
         <a-table-column title="分组" :width="90">
           <template #default="{ record }">

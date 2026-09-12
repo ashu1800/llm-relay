@@ -17,10 +17,12 @@ import (
 
 // UpstreamRequest 按上游协议改写请求路径与请求体。
 //
-// path 是入站协议对应的默认上游路径（见 api/protocols.go）。只有「对话」
-// 类请求才做协议转换：embeddings 没有 Anthropic / Gemini 的对应物，
-// 遇到这类渠道时保持原样，让上游自己报错，比在中转站里造一个假的成功响应好。
-func UpstreamRequest(protocol, path string, body []byte) (string, []byte, error) {
+// path 是入站协议对应的默认上游路径（见 api/protocols.go）；
+// upstreamModel 是白名单里的上游模型名 —— Gemini 把它放在路径里，
+// 转换时必须拿到。只有「对话」类请求才做协议转换：embeddings 没有
+// Anthropic / Gemini 的对应物，遇到这类渠道时保持原样，让上游自己报错，
+// 比在中转站里造一个假的成功响应好。
+func UpstreamRequest(protocol, path string, body []byte, upstreamModel string) (string, []byte, error) {
 	if !isChatPath(path) {
 		return path, body, nil
 	}
@@ -31,6 +33,12 @@ func UpstreamRequest(protocol, path string, body []byte) (string, []byte, error)
 			return "", nil, err
 		}
 		return "/v1/messages", out, nil
+	case model.ProtocolGemini:
+		out, err := OpenAIChatToGeminiRequest(body)
+		if err != nil {
+			return "", nil, err
+		}
+		return GeminiUpstreamPath(upstreamModel, requestIsStream(body)), out, nil
 	default:
 		// openai-chat / openai-responses / openai-embeddings / custom：
 		// 上游本来就是 OpenAI 形状（responses 与 embeddings 也走 OpenAI 端点），
@@ -39,12 +47,30 @@ func UpstreamRequest(protocol, path string, body []byte) (string, []byte, error)
 	}
 }
 
+// requestIsStream 读请求体里的 stream 标记。
+// Gemini 的流式与否体现在方法名（:streamGenerateContent）上，路径必须与它一致。
+func requestIsStream(body []byte) bool {
+	var payload struct {
+		Stream bool `json:"stream"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false
+	}
+	return payload.Stream
+}
+
 // UpstreamResponseBody 把非流式响应体转回 OpenAI Chat。
 // 解析失败时原样返回：宁可让客户端看到上游的原文，也不要吞掉一次成功的响应。
 func UpstreamResponseBody(protocol string, body []byte, upstreamModel string) []byte {
 	switch protocol {
 	case model.ProtocolAnthropic:
 		out, err := AnthropicResponseToOpenAIChat(body, upstreamModel)
+		if err != nil {
+			return body
+		}
+		return out
+	case model.ProtocolGemini:
+		out, err := GeminiResponseToOpenAIChat(body, upstreamModel)
 		if err != nil {
 			return body
 		}
@@ -59,6 +85,8 @@ func UpstreamStream(protocol string, r io.ReadCloser, upstreamModel string) io.R
 	switch protocol {
 	case model.ProtocolAnthropic:
 		return NewAnthropicStreamToOpenAIChat(r, upstreamModel)
+	case model.ProtocolGemini:
+		return NewGeminiStreamToOpenAIChat(r, upstreamModel)
 	default:
 		return r
 	}
@@ -75,6 +103,8 @@ func UpstreamErrorMessage(protocol string, body []byte) string {
 	switch protocol {
 	case model.ProtocolAnthropic:
 		return AnthropicErrorMessage(body)
+	case model.ProtocolGemini:
+		return GeminiErrorMessage(body)
 	default:
 		// OpenAI 形状的上游同样把原因放在 error.message 里
 		var payload map[string]any

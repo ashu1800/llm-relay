@@ -11,9 +11,11 @@ const PORT = Number(process.env.PORT || 9998);
 
 let anthropicHits = 0;
 let openaiHits = 0;
+let geminiHits = 0;
 let rejected = 0;
 let lastRequest = null;
 let lastPath = '';
+let lastModel = '';
 
 // 真实 Anthropic 对未知字段、缺失必填字段都是直接 400
 function validateAnthropic(p, rawKeys) {
@@ -44,11 +46,11 @@ function errorBody(type, message) {
 const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url.startsWith('/stats')) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ anthropic_hits: anthropicHits, openai_hits: openaiHits, rejected, last_path: lastPath, last_request: lastRequest }));
+    res.end(JSON.stringify({ anthropic_hits: anthropicHits, openai_hits: openaiHits, gemini_hits: geminiHits, rejected, last_path: lastPath, last_request: lastRequest, last_model: lastModel }));
     return;
   }
   if (req.method === 'GET' && req.url.startsWith('/reset')) {
-    anthropicHits = 0; openaiHits = 0; rejected = 0; lastRequest = null; lastPath = '';
+    anthropicHits = 0; openaiHits = 0; geminiHits = 0; rejected = 0; lastRequest = null; lastPath = ''; lastModel = '';
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end('{"ok":true}');
     return;
@@ -61,6 +63,64 @@ const server = http.createServer((req, res) => {
     let p = {};
     try { p = JSON.parse(body); } catch (e) { p = {}; }
     lastRequest = p;
+
+    // ---------- Gemini generateContent ----------
+    if (req.url.startsWith('/v1beta/models/')) {
+      geminiHits++;
+      const m = req.url.match(/\/v1beta\/models\/([^:?]+):([A-Za-z]+)/);
+      const model = m ? decodeURIComponent(m[1]) : '';
+      const method = m ? m[2] : '';
+      lastModel = model;
+      const badField = ['messages', 'max_tokens', 'stream_options', 'stream', 'temperature', 'top_p']
+        .find((k) => p[k] !== undefined);
+      if (badField) {
+        rejected++;
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 400, message: 'Unknown name "' + badField + '": Cannot find field.', status: 'INVALID_ARGUMENT' } }));
+        return;
+      }
+      if (!Array.isArray(p.contents)) {
+        rejected++;
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 400, message: 'contents: Field required', status: 'INVALID_ARGUMENT' } }));
+        return;
+      }
+      if (p.contents.some((c) => c && c.role === 'system')) {
+        rejected++;
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 400, message: '请用 systemInstruction 传系统提示', status: 'INVALID_ARGUMENT' } }));
+        return;
+      }
+      if (model.includes('trigger-error')) {
+        rejected++;
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 400, message: 'mock 拒绝了这个模型：' + model, status: 'INVALID_ARGUMENT' } }));
+        return;
+      }
+      if (method === 'streamGenerateContent') {
+        // 真实 Gemini 不带 alt=sse 时返回的是 JSON 数组（不是 SSE），
+        // 这里照做：中转站若漏了 alt=sse，客户端拿到的就不是分片流
+        if (!req.url.includes('alt=sse')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify([{ candidates: [{ content: { role: 'model', parts: [{ text: 'not-sse' }] }, finishReason: 'STOP', index: 0 }], modelVersion: model }]));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+        const frame = (o) => res.write('data: ' + JSON.stringify(o) + '\n\n');
+        frame({ candidates: [{ content: { role: 'model', parts: [{ text: 'hello ' }] }, index: 0 }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 1, totalTokenCount: 11 }, modelVersion: model });
+        frame({ candidates: [{ content: { role: 'model', parts: [{ text: 'from gemini' }] }, index: 0 }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 3, totalTokenCount: 13 }, modelVersion: model });
+        frame({ candidates: [{ content: { role: 'model', parts: [] }, finishReason: 'STOP', index: 0 }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 3, totalTokenCount: 13 }, modelVersion: model });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        candidates: [{ content: { role: 'model', parts: [{ text: 'hello from gemini' }] }, finishReason: 'STOP', index: 0 }],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 6, totalTokenCount: 16, cachedContentTokenCount: 2 },
+        modelVersion: model,
+      }));
+      return;
+    }
 
     // 用到 OpenAI 的端点就是走错了协议（中转站没转换）
     if (req.url.startsWith('/v1/chat/completions')) {

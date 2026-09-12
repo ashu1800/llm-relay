@@ -254,7 +254,7 @@ func TestAnthropicStreamEmptyUpstream(t *testing.T) {
 
 func TestUpstreamRequestSkipsNonChatPaths(t *testing.T) {
 	body := []byte(`{"model":"m","input":"hi"}`)
-	path, out, err := UpstreamRequest("anthropic-messages", "/v1/embeddings", body)
+	path, out, err := UpstreamRequest("anthropic-messages", "/v1/embeddings", body, "m")
 	if err != nil {
 		t.Fatal(err)
 	}
