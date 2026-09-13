@@ -54,7 +54,6 @@ llm-relay/
 │       ├── pricing/            单价解析与成本计算
 │       ├── proxy/              出站代理（socks5/http/https）与连通性测试
 │       ├── secure/             AES-GCM 加密与密钥哈希
-│       ├── usage/              Token 计量
 │       └── web/                前端产物 embed
 ├── frontend/                   Vue 3 + Vite + Ant Design Vue 4
 │   └── src/
