@@ -2,7 +2,6 @@ package pricing
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -94,12 +93,10 @@ func scale(price decimal.Decimal, tokens int) decimal.Decimal {
 // 缓存整张 channel_models（几百行）而不是按需查库：计费发生在每次请求结束时，
 // 那时候再查一次库等于给转发链路加一跳。价格改了由调用方 Invalidate。
 type Engine struct {
-	db    *gorm.DB
-	ttl   time.Duration
-	mu    sync.RWMutex
-	cache map[string]model.ChannelModel
-	// names 记住每个渠道有哪些模型：不是用来查价的，而是给「未配价」
-	// 这类统计用 —— 计价只需要 cache
+	db       *gorm.DB
+	ttl      time.Duration
+	mu       sync.RWMutex
+	cache    map[string]model.ChannelModel
 	loadedAt time.Time
 	lastErr  error
 }
@@ -231,23 +228,7 @@ func FormatCost(d decimal.Decimal) string {
 	return d.Round(8).String()
 }
 
-// ValidatePrice 校验一行价格的合理性，供管理接口在保存渠道模型前调用。
-//
-// 时段规则的窗口合法性问题在 NormalizeRules 里查：窗口写错（起止相同、
-// 时间格式不对）不会报错、只会永不命中，用户会以为「配了却没生效」。
-func ValidatePrice(p model.ChannelModel) error {
-	if p.InputPer1M.IsNegative() || p.OutputPer1M.IsNegative() ||
-		p.CacheReadPer1M.IsNegative() || p.CacheWritePer1M.IsNegative() {
-		return fmt.Errorf("单价不能为负")
-	}
-	if p.Multiplier < 0 {
-		return fmt.Errorf("固定倍率不能为负")
-	}
-	if p.Multiplier > MaxMultiplier {
-		return fmt.Errorf("固定倍率不能超过 %g", MaxMultiplier)
-	}
-	if _, err := NormalizeRules(p.PeakRules); err != nil {
-		return err
-	}
-	return nil
-}
+// 价格的合法性校验在 api.applyPriceFields 里随写入一起做：单价非负
+// （parseDecimal 拒绝负数）、倍率区间、时段规则（NormalizeRules）。
+// 刻意不在这里再包一层 Validate —— 两份规则迟早会不一致，
+// 而漏掉的那一条的表现是「保存成功但规则永不命中」。

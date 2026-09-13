@@ -22,6 +22,31 @@ export interface PriceConfig {
   peak_rules?: RateRule[]
 }
 
+/**
+ * 从任意带价格字段的对象里取出价格。
+ *
+ * 读回来的绑定要经过这一步再进表单：漏掉它的话，保存时提交的 items 里
+ * 没有价格字段，而后端把「空」当成 0 —— 表现为「编辑一次渠道，价格全没了」，
+ * 界面上还提示保存成功。
+ */
+export function pickPrice(src: {
+  input_per_1m?: string | null
+  output_per_1m?: string | null
+  cache_read_per_1m?: string | null
+  cache_write_per_1m?: string | null
+  multiplier?: number | null
+  peak_rules?: RateRule[] | null
+}): PriceConfig {
+  return {
+    input_per_1m: src.input_per_1m ?? '',
+    output_per_1m: src.output_per_1m ?? '',
+    cache_read_per_1m: src.cache_read_per_1m ?? '',
+    cache_write_per_1m: src.cache_write_per_1m ?? '',
+    multiplier: src.multiplier ?? 1,
+    peak_rules: (src.peak_rules || []).map((r) => ({ ...r, days: [...(r.days || [])] }))
+  }
+}
+
 export function emptyPrice(): PriceConfig {
   return {
     input_per_1m: '',

@@ -18,7 +18,7 @@ import type { Proxy } from '@/api/types'
 import GroupTag from '@/components/GroupTag.vue'
 import ChannelIcon from '@/components/ChannelIcon.vue'
 import { PROTOCOLS, type Channel, type ChannelGroup, type ChannelBinding } from '@/api/types'
-import { emptyPrice } from '@/components/ModelPricingEditor.vue'
+import { emptyPrice, pickPrice } from '@/components/ModelPricingEditor.vue'
 
 type ChannelRow = Channel & {
   models?: string[]
@@ -147,7 +147,10 @@ async function openEdit(row: ChannelRow) {
       public_name: b.public_name,
       upstream_name: b.upstream_name === b.public_name ? '' : b.upstream_name,
       enabled: b.enabled,
-      proxy_id: b.proxy_id || 0
+      proxy_id: b.proxy_id || 0,
+      // 价格必须一起带上：编辑一次渠道再保存，提交的就是这张表，
+      // 漏掉价格等于把用户配好的价全部清零
+      ...pickPrice(b)
     }))
   } catch (e: any) {
     message.error('读取模型白名单失败：' + e.message)
@@ -161,7 +164,8 @@ function whitelistPayload(): WhitelistRow[] | null {
       public_name: r.public_name.trim(),
       upstream_name: r.upstream_name.trim(),
       enabled: r.enabled,
-      proxy_id: r.proxy_id || 0
+      proxy_id: r.proxy_id || 0,
+      ...pickPrice(r)
     }))
     .filter((r) => r.public_name || r.upstream_name)
   const seen = new Set<string>()
@@ -349,7 +353,8 @@ async function loadBindings() {
       // 上游名与对外名相同时留空显示，避免满屏重复的模型名
       upstream_name: b.upstream_name === b.public_name ? '' : b.upstream_name,
       enabled: b.enabled,
-      proxy_id: b.proxy_id || 0
+      proxy_id: b.proxy_id || 0,
+      ...pickPrice(b)
     }))
   } catch (e: any) {
     message.error(e.message)
@@ -365,7 +370,8 @@ async function saveBindings() {
       public_name: r.public_name.trim(),
       upstream_name: r.upstream_name.trim() || r.public_name.trim(),
       enabled: r.enabled,
-      proxy_id: r.proxy_id || 0
+      proxy_id: r.proxy_id || 0,
+      ...pickPrice(r)
     }))
     .filter((r) => r.public_name)
   if (!items.length) {
