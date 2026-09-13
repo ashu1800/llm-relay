@@ -184,12 +184,12 @@ func (s *Store) migrateLegacySchema() error {
 				return fmt.Errorf("迁移 channel_models 价格列失败（%s）: %w", stmt, err)
 			}
 		}
-		// multiplier 单独处理：实体上刻意不带 default（否则「填 0」会被列默认值改写），
-		// 而无默认的 NOT NULL 列加不进已有数据的表。先带 DEFAULT 0 建列再撤掉默认值
+		// multiplier 单独处理：无默认值的 NOT NULL 列加不进已有数据的表
+		// （AutoMigrate 生成的是 ADD COLUMN ... NOT NULL，Postgres 直接拒绝），
+		// 所以先带 DEFAULT 0 建列，建完也**保留**默认值 —— 理由见实体上的注释
 		if !s.hasColumn("channel_models", "multiplier") {
 			for _, stmt := range []string{
 				"ALTER TABLE channel_models ADD COLUMN multiplier numeric(10,4) NOT NULL DEFAULT 0",
-				"ALTER TABLE channel_models ALTER COLUMN multiplier DROP DEFAULT",
 			} {
 				if err := s.db.Exec(stmt).Error; err != nil {
 					return fmt.Errorf("迁移 channel_models.multiplier 失败（%s）: %w", stmt, err)

@@ -128,10 +128,16 @@ type ChannelModel struct {
 	OutputPer1M     decimal.Decimal `gorm:"column:output_per1_m;type:numeric(18,8);default:0" json:"output_per_1m"`
 	CacheReadPer1M  decimal.Decimal `gorm:"column:cache_read_per1_m;type:numeric(18,8);default:0" json:"cache_read_per_1m"`
 	CacheWritePer1M decimal.Decimal `gorm:"column:cache_write_per1_m;type:numeric(18,8);default:0" json:"cache_write_per_1m"`
-	// Multiplier 是固定倍率（1 = 原价）。0 表示没配，由代码归一到 1 ——
-	// 与 ModelPricing 当年同一个坑：加了列默认值会让 0 由数据库静默改写，
-	// 「填了 0.5 却按 1 算」这种问题在界面上看不出来
-	Multiplier float64 `gorm:"column:multiplier;type:numeric(10,4);not null" json:"multiplier"`
+	// Multiplier 是固定倍率（1 = 原价），0 表示「没配」，由代码归一到 1。
+	//
+	// 这一列**要**保留 default:0，与 ModelPricing 当年相反：那一列的问题是
+	// 「用户填的 0 会被列默认值顶掉」，而这一列的 0 恰好就是想要的语义
+	// （引擎只在 multiplier > 0 且 != 1 时才用它）。
+	// 反过来，NOT NULL 且无默认会留下一个很难查的坑：每一条原生 INSERT
+	// 都必须显式给值，漏写就直接违反约束 —— 实测踩过：级联删除的测试用例
+	// 插白名单时没写 multiplier，插入静默失败，最后报出来的却是
+	// 「删除前绑定数 期望 1 实际 0」这种指错方向的断言。
+	Multiplier float64 `gorm:"column:multiplier;type:numeric(10,4);not null;default:0" json:"multiplier"`
 	// PeakRules 是时段倍率规则（命中时段时以它为准，优先于固定倍率）
 	PeakRules JSONList `gorm:"type:jsonb" json:"peak_rules"`
 
