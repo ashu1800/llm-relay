@@ -36,7 +36,9 @@ die()  { printf "\033[31m[失败] %s\033[0m\n" "$*" >&2; exit 1; }
 mkdir -p "$INSTALL_DIR/deploy"
 ENV_FILE="$INSTALL_DIR/deploy/.env"
 if [ -f "$ENV_FILE" ] && grep -q "^DB_PASSWORD=" "$ENV_FILE"; then
-  DB_PASS="$(grep '^DB_PASSWORD=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
+  # 剥引号与 CRLF/空白：Windows 手编 .env 常带入，混进 postgres 密码会造成
+  # ALTER USER 与 systemd EnvironmentFile 两个口径永久错位、服务 crashloop
+  DB_PASS="$(grep '^DB_PASSWORD=' "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d "\"'[[:space:]]")"
   log "复用已有配置中的数据库密码"
 else
   DB_PASS="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -45,7 +47,7 @@ fi
 
 # 主密钥同理：重装必须沿用原值，否则已存库的渠道密钥再也解不开
 if [ -f "$ENV_FILE" ] && grep -q "^RELAY_SECRET=.\+" "$ENV_FILE"; then
-  RELAY_SECRET="$(grep '^RELAY_SECRET=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
+  RELAY_SECRET="$(grep '^RELAY_SECRET=' "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d "\"'[[:space:]]")"
   log "复用已有配置中的加密主密钥"
 else
   RELAY_SECRET="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -69,18 +71,22 @@ if [ "${#PKGS[@]}" -gt 0 ]; then
   apt-get install -y -qq "${PKGS[@]}"
 fi
 
-# Go：优先用系统包，太旧则下载官方 tarball
+# Go：优先用系统包，太旧则下载官方 tarball。
+# 最低版本从 go.mod 推导，避免与 go.mod / Dockerfile 各自钉版后漂移；
+# 补丁号固定（go.mod 只约束 major.minor，.3 起温）
+GO_MM="$(sed -nE 's/^go ([0-9]+\.[0-9]+).*/\1/p' "$REPO_DIR/backend/go.mod")"
+GO_MIN="${GO_MM//./}"
 GO_BIN="$(command -v go || true)"
 GO_OK=0
 if [ -n "$GO_BIN" ]; then
   GOVER="$("$GO_BIN" version | sed -E 's/.*go([0-9]+)\.([0-9]+).*/\1\2/')"
-  [ "$GOVER" -ge 125 ] 2>/dev/null && GO_OK=1
+  [ "$GOVER" -ge "$GO_MIN" ] 2>/dev/null && GO_OK=1
 fi
 if [ "$GO_OK" != "1" ]; then
-  log "安装 Go 1.25（系统版本缺失或过旧）"
-  GOVERSION="1.25.3"
+  GOVERSION="${GO_MM}.3"
+  log "安装 Go ${GOVERSION}（系统版本缺失或过旧）"
   curl -fsSL "https://golang.google.cn/dl/go${GOVERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz \
-    || die "Go 下载失败，请检查网络或手动安装 Go >= 1.25"
+    || die "Go 下载失败，请检查网络或手动安装 Go >= ${GO_MM}"
   rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz && rm -f /tmp/go.tgz
   export PATH="/usr/local/go/bin:$PATH"
 fi

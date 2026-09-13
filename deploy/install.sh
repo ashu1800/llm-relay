@@ -321,16 +321,17 @@ else
 fi
 echo "------------------------------------------------------------"
 echo " 访问地址   : http://localhost:$PORT"
-ENV_BIND="$(grep -E '^BIND_ADDR=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)"
-# 容错手编 .env：去引号与空白/CRLF（compose 解析时同样剥掉这些）
-ENV_BIND="${ENV_BIND//[\"\']/}"
-ENV_BIND="${ENV_BIND//[[:space:]]/}"
-ENV_BIND="${ENV_BIND:-127.0.0.1}"
-if [[ -n "$WSL_IP" && "$ENV_BIND" != "127.0.0.1" && "$ENV_BIND" != "localhost" ]]; then
-  echo " 局域网地址 : http://$WSL_IP:$PORT"
-else
-  echo " 局域网访问 : 在 deploy/.env 设 BIND_ADDR=0.0.0.0 后重启（管理接口无鉴权，自行加防火墙）"
-fi
+# 不手工解析 .env 来推断绑定（env 优先级/引号/重复键与 compose 语义处处分歧），
+# 直接回读 Docker 实际发布的地址 —— 容器没起来时回退到回环提示，宁可不报
+PUB_BIND="$(cd "$INSTALL_DIR/deploy" && docker compose port app 8888 2>/dev/null | head -1 | cut -d: -f1 || true)"
+case "$PUB_BIND" in
+  ""|127.0.0.1|"::1"|localhost)
+    echo " 局域网访问 : 在 deploy/.env 设 BIND_ADDR=0.0.0.0 后重启（管理接口无鉴权，自行加防火墙）" ;;
+  0.0.0.0|"::")
+    [[ -n "$WSL_IP" ]] && echo " 局域网地址 : http://$WSL_IP:$PORT" ;;
+  *)
+    echo " 局域网地址 : http://$PUB_BIND:$PORT" ;;
+esac
 echo " 安装目录   : $INSTALL_DIR"
 echo " 端口       : $PORT"
 echo
