@@ -147,8 +147,11 @@ for col in $DROPCOLS; do
 done
 chk "倍率列已补回" "1" "$(P "SELECT count(*) FROM information_schema.columns WHERE table_name='channel_models' AND column_name='multiplier'")"
 chk "倍率列是 not null" "NO" "$(P "SELECT is_nullable FROM information_schema.columns WHERE table_name='channel_models' AND column_name='multiplier'")"
-# 默认值必须被去掉：留着它会让「忘记填倍率」被列默认值静默补上
-chk "倍率列没有留下列默认值" "" "$(P "SELECT COALESCE(column_default,'') FROM information_schema.columns WHERE table_name='channel_models' AND column_name='multiplier'")"
+# 默认值必须是 0 且**要留着**：0 就是这一列想要的语义（没配倍率，引擎只在
+# multiplier > 0 且 != 1 时才用它）。反过来，NOT NULL 且无默认要求每一条原生
+# INSERT 都显式给值，漏写就直接违反约束 —— 实测踩过：级联删除的用例插白名单时
+# 没写 multiplier，插入静默失败，断言却报「删除前绑定数 期望 1 实际 0」。
+chk "倍率列保留 0 作为默认值" "0" "$(P "SELECT COALESCE(column_default,'') FROM information_schema.columns WHERE table_name='channel_models' AND column_name='multiplier'")"
 chk "既有行的单价按 0 兜底（不是 null）" "$ROWS_BEFORE" "$(P "SELECT count(*) FROM channel_models WHERE input_per1_m = 0 AND cache_write_per1_m::text::numeric = 0")"
 chk "既有行的倍率按 0 兜底（由代码归一到 1）" "$ROWS_BEFORE" "$(P "SELECT count(*) FROM channel_models WHERE multiplier = 0")"
 
