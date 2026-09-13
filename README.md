@@ -24,7 +24,7 @@
   渠道列表会点名「N 个未定价」——漏配价的后果是这笔调用被记成 0 元，账面上看不出异常；
   金额仅作成本感知，**不做任何扣减**
 - **详尽的请求日志**：首包时间、总耗时、渠道与模型映射、状态码、原始报文、计费过程还原、导出
-- **渠道管理**：分组、权重、可用时段（支持跨午夜）、**模型白名单（对外名 → 上游名映射）**、
+- **渠道管理**：分组、权重、可用时段（支持跨午夜，按服务器本地时区判断，与时段倍率同一口径）、**模型白名单（对外名 → 上游名映射）**、
   渠道图标（可从上游抓 favicon，也可填 emoji）、**发一句 "hi" 测连通性**
 - **出站代理**：socks5 / http / https，可测连通性与延迟；
   渠道级与**模型级**都能指定（优先级：模型 > 渠道 > 直连），
@@ -43,7 +43,7 @@
 
 ```
 llm-relay/
-├── backend/                    Go 1.24 + Gin 后端
+├── backend/                    Go 1.25 + Gin 后端
 │   ├── cmd/server/             程序入口
 │   └── internal/
 │       ├── api/                HTTP 路由与处理
@@ -53,7 +53,7 @@ llm-relay/
 │       ├── relay/              协议适配与转发内核
 │       ├── pricing/            单价解析与成本计算
 │       ├── proxy/              出站代理（socks5/http/https）与连通性测试
-│       ├── usage/              Token 计量
+│       ├── secure/             AES-GCM 加密与密钥哈希
 │       └── web/                前端产物 embed
 ├── frontend/                   Vue 3 + Vite + Ant Design Vue 4
 │   └── src/
@@ -63,7 +63,7 @@ llm-relay/
 │       └── styles/theme.css    设计令牌（实测自参考站）
 ├── deploy/
 │   ├── Dockerfile              多阶段构建（前端 → 后端 → 运行时）
-│   ├── docker-compose.yml      app + postgres + redis
+│   ├── docker-compose.yml      app + postgres
 │   ├── .env.example            部署配置模板
 │   ├── install.sh              一键部署脚本（Docker）
 │   └── install-bare.sh         无 Docker 部署脚本（systemd 直跑）

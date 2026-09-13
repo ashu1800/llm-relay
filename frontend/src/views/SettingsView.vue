@@ -44,7 +44,6 @@ const runtimeRows = [
   { key: 'payload_max_kb', label: '单条报文上限（KB）', hint: 'RELAY_PAYLOAD_MAX_KB' },
   { key: 'max_concurrency', label: '上游并发上限', hint: 'RELAY_MAX_CONCURRENCY' },
   { key: 'default_rpm', label: '默认每分钟请求上限', hint: 'RELAY_DEFAULT_RPM' },
-  { key: 'redis_enabled', label: '启用 Redis', hint: 'REDIS_ENABLED' }
 ]
 
 const countCards = [

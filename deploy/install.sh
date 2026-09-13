@@ -195,9 +195,10 @@ if [[ "$SRC_DIR" != "$INSTALL_DIR" ]]; then
       --exclude='./.git' \
       --exclude='./.chrome-profile' \
       --exclude='./docs/shots' \
+      --exclude='./.shots' \
       -cf - . | tar -C "$INSTALL_DIR" -xf -
 fi
-mkdir -p "$INSTALL_DIR/deploy/data"/{postgres,redis,relay}
+mkdir -p "$INSTALL_DIR/deploy/data"/{postgres,relay}
 
 # ---------- 5. 生成 .env ----------
 ENV_FILE="$INSTALL_DIR/deploy/.env"

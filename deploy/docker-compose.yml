@@ -59,8 +59,11 @@ services:
       LOG_FORMAT: ${LOG_FORMAT:-text}
       TZ: ${TZ:-Asia/Shanghai}
     ports:
-      # 仅绑定 127.0.0.1 也足够（WSL2 localhost 转发），如需局域网访问改为 "8888:8888"
-      - "${BIND_ADDR:-0.0.0.0}:8888:8888"
+      # 默认只绑宿主机回环：管理接口没有登录鉴权，绑 0.0.0.0 会把渠道密钥与
+      # 调用日志暴露给整个局域网。需要局域网访问时在 .env 里显式改 BIND_ADDR
+      # 并自行加防火墙 —— 缺省值必须安全，不能反过来。
+      # （容器内 SERVER_HOST 始终是 0.0.0.0，这里限制的是宿主机侧的端口发布）
+      - "${BIND_ADDR:-127.0.0.1}:8888:8888"
     volumes:
       - ./data/relay:/data
     networks: [relay]

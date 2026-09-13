@@ -14,21 +14,6 @@ database:
   sslmode: disable
   timezone: UTC
 
-redis:
-  host: 127.0.0.1
-  port: 6379
-  password: ""
-  db: 0
-  enabled: true
-
-# 模型单价定时同步
-pricing:
-  remote_url: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
-  update_interval_hours: 24
-  official_sync_enabled: true
-  proxy_url: ""
-  sync_on_start: true
-
 relay:
   upstream_timeout: 300s
   first_byte_timeout: 120s
