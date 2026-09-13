@@ -246,6 +246,11 @@ func (s *Server) importConfig(c *gin.Context) {
 		ch := b.Channels[i].Channel
 		// 密文被 json:"-" 挡住过，导入时必须显式写回，否则渠道没有密钥
 		ch.APIKeyEnc = b.Channels[i].APIKeyEnc
+		// 老备份里没有 currency 字段（那时全站按美元口径算），空值落到列默认值
+		// 虽然结果一样，但显式写出来，免得下一个人以为这里漏了一件事
+		if ch.Currency == "" {
+			ch.Currency = model.CurrencyUSD
+		}
 		oldID := ch.ID
 		var exist model.Channel
 		if err := db.Where("name = ?", ch.Name).First(&exist).Error; err == nil {

@@ -100,6 +100,10 @@ type channelPayload struct {
 	GroupID  uint   `json:"group_id"`
 	Protocol string `json:"protocol"`
 	BaseURL  string `json:"base_url"`
+	// Currency 是这条渠道的记账币种（人民币渠道填 CNY）。它决定价格字段的
+	// 单位，也决定这笔调用在日志与看板里算到哪个币种下面；空值按美元处理，
+	// 与数据列的默认值保持一致（见 model.Channel.Currency）
+	Currency string `json:"currency"`
 	APIKey   string `json:"api_key"`
 	Weight   int    `json:"weight"`
 	// ProxyID 走哪个出站代理；0 = 直连。
@@ -271,6 +275,16 @@ func (s *Server) createChannel(c *gin.Context) {
 	if p.Protocol == "" {
 		p.Protocol = model.ProtocolOpenAIChat
 	}
+	currency, ok := model.NormalizeCurrency(p.Currency)
+	if !ok {
+		if strings.TrimSpace(p.Currency) != "" {
+			writeUpstreamError(c, http.StatusBadRequest, "不支持的币种："+p.Currency+"（可选 "+strings.Join(model.SupportedCurrencies, " / ")+"）", "invalid_request_error")
+			return
+		}
+		// 没传币种 = 按历史口径（美元）处理：这里的默认值必须与数据列的
+		// 默认值一致，否则同一个渠道经界面创建和经脚本创建会是两种币种
+		currency = model.CurrencyUSD
+	}
 	if p.Weight <= 0 {
 		p.Weight = 1
 	}
@@ -315,6 +329,7 @@ func (s *Server) createChannel(c *gin.Context) {
 	ch := model.Channel{
 		Name: p.Name, GroupID: p.GroupID,
 		Protocol: p.Protocol, BaseURL: strings.TrimRight(strings.TrimSpace(p.BaseURL), "/"),
+		Currency:  currency,
 		APIKeyEnc: enc, APIKeyHint: secure.MaskKey(p.APIKey),
 		Weight: p.Weight, Enabled: enabled, MonitorType: orDefault(p.Monitor, "none"),
 		Slots: p.Slots, ExtraConfig: p.ExtraConf, CustomMap: p.CustomMap,
@@ -360,6 +375,16 @@ func (s *Server) updateChannel(c *gin.Context) {
 	}
 	if p.Protocol != "" {
 		updates["protocol"] = p.Protocol
+	}
+	if p.Currency != "" {
+		currency, ok := model.NormalizeCurrency(p.Currency)
+		if !ok {
+			writeUpstreamError(c, http.StatusBadRequest, "不支持的币种："+p.Currency+"（可选 "+strings.Join(model.SupportedCurrencies, " / ")+"）", "invalid_request_error")
+			return
+		}
+		// 改币种只影响之后的账：历史日志各自带着当时的币种快照，
+		// 不会因为这次改动被重新解释（也**不会**自动换算已有的价格）
+		updates["currency"] = currency
 	}
 	if p.GroupID != 0 {
 		updates["group_id"] = p.GroupID
@@ -1246,7 +1271,9 @@ func (s *Server) exportLogs(c *gin.Context) {
 	b.WriteString("\ufeff")
 	// 表头文案与界面保持一致（首字耗时 / 总共耗时）：
 	// 同一个数在页面叫一个名字、导出来又叫另一个名字，对不上账时最难查
-	b.WriteString("请求时间,模型,状态,密钥,渠道,输入Token,输出Token,缓存命中,缓存写入,推理Token,首字耗时(ms),总共耗时(ms),费用USD,trace_id\n")
+	// 费用拆成「金额 + 币种」两列：金额离开币种就没意义，
+	// 而现在同一份导出里可能同时有人民币和美元的账
+	b.WriteString("请求时间,模型,状态,密钥,渠道,输入Token,输出Token,缓存命中,缓存写入,推理Token,首字耗时(ms),总共耗时(ms),费用,币种,trace_id\n")
 	for i := range items {
 		r := &items[i]
 		row := []string{
@@ -1254,7 +1281,7 @@ func (s *Server) exportLogs(c *gin.Context) {
 			r.ModelRequested, strconv.Itoa(r.StatusCode), r.APIKeyName, r.ChannelName,
 			strconv.Itoa(r.PromptTokens), strconv.Itoa(r.CompletionTokens),
 			strconv.Itoa(r.CachedTokens), strconv.Itoa(r.CacheCreationTokens), strconv.Itoa(r.ReasoningTokens),
-			strconv.Itoa(r.FirstByteMs), strconv.Itoa(r.TotalMs), r.EstimatedCost.String(), r.TraceID,
+			strconv.Itoa(r.FirstByteMs), strconv.Itoa(r.TotalMs), r.EstimatedCost.String(), r.CostCurrency, r.TraceID,
 		}
 		for j, cell := range row {
 			if j > 0 {

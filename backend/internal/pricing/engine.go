@@ -14,7 +14,7 @@ import (
 	"llm-relay/internal/relay"
 )
 
-// per1M 是单价的计价单位：每 100 万 token 的美元价。
+// per1M 是单价的计价单位：每 100 万 token 的价格（币种跟着渠道走，见 Price.Currency）。
 var per1M = decimal.NewFromInt(1000000)
 
 // Price 是某一时刻对「某渠道的某个模型」生效的单价。
@@ -93,12 +93,15 @@ func scale(price decimal.Decimal, tokens int) decimal.Decimal {
 // 缓存整张 channel_models（几百行）而不是按需查库：计费发生在每次请求结束时，
 // 那时候再查一次库等于给转发链路加一跳。价格改了由调用方 Invalidate。
 type Engine struct {
-	db       *gorm.DB
-	ttl      time.Duration
-	mu       sync.RWMutex
-	cache    map[string]model.ChannelModel
-	loadedAt time.Time
-	lastErr  error
+	db    *gorm.DB
+	ttl   time.Duration
+	mu    sync.RWMutex
+	cache map[string]model.ChannelModel
+	// currencies 是「渠道 ID -> 记账币种」。金额带币种，算价时就要用到它，
+	// 所以和价格一起缓存：每次请求再单查一次 channels 等于给转发链路加一跳
+	currencies map[uint]string
+	loadedAt   time.Time
+	lastErr    error
 }
 
 // cacheKey 拼出缓存键。用 NUL 分隔而不是 ":" 或 "-"：
@@ -112,7 +115,7 @@ func NewEngine(db *gorm.DB, ttl time.Duration) *Engine {
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
-	return &Engine{db: db, ttl: ttl, cache: map[string]model.ChannelModel{}}
+	return &Engine{db: db, ttl: ttl, cache: map[string]model.ChannelModel{}, currencies: map[uint]string{}}
 }
 
 // Invalidate 在定价被修改或同步后强制刷新缓存。
@@ -120,6 +123,25 @@ func (e *Engine) Invalidate() {
 	e.mu.Lock()
 	e.loadedAt = time.Time{}
 	e.mu.Unlock()
+}
+
+// CurrencyOf 返回某个渠道的记账币种。
+//
+// 与 Resolve 分开是因为「这笔账是哪个币种」和「这个模型配没配价」是两件事：
+// 没配价的调用金额是 0，但币种仍要如实记下来，否则同一页日志里会出现
+// 「有的行有币种、有的行空着」，只能靠人猜。
+func (e *Engine) CurrencyOf(ctx context.Context, channelID uint) string {
+	if channelID == 0 {
+		return model.CurrencyUSD
+	}
+	e.refresh(ctx)
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if c := e.currencies[channelID]; c != "" {
+		return c
+	}
+	return model.CurrencyUSD
 }
 
 // Resolve 解析「某个渠道的某个模型」在 at 时刻的单价。
@@ -165,12 +187,22 @@ func (e *Engine) Resolve(ctx context.Context, channelID uint, modelName string, 
 	}
 	dec := decimal.NewFromFloat(m)
 
+	currency := e.currencies[channelID]
+	if currency == "" {
+		// 加列之前的老库或渠道被手工改坏时兜底，不让金额挂到空币种上
+		currency = model.CurrencyUSD
+	}
+
 	return Price{
 		ChannelID: channelID,
 		ModelName: base.PublicName,
-		// 币种恒定美元：原来只有 ModelPricing 带 currency 字段，
-		// 而全站金额都按美元展示，留着那个字段只会让人以为能改
-		Currency:        "USD",
+		// 币种跟着渠道走：人民币渠道配的就是人民币数字。
+		//
+		// 这里曾经写死 USD，理由是「全站金额都按美元展示，留个能改的字段
+		// 只会让人以为能改」—— 那在当时是对的（那时确实只有美元一种口径），
+		// 现在上游有人民币账单，写死就变成了「把人民币数字标成美元」。
+		// 换算仍然不做：币种只用来分别展示、分别统计（见 model/currency.go）。
+		Currency:        currency,
 		InputPer1M:      base.InputPer1M.Mul(dec),
 		OutputPer1M:     base.OutputPer1M.Mul(dec),
 		CacheReadPer1M:  base.CacheReadPer1M.Mul(dec),
@@ -197,6 +229,13 @@ func (e *Engine) refresh(ctx context.Context) {
 	var rows []model.ChannelModel
 	err := e.db.WithContext(ctx).Where("enabled = ?", true).Find(&rows).Error
 
+	// 币种按渠道存，价格按「渠道 x 模型」存，两者在同一次刷新里读回来
+	var chans []struct {
+		ID       uint
+		Currency string
+	}
+	errCurrency := e.db.WithContext(ctx).Model(&model.Channel{}).Select("id, currency").Find(&chans).Error
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	// 双检：并发刷新时以先到者为准
@@ -212,8 +251,21 @@ func (e *Engine) refresh(ctx context.Context) {
 		cache[cacheKey(r.ChannelID, r.PublicName)] = r
 	}
 	e.cache = cache
+	if errCurrency == nil {
+		currencies := make(map[uint]string, len(chans))
+		for _, ch := range chans {
+			currencies[ch.ID] = ch.Currency
+		}
+		e.currencies = currencies
+	} else if err == nil {
+		// 币种读不回来不影响金额本身（金额是价格乘出来的），只是会退回
+		// 默认币种展示；但也不能一声不吭，系统页会显示这个错误
+		e.lastErr = errCurrency
+	}
 	e.loadedAt = time.Now()
-	e.lastErr = nil
+	if err == nil && errCurrency == nil {
+		e.lastErr = nil
+	}
 }
 
 // LastError 返回最近一次加载定价表的错误，供系统页展示。

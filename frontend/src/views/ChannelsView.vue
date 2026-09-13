@@ -18,7 +18,16 @@ import type { Proxy } from '@/api/types'
 import GroupTag from '@/components/GroupTag.vue'
 import ChannelIcon from '@/components/ChannelIcon.vue'
 import { PROTOCOLS, type Channel, type ChannelGroup, type ChannelBinding } from '@/api/types'
+import { symbolOf } from '@/utils/money'
 import { emptyPrice, pickPrice } from '@/components/ModelPricingEditor.vue'
+
+// 记账币种：新增渠道默认人民币 —— 现在接的上游都按人民币开账单。
+// 数据列的默认值是美元（加列之前的历史行本就是美元口径），两者不一致是刻意的：
+// 一个管「老数据怎么读」，一个管「新渠道怎么填」，界面里会显式带着这个值提交。
+const CURRENCY_OPTIONS = [
+  { value: 'CNY', label: '¥ 人民币（CNY）' },
+  { value: 'USD', label: '$ 美元（USD）' }
+]
 
 type ChannelRow = Channel & {
   models?: string[]
@@ -45,6 +54,7 @@ const form = reactive({
   name: '',
   protocol: 'openai-chat',
   base_url: '',
+  currency: 'CNY',
   api_key: '',
   group_id: 0,
   weight: 1,
@@ -109,6 +119,7 @@ function openCreate() {
     name: '',
     protocol: 'openai-chat',
     base_url: '',
+    currency: 'CNY',
     api_key: '',
     group_id: groups.value.find((x) => x.is_default)?.id ?? groups.value[0]?.id ?? 0,
     weight: 1,
@@ -127,6 +138,8 @@ async function openEdit(row: ChannelRow) {
     name: row.name,
     protocol: row.protocol,
     base_url: row.base_url,
+    // 老渠道（加列前建的）读回来是 USD：那正是它们价格数字的口径
+    currency: row.currency || 'USD',
     api_key: '',
     group_id: row.group_id,
     weight: row.weight,
@@ -214,6 +227,8 @@ async function save() {
       name: form.name.trim(),
       protocol: form.protocol,
       base_url: form.base_url.trim(),
+      // 币种总是跟着提交：漏了它，改一次渠道就会把币种打回默认值
+      currency: form.currency,
       group_id: form.group_id,
       weight: form.weight,
       enabled: form.enabled,
@@ -441,7 +456,7 @@ onMounted(load)
         :pagination="false"
         row-key="id"
         size="small"
-        :scroll="{ x: 1230 }"
+        :scroll="{ x: 1316 }"
       >
         <template #emptyText>
           <a-empty description="还没有渠道，点「新建渠道」添加第一个" />
@@ -492,6 +507,12 @@ onMounted(load)
         </a-table-column>
         <a-table-column title="权重" data-index="weight" :width="58" />
         <a-table-column title="密钥" data-index="api_key_hint" :width="105" />
+        <a-table-column title="币种" :width="86">
+          <template #default="{ record }">
+            <!-- 单价的单位就挂在这条渠道上：只看到「0.15」看不出是 ¥ 还是 $ -->
+            {{ symbolOf(record.currency) }}{{ record.currency }}
+          </template>
+        </a-table-column>
         <a-table-column title="状态" :width="78">
           <template #default="{ record }">
             <a-tag :color="healthTag(record).color">{{ healthTag(record).text }}</a-tag>
@@ -527,6 +548,13 @@ onMounted(load)
         </a-form-item>
         <a-form-item label="上游地址" required>
           <a-input v-model:value="form.base_url" placeholder="https://api.example.com 或 https://api.example.com/v1" />
+        </a-form-item>
+        <a-form-item label="记账币种" required>
+          <a-select v-model:value="form.currency" :options="CURRENCY_OPTIONS" style="width: 220px" />
+          <div class="field-hint">
+            这家上游按什么币种给你开账单，就选哪个：下面的单价按它录入，日志与看板也按它统计。
+            不同币种之间<b>不做任何换算、也不相加</b>，所以改了币种之后已填的单价需要自己重填。
+          </div>
         </a-form-item>
         <a-form-item :label="editing ? 'API Key（留空表示不修改）' : 'API Key'">
           <a-input-password v-model:value="form.api_key" placeholder="sk-..." />
@@ -577,7 +605,7 @@ onMounted(load)
         </a-row>
 
         <a-form-item label="模型白名单与映射" required>
-          <ModelWhitelistEditor v-model:items="form.models" :proxies="proxies" />
+          <ModelWhitelistEditor v-model:items="form.models" :proxies="proxies" :currency="form.currency" />
           <div class="field-hint">
             只有写在这里的模型才会被路由到这条渠道。「模型映射」把客户端请求的模型名
             换成上游真正认识的模型名，留空表示同名；需要单独出口的模型可以在「代理」列覆盖渠道设置。
@@ -608,7 +636,7 @@ onMounted(load)
               show-icon
               message="对外名是客户端请求时用的名字；上游名是转发给上游时替换成的名字。客户端写错名字是最常见的 502 原因。"
             />
-            <ModelWhitelistEditor v-model:items="bindItems" :proxies="proxies" />
+            <ModelWhitelistEditor v-model:items="bindItems" :proxies="proxies" :currency="bindChannel?.currency" />
             <a-button type="primary" block :loading="bindSaving" @click="saveBindings">保存白名单</a-button>
           </a-space>
         </a-card>

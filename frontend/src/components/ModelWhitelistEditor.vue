@@ -20,6 +20,7 @@ import { computed, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { PlusOutlined, DeleteOutlined, SnippetsOutlined, DollarOutlined } from '@ant-design/icons-vue'
 import ModelPricingEditor, { emptyPrice, hasPrice, priceSummary } from './ModelPricingEditor.vue'
+import { symbolOf } from '@/utils/money'
 
 // 这是纯展示型编辑器：数据的保存方式由父组件决定 ——
 // 建/改渠道时随渠道一起提交，抽屉里则单独整表提交。
@@ -28,6 +29,8 @@ const props = defineProps<{
   items: WhitelistRow[]
   /** 可选：传了才显示「代理」列。没有代理可选的场景不必多一列空下拉 */
   proxies?: { id: number; name: string; enabled: boolean }[]
+  /** 所属渠道的记账币种（CNY / USD）：单价的单位与摘要都按它显示 */
+  currency?: string
 }>()
 const emit = defineEmits<{ (e: 'update:items', v: WhitelistRow[]): void }>()
 
@@ -132,7 +135,7 @@ function applyBulk() {
       <span class="wl-col-name">对外模型名（客户端请求用）</span>
       <span class="wl-col-up">模型映射（转发时替换成）</span>
       <span v-if="proxies" class="wl-col-proxy">代理</span>
-      <span class="wl-col-price">定价</span>
+      <span class="wl-col-price">{{ currency ? symbolOf(currency) + " " : "" }}定价</span>
       <span class="wl-col-on">启用</span>
       <span class="wl-col-op"></span>
     </div>
@@ -163,7 +166,7 @@ function applyBulk() {
         <a-tooltip :title="hasPrice(row) ? '点击修改这条模型的价格' : '这条模型还没配价，调用会被记成 0 元'">
           <span class="price-pill" :class="{ unset: !hasPrice(row) }" @click="openPrice(index)">
             <DollarOutlined />
-            {{ priceSummary(row) }}
+            {{ priceSummary(row, currency) }}
           </span>
         </a-tooltip>
       </span>
@@ -183,6 +186,7 @@ function applyBulk() {
     </div>
 
     <ModelPricingEditor
+      :currency="currency"
       v-model:open="priceOpen"
       :model-name="priceRow?.public_name || ''"
       :value="priceRow"

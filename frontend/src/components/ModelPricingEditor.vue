@@ -65,11 +65,17 @@ export function hasPrice(p?: PriceConfig | null): boolean {
   return (p.peak_rules || []).length > 0
 }
 
-/** 列表里显示的一行摘要 */
-export function priceSummary(p?: PriceConfig | null): string {
+/**
+ * 列表里显示的一行摘要。
+ *
+ * currency 由调用方（所属渠道）传入：单价的币种是渠道属性，不是价格自己的
+ * 属性 —— 同一条价格换个渠道就是另一种钱，所以这里没有默认符号。
+ */
+export function priceSummary(p?: PriceConfig | null, currency?: string): string {
   if (!hasPrice(p)) return '未定价'
   const q = p as PriceConfig
-  let s = '$' + (q.input_per_1m || '0') + ' / ' + (q.output_per_1m || '0')
+  const sym = symbolOf(currency)
+  let s = sym + (q.input_per_1m || '0') + ' / ' + sym + (q.output_per_1m || '0')
   const rules = q.peak_rules || []
   if (rules.length) {
     s += ' · 时段×' + rules[0].multiplier + (rules.length > 1 ? ' 等' + rules.length + '条' : '')
@@ -82,6 +88,7 @@ export function priceSummary(p?: PriceConfig | null): string {
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { symbolOf } from '@/utils/money'
 import { message } from 'ant-design-vue'
 import { PlusOutlined, DeleteOutlined } from '@ant-design/icons-vue'
 
@@ -89,6 +96,8 @@ const props = defineProps<{
   open: boolean
   modelName: string
   value: PriceConfig | null
+  /** 所属渠道的记账币种：单价的单位按它显示（见 model.Channel.Currency） */
+  currency?: string
 }>()
 const emit = defineEmits<{
   (e: 'update:open', v: boolean): void
@@ -183,7 +192,7 @@ function submit() {
   >
     <a-form layout="vertical">
       <div class="price-grid">
-        <a-form-item label="输入价（每 100 万 token，美元）">
+        <a-form-item :label="'输入价（每 100 万 token，' + (symbolOf(currency) || '原币') + '）'">
           <a-input v-model:value="form.input_per_1m" placeholder="0.15" />
         </a-form-item>
         <a-form-item label="输出价">
@@ -195,6 +204,10 @@ function submit() {
         <a-form-item label="缓存写价">
           <a-input v-model:value="form.cache_write_per_1m" placeholder="0" />
         </a-form-item>
+      </div>
+      <div class="field-hint currency-hint">
+        单价按所属渠道的币种录入：{{ symbolOf(currency) || '原币' }}{{ currency ? '（' + currency + '）' : '' }}。
+        改渠道币种不会自动折算已有单价，需要自己重填。
       </div>
       <a-form-item label="固定倍率（1 = 原价，可以填 0.5 表示打折）">
         <a-input-number
@@ -266,4 +279,5 @@ function submit() {
 }
 .rule-sep { color: var(--color-text-secondary); font-size: 12px; }
 .rule-hint { color: var(--color-text-secondary); font-size: 12px; margin-top: 4px; }
+.currency-hint { margin: -4px 0 12px; color: var(--color-text-secondary); font-size: 12px; line-height: 1.7; }
 </style>

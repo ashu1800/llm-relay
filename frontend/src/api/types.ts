@@ -5,6 +5,8 @@ export interface Channel {
   /** 上游协议：客户端无论用哪种协议，都会按它转成上游格式 */
   protocol: string
   base_url: string
+  /** 记账币种（CNY / USD）：价格按它录入，日志与看板也按它统计 */
+  currency: string
   api_key_hint: string
   weight: number
   /** 走哪个出站代理转发；0 = 直连 */
@@ -146,6 +148,8 @@ export interface RequestLog {
   reasoning_tokens: number
   usage_estimated: boolean
   estimated_cost: string
+  /** 这笔账的币种，随日志一起快照（渠道改币种不会改写历史） */
+  cost_currency: string
   /** 计价快照：命中时刻的单价与倍率，日后改价不会影响历史账目 */
   pricing_snapshot?: Record<string, any> | null
   first_byte_ms: number

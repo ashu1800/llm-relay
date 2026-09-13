@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import {
   ApiOutlined,
   DollarOutlined,
@@ -13,6 +13,8 @@ import PanelCard from '@/components/PanelCard.vue'
 import StatCard from '@/components/StatCard.vue'
 import AnimatedNumber from '@/components/AnimatedNumber.vue'
 import { onLive } from '@/composables/useLive'
+// 金额一律走 utils/money.ts：符号与小数位数只此一份（见那里的说明）
+import { costsText, currencyKeys, moneyText, primaryCurrency, symbolOf } from '@/utils/money'
 import EChart from '@/components/EChart.vue'
 import { useChartTheme } from '@/utils/chartTheme'
 import DataState from '@/components/DataState.vue'
@@ -29,7 +31,12 @@ type Summary = {
   reasoning_tokens: number
   total_tokens: number
   cache_hit_rate: number
-  estimated_cost: string
+  /**
+   * 金额按币种分开：{"CNY":"12.34","USD":"5.67"}。
+   * 不同币种不能相加（人民币和美元之间没有汇率），所以看板只分别统计，
+   * 不做任何折算 —— 见 utils/money.ts
+   */
+  costs: Record<string, string>
   avg_first_byte_ms: number
   avg_total_ms: number
 }
@@ -40,17 +47,17 @@ type SeriesPoint = {
   prompt_tokens: number
   completion_tokens: number
   cached_tokens: number
-  cost: string
+  costs: Record<string, string>
 }
 type GroupItem = {
   name: string
   requests: number
   errors: number
   tokens: number
-  cost: string
+  costs: Record<string, string>
   avg_ms: number
 }
-type HeatItem = { day: string; hour: number; requests: number; cost: string; tokens: number }
+type HeatItem = { day: string; hour: number; requests: number; costs: Record<string, string>; tokens: number }
 
 const summary = ref<Summary | null>(null)
 const series = ref<SeriesPoint[]>([])
@@ -92,11 +99,6 @@ function n(v: number | undefined) {
   return (v ?? 0).toLocaleString('zh-CN')
 }
 
-function money(v: string | undefined) {
-  const x = Number(v ?? 0)
-  if (!x) return '0.0000'
-  return x.toFixed(x < 1 ? 6 : 4)
-}
 
 function fmtBucket(ts: string, bucket: string) {
   const d = new Date(ts)
@@ -147,9 +149,19 @@ async function load() {
 // 对齐参考站：两条都是带圆点标记的平滑曲线（原来请求数画的是柱状），
 // 图例居中在顶部、左右轴各带名称（金额 / 请求），只保留横向虚线网格，
 // 金额在左、请求在右。配色取自参考站的 --color-orange / --color-blue。
+// 趋势里出现过的币种：整段区间取并集，而不是只看某一条点 ——
+// 只看当前点的话，图例会随着数据来回闪。
+const trendCurrencies = computed(() => {
+  const seen: Record<string, string> = {}
+  for (const p of series.value) for (const c of Object.keys(p.costs ?? {})) seen[c] = ''
+  return currencyKeys(seen)
+})
+const trendLegend = computed(() => trendCurrencies.value.map((c) => '消费 ' + symbolOf(c)).concat(['请求数']))
+// 第一条沿用原来的消费色（看板上「钱」一直是这个橙色）
+const TREND_COLORS = ['#f59e0b', '#8b5cf5', '#06b6d4', '#10b37d']
+
 const trendOption = computed(() => {
   const labels = series.value.map((p) => fmtBucket(p.ts, seriesBucket.value))
-  const COST = '#f59e0b'
   const REQ = '#06b6d4'
   // 圆点是空心的：填充用卡片底色、描边用线色
   const lineSeries = (name: string, color: string, data: number[]) => ({
@@ -165,7 +177,7 @@ const trendOption = computed(() => {
   const axisName = { color: ct.value.secondary, fontSize: 11 }
   return {
     tooltip: { trigger: 'axis' },
-    legend: { data: ['消费金额', '请求数'], top: 0, left: 'center', textStyle: { color: ct.value.text } },
+    legend: { data: trendLegend.value, top: 0, left: 'center', textStyle: { color: ct.value.text } },
     grid: { left: 54, right: 56, top: 46, bottom: 28 },
     xAxis: {
       type: 'category',
@@ -195,7 +207,16 @@ const trendOption = computed(() => {
       }
     ],
     series: [
-      lineSeries('消费金额', COST, series.value.map((p) => Number(p.cost))),
+      // 每个币种单独一条线，名称里带符号。刻意**不**给第二个币种开第二根 Y 轴：
+      // 两根轴会让「谁更高」变成由画法决定，而不是由数据决定；
+      // 同一条轴上至少各自的趋势读得对。
+      ...trendCurrencies.value.map((c, i) =>
+        lineSeries(
+          '消费 ' + symbolOf(c),
+          TREND_COLORS[i % TREND_COLORS.length],
+          series.value.map((p) => Number(p.costs?.[c] ?? 0))
+        )
+      ),
       { ...lineSeries('请求数', REQ, series.value.map((p) => p.requests)), yAxisIndex: 1 }
     ]
   }
@@ -226,7 +247,18 @@ const TOKEN_PARTS: { name: string; color: string; pick: (s: Summary | null) => n
 // 实时推送的数值：金额与成功率不是整数，滚动组件用 format 预设走不同的格式化。
 // 用 computed 而不是直接传字符串：滚动需要的是**数字**，
 // 传 "12.3%" 过去它没法补间
-const costValue = computed(() => (summary.value ? Number(summary.value.estimated_cost) : null))
+// 金额：主币种给大数字，其余币种并排写在提示里。
+// 之所以不做「合计」：SUM 只在同一币种内成立，把人民币和美元加起来会得到一个
+// 既不是人民币也不是美元的数，而且账面上看不出任何异常。
+const costCurrencies = computed(() => currencyKeys(summary.value?.costs))
+const costCur = computed(() => primaryCurrency(summary.value?.costs))
+const costValue = computed(() => (summary.value ? Number(summary.value.costs?.[costCur.value] ?? 0) : null))
+const costHint = computed(() => {
+  const rest = costCurrencies.value.filter((c) => c !== costCur.value)
+  if (!rest.length) return '按渠道币种计，不折算'
+  const text = rest.map((c) => moneyText(summary.value?.costs?.[c], c)).join(' / ')
+  return '另有 ' + text
+})
 const rateValue = computed(() => (summary.value ? summary.value.success_rate * 100 : null))
 
 const compositionOption = computed(() => {
@@ -315,17 +347,35 @@ const modelBarOption = computed(() => {
 })
 
 // ---- 模型消耗占比：按费用 ----
+// 占比必须限定在一种币种内：跨币种的「占比」分母是两种钱的和，没有意义。
+// 只有一种币种时切换器整个不显示，页面与以前完全一样。
+const pieCurrencies = computed(() => {
+  const seen: Record<string, string> = {}
+  for (const x of byModel.value) for (const c of Object.keys(x.costs ?? {})) seen[c] = ''
+  return currencyKeys(seen)
+})
+const pieCurrency = ref('')
+watch(
+  pieCurrencies,
+  (list) => {
+    // 选中的币种消失了（换时间范围）就回到第一个，不留一个空图
+    if (!list.includes(pieCurrency.value)) pieCurrency.value = list[0] ?? ''
+  },
+  { immediate: true }
+)
+const pieCur = computed(() => pieCurrency.value || pieCurrencies.value[0] || '')
+
 const modelPieOption = computed(() => {
   const data = byModel.value
     .map((x) => ({
       name: x.name,
-      value: Number(x.cost),
+      value: Number(x.costs?.[pieCur.value] ?? 0),
       itemStyle: { color: modelColors.value.get(x.name) || '#c87864' }
     }))
     .filter((x) => x.value > 0)
   return {
     color: PALETTE,
-    tooltip: { trigger: 'item', valueFormatter: (v: number) => '$' + v.toFixed(6) },
+    tooltip: { trigger: 'item', valueFormatter: (v: number) => moneyText(v, pieCur.value) },
     legend: { type: 'scroll', bottom: 0, icon: 'circle', textStyle: { fontSize: 12, color: ct.value.text } },
     series: [
       {
@@ -397,8 +447,11 @@ const heatGrid = computed(() => {
 // 与参考站一致。用「整块网格共用一个提示框 + 事件委托」，而不是给 168 个格子
 // 各挂一个气泡 —— 格子自带 data-key，提示框按被指格子的位置定位。
 const heatTip = ref({
-  show: false, x: 0, y: 0, day: '', hour: 0, requests: 0, cost: '0', tokens: 0
+  show: false, x: 0, y: 0, day: '', hour: 0, requests: 0, costs: {} as Record<string, string>, tokens: 0
 })
+// 一格里可能有两种币种的账（同一小时里既有人民币渠道又有美元渠道），
+// 提示框逐币种列出来，不合成一个数
+const heatTipCosts = computed(() => costsText(heatTip.value.costs))
 
 const heatLookup = computed(() => {
   const m = new Map<string, HeatItem>()
@@ -423,7 +476,7 @@ function onHeatOver(e: MouseEvent) {
     day,
     hour: Number(hour),
     requests: it?.requests ?? 0,
-    cost: it?.cost ?? '0',
+    costs: it?.costs ?? {},
     tokens: it?.tokens ?? 0
   }
 }
@@ -485,9 +538,16 @@ onMounted(load)
           </template>
           <template #icon><ApiOutlined /></template>
         </StatCard>
-        <StatCard label="消耗金额" :value="'$' + money(summary?.estimated_cost)" tone="orange" hint="按录入单价折算">
+        <!-- 大数字是主币种，其余币种写在提示里。不同币种不能相加，
+             所以这张卡永远不会出现「合计」 -->
+        <StatCard
+          label="消耗金额"
+          :value="moneyText(summary?.costs?.[costCur], costCur)"
+          tone="orange"
+          :hint="costHint"
+        >
           <template #value>
-            <AnimatedNumber :value="costValue" format="money" />
+            <AnimatedNumber :value="costValue" format="money" :currency="costCur" />
           </template>
           <template #icon><DollarOutlined /></template>
         </StatCard>
@@ -543,7 +603,7 @@ onMounted(load)
           >
             <div class="heat-tip-time">{{ heatTip.day }} {{ heatTip.hour }}:00</div>
             <div>{{ heatTip.requests }} 次请求</div>
-            <div>消费 ${{ money(heatTip.cost) }}</div>
+            <div v-if="heatTipCosts">消费 {{ heatTipCosts }}</div>
             <div>词元 {{ n(heatTip.tokens) }}</div>
           </div>
         </div>
@@ -562,6 +622,13 @@ onMounted(load)
         <EChart :option="modelBarOption" height="260px" />
       </PanelCard>
       <PanelCard title="模型消耗占比">
+        <template #extra>
+          <!-- 占比不能跨币种相加，所以这里限定一种币种；只有一种时不显示 -->
+          <a-radio-group v-if="pieCurrencies.length > 1" v-model:value="pieCurrency" size="small">
+            <a-radio-button v-for="c in pieCurrencies" :key="c" :value="c">{{ symbolOf(c) }} {{ c }}</a-radio-button>
+          </a-radio-group>
+          <span v-else class="panel-note">{{ pieCur ? symbolOf(pieCur) + ' ' + pieCur : '' }}</span>
+        </template>
         <EChart :option="modelPieOption" height="260px" />
       </PanelCard>
     </section>

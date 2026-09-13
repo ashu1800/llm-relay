@@ -74,6 +74,14 @@ type Channel struct {
 	APIKeyEnc  string `gorm:"size:2048" json:"-"`
 	APIKeyHint string `gorm:"size:32" json:"api_key_hint"`
 	Weight     int    `gorm:"not null;default:1" json:"weight"`
+	// Currency 是这家上游给用户开账单用的币种（见 model.NormalizeCurrency）。
+	// 价格、日志金额、看板金额都按它计量 —— 同一个模型名在人民币渠道与
+	// 美元渠道上本来就是两笔不同的钱，不能合成一个数。
+	//
+	// default:USD 是给已有数据兜底：加这一列之前，全站金额都按美元口径
+	// 录入与展示，老行保持 USD 才是它们本来的语义；新渠道用什么币种由
+	// 用户在渠道表单里显式选择。
+	Currency string `gorm:"size:8;not null;default:USD" json:"currency"`
 	// ProxyID 指定这个渠道走哪个出站代理（见 model.Proxy）；0 表示直连。
 	// 用 0 而不是 NULL：零值就等于默认行为，能少一层判空；带 default 的列在
 	// 已有数据上加列也安全（非空且无默认值时 AutoMigrate 会直接失败）
@@ -121,7 +129,8 @@ type ChannelModel struct {
 	// 同一个模型名在不同渠道的成本本来就不一样（官网直连 vs 中转站），
 	// 全局一份价只能取其一，用户还得自己在脑子里记住哪条渠道该按哪个价算。
 	//
-	// 单位是每 100 万 token 的美元价，与官网口径一致。
+	// 单位是每 100 万 token 的价格，**币种由所属渠道的 Currency 决定**
+	// （人民币渠道就填人民币数字），日志与看板都按它显示。
 	// 四个单价全为 0 表示「这个模型还没配价」，界面上会点名提醒 ——
 	// 缺价的直接后果是这笔调用被记成 0 元，而账面上完全看不出异常。
 	InputPer1M      decimal.Decimal `gorm:"column:input_per1_m;type:numeric(18,8);default:0" json:"input_per_1m"`
@@ -233,8 +242,13 @@ type RequestLog struct {
 	ReasoningTokens     int  `json:"reasoning_tokens"`
 	UsageEstimated      bool `json:"usage_estimated"`
 
-	EstimatedCost   decimal.Decimal `gorm:"type:numeric(18,8);default:0" json:"estimated_cost"`
-	PricingSnapshot JSONMap         `gorm:"type:jsonb" json:"pricing_snapshot"`
+	EstimatedCost decimal.Decimal `gorm:"type:numeric(18,8);default:0" json:"estimated_cost"`
+	// CostCurrency 是这笔账的币种：取下发请求时那条渠道的 Currency，随日志
+	// 一起快照下来。**不能靠 join channels 现查** —— 渠道换个币种，历史账目
+	// 就被整体改写了（与 PricingSnapshot 是同一个道理）。
+	// default:USD 同上：加列之前的历史行都是按美元口径算出来的。
+	CostCurrency    string  `gorm:"size:8;not null;default:USD" json:"cost_currency"`
+	PricingSnapshot JSONMap `gorm:"type:jsonb" json:"pricing_snapshot"`
 
 	FirstByteMs int       `json:"first_byte_ms"`
 	TotalMs     int       `json:"total_ms"`

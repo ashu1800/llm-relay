@@ -27,6 +27,9 @@ func (s *Server) finalizeLog(req *relay.RelayRequest, res *relay.RelayResult, us
 		// 必须用**服务器本地时间**：时段倍率（如工作日 9:00-12:00 双倍）
 		// 是按用户看到的钟点填的，传 UTC 会让窗口整体偏 8 小时
 		at := time.Now()
+		// 币种与「配没配价」无关，先按渠道记下来：没配价的调用金额是 0，
+		// 但它仍然属于某条渠道的账，币种留空只能靠人猜
+		entry.CostCurrency = s.deps.Pricing.CurrencyOf(context.Background(), entry.ChannelID)
 		if p, ok := s.deps.Pricing.Resolve(context.Background(), entry.ChannelID, entry.ModelRequested, at); ok {
 			entry.EstimatedCost = p.Cost(usage)
 			entry.PricingSnapshot = p.Snapshot(at)

@@ -8,6 +8,7 @@
 // 数字内容不是可插值的 CSS 属性，只能用 JS 逐帧算。
 // 时长 0.5s：比参考站的 0.3s 稍长，24px 的大字号下太快会看着像闪烁。
 import { computed, onUnmounted, ref, watch } from 'vue'
+import { amountText, symbolOf } from '@/utils/money'
 
 const props = withDefaults(
   defineProps<{
@@ -21,6 +22,8 @@ const props = withDefaults(
      * 分散在各页面里迟早会对不上（金额的小数位数尤其容易各写各的）
      */
     format?: 'int' | 'money' | 'percent' | ((v: number) => string)
+    /** 金额币种：只影响符号（¥ / $），不做任何换算 */
+    currency?: string
   }>(),
   { duration: 500 }
 )
@@ -39,10 +42,10 @@ function applyFormat(v: number) {
   if (typeof f === 'function') return f(v)
   switch (f) {
     case 'money':
-      // 与看板原生的 money() 同口径：金额通常远小于 1，
-      // 固定 4 位会全变成 0.0000
-      if (!v) return '0.0000'
-      return '$' + v.toFixed(v < 1 ? 6 : 4)
+      // 数额口径统一在 utils/money.ts：金额通常远小于 1，
+      // 固定 4 位会全变成 0.0000。符号跟着币种走 ——
+      // 库里存的是按渠道币种的原始金额，这里不做折算
+      return symbolOf(props.currency) + amountText(v)
     case 'percent':
       return v.toFixed(1) + '%'
     default:

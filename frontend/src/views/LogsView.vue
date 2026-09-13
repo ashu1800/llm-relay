@@ -6,6 +6,7 @@ import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import GroupTag from '@/components/GroupTag.vue'
 import { onLive } from '@/composables/useLive'
+import { symbolOf } from '@/utils/money'
 import type { ChannelGroup, Paged, RequestLog } from '@/api/types'
 
 // 分组表：日志里的模型、密钥、分组三处标签共用该请求所属分组的颜色。
@@ -223,9 +224,11 @@ function fmtTokens(v: number | null | undefined) {
   return (Math.floor(v / 10) / 100).toFixed(2) + 'K'
 }
 
-function fmtCost(v: string) {
+// 费用：符号取这条日志自己的币种快照（渠道后来改了币种也不影响历史行），
+// 不做任何换算 —— 人民币渠道的钱就是人民币
+function fmtCost(v: string, currency?: string) {
   const n = Number(v)
-  return n > 0 ? '$' + n.toFixed(6) : '-'
+  return n > 0 ? symbolOf(currency) + n.toFixed(6) : '-'
 }
 
 // 费用为什么是这么多：把当时生效的倍率摊在金额旁边。
@@ -252,7 +255,10 @@ function multiplierSourceText(row: RequestLog) {
   // 不判断的话界面上会出现「输入 $undefined」
   if (s.input_per_1m == null && s.input == null) return ''
   const parts: string[] = []
-  parts.push('输入 $' + (s.input_per_1m ?? s.input) + ' / 输出 $' + (s.output_per_1m ?? s.output) + ' 每 1M')
+  // 单价符号取快照里的币种：日志里存的单价与金额必须是同一个口径，
+  // 否则这一行会和上面的费用对不上（¥ 的金额配 $ 的单价）
+  const sym = symbolOf(s.currency)
+  parts.push('输入 ' + sym + (s.input_per_1m ?? s.input) + ' / 输出 ' + sym + (s.output_per_1m ?? s.output) + ' 每 1M')
   if (Number(s.fixed_multiplier) && Number(s.fixed_multiplier) !== 1) {
     parts.push('固定倍率 ×' + s.fixed_multiplier)
   }
@@ -469,7 +475,7 @@ onMounted(() => {
           </template>
         </a-table-column>
         <a-table-column title="费用" :width="100">
-          <template #default="{ record }">{{ fmtCost(record.estimated_cost) }}</template>
+          <template #default="{ record }">{{ fmtCost(record.estimated_cost, record.cost_currency) }}</template>
         </a-table-column>
         <a-table-column title="操作" :width="72" fixed="right">
           <template #default="{ record }">
@@ -513,7 +519,7 @@ onMounted(() => {
           总共 {{ fmtMs(current.total_ms) }}
         </a-descriptions-item>
         <a-descriptions-item label="费用">
-          ${{ Number(current.estimated_cost).toFixed(8) }}
+          {{ symbolOf(current.cost_currency) }}{{ Number(current.estimated_cost).toFixed(8) }}
           <a-tag v-if="current.usage_estimated" color="orange" style="margin-left: 6px">用量为估算值</a-tag>
           <!-- 金额为什么是这个数：把当时生效的倍率与来源摊开，省得去猜 -->
           <a-tag v-if="costMultiplierTag(current).peak" color="orange" style="margin-left: 6px">
