@@ -1,6 +1,7 @@
 package model
 
 import (
+	"sync"
 	"testing"
 
 	"gorm.io/gorm/schema"
@@ -41,5 +42,32 @@ func TestPricingColumnDiffersFromJSONName(t *testing.T) {
 	}
 	if ColPricingInputPer1M == "input_per_1m" {
 		t.Error("常量不应等于 json 名，否则说明写错了")
+	}
+}
+
+// 价格列的**类型**也必须被 GORM 正确解析出来。
+//
+// 防的是另一个真实踩过的坑：CacheWritePer1M 的 gorm tag 把 `type:` 写成了 `type=`，
+// 而 GORM 的 tag 解析只认冒号 —— 那个字段于是没有类型，退回按 Go 类型推断：
+// decimal.Decimal 的 Value() 返回 string，列就被建成 text。
+//
+// 这类错误不会立刻炸：GORM 把 text 读进 decimal 照样能读，计费看起来一切正常。
+// 但任何拿这一列和 0 比较的原生 SQL 都会报「operator does not exist: text <> integer」——
+// 也就是 GET /api/admin/settings 直接 500、旧备份导入时按该列过滤的 WHERE 整句失败，
+// 备份里的价格一条都恢复不了。
+func TestPricingColumnTypesAreParsed(t *testing.T) {
+	s, err := schema.Parse(&ChannelModel{}, &sync.Map{}, schema.NamingStrategy{})
+	if err != nil {
+		t.Fatalf("解析 ChannelModel 失败: %v", err)
+	}
+	for _, name := range []string{"InputPer1M", "OutputPer1M", "CacheReadPer1M", "CacheWritePer1M"} {
+		field := s.LookUpField(name)
+		if field == nil {
+			t.Fatalf("找不到字段 %s", name)
+		}
+		if field.DataType != "numeric(18,8)" {
+			t.Errorf("%s 的类型被解析成 %q，期望 numeric(18,8)：tag 里要写 type:（冒号），"+
+				"写成 type= 时 GORM 读不到，会按 Go 类型推断成 text", name, field.DataType)
+		}
 	}
 }

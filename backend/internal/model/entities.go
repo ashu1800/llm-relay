@@ -127,7 +127,7 @@ type ChannelModel struct {
 	InputPer1M      decimal.Decimal `gorm:"column:input_per1_m;type:numeric(18,8);default:0" json:"input_per_1m"`
 	OutputPer1M     decimal.Decimal `gorm:"column:output_per1_m;type:numeric(18,8);default:0" json:"output_per_1m"`
 	CacheReadPer1M  decimal.Decimal `gorm:"column:cache_read_per1_m;type:numeric(18,8);default:0" json:"cache_read_per_1m"`
-	CacheWritePer1M decimal.Decimal `gorm:"column:cache_write_per1_m;type=numeric(18,8);default:0" json:"cache_write_per_1m"`
+	CacheWritePer1M decimal.Decimal `gorm:"column:cache_write_per1_m;type:numeric(18,8);default:0" json:"cache_write_per_1m"`
 	// Multiplier 是固定倍率（1 = 原价）。0 表示没配，由代码归一到 1 ——
 	// 与 ModelPricing 当年同一个坑：加了列默认值会让 0 由数据库静默改写，
 	// 「填了 0.5 却按 1 算」这种问题在界面上看不出来

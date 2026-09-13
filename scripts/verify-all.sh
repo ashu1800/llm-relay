@@ -52,7 +52,9 @@ for s in test-group-update.py test-key-whitelist.py test-delete-semantics.py \
   echo
 done
 # bash 用例：没有统一的通过标志，按「没有 HAS_FAILURE」判定
-# test-legacy-column-add.sh 会删列并重启应用（约 10 秒不可用），放在最后跑
+# 依赖 mock 上游的用例自己会拉起它（test-pricing-rules.sh → slow-upstream，
+# test-cost.sh → proto-upstream），所以上面那次网络重建不会让它们变 502。
+# test-legacy-column-add.sh 会删价格列并跑 install.sh 重新部署（几分钟不可用），放在最后跑
 for s in test-model-whitelist.sh test-upstream-protocol.sh test-upstream-gemini.sh test-pricing.sh test-pricing-rules.sh test-pricing-backup.sh test-pricing-filter.sh \
          test-group-quota.sh test-proxies.sh test-egress-proxy.sh test-live.sh test-purge-scope.sh test-cost.sh test-legacy-column-add.sh; do
   echo "########## $s ##########"

@@ -32,6 +32,10 @@ WHERE=$(cat <<'SQL'
     'csrf-ok-probe','wl-probe-key','key'
   )
   OR starts_with(model_requested, 'wl-probe-')
+  -- 定价套件（test-pricing*.sh / test-cost.sh）建的模型名一律 __ 前缀：
+  -- 跑到一半被打断时，日志由这里兜底清掉。starts_with 是字面匹配，
+  -- 不会像 LIKE '__%' 那样把真实模型名一起命中
+  OR starts_with(model_requested, '__')
   OR model_requested IN (
     'pricing-rule-model','proto-chat-model','proto-gemini-model','proto-gemini-error',
     'group-enabled-test',
