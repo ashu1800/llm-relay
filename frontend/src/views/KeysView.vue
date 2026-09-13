@@ -133,6 +133,21 @@ async function copyRowKey(record: APIKey) {
   else message.warning('复制失败，请在悬浮提示里手动选择复制')
 }
 
+// 客户端该填的调用地址 —— 中转端点和这个后台同进程、同端口（见后端 Register 里的
+// /v1 与 /v1beta 路由分组），所以它就是当前访问的这个源加上 /v1。
+//
+// 不写死 127.0.0.1:8888：端口可能改过，也可能从别的机器用 IP 打开这个后台，
+// 写死的地址复制走就是错的。带 /v1 是因为它要填进各家客户端的 Base URL 输入框，
+// 客户端会把 /chat/completions 接在它后面。
+const baseUrl = window.location.origin + '/v1'
+
+async function copyBaseUrl() {
+  // 与复制密钥共用 writeClipboard：http 下 clipboard API 不可用、
+  // 以及 writeText 被挂起等授权这两种情况它都处理过了
+  if (await writeClipboard(baseUrl)) message.success('已复制 BaseURL')
+  else message.warning('复制失败，请手动选择复制')
+}
+
 async function loadGroups() {
   try {
     const res = await api.get<{ items: ChannelGroup[] }>('/groups')
@@ -330,6 +345,15 @@ onMounted(() => {
           <a-button type="primary" @click="openCreate"><PlusOutlined /> 新建密钥</a-button>
           <a-button :loading="loading" @click="load"><ReloadOutlined /> 刷新</a-button>
         </div>
+        <!-- 客户端该填的地址放在这里：建完密钥紧接着就是把它填进客户端，
+             而这一页原来只在列密钥，地址得去别处找 -->
+        <a-tooltip title="点击复制这个地址">
+          <span class="baseurl-pill" @click="copyBaseUrl">
+            <span class="baseurl-label">BaseURL</span>
+            <span class="baseurl-text">{{ baseUrl }}</span>
+            <CopyOutlined class="baseurl-copy" />
+          </span>
+        </a-tooltip>
         <div class="toolbar-spacer" />
         <span class="toolbar-hint">共 {{ rows.length }} 个密钥</span>
       </div>
@@ -478,6 +502,34 @@ onMounted(() => {
 .toolbar-left { display: flex; gap: var(--gap); }
 .toolbar-spacer { flex: 1; }
 .toolbar-hint { color: var(--color-text-secondary); font-size: 13px; }
+/* BaseURL 胶囊：与密钥胶囊同一套视觉语言，但走中性色 —— 它只是陈列一条
+   可以复制走的地址，用主色会和旁边的「新建密钥」抢注意力 */
+.baseurl-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 340px;
+  padding: 3px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-bg);
+  font-size: 12px;
+  line-height: 20px;
+  cursor: pointer;
+  transition: border-color 0.2s ease;
+}
+.baseurl-pill:hover { border-color: var(--color-primary); }
+.baseurl-label { flex: none; color: var(--color-text-secondary); }
+/* 地址是代码类内容，等宽便于逐段核对；太长时省略号收尾，不撑破工具栏 */
+.baseurl-text {
+  font-family: var(--font-family-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.baseurl-copy { flex: none; opacity: 0.55; transition: opacity 0.2s ease; }
+.baseurl-pill:hover .baseurl-copy { opacity: 1; color: var(--color-primary); }
 .muted { color: var(--color-text-secondary); }
 /* 密钥胶囊：与分组胶囊同一套视觉语言（浅底 + 圆角 + 同色文字），
    但用等宽字体 —— 密钥是代码类内容，逐字符比对时等宽好读得多 */
