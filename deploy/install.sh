@@ -322,6 +322,9 @@ fi
 echo "------------------------------------------------------------"
 echo " 访问地址   : http://localhost:$PORT"
 ENV_BIND="$(grep -E '^BIND_ADDR=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+# 容错手编 .env：去引号与空白/CRLF（compose 解析时同样剥掉这些）
+ENV_BIND="${ENV_BIND//[\"\']/}"
+ENV_BIND="${ENV_BIND//[[:space:]]/}"
 ENV_BIND="${ENV_BIND:-127.0.0.1}"
 if [[ -n "$WSL_IP" && "$ENV_BIND" != "127.0.0.1" && "$ENV_BIND" != "localhost" ]]; then
   echo " 局域网地址 : http://$WSL_IP:$PORT"

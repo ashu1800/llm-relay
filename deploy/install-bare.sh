@@ -74,13 +74,13 @@ GO_BIN="$(command -v go || true)"
 GO_OK=0
 if [ -n "$GO_BIN" ]; then
   GOVER="$("$GO_BIN" version | sed -E 's/.*go([0-9]+)\.([0-9]+).*/\1\2/')"
-  [ "$GOVER" -ge 124 ] 2>/dev/null && GO_OK=1
+  [ "$GOVER" -ge 125 ] 2>/dev/null && GO_OK=1
 fi
 if [ "$GO_OK" != "1" ]; then
-  log "安装 Go 1.24（系统版本缺失或过旧）"
-  GOVERSION="1.24.6"
+  log "安装 Go 1.25（系统版本缺失或过旧）"
+  GOVERSION="1.25.3"
   curl -fsSL "https://golang.google.cn/dl/go${GOVERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz \
-    || die "Go 下载失败，请检查网络或手动安装 Go >= 1.24"
+    || die "Go 下载失败，请检查网络或手动安装 Go >= 1.25"
   rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz && rm -f /tmp/go.tgz
   export PATH="/usr/local/go/bin:$PATH"
 fi
