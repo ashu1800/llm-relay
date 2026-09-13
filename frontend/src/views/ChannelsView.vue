@@ -8,7 +8,9 @@ import {
   EditOutlined,
   LinkOutlined,
   ThunderboltOutlined,
-  CloudDownloadOutlined
+  CloudDownloadOutlined,
+  CheckCircleOutlined,
+  StopOutlined
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
@@ -353,6 +355,23 @@ async function testChannel(row: ChannelRow) {
   }
 }
 
+// 启用 / 禁用渠道：与编辑弹窗里那个开关是同一个字段，只是把最常用的一个动作
+// 提到列表上 —— 上游出问题时要做的第一件事就是先把这条渠道摘出去，
+// 而原来得进编辑弹窗、拨开关、再保存三步。
+//
+// 不弹二次确认：这是可逆的一键操作（再点一下就回来了），与密钥列表的启用/停用
+// 保持一致；真正不可逆的删除才需要确认。
+async function toggleChannel(row: ChannelRow) {
+  const next = !row.enabled
+  try {
+    await api.put('/channels/' + row.id, { enabled: next })
+    message.success(next ? '已启用' : '已禁用，不再路由到这条渠道')
+    await load()
+  } catch (e: any) {
+    message.error(e.message)
+  }
+}
+
 async function openBindings(row: ChannelRow) {
   bindChannel.value = row
   bindOpen.value = true
@@ -456,7 +475,7 @@ onMounted(load)
         :pagination="false"
         row-key="id"
         size="small"
-        :scroll="{ x: 1316 }"
+        :scroll="{ x: 1211 }"
       >
         <template #emptyText>
           <a-empty description="还没有渠道，点「新建渠道」添加第一个" />
@@ -506,7 +525,7 @@ onMounted(load)
           </template>
         </a-table-column>
         <a-table-column title="权重" data-index="weight" :width="58" />
-        <a-table-column title="密钥" data-index="api_key_hint" :width="105" />
+
         <a-table-column title="币种" :width="86">
           <template #default="{ record }">
             <!-- 单价的单位就挂在这条渠道上：只看到「0.15」看不出是 ¥ 还是 $ -->
@@ -518,7 +537,7 @@ onMounted(load)
             <a-tag :color="healthTag(record).color">{{ healthTag(record).text }}</a-tag>
           </template>
         </a-table-column>
-        <a-table-column title="操作" :width="230" fixed="right">
+        <a-table-column title="操作" :width="292" fixed="right">
           <template #default="{ record }">
             <a-space>
               <a :class="{ disabled: testingId === record.id }" @click="testChannel(record)">
@@ -527,6 +546,11 @@ onMounted(load)
               </a>
               <a @click="openBindings(record)"><LinkOutlined /> 模型</a>
               <a @click="openEdit(record)"><EditOutlined /> 编辑</a>
+              <a @click="toggleChannel(record)">
+                <CheckCircleOutlined v-if="!record.enabled" />
+                <StopOutlined v-else />
+                {{ record.enabled ? '禁用' : '启用' }}
+              </a>
               <a class="danger-link" @click="confirmDelete(record)"><DeleteOutlined /> 删除</a>
             </a-space>
           </template>
