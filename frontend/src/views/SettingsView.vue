@@ -249,8 +249,8 @@ onMounted(load)
       <div class="panel-title">关于报文留存</div>
       <div class="note">
         当前模式为 <span class="mono">{{ runtime.payload_storage_mode }}</span>。
-        留存的请求与响应原文会写入 <span class="mono">request_payloads</span> 表，
-        在「请求日志」页点开单条记录即可查看；凭据类请求头（Authorization、各类 api-key）
+        留存的请求与响应原文会写入 <span class="mono">request_payloads</span> 表
+        （界面不再展示，需要直接查询数据库）；凭据类请求头（Authorization、各类 api-key）
         一律以 <span class="mono">[已隐藏]</span> 落库，不会明文保存。
         超过 <span class="mono">{{ runtime.payload_max_kb }}</span> KB 的报文会被截断并标注。
         想保留全部调用可设为 <span class="mono">all</span>，只留出错调用设为

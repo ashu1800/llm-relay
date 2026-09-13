@@ -41,14 +41,6 @@ const rows = ref<RequestLog[]>([])
 const total = ref(0)
 const detailOpen = ref(false)
 const current = ref<RequestLog | null>(null)
-interface LogPayload {
-  request_body?: string
-  response_body?: string
-  request_headers?: Record<string, string>
-  response_headers?: Record<string, string>
-}
-const payload = ref<LogPayload | null>(null)
-
 
 const query = reactive({
   page: 1,
@@ -152,36 +144,11 @@ function search() {
   load()
 }
 
-// 结构化报文格式化后展示；SSE 流不是合法 JSON，原样返回
-function pretty(s?: string) {
-  if (!s) return '（空）'
-  const t = s.trim()
-  if (!t.startsWith('{') && !t.startsWith('[')) return s
-  try {
-    return JSON.stringify(JSON.parse(t), null, 2)
-  } catch {
-    return s
-  }
-}
-
-function prettyHeaders(h?: Record<string, string>) {
-  if (!h) return '（无）'
-  return Object.entries(h)
-    .map(([k, v]) => k + ': ' + v)
-    .sort()
-    .join('\n')
-}
-
-async function openDetail(row: RequestLog) {
+// 详情直接用列表行数据：列表接口返回的字段已经完整，
+// 报文相关展示移除后，也不必再为它请求 /logs/:id。
+function openDetail(row: RequestLog) {
   current.value = row
-  payload.value = null
   detailOpen.value = true
-  try {
-    const res = await api.get<{ log: RequestLog; payload: any }>('/logs/' + row.id)
-    payload.value = res.payload || null
-  } catch {
-    // 报文未留存时静默处理，不影响查看基础信息
-  }
 }
 
 // 耗时分级：5 秒内绿色、6-15 秒橙黄、15 秒以上红色。
@@ -563,28 +530,6 @@ onMounted(() => {
         </a-descriptions-item>
       </a-descriptions>
 
-      <template v-if="payload">
-        <h4 class="section-title">请求报文</h4>
-        <pre class="code-box">{{ pretty(payload.request_body) }}</pre>
-        <h4 class="section-title">响应报文</h4>
-        <pre class="code-box">{{ pretty(payload.response_body) }}</pre>
-        <a-collapse ghost class="hdr-collapse">
-          <a-collapse-panel key="req" header="请求头（凭据字段已隐藏）">
-            <pre class="code-box small">{{ prettyHeaders(payload.request_headers) }}</pre>
-          </a-collapse-panel>
-          <a-collapse-panel key="resp" header="响应头">
-            <pre class="code-box small">{{ prettyHeaders(payload.response_headers) }}</pre>
-          </a-collapse-panel>
-        </a-collapse>
-      </template>
-      <a-alert
-        v-else
-        type="info"
-        show-icon
-        class="no-payload"
-        message="本次调用未留存报文"
-        description="留存模式为 errors 时只保留出错的调用。想查看全部调用，把部署配置里的 RELAY_PAYLOAD_STORAGE_MODE 改为 all 后重新部署即可。"
-      />
     </a-drawer>
   </div>
 </template>
@@ -643,10 +588,10 @@ onMounted(() => {
 
 /* 缓存命中率用缓存那段的颜色，与词元列第三个数是同一个语义 */
 .cache-hit { color: var(--token-cache); font-variant-numeric: tabular-nums; }
-.section-title { margin: 16px 0 8px; font-size: 14px; }
-.code-box, .err-box {
+/* 错误原文：详情里唯一保留的代码块（排障时最常看的就是上游报错） */
+.err-box {
   font-family: var(--font-family-mono);
-  max-height: 320px;
+  max-height: 160px;
   overflow: auto;
   padding: 8px;
   font-size: 12px;
@@ -656,11 +601,6 @@ onMounted(() => {
   background: var(--color-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-control);
+  color: var(--color-red);
 }
-.err-box { color: var(--color-red); max-height: 160px; }
-.code-box.small { max-height: 200px; font-size: 11px; }
-.hdr-collapse { margin-top: 12px; border-top: 1px solid var(--color-border); }
-.hdr-collapse :deep(.ant-collapse-header) { padding-left: 0; font-size: 13px; }
-.hdr-collapse :deep(.ant-collapse-content-box) { padding: 0 0 8px; }
-.no-payload { margin-top: 16px; }
 </style>
