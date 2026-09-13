@@ -241,7 +241,7 @@ async function save() {
       await load()
     } else {
       const res = await api.post<{ key: string }>('/keys', { ...body, enabled: form.enabled })
-      // 明文只返回一次，留在弹窗里等用户复制
+      // 明文留在弹窗里方便立刻复制走（列表里也随时能看，见 ensureKey）
       createdKey.value = res.key
       await load()
     }
@@ -315,7 +315,7 @@ onMounted(() => {
       >
       <a-table :data-source="rows" :loading="loading" :pagination="false" row-key="id" size="small" :scroll="{ x: 1170 }">
         <template #emptyText>
-          <a-empty description="还没有密钥，点「新建密钥」创建第一个；明文只在创建时显示一次" />
+          <a-empty description="还没有密钥，点「新建密钥」创建第一个" />
         </template>
         <a-table-column title="名称" data-index="name" :width="150" />
         <a-table-column title="密钥" :width="170">
@@ -422,7 +422,7 @@ onMounted(() => {
         type="success"
         show-icon
         message="密钥创建成功"
-        description="明文仅展示这一次，请立即复制保存。"
+        description="密钥已保存。以后随时能在列表里悬停查看、点击复制，这里也可以直接复制走。"
         style="margin-top: 8px"
       />
       <div v-if="createdKey" class="key-box">

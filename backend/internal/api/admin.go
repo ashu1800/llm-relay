@@ -940,7 +940,8 @@ type keyPayload struct {
 	RateLimitRPM *int `json:"rate_limit_rpm"`
 }
 
-// createKey 只在创建时返回一次明文，之后只保留哈希与掩码。
+// createKey 创建密钥。明文随响应返回一份（方便立刻复制走），
+// 同时加密存一份供日后查看 —— 见 model.APIKey 里关于「为什么不只存哈希」的说明。
 func (s *Server) createKey(c *gin.Context) {
 	var p keyPayload
 	if err := c.ShouldBindJSON(&p); err != nil {
@@ -977,7 +978,7 @@ func (s *Server) createKey(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"id": k.ID, "name": k.Name, "key": plain,
-		"notice": "请立即保存，明文不会再次展示",
+		"notice": "密钥已保存，之后可在列表里随时查看或复制",
 	})
 }
 
