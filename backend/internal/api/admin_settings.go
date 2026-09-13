@@ -74,7 +74,6 @@ func (s *Server) getSettings(c *gin.Context) {
 			"payload_max_kb":         cfg.Relay.PayloadMaxKB,
 			"max_concurrency":        cfg.Relay.MaxConcurrency,
 			"default_rpm":            cfg.Relay.DefaultRPM,
-			"redis_enabled":          cfg.Redis.Enabled,
 			"database_ok":            dbVersion != "",
 			"database_version":       dbVersion,
 		},
@@ -95,37 +94,17 @@ func (s *Server) cleanupData(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, "未配置日志保留天数，已跳过清理", "invalid_request_error")
 		return
 	}
-	cutoff := time.Now().AddDate(0, 0, -days)
-	db := s.deps.Store.DB()
-
-	// 报文表按 log_id 关联，先删报文再删日志，避免留下孤儿行
-	var deletedPayloads int64
-	if res := db.Exec(`DELETE FROM request_payloads WHERE log_id IN
-		(SELECT id FROM request_logs WHERE created_at < ?)`, cutoff); res.Error != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, res.Error.Error(), "internal_error")
-		return
-	} else {
-		deletedPayloads = res.RowsAffected
-	}
-
-	// 历史遗留的孤儿报文（对应日志已被删）一并清掉
-	var orphans int64
-	db.Raw("SELECT COUNT(*) FROM request_payloads WHERE log_id NOT IN (SELECT id FROM request_logs)").Scan(&orphans)
-	if orphans > 0 {
-		db.Exec("DELETE FROM request_payloads WHERE log_id NOT IN (SELECT id FROM request_logs)")
-	}
-
-	res := db.Exec("DELETE FROM request_logs WHERE created_at < ?", cutoff)
-	if res.Error != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, res.Error.Error(), "internal_error")
+	out, err := s.runCleanup(days)
+	if err != nil {
+		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"deleted_logs":     res.RowsAffected,
-		"deleted_payloads": deletedPayloads,
-		"deleted_orphans":  orphans,
+		"deleted_logs":     out.DeletedLogs,
+		"deleted_payloads": out.DeletedPayloads,
+		"deleted_orphans":  out.DeletedOrphans,
 		"retention_days":   days,
-		"cutoff":           cutoff.Format(time.RFC3339),
+		"cutoff":           time.Now().AddDate(0, 0, -days).Format(time.RFC3339),
 	})
 }

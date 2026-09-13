@@ -3,6 +3,7 @@ package api
 import (
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -40,11 +41,21 @@ type Deps struct {
 type Server struct {
 	deps      *Deps
 	startedAt time.Time
+	// keys 是密钥的进程内缓存（转发热路径不再每请求查库）；
+	// lastTouch 记录各密钥最近一次 last_used_at 落库时间，用于写库节流
+	keys      *keyCache
+	touchMu   sync.Mutex
+	lastTouch map[uint]time.Time
 }
 
 // New 构造 HTTP 层。
 func New(deps *Deps) *Server {
-	return &Server{deps: deps, startedAt: time.Now()}
+	return &Server{
+		deps:      deps,
+		startedAt: time.Now(),
+		keys:      newKeyCache(),
+		lastTouch: map[uint]time.Time{},
+	}
 }
 
 // Register 挂载全部路由。

@@ -155,7 +155,8 @@ func (s *Server) statsTimeseries(c *gin.Context) {
 		bucket = "hour"
 	}
 
-	sql := `SELECT date_trunc('` + bucket + `', created_at) AS bucket,
+	tz := localTZ()
+	sql := `SELECT date_trunc(?, created_at AT TIME ZONE ?) AT TIME ZONE ? AS bucket,
 		COUNT(*)::bigint AS requests,
 		COUNT(*) FILTER (WHERE status_code >= 400)::bigint AS errors,
 		COALESCE(SUM(prompt_tokens),0)::bigint AS prompt_tokens,
@@ -166,7 +167,7 @@ func (s *Server) statsTimeseries(c *gin.Context) {
 	GROUP BY bucket ORDER BY bucket`
 
 	var rows []seriesRow
-	if err := s.deps.Store.DB().Raw(sql, start, end).Scan(&rows).Error; err != nil {
+	if err := s.deps.Store.DB().Raw(sql, bucket, tz, tz, start, end).Scan(&rows).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
@@ -174,7 +175,7 @@ func (s *Server) statsTimeseries(c *gin.Context) {
 	items := make([]gin.H, 0, len(rows))
 	for _, r := range rows {
 		items = append(items, gin.H{
-			"ts":                r.Bucket.UTC().Format(time.RFC3339),
+			"ts":                r.Bucket.Local().Format(time.RFC3339),
 			"requests":          r.Requests,
 			"errors":            r.Errors,
 			"prompt_tokens":     r.PromptTokens,

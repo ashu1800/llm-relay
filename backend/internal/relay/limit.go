@@ -79,12 +79,18 @@ func (l *RateLimiter) Allow(key uint, limit int, now time.Time) (bool, time.Dura
 	w.advance(nowSec)
 
 	if w.total() >= limit {
-		// 最早的那一秒滑出窗口后就能再放行，据此给出等待时间
-		oldest := (w.lastSec + 1) % 60
-		wait := time.Duration(60-(nowSec%60)) * time.Second
-		_ = oldest
+		// 等待时间按「最早一个仍有计数的那一秒」算：它滑出 60 秒窗口的那一刻
+		// 就有一个名额放出来。不能按墙钟分钟边界（60-nowSec%60）估 ——
+		// 那与窗口起点无关，可能告诉客户端 Retry-After: 1s 而实际要等 59s。
+		wait := time.Duration(0)
+		for back := 59; back >= 1; back-- {
+			if w.counts[(nowSec-int64(back))%60] > 0 {
+				wait = time.Duration(60-back) * time.Second
+				break
+			}
+		}
 		if wait <= 0 {
-			wait = time.Second
+			wait = time.Second // 理论上到不了这里（total>0 必有非零桶），兜底
 		}
 		return false, wait
 	}
@@ -105,6 +111,26 @@ func (l *RateLimiter) Sweep(now time.Time) {
 			delete(l.windows, k)
 		}
 	}
+}
+
+// StartSweeper 周期性执行 Sweep。窗口本身没有任何到期回收机制，
+// 不挂这个循环的话 map 会随密钥数量只增不减（删掉的密钥也留着）。
+func (l *RateLimiter) StartSweeper(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 10 * time.Minute
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				l.Sweep(time.Now())
+			}
+		}
+	}()
 }
 
 // ============================ Retry-After ============================
@@ -151,11 +177,14 @@ type ChannelState struct {
 	until    map[uint]time.Time
 	inflight map[uint]int
 	rejected int64
+	// latency 是各渠道最近成功响应的首包延迟（EWMA，毫秒），
+	// 供 least_latency 策略排序。只记成功：失败渠道该被冷却，而不是参与比快。
+	latency map[uint]float64
 }
 
 // NewChannelState 构造渠道状态表。
 func NewChannelState() *ChannelState {
-	return &ChannelState{until: map[uint]time.Time{}, inflight: map[uint]int{}}
+	return &ChannelState{until: map[uint]time.Time{}, inflight: map[uint]int{}, latency: map[uint]float64{}}
 }
 
 // Cooldown 把渠道摘掉一段时间。已存在的更长冷却不会被缩短。
@@ -236,6 +265,32 @@ func (s *ChannelState) Acquire(id uint, max int) bool {
 	}
 	s.inflight[id]++
 	return true
+}
+
+// RecordLatency 记录一次成功响应的首包延迟（毫秒），EWMA 平滑。
+// alpha 取 0.3：既跟得上变化，又不至于被单次抖动带偏。
+func (s *ChannelState) RecordLatency(id uint, ms int) {
+	if s == nil || id == 0 || ms <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	const alpha = 0.3
+	if prev, ok := s.latency[id]; ok && prev > 0 {
+		s.latency[id] = prev*(1-alpha) + float64(ms)*alpha
+	} else {
+		s.latency[id] = float64(ms)
+	}
+}
+
+// Latency 返回该渠道的平滑首包延迟；没有观测值时返回 0。
+func (s *ChannelState) Latency(id uint) float64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.latency[id]
 }
 
 // Inflight 返回该渠道当前占用的在途名额数。

@@ -24,7 +24,7 @@ func TestForwarderRefusesToFallBackToDirect(t *testing.T) {
 	}))
 	defer up.Close()
 
-	f := NewForwarder(5 * time.Second)
+	f := NewForwarder(5*time.Second, 0)
 	f.SetProxyResolver(func(id uint) (proxy.Config, error) {
 		// 解析不出来 = 代理不存在、被停用，或密码解不开
 		return proxy.Config{}, errors.New("不存在")

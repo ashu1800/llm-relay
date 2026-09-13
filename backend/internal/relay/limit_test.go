@@ -282,3 +282,26 @@ func TestConcurrencyGate(t *testing.T) {
 		t.Fatalf("在途数应为 0，实际 %d", g.Inflight())
 	}
 }
+
+// 被限流时给出的等待时间应等于「最早那次占用滑出窗口」的剩余时间，
+// 而不是墙钟分钟边界 —— 两者在窗口中途可相差数十秒，
+// 客户端拿到的 Retry-After 会严重失真。
+func TestRateLimiterWaitMatchesWindow(t *testing.T) {
+	rl := NewRateLimiter()
+	// 选在某分钟的中间（第 50 秒），避免与分钟边界重合掩盖差异
+	base := time.Unix(1700000030, 0)
+	if base.Unix()%60 != 50 {
+		t.Fatalf("基准秒应落在分钟中段，实际 %d", base.Unix()%60)
+	}
+	if ok, _ := rl.Allow(1, 1, base); !ok {
+		t.Fatal("首次应放行")
+	}
+	ok, wait := rl.Allow(1, 1, base.Add(2*time.Second))
+	if ok {
+		t.Fatal("额度 1 时第二次应拒绝")
+	}
+	// 名额在 base+60s 滑出窗口；现在是 base+2s，还应等 58 秒
+	if wait != 58*time.Second {
+		t.Fatalf("等待时间应为 58s（按窗口起点算），实际 %v", wait)
+	}
+}

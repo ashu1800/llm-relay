@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -97,14 +98,23 @@ func (s *Server) requireAPIKey() gin.HandlerFunc {
 			return
 		}
 
-		var key model.APIKey
-		err := s.deps.Store.DB().
-			Where("key_hash = ? AND enabled = ?", secure.HashKey(raw), true).
-			First(&key).Error
-		if err != nil {
-			profile.writeError(c, http.StatusUnauthorized, "API Key 无效或已禁用", "invalid_request_error")
-			c.Abort()
-			return
+		// 热路径上每个请求都查一次库太浪费：密钥极少变动，进程内短缓存即可。
+		// 代价是「停用的密钥最多还能用 keyCacheTTL 这么久」，个人自用可接受；
+		// 新建/更新/删除密钥时会整表失效（见 invalidateKeyCache）。
+		hash := secure.HashKey(raw)
+		key, cached := s.keys.get(hash)
+		if !cached {
+			var k model.APIKey
+			err := s.deps.Store.DB().
+				Where("key_hash = ? AND enabled = ?", hash, true).
+				First(&k).Error
+			if err != nil {
+				profile.writeError(c, http.StatusUnauthorized, "API Key 无效或已禁用", "invalid_request_error")
+				c.Abort()
+				return
+			}
+			s.keys.put(hash, k)
+			key = k
 		}
 
 		// 密钥级限流：先看该密钥自己的额度，没配就用全局默认值。
@@ -143,7 +153,18 @@ func extractBearer(header string) string {
 }
 
 // touchAPIKey 异步刷新最后使用时间，失败不影响请求。
+// 同一把密钥一分钟内只写一次：last_used_at 只是给人看的参考时间，
+// 高频调用下每个请求都写库纯属浪费。
 func (s *Server) touchAPIKey(id uint) {
+	now := time.Now()
+	s.touchMu.Lock()
+	if last, ok := s.lastTouch[id]; ok && now.Sub(last) < time.Minute {
+		s.touchMu.Unlock()
+		return
+	}
+	s.lastTouch[id] = now
+	s.touchMu.Unlock()
+
 	go func() {
 		_ = s.deps.Store.DB().Model(&model.APIKey{}).
 			Where("id = ?", id).
@@ -159,3 +180,55 @@ func apiKeyFromContext(c *gin.Context) *model.APIKey {
 	}
 	return nil
 }
+
+// ============================ 密钥进程内缓存 ============================
+
+// keyCacheTTL 是密钥缓存的存活期。取「足够短，停用密钥后很快失效」与
+// 「足够长，扛住转发热路径」之间的折中。
+const keyCacheTTL = 15 * time.Second
+
+// keyCache 按密钥哈希缓存整行，避免每个转发请求都查一次数据库。
+type keyCache struct {
+	mu      sync.Mutex
+	entries map[string]keyCacheEntry
+}
+
+type keyCacheEntry struct {
+	key model.APIKey
+	at  time.Time
+}
+
+func newKeyCache() *keyCache { return &keyCache{entries: map[string]keyCacheEntry{}} }
+
+func (c *keyCache) get(hash string) (model.APIKey, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[hash]
+	if !ok || time.Since(e.at) > keyCacheTTL {
+		return model.APIKey{}, false
+	}
+	return e.key, true
+}
+
+func (c *keyCache) put(hash string, k model.APIKey) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	// 顺带清掉过期项，map 不随时间无限增长
+	for h, e := range c.entries {
+		if now.Sub(e.at) > keyCacheTTL {
+			delete(c.entries, h)
+		}
+	}
+	c.entries[hash] = keyCacheEntry{key: k, at: now}
+}
+
+// invalidate 整表失效。密钥的任何写操作后调用，宁可多查一次库也不要留旧配置。
+func (c *keyCache) invalidate() {
+	c.mu.Lock()
+	c.entries = map[string]keyCacheEntry{}
+	c.mu.Unlock()
+}
+
+// invalidateKeyCache 供密钥管理接口在写操作后调用。
+func (s *Server) invalidateKeyCache() { s.keys.invalidate() }

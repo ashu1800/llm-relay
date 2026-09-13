@@ -76,10 +76,12 @@ func run() error {
 	// 这样「选定渠道」和「转发出去」看到的是同一份事实。
 	state := relay.NewChannelState()
 	router := relay.NewRouter(st.DB(), cipher)
+	router.SetLogger(logger)
 	router.SetChannelState(state)
 	svc := relay.NewService(st.DB(), router, relay.Options{
 		MaxRetries:        cfg.Relay.MaxRetries,
-		UpstreamTimeout:   cfg.Relay.FirstByteTimeout,
+		FirstByteTimeout:  cfg.Relay.FirstByteTimeout,
+		UpstreamTimeout:   cfg.Relay.UpstreamTimeout,
 		InjectStreamUsage: true,
 	}, logger)
 	svc.SetChannelState(state)
@@ -151,6 +153,10 @@ func run() error {
 
 	// 推送循环跟着进程生命周期走：退出时 ctx 结束，两个 goroutine 自行收尾
 	srv.StartLive(ctx)
+
+	// 密钥限流窗口的定期回收 + 日志保留期的自动清理，都跟着进程生命周期走
+	rateLimiter.StartSweeper(ctx, 10*time.Minute)
+	srv.StartRetentionLoop(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {

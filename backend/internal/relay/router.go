@@ -3,6 +3,8 @@ package relay
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"math"
 	"math/rand"
 	"sort"
 	"strings"
@@ -44,6 +46,8 @@ func (c Candidate) EgressProxyID() uint {
 type Router struct {
 	db     *gorm.DB
 	cipher *secure.Cipher
+	// logger 用于记录「渠道密钥解不开被剔除」这类需要人看见的异常
+	logger *slog.Logger
 
 	mu       sync.Mutex
 	rrCursor map[uint]int // 分组 ID -> 轮询游标
@@ -55,9 +59,16 @@ type Router struct {
 // SetChannelState 注入渠道运行期状态，用于冷却过滤与并发饱和判定。
 func (r *Router) SetChannelState(st *ChannelState) { r.state = st }
 
-// NewRouter 构造路由器。
+// SetLogger 覆盖默认日志器，传 nil 不生效。
+func (r *Router) SetLogger(l *slog.Logger) {
+	if l != nil {
+		r.logger = l
+	}
+}
+
+// NewRouter 构造路由器。logger 默认 slog.Default()，main 里可换成全局那一份。
 func NewRouter(db *gorm.DB, cipher *secure.Cipher) *Router {
-	return &Router{db: db, cipher: cipher, rrCursor: make(map[uint]int)}
+	return &Router{db: db, cipher: cipher, logger: slog.Default(), rrCursor: make(map[uint]int)}
 }
 
 // CandidateQuery 是一次候选渠道查询的条件。
@@ -116,7 +127,9 @@ func (r *Router) Candidates(ctx context.Context, q CandidateQuery) ([]Candidate,
 		excluded[id] = true
 	}
 
-	now := time.Now().UTC()
+	// 本地时区：可用时段是用户按自己钟点填的，与定价时段规则同一口径；
+	// 用 UTC 判断会让窗口整体偏移（Asia/Shanghai 下偏 8 小时）。
+	now := time.Now()
 	cands := make([]Candidate, 0, len(rows))
 	for _, rw := range rows {
 		if excluded[rw.ID] {
@@ -135,9 +148,16 @@ func (r *Router) Candidates(ctx context.Context, q CandidateQuery) ([]Candidate,
 			GroupRPM:  rw.GroupRPM,
 			GroupTPM:  rw.GroupTPM,
 		}
-		if plain, err := r.cipher.Decrypt(rw.APIKeyEnc); err == nil {
-			c.APIKeyPlain = plain
+		plain, err := r.cipher.Decrypt(rw.APIKeyEnc)
+		if err != nil {
+			// 密文解不开（换过主密钥、数据损坏）还放行的话，请求会带着空密钥
+			// 发给上游、以 401 收场 —— 用户会去查上游，而问题其实在本地。
+			// 剔出本轮候选并留下日志；APIKeyEnc 为空的免密渠道不受影响。
+			r.logger.Warn("渠道密钥解密失败，已从候选中剔除",
+				"channel_id", rw.ID, "channel", rw.Name, "err", err)
+			continue
 		}
+		c.APIKeyPlain = plain
 		cands = append(cands, c)
 	}
 
@@ -182,7 +202,17 @@ func sortCandidates(cands []Candidate, strategy string, r *Router) {
 	case model.StrategyRoundRobin:
 		rotate(cands)
 	case model.StrategyLeastLatency:
-		sort.SliceStable(cands, func(i, j int) bool { return cands[i].Channel.ID < cands[j].Channel.ID })
+		// 按最近成功响应的首包延迟（EWMA，见 ChannelState.RecordLatency）升序。
+		// 没有观测值的渠道排最后但不出局 —— 否则新渠道永远得不到第一次机会。
+		lat := func(id uint) float64 {
+			if v := r.state.Latency(id); v > 0 {
+				return v
+			}
+			return math.Inf(1)
+		}
+		sort.SliceStable(cands, func(i, j int) bool {
+			return lat(cands[i].Channel.ID) < lat(cands[j].Channel.ID)
+		})
 	case model.StrategyFailover:
 		sort.SliceStable(cands, func(i, j int) bool { return cands[i].Channel.ID < cands[j].Channel.ID })
 	default: // weighted
@@ -239,6 +269,7 @@ func rotate(cands []Candidate) {
 
 // SlotAvailable 判断当前时刻是否落在渠道声明的可用时段内。
 // slots 为空表示全天可用。时段支持跨午夜（结束时间早于开始时间）。
+// 时刻按服务器本地时区判断（与定价时段规则同一口径）。
 func SlotAvailable(slots model.JSONList, now time.Time) bool {
 	if len(slots) == 0 {
 		return true

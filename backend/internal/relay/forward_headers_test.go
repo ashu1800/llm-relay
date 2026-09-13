@@ -25,7 +25,7 @@ func TestForwarderHeadersByProtocol(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	fwd := NewForwarder(5e9)
+	fwd := NewForwarder(5e9, 0)
 	inbound := http.Header{}
 	inbound.Set("Content-Type", "application/json")
 	inbound.Set("anthropic-beta", "prompt-caching-2024-07-31")

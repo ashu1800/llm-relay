@@ -18,7 +18,11 @@ import (
 
 // Options 控制转发行为，避免让 relay 包依赖全局配置。
 type Options struct {
-	MaxRetries        int
+	MaxRetries int
+	// FirstByteTimeout 只约束「等待上游响应头」这一段；流式正文不受它限制。
+	FirstByteTimeout time.Duration
+	// UpstreamTimeout 是非流式调用的总时长上限（连接 + 响应头 + 响应体），
+	// 防止上游返回响应头之后挂住正文、把请求无限期拖住。0 表示不设上限。
 	UpstreamTimeout   time.Duration
 	InjectStreamUsage bool
 }
@@ -75,7 +79,7 @@ func NewService(db *gorm.DB, router *Router, opts Options, logger *slog.Logger) 
 	}
 	return &Service{
 		router: router,
-		fwd:    NewForwarder(opts.UpstreamTimeout),
+		fwd:    NewForwarder(opts.FirstByteTimeout, opts.UpstreamTimeout),
 		db:     db,
 		opts:   opts,
 		logger: logger,
@@ -307,6 +311,10 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 		// 名额**不在这里释放**：流式响应此刻只拿到了响应头，正文还在从上游读，
 		// 调用方转发结束后会调 res.ReleaseSlot()。
 		s.markChannelSuccess(cand.Channel.ID)
+		// 首包延迟喂给 least_latency 策略：只记成功响应，失败渠道该被冷却而不是比快
+		if s.state != nil {
+			s.state.RecordLatency(cand.Channel.ID, attempt.HeaderMs)
+		}
 		res.Attempt = attempt
 		res.Candidate = cand
 		res.Retries = attemptNo

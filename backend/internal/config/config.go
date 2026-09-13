@@ -14,7 +14,6 @@ import (
 type Config struct {
 	Server   ServerConfig   `yaml:"server"`
 	Database DatabaseConfig `yaml:"database"`
-	Redis    RedisConfig    `yaml:"redis"`
 	Relay    RelayConfig    `yaml:"relay"`
 	Security SecurityConfig `yaml:"security"`
 	Log      LogConfig      `yaml:"log"`
@@ -55,16 +54,6 @@ func (d DatabaseConfig) DSN() string {
 		d.Host, d.Port, d.User, d.Password, d.DBName, d.SSLMode, tz)
 }
 
-type RedisConfig struct {
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	Password string `yaml:"password"`
-	DB       int    `yaml:"db"`
-	Enabled  bool   `yaml:"enabled"`
-}
-
-func (r RedisConfig) Addr() string { return fmt.Sprintf("%s:%d", r.Host, r.Port) }
-
 type RelayConfig struct {
 	UpstreamTimeout    time.Duration `yaml:"upstream_timeout"`
 	FirstByteTimeout   time.Duration `yaml:"first_byte_timeout"`
@@ -90,7 +79,6 @@ func Default() *Config {
 			Host: "127.0.0.1", Port: 5432, User: "llmrelay",
 			Password: "", DBName: "llm_relay", SSLMode: "disable", TimeZone: "UTC",
 		},
-		Redis:    RedisConfig{Host: "127.0.0.1", Port: 6379, DB: 0, Enabled: true},
 		Security: SecurityConfig{Secret: "llm-relay-dev-secret-change-me"},
 		Relay: RelayConfig{
 			UpstreamTimeout:    300 * time.Second,
@@ -141,12 +129,6 @@ func applyEnv(c *Config) {
 	setStr(&c.Database.Password, "DB_PASSWORD")
 	setStr(&c.Database.DBName, "DB_NAME")
 	setStr(&c.Database.SSLMode, "DB_SSLMODE")
-
-	setStr(&c.Redis.Host, "REDIS_HOST")
-	setInt(&c.Redis.Port, "REDIS_PORT")
-	setStr(&c.Redis.Password, "REDIS_PASSWORD")
-	setInt(&c.Redis.DB, "REDIS_DB")
-	setBool(&c.Redis.Enabled, "REDIS_ENABLED")
 
 	setInt(&c.Relay.MaxRetries, "RELAY_MAX_RETRIES")
 	setStr(&c.Relay.PayloadStorageMode, "RELAY_PAYLOAD_STORAGE_MODE")

@@ -43,7 +43,9 @@ type ProxyResolver func(id uint) (proxy.Config, error)
 // 每个代理一个 client 也顺带保住了各自的连接池。
 type Forwarder struct {
 	headerTimeout time.Duration
-	base          *http.Client
+	// bodyTimeout 是非流式调用的总时长上限；流式请求不受它约束
+	bodyTimeout time.Duration
+	base        *http.Client
 
 	mu      sync.Mutex
 	proxied map[uint]*http.Client
@@ -52,10 +54,12 @@ type Forwarder struct {
 	resolve    ProxyResolver
 }
 
-// NewForwarder 构造转发器。timeout 只约束「等待响应头」，不限制流式响应体时长。
-func NewForwarder(headerTimeout time.Duration) *Forwarder {
+// NewForwarder 构造转发器。headerTimeout 只约束「等待响应头」；
+// bodyTimeout 给非流式调用兜一个总时长上限，0 表示不设。流式正文两者都不限制。
+func NewForwarder(headerTimeout, bodyTimeout time.Duration) *Forwarder {
 	return &Forwarder{
 		headerTimeout: headerTimeout,
+		bodyTimeout:   bodyTimeout,
 		base:          BuildClient(headerTimeout),
 		proxied:       make(map[uint]*http.Client),
 		proxiedCfg:    make(map[uint]proxy.Config),
@@ -163,6 +167,16 @@ func (f *Forwarder) Do(
 	injectUsage bool,
 ) (*Attempt, error) {
 	att := &Attempt{StartedAt: time.Now()}
+
+	// 非流式请求给整次调用一个总时长上限：headerTimeout 只覆盖到响应头，
+	// 之后正文挂起的话请求会被无限拖住（客户端不断开就一直挂着）。
+	// 流式请求不能加 —— 长流的正文时长没有合理上限，ctx 一断流就死了。
+	// 依据入站 body 里的 stream 标记判断（站内通用语始终带这个字段）。
+	if f.bodyTimeout > 0 && !ExtractStream(inboundBody) {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, f.bodyTimeout)
+		defer cancel()
+	}
 
 	body, err := RewriteModel(inboundBody, cand.Binding.UpstreamName, injectUsage)
 	if err != nil {

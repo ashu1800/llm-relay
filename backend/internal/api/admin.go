@@ -944,6 +944,7 @@ func (s *Server) updateGroup(c *gin.Context) {
 		writeUpdateError(c, err)
 		return
 	}
+	s.invalidateKeyCache()
 	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates)})
 }
 
@@ -1041,6 +1042,7 @@ func (s *Server) createKey(c *gin.Context) {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
+	s.invalidateKeyCache()
 	c.JSON(http.StatusOK, gin.H{
 		"id": k.ID, "name": k.Name, "key": plain,
 		"notice": "密钥已保存，之后可在列表里随时查看或复制",
@@ -1084,6 +1086,7 @@ func (s *Server) updateKey(c *gin.Context) {
 		writeUpdateError(c, err)
 		return
 	}
+	s.invalidateKeyCache()
 	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates)})
 }
 
@@ -1092,7 +1095,9 @@ func (s *Server) deleteKey(c *gin.Context) {
 	if !ok {
 		return
 	}
-	deleteByID(c, s.deps.Store.DB(), &model.APIKey{}, id, "密钥不存在")
+	if deleteByID(c, s.deps.Store.DB(), &model.APIKey{}, id, "密钥不存在") {
+		s.invalidateKeyCache()
+	}
 }
 
 // ============================ 日志 ============================
@@ -1109,8 +1114,14 @@ func registerLogRoutes(g *gin.RouterGroup, s *Server) {
 //
 // 单拎出来是为了让列表与导出用同一套条件：两边各写一遍迟早会不一致，
 // 而「导出的和看到的不一样」是排查问题时最误导人的情况。
-func (s *Server) logFilters(c *gin.Context) *gorm.DB {
+// 第二个返回值为 false 表示参数非法（已写过 400 响应），调用方应立即返回；
+// 数字型参数不校验直接进 SQL，非法值会在数据库层报错、客户端拿到 500。
+func (s *Server) logFilters(c *gin.Context) (*gorm.DB, bool) {
 	q := s.deps.Store.DB().Model(&model.RequestLog{})
+	bad := func(name, val string) (*gorm.DB, bool) {
+		writeUpstreamError(c, http.StatusBadRequest, "参数 "+name+" 非法: "+val, "invalid_request_error")
+		return nil, false
+	}
 
 	if m := strings.TrimSpace(c.Query("model")); m != "" {
 		q = q.Where("model_requested = ?", m)
@@ -1122,7 +1133,11 @@ func (s *Server) logFilters(c *gin.Context) *gorm.DB {
 	// 状态码：既支持精确值，也支持按类别看
 	// （「只看失败的」是排查时最常用的，而精确匹配单个状态码做不到）
 	if st := strings.TrimSpace(c.Query("status")); st != "" {
-		q = q.Where("status_code = ?", st)
+		n, err := strconv.Atoi(st)
+		if err != nil || n < 100 || n > 599 {
+			return bad("status", st)
+		}
+		q = q.Where("status_code = ?", n)
 	}
 	switch c.Query("status_class") {
 	case "success":
@@ -1131,22 +1146,34 @@ func (s *Server) logFilters(c *gin.Context) *gorm.DB {
 		q = q.Where("status_code >= 400")
 	}
 	if cid := strings.TrimSpace(c.Query("channel_id")); cid != "" {
-		q = q.Where("channel_id = ?", cid)
+		v, err := strconv.ParseUint(cid, 10, 64)
+		if err != nil || v == 0 {
+			return bad("channel_id", cid)
+		}
+		q = q.Where("channel_id = ?", v)
 	}
 	if kid := strings.TrimSpace(c.Query("key_id")); kid != "" {
-		q = q.Where("api_key_id = ?", kid)
+		v, err := strconv.ParseUint(kid, 10, 64)
+		if err != nil || v == 0 {
+			return bad("key_id", kid)
+		}
+		q = q.Where("api_key_id = ?", v)
 	}
 	if since := c.Query("since"); since != "" {
-		if t, err := time.Parse(time.RFC3339, since); err == nil {
-			q = q.Where("created_at >= ?", t)
+		t, err := time.Parse(time.RFC3339, since)
+		if err != nil {
+			return bad("since", since)
 		}
+		q = q.Where("created_at >= ?", t)
 	}
 	if until := c.Query("until"); until != "" {
-		if t, err := time.Parse(time.RFC3339, until); err == nil {
-			q = q.Where("created_at <= ?", t)
+		t, err := time.Parse(time.RFC3339, until)
+		if err != nil {
+			return bad("until", until)
 		}
+		q = q.Where("created_at <= ?", t)
 	}
-	return q
+	return q, true
 }
 
 func (s *Server) listLogs(c *gin.Context) {
@@ -1159,7 +1186,10 @@ func (s *Server) listLogs(c *gin.Context) {
 		size = 50
 	}
 
-	q := s.logFilters(c)
+	q, ok := s.logFilters(c)
+	if !ok {
+		return
+	}
 
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
@@ -1184,8 +1214,12 @@ const maxExportRows = 20000
 // 这种「看起来成功、实际只有一小部分」是最难发现的一类问题。
 // 导出必须在服务端按同一套筛选条件做全量，并把实际条数写进响应头。
 func (s *Server) exportLogs(c *gin.Context) {
+	filters, ok := s.logFilters(c)
+	if !ok {
+		return
+	}
 	var total int64
-	if err := s.logFilters(c).Count(&total).Error; err != nil {
+	if err := filters.Count(&total).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
@@ -1195,7 +1229,7 @@ func (s *Server) exportLogs(c *gin.Context) {
 	}
 
 	var items []model.RequestLog
-	if err := s.logFilters(c).Order("id DESC").Limit(int(exported)).Find(&items).Error; err != nil {
+	if err := filters.Order("id DESC").Limit(int(exported)).Find(&items).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
