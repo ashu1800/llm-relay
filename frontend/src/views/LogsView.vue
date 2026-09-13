@@ -214,6 +214,15 @@ function fmtMs(v: number) {
   return v >= 1000 ? (v / 1000).toFixed(2) + 's' : v + 'ms'
 }
 
+// 词元超过 1K 后改用 K 显示：列宽有限，4457 这种原始数字扫一眼读不出量级。
+// 与 fmtMs 同一档阈值（>=1000），但这里按两位小数截断而不是四舍五入 ——
+// 4.457K 显示 4.45K，避免展示值比真实用量大。
+function fmtTokens(v: number | null | undefined) {
+  if (v == null || !Number.isFinite(v)) return '-'
+  if (v < 1000) return String(v)
+  return (Math.floor(v / 10) / 100).toFixed(2) + 'K'
+}
+
 function fmtCost(v: string) {
   const n = Number(v)
   return n > 0 ? '$' + n.toFixed(6) : '-'
@@ -440,11 +449,11 @@ onMounted(() => {
         <a-table-column title="词元（输入/输出/缓存）" :width="180">
           <template #default="{ record }">
             <span class="token-cell">
-              <span class="tk tk-in">{{ record.prompt_tokens }}</span>
+              <span class="tk tk-in">{{ fmtTokens(record.prompt_tokens) }}</span>
               <span class="tk-sep">/</span>
-              <span class="tk tk-out">{{ record.completion_tokens }}</span>
+              <span class="tk tk-out">{{ fmtTokens(record.completion_tokens) }}</span>
               <span class="tk-sep">/</span>
-              <span class="tk tk-cache">{{ record.cached_tokens }}</span>
+              <span class="tk tk-cache">{{ fmtTokens(record.cached_tokens) }}</span>
             </span>
           </template>
         </a-table-column>
@@ -500,9 +509,9 @@ onMounted(() => {
         <a-descriptions-item label="客户端 IP">{{ current.client_ip }}</a-descriptions-item>
         <a-descriptions-item label="流式">{{ current.stream ? '是' : '否' }}</a-descriptions-item>
         <a-descriptions-item label="词元明细">
-          输入 {{ current.prompt_tokens }} · 输出 {{ current.completion_tokens }} ·
-          缓存命中 {{ current.cached_tokens }} · 缓存写入 {{ current.cache_creation_tokens }} ·
-          推理 {{ current.reasoning_tokens }} · 命中率 {{ cacheRate(current) }}
+          输入 {{ fmtTokens(current.prompt_tokens) }} · 输出 {{ fmtTokens(current.completion_tokens) }} ·
+          缓存命中 {{ fmtTokens(current.cached_tokens) }} · 缓存写入 {{ fmtTokens(current.cache_creation_tokens) }} ·
+          推理 {{ fmtTokens(current.reasoning_tokens) }} · 命中率 {{ cacheRate(current) }}
         </a-descriptions-item>
         <a-descriptions-item label="重试">
           {{ current.retry_count > 0 ? '重试 ' + current.retry_count + ' 次' : '无' }}
