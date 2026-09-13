@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 带重试地拉取镜像（代理偶发瞬断）
 set -uo pipefail
-IMAGES="redis:7-alpine node:22-alpine alpine:3.20 postgres:16-alpine golang:1.24-alpine"
+IMAGES="node:22-alpine alpine:3.20 postgres:16-alpine golang:1.25-alpine"
 
 for img in $IMAGES; do
   printf '\n=== %s ===\n' "$img"

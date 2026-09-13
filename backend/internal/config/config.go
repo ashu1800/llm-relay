@@ -167,11 +167,3 @@ func setInt(dst *int, key string) {
 		}
 	}
 }
-
-func setBool(dst *bool, key string) {
-	if v, ok := os.LookupEnv(key); ok {
-		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
-			*dst = b
-		}
-	}
-}

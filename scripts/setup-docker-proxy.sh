@@ -33,7 +33,7 @@ cat > /etc/systemd/system/docker.service.d/http-proxy.conf <<'EOF'
 [Service]
 Environment="HTTP_PROXY=http://127.0.0.1:8118"
 Environment="HTTPS_PROXY=http://127.0.0.1:8118"
-Environment="NO_PROXY=localhost,127.0.0.1,::1,postgres,redis,llm-relay"
+Environment="NO_PROXY=localhost,127.0.0.1,::1,postgres,llm-relay"
 EOF
 systemctl daemon-reload
 

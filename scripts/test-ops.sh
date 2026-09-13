@@ -12,8 +12,7 @@ import json
 d = json.load(open('/tmp/st.json'))
 r = d['runtime']
 for k in ['listen','mode','log_level','max_retries','max_request_body_mb',
-          'log_retention_days','payload_storage_mode','pricing_interval_hours',
-          'database_ok','redis_enabled']:
+          'log_retention_days','payload_storage_mode','database_ok']:
     print('  %-24s %s' % (k, r.get(k)))
 print('  计数:', json.dumps(d['counts'], ensure_ascii=False))
 print('  跨度:', json.dumps(d['log_span'], ensure_ascii=False))

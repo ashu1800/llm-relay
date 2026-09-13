@@ -143,7 +143,7 @@ PY
 [Service]
 Environment="HTTP_PROXY=http://127.0.0.1:$HTTP_PROXY_PORT"
 Environment="HTTPS_PROXY=http://127.0.0.1:$HTTP_PROXY_PORT"
-Environment="NO_PROXY=localhost,127.0.0.1,::1,postgres,redis,llm-relay"
+Environment="NO_PROXY=localhost,127.0.0.1,::1,postgres,llm-relay"
 EOF
     return 0
   fi
@@ -157,7 +157,7 @@ EOF
 [Service]
 Environment="HTTP_PROXY=$UPSTREAM_HTTP"
 Environment="HTTPS_PROXY=$UPSTREAM_HTTP"
-Environment="NO_PROXY=localhost,127.0.0.1,::1,postgres,redis,llm-relay"
+Environment="NO_PROXY=localhost,127.0.0.1,::1,postgres,llm-relay"
 EOF
     return 0
   fi
@@ -321,7 +321,13 @@ else
 fi
 echo "------------------------------------------------------------"
 echo " 访问地址   : http://localhost:$PORT"
-[[ -n "$WSL_IP" ]] && echo " 局域网地址 : http://$WSL_IP:$PORT"
+ENV_BIND="$(grep -E '^BIND_ADDR=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+ENV_BIND="${ENV_BIND:-127.0.0.1}"
+if [[ -n "$WSL_IP" && "$ENV_BIND" != "127.0.0.1" && "$ENV_BIND" != "localhost" ]]; then
+  echo " 局域网地址 : http://$WSL_IP:$PORT"
+else
+  echo " 局域网访问 : 在 deploy/.env 设 BIND_ADDR=0.0.0.0 后重启（管理接口无鉴权，自行加防火墙）"
+fi
 echo " 安装目录   : $INSTALL_DIR"
 echo " 端口       : $PORT"
 echo
