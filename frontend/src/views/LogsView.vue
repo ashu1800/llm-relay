@@ -5,7 +5,7 @@ import { ReloadOutlined, DownloadOutlined, SearchOutlined } from '@ant-design/ic
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import GroupTag from '@/components/GroupTag.vue'
-import { liveConnected, onLive } from '@/composables/useLive'
+import { onLive } from '@/composables/useLive'
 import type { ChannelGroup, Paged, RequestLog } from '@/api/types'
 
 // 分组表：日志里的模型、密钥、分组三处标签共用该请求所属分组的颜色。
@@ -329,10 +329,8 @@ const pagination = computed(() => ({
 // 实时插入：服务端每秒查一次新日志（id 增量），有就推过来。
 // 只在「看的是第一页且没有筛选」时插进去 —— 翻了页或筛了模型时，
 // 新来的日志不一定属于当前视图，硬插会让列表与筛选条件对不上。
-const liveTail = ref(true)
-
 onLive('logs', (items: RequestLog[]) => {
-  if (!liveTail.value || !Array.isArray(items) || !items.length) return
+  if (!Array.isArray(items) || !items.length) return
   if (query.page !== 1) return
   if (query.model.trim() || query.trace_id.trim() || query.status) return
   // 新日志的时间一定落在当前时间范围里（今天/近 1 小时……），
@@ -358,12 +356,6 @@ onMounted(() => {
         <div class="toolbar-left">
           <a-button :loading="loading" @click="load"><ReloadOutlined /> 刷新</a-button>
           <a-button :loading="exporting" @click="exportCsv"><DownloadOutlined /> 导出</a-button>
-          <!-- 实时插入可以关掉：正在盯着某一行排障时，
-               不断有新行从上面顶进来会看串行 -->
-          <a-button :type="liveTail ? 'primary' : 'default'" ghost @click="liveTail = !liveTail">
-            <span class="live-dot" :class="{ on: liveConnected && liveTail }" />
-            {{ liveTail ? '实时插入中' : '实时已暂停' }}
-          </a-button>
         </div>
         <a-input
           v-model:value="query.model"
@@ -555,24 +547,6 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 .toolbar-left { display: flex; gap: var(--gap); }
-.live-dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  margin-right: 6px;
-  background: currentColor;
-  opacity: 0.35;
-}
-.live-dot.on {
-  background: var(--color-green);
-  opacity: 1;
-  animation: live-pulse 2s ease-in-out infinite;
-}
-@keyframes live-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
-}
 .sub-text { font-size: 12px; color: var(--color-text-secondary); }
 .token-cell { font-variant-numeric: tabular-nums; }
 

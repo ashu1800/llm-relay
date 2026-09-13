@@ -12,7 +12,7 @@ import PageToolbar from '@/components/PageToolbar.vue'
 import PanelCard from '@/components/PanelCard.vue'
 import StatCard from '@/components/StatCard.vue'
 import AnimatedNumber from '@/components/AnimatedNumber.vue'
-import { liveConnected, onLive } from '@/composables/useLive'
+import { onLive } from '@/composables/useLive'
 import EChart from '@/components/EChart.vue'
 import { useChartTheme } from '@/utils/chartTheme'
 import DataState from '@/components/DataState.vue'
@@ -464,11 +464,6 @@ onMounted(load)
         <a-radio-button v-for="r in ranges" :key="r.key" :value="r.key">{{ r.label }}</a-radio-button>
       </a-radio-group>
       <template #right>
-        <!-- 实时状态：断开时要让用户知道「数字不动」是连接断了，
-             而不是这段时间真的没有请求 -->
-        <span class="live-badge" :class="{ on: liveConnected }" :title="liveConnected ? '数值由服务端实时推送' : '实时连接已断开，正在重连'">
-          <span class="live-dot" />{{ liveConnected ? '实时' : '已断开' }}
-        </span>
         <a-button :loading="loading" @click="load"><ReloadOutlined /> 刷新</a-button>
       </template>
     </PageToolbar>
@@ -594,29 +589,6 @@ onMounted(load)
   flex-direction: column;
 }
 
-.live-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-right: 10px;
-  font-size: 12px;
-  color: var(--color-text-secondary);
-}
-.live-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--color-gray);
-}
-.live-badge.on .live-dot {
-  background: var(--color-green);
-  /* 呼吸效果：让「正在实时接收」这件事在余光里也能被注意到 */
-  animation: live-pulse 2s ease-in-out infinite;
-}
-@keyframes live-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
-}
 .summary-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
