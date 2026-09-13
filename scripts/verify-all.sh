@@ -54,7 +54,7 @@ done
 # bash 用例：没有统一的通过标志，按「没有 HAS_FAILURE」判定
 # test-legacy-column-add.sh 会删列并重启应用（约 10 秒不可用），放在最后跑
 for s in test-model-whitelist.sh test-upstream-protocol.sh test-upstream-gemini.sh test-pricing.sh test-pricing-rules.sh test-pricing-backup.sh test-pricing-filter.sh \
-         test-group-quota.sh test-proxies.sh test-egress-proxy.sh test-live.sh test-cost.sh test-legacy-column-add.sh; do
+         test-group-quota.sh test-proxies.sh test-egress-proxy.sh test-live.sh test-purge-scope.sh test-cost.sh test-legacy-column-add.sh; do
   echo "########## $s ##########"
   out=$(bash "scripts/$s" 2>&1)
   echo "$out" | tail -1

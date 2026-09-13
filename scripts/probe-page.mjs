@@ -51,6 +51,12 @@ const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: t
 await send('Page.enable', {}, sessionId)
 await send('Runtime.enable', {}, sessionId)
 await send('Log.enable', {}, sessionId)
+// 授予剪贴板权限：没有它，navigator.clipboard.writeText 会一直挂着等授权，
+// 「点击复制」这类功能就只能测出「没反应」—— 那是权限问题，不是功能坏了
+await send('Browser.grantPermissions', {
+  origin: 'http://127.0.0.1:8888',
+  permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite']
+}).catch(() => {})
 await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId)
 // 让页面认为自己有焦点：CDP 打开的标签页在后台，浏览器会**暂停
 // requestAnimationFrame**，于是任何滚动/补间动画都不会跑 ——

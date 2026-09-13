@@ -1,10 +1,18 @@
 <script setup lang="ts">
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { InputNumber, message, Modal } from 'ant-design-vue'
-import { PlusOutlined, ReloadOutlined, DeleteOutlined, CopyOutlined, EditOutlined } from '@ant-design/icons-vue'
+import {
+  PlusOutlined,
+  ReloadOutlined,
+  DeleteOutlined,
+  CopyOutlined,
+  EditOutlined,
+  KeyOutlined
+} from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import GroupTag from '@/components/GroupTag.vue'
+
 import type { APIKey, ChannelGroup } from '@/api/types'
 
 const loading = ref(false)
@@ -48,6 +56,81 @@ async function load() {
 /** 按分组名取颜色：密钥白名单存的是名字，不是 ID */
 function groupColorByName(name: string) {
   return groups.value.find((g) => g.name === name)?.color
+}
+
+// 密钥明文：按需从后端解密，取到后缓存在内存里。
+// 缓存是刻意的 —— 悬停和点击复制是同一个诉求的两种触发方式，
+// 不缓存的话鼠标扫过列表就会打出一串解密请求。
+interface RevealResult {
+  available: boolean
+  key?: string
+  reason?: string
+}
+const revealed = reactive<Record<number, RevealResult | 'loading'>>({})
+
+async function ensureKey(record: APIKey): Promise<RevealResult | null> {
+  const cached = revealed[record.id]
+  if (cached && cached !== 'loading') return cached
+  if (cached === 'loading') return null
+  revealed[record.id] = 'loading'
+  try {
+    const res = await api.get<RevealResult>('/keys/' + record.id + '/reveal')
+    revealed[record.id] = res
+    return res
+  } catch (e: any) {
+    const fail: RevealResult = { available: false, reason: e.message || '读取失败' }
+    revealed[record.id] = fail
+    return fail
+  }
+}
+
+function tooltipOf(record: APIKey) {
+  const info = revealed[record.id]
+  if (info === 'loading') return '读取中…'
+  if (!info) return '悬停读取完整密钥，点击复制'
+  if (!info.available) return info.reason || '明文不可用'
+  return info.key + '（点击复制）'
+}
+
+// 写剪贴板：优先用 clipboard API，失败时退回临时 textarea + execCommand。
+//
+// 两条退路缺一不可：
+//  1. 用 http 且不是 localhost 访问时 clipboard API 直接不可用（抛错）；
+//  2. 浏览器可能把 writeText 挂起等用户授权 —— 那是**既不成功也不失败**的状态，
+//     实测点击后界面毫无反应。所以给它 800ms 的上限，超时就走退路。
+async function writeClipboard(text: string) {
+  try {
+    const ok = await Promise.race([
+      navigator.clipboard.writeText(text).then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 800))
+    ])
+    if (ok) return true
+  } catch {
+    // 落到下面的退路
+  }
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    return document.execCommand('copy')
+  } finally {
+    document.body.removeChild(ta)
+  }
+}
+
+async function copyRowKey(record: APIKey) {
+  const info = await ensureKey(record)
+  if (!info) return
+  if (!info.available || !info.key) {
+    // 看不到明文不是错误，是一种正常状态（升级前创建的密钥只存过哈希）
+    Modal.info({ title: '看不到这把密钥的明文', content: info.reason || '明文不可用', width: 460 })
+    return
+  }
+  if (await writeClipboard(info.key)) message.success('已复制完整密钥')
+  else message.warning('复制失败，请在悬浮提示里手动选择复制')
 }
 
 async function loadGroups() {
@@ -170,12 +253,8 @@ async function save() {
 }
 
 async function copyKey() {
-  try {
-    await navigator.clipboard.writeText(createdKey.value)
-    message.success('已复制到剪贴板')
-  } catch {
-    message.warning('复制失败，请手动选择复制')
-  }
+  if (await writeClipboard(createdKey.value)) message.success('已复制到剪贴板')
+  else message.warning('复制失败，请手动选择复制')
 }
 
 async function toggle(row: APIKey) {
@@ -239,7 +318,23 @@ onMounted(() => {
           <a-empty description="还没有密钥，点「新建密钥」创建第一个；明文只在创建时显示一次" />
         </template>
         <a-table-column title="名称" data-index="name" :width="150" />
-        <a-table-column title="密钥前缀" data-index="key_prefix" :width="140" />
+        <a-table-column title="密钥" :width="170">
+          <template #default="{ record }">
+            <!-- 胶囊 + 悬停看全量 + 点击复制：三个动作都指向同一件事
+                 「我要把这把密钥拿去用」。明文按需从后端解密，不随列表下发 -->
+            <a-tooltip
+              placement="topLeft"
+              :title="tooltipOf(record)"
+              @open-change="(open: boolean) => open && ensureKey(record)"
+            >
+              <span class="key-pill" @click="copyRowKey(record)">
+                <KeyOutlined />
+                <span class="key-text">{{ record.key_prefix }}…</span>
+                <CopyOutlined class="key-copy" />
+              </span>
+            </a-tooltip>
+          </template>
+        </a-table-column>
         <a-table-column title="模型白名单" :width="160" ellipsis>
           <template #default="{ record }">
             <span v-if="whitelistText(record.allowed_models) === '不限'" class="muted">不限</span>
@@ -347,6 +442,28 @@ onMounted(() => {
 .toolbar-spacer { flex: 1; }
 .toolbar-hint { color: var(--color-text-secondary); font-size: 13px; }
 .muted { color: var(--color-text-secondary); }
+/* 密钥胶囊：与分组胶囊同一套视觉语言（浅底 + 圆角 + 同色文字），
+   但用等宽字体 —— 密钥是代码类内容，逐字符比对时等宽好读得多 */
+.key-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 1px 8px;
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--color-primary) 13%, transparent);
+  color: var(--color-primary);
+  font-family: var(--font-family-mono);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+.key-pill:hover { background: color-mix(in oklab, var(--color-primary) 22%, transparent); }
+.key-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.key-copy { opacity: 0; transition: opacity 0.2s ease; }
+.key-pill:hover .key-copy { opacity: 0.75; }
+
 .group-tag-list { display: inline-flex; flex-wrap: wrap; gap: 4px; }
 .danger-link { color: var(--color-red); }
 .key-box {

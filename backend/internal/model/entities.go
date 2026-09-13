@@ -155,11 +155,20 @@ const (
 	ProxyProtocolHTTPS  = "https"
 )
 
-// APIKey 对外下发的调用密钥。只存哈希与展示前缀，明文仅在创建时返回一次。
+// APIKey 对外下发的调用密钥。鉴权只认哈希，明文另外用主密钥加密存一份。
+//
+// 为什么不只存哈希：那是最安全的做法，但用户一旦丢了明文就只能重建密钥 ——
+// 而「回看一眼自己发出去的密钥」是本地自用工具里最常见的需求，
+// 每次都要重建会逼着人把明文记在别处，反而更不安全。
+// 与渠道密钥（Channel.APIKeyEnc）用同一套加密与同一条原则：
+// 密文不随列表接口下发，只有显式查看时才解密，且带 json:"-" 防止误泄漏。
 type APIKey struct {
-	ID            uint       `gorm:"primaryKey" json:"id"`
-	Name          string     `gorm:"size:64;not null" json:"name"`
-	KeyHash       string     `gorm:"size:64;uniqueIndex;not null" json:"-"`
+	ID      uint   `gorm:"primaryKey" json:"id"`
+	Name    string `gorm:"size:64;not null" json:"name"`
+	KeyHash string `gorm:"size:64;uniqueIndex;not null" json:"-"`
+	// KeyEnc 是加密后的密钥明文。老数据没有这一列（升级前创建的密钥），
+	// 那种情况下明文确实找不回来了，界面上如实说明而不是显示半截。
+	KeyEnc        string     `gorm:"type:text" json:"-"`
 	KeyPrefix     string     `gorm:"size:32" json:"key_prefix"`
 	Enabled       bool       `gorm:"not null" json:"enabled"`
 	AllowedModels StringList `gorm:"type:jsonb" json:"allowed_models"`

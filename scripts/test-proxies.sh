@@ -26,7 +26,7 @@ chk_has() { # chk_has 说明 期望子串 实际
 }
 
 cleanup() {
-  for id in $($PG "SELECT id FROM proxies WHERE name LIKE '__probe_%'"); do
+  for id in $($PG "SELECT id FROM proxies WHERE starts_with(name, '__probe_')"); do
     curl -s -o /dev/null -X DELETE "$API/proxies/$id"
   done
   # 渠道上挂过的代理引用要还原成直连（正常流程不会走到这里，兜底）
@@ -122,7 +122,7 @@ echo
 echo "=== 9. 清理 ==="
 chk "还原后可以删" "200" "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$API/proxies/$PID")"
 chk "失败那个也能删" "200" "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$API/proxies/$BAD")"
-chk "没有残留探针" "0" "$($PG "SELECT count(*) FROM proxies WHERE name LIKE '__probe_%'")"
+chk "没有残留探针" "0" "$($PG "SELECT count(*) FROM proxies WHERE starts_with(name, '__probe_')")"
 chk "渠道引用已还原" "0" "$($PG "SELECT count(*) FROM channels WHERE proxy_id <> 0")"
 
 echo

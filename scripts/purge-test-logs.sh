@@ -13,22 +13,28 @@ set -uo pipefail
 
 P() { docker exec -i llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "$1"; }
 
+# 判定「名字以双下划线开头」必须用 left/starts_with，**不能**写 LIKE '__%'：
+# LIKE 里的下划线是「任意单个字符」的通配符，'__%' 的真实含义是
+# 「任意两个字符开头的任意字符串」—— 它会命中用户自己的密钥名（如 DeepSeek），
+# 把真实调用日志一并删光。实测踩过：一次清理删掉了全部真实日志。
 WHERE=$(cat <<'SQL'
-  api_key_name LIKE '__%'
+  starts_with(api_key_name, '__')
   OR api_key_name LIKE 'quota-probe%'
-  OR api_key_name LIKE 'wl-probe-%'
+  OR starts_with(api_key_name, 'wl-probe-')
   OR api_key_name LIKE 'k-%'
   OR api_key_name LIKE 'audit-key-partial%'
   OR api_key_name IN (
     'regress','regress-tmp','ae-regress-key','filter-probe-key','pricing-check',
-    'pricing-rule-key','proto-upstream-key','group-enabled-key','delete-semantics-key',
+    'pricing-rule-key','proto-upstream-key','proto-gemini-key','proto-gemini-error',
+    'group-enabled-key','delete-semantics-key',
     'restore-probe','anthropic-test','gemini-test','gem-stream','payload-all',
     'local-test','coldstart','slow-concurrency-key','truncate-key','fk-probe',
     'csrf-ok-probe','wl-probe-key','key'
   )
-  OR model_requested LIKE 'wl-probe-%'
+  OR starts_with(model_requested, 'wl-probe-')
   OR model_requested IN (
-    'pricing-rule-model','proto-chat-model','proto-gemini-model','group-enabled-test',
+    'pricing-rule-model','proto-chat-model','proto-gemini-model','proto-gemini-error',
+    'group-enabled-test',
     'group-whitelist-test','egress-proxy-test','no-such-model-filter'
   )
 SQL

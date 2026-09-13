@@ -24,13 +24,13 @@ chk_has() {
 }
 
 cleanup() {
-  for id in $($PG "SELECT id FROM api_keys WHERE name LIKE '__egress_%'"); do
+  for id in $($PG "SELECT id FROM api_keys WHERE starts_with(name, '__egress_')"); do
     curl -s -o /dev/null -X DELETE "$API/keys/$id"
   done
-  for id in $($PG "SELECT id FROM channels WHERE name LIKE '__egress_%'"); do
+  for id in $($PG "SELECT id FROM channels WHERE starts_with(name, '__egress_')"); do
     curl -s -o /dev/null -X DELETE "$API/channels/$id"
   done
-  for id in $($PG "SELECT id FROM proxies WHERE name LIKE '__egress_%'"); do
+  for id in $($PG "SELECT id FROM proxies WHERE starts_with(name, '__egress_')"); do
     curl -s -o /dev/null -X DELETE "$API/proxies/$id"
   done
   pkill -f mini-proxy.py 2>/dev/null

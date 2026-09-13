@@ -36,6 +36,9 @@ type channelExport struct {
 type apiKeyExport struct {
 	model.APIKey
 	KeyHash string `json:"key_hash"`
+	// 与渠道密钥同理：KeyEnc 的 json tag 是 "-"，不显式带出来备份里就没有明文，
+	// 恢复之后「查看密钥」全是「无法找回」
+	KeyEnc string `json:"key_enc"`
 }
 
 // proxyExport 与 channelExport 同理：代理密码的 json tag 是 "-"，
@@ -123,7 +126,7 @@ func (s *Server) exportConfig(c *gin.Context) {
 					return err
 				}
 				for _, k := range rows {
-					b.APIKeys = append(b.APIKeys, apiKeyExport{APIKey: k, KeyHash: k.KeyHash})
+					b.APIKeys = append(b.APIKeys, apiKeyExport{APIKey: k, KeyHash: k.KeyHash, KeyEnc: k.KeyEnc})
 				}
 				return nil
 			},
@@ -312,10 +315,12 @@ func (s *Server) importConfig(c *gin.Context) {
 		report.Created["模型白名单"]++
 	}
 
-	// 密钥只有哈希，本身无法找回明文；导入后原密钥可直接继续使用
+	// 鉴权只认哈希，所以没有明文也能用；密文一并带回去是为了
+	// 「查看密钥」在恢复后依然可用（老备份里没有这个字段，导入后就是看不到明文）
 	for i := range b.APIKeys {
 		k := b.APIKeys[i].APIKey
 		k.KeyHash = b.APIKeys[i].KeyHash
+		k.KeyEnc = b.APIKeys[i].KeyEnc
 		if strings.TrimSpace(k.KeyHash) == "" {
 			report.Warnings = append(report.Warnings,
 				"密钥 "+k.Name+" 缺少哈希无法恢复，需要重新签发")

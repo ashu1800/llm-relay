@@ -917,6 +917,9 @@ func registerKeyRoutes(g *gin.RouterGroup, s *Server) {
 	r.POST("", s.createKey)
 	r.PUT("/:id", s.updateKey)
 	r.DELETE("/:id", s.deleteKey)
+	// 单独一个接口而不是让列表带上明文：列表一次取全部密钥，
+	// 而用户一次只看一把。按需解密，明文在最少的场合出现
+	r.GET("/:id/reveal", s.revealKey)
 }
 
 func (s *Server) listKeys(c *gin.Context) {
@@ -953,8 +956,13 @@ func (s *Server) createKey(c *gin.Context) {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
+	enc, err := s.deps.Cipher.Encrypt(plain)
+	if err != nil {
+		writeUpstreamError(c, http.StatusInternalServerError, "加密密钥失败: "+err.Error(), "internal_error")
+		return
+	}
 	k := model.APIKey{
-		Name: p.Name, KeyHash: secure.HashKey(plain), KeyPrefix: plain[:11],
+		Name: p.Name, KeyHash: secure.HashKey(plain), KeyEnc: enc, KeyPrefix: plain[:11],
 		Enabled: true, AllowedModels: p.AllowedModels, AllowedGroups: p.AllowedGroups,
 	}
 	if p.Enabled != nil {

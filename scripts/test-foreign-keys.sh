@@ -40,9 +40,14 @@ chkcontains "直接删有渠道的分组会被外键拒绝" "foreign key" \
 
 echo
 echo "=== 5. 删渠道时绑定级联清除（用临时渠道，不动真实数据）==="
+# 分组 id 必须现取：写死 1 曾经能过，但分组是可以被删掉重建的
+# （备份恢复、分组用例都会重排 id），某天它就不存在了，
+# 报出来的是「syntax error at end of input」这种完全指错方向的错误 ——
+# 因为插入失败后 TMPCH 是空的，后面的 SQL 就成了 WHERE channel_id=
+GID_FOR_PROBE=$(P "SELECT id FROM channel_groups ORDER BY id LIMIT 1")
 # 不依赖 RETURNING：psql 的命令标签会和结果混在一起，取起来容易出错。
 # 插进去再按名字查回来，简单且确定。
-P "INSERT INTO channels (name, group_id, protocol, base_url, api_key_enc, weight, enabled, created_at, updated_at) VALUES ('fk-cascade-probe', 1, 'openai-chat', 'http://x', '', 1, false, now(), now())" >/dev/null
+P "INSERT INTO channels (name, group_id, protocol, base_url, api_key_enc, weight, enabled, created_at, updated_at) VALUES ('fk-cascade-probe', $GID_FOR_PROBE, 'openai-chat', 'http://x', '', 1, false, now(), now())" >/dev/null
 TMPCH=$(P "SELECT id FROM channels WHERE name = 'fk-cascade-probe'")
 P "INSERT INTO channel_models (channel_id, public_name, upstream_name, enabled, created_at, updated_at) VALUES ($TMPCH, 'fk-probe', 'fk-probe', true, now(), now())" >/dev/null
 BEFORE=$(P "SELECT count(*) FROM channel_models WHERE channel_id=$TMPCH")
