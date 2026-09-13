@@ -98,6 +98,16 @@ export interface ChannelBinding {
   enabled: boolean
   /** 这一个模型走哪个代理；0 = 跟随渠道 */
   proxy_id: number
+  // 价格挂在这一行上：同一个模型名在不同渠道成本不同，
+  // 全局一份价只能取其一（原来的做法），账就对不上了
+  input_per_1m: string
+  output_per_1m: string
+  cache_read_per_1m: string
+  cache_write_per_1m: string
+  /** 固定倍率，1 = 原价；没有时段命中时用它 */
+  multiplier: number
+  /** 倍率时段：命中时用该时段的倍率（优先于固定倍率） */
+  peak_rules: RateRule[] | null
 }
 
 export interface APIKey {
@@ -152,22 +162,9 @@ export interface Paged<T> {
   page_size?: number
 }
 
-export interface Pricing {
-  id: number
-  model_key: string
-  match_type: string
-  currency: string
-  input_per_1m: string
-  output_per_1m: string
-  cache_read_per_1m: string
-  cache_write_per_1m: string
-  /** 倍率时段：命中时用该时段的倍率（优先于固定倍率） */
-  peak_rules: RateRule[] | null
-  /** 固定倍率，1 = 原价；没有时段命中时用它 */
-  multiplier: number
-  active: boolean
-  updated_at: string
-}
+// Pricing 已删除：价格改为挂在渠道模型的绑定上（见 ChannelBinding 的价格字段）。
+// 原来那张「模型名 → 单价」的独立表已经下线，全局一份价没法表达
+// 「同一个模型名在不同渠道成本不同」。
 
 // 渠道协议选项，与后端 model.Protocol* 常量保持一致
 export const PROTOCOLS = [

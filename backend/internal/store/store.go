@@ -76,7 +76,6 @@ func (s *Store) Migrate() error {
 		&model.APIKey{},
 		&model.RequestLog{},
 		&model.RequestPayload{},
-		&model.ModelPricing{},
 		&model.Proxy{},
 		&model.Setting{},
 	); err != nil {
@@ -168,16 +167,77 @@ func (s *Store) migrateLegacySchema() error {
 		slog.Info("定价表已补充固定倍率列（既有记录按 1 倍原价处理）")
 	}
 
+	// 价格从「模型名 → 单价」的独立表搬到渠道的模型白名单上。
+	//
+	// 顺序很讲究：先把列补齐（AutoMigrate 加不了 NOT NULL 无默认的列），
+	// 再搬数据，最后才删表 —— 中间任何一步失败都不该丢价格。
+	if s.hasTable("channel_models") {
+		for _, stmt := range []string{
+			// 四个单价与实体上的 default:0 保持一致：0 就是「这个模型没配价」
+			"ALTER TABLE channel_models ADD COLUMN IF NOT EXISTS input_per1_m numeric(18,8) NOT NULL DEFAULT 0",
+			"ALTER TABLE channel_models ADD COLUMN IF NOT EXISTS output_per1_m numeric(18,8) NOT NULL DEFAULT 0",
+			"ALTER TABLE channel_models ADD COLUMN IF NOT EXISTS cache_read_per1_m numeric(18,8) NOT NULL DEFAULT 0",
+			"ALTER TABLE channel_models ADD COLUMN IF NOT EXISTS cache_write_per1_m numeric(18,8) NOT NULL DEFAULT 0",
+			"ALTER TABLE channel_models ADD COLUMN IF NOT EXISTS peak_rules jsonb",
+		} {
+			if err := s.db.Exec(stmt).Error; err != nil {
+				return fmt.Errorf("迁移 channel_models 价格列失败（%s）: %w", stmt, err)
+			}
+		}
+		// multiplier 单独处理：实体上刻意不带 default（否则「填 0」会被列默认值改写），
+		// 而无默认的 NOT NULL 列加不进已有数据的表。先带 DEFAULT 0 建列再撤掉默认值
+		if !s.hasColumn("channel_models", "multiplier") {
+			for _, stmt := range []string{
+				"ALTER TABLE channel_models ADD COLUMN multiplier numeric(10,4) NOT NULL DEFAULT 0",
+				"ALTER TABLE channel_models ALTER COLUMN multiplier DROP DEFAULT",
+			} {
+				if err := s.db.Exec(stmt).Error; err != nil {
+					return fmt.Errorf("迁移 channel_models.multiplier 失败（%s）: %w", stmt, err)
+				}
+			}
+		}
+	}
+
+	if s.hasTable("model_pricings") && s.hasTable("channel_models") {
+		// 只填「还没配价」的白名单行：用户在渠道里已经配好的价格不能被
+		// 一张要被删掉的旧表覆盖
+		res := s.db.Exec(`UPDATE channel_models cm SET
+				input_per1_m = mp.input_per1_m,
+				output_per1_m = mp.output_per1_m,
+				cache_read_per1_m = mp.cache_read_per1_m,
+				cache_write_per1_m = mp.cache_write_per1_m,
+				multiplier = mp.multiplier,
+				peak_rules = mp.peak_rules
+			FROM model_pricings mp
+			WHERE mp.model_key = cm.public_name
+			  AND COALESCE(cm.input_per1_m, 0) = 0
+			  AND COALESCE(cm.output_per1_m, 0) = 0
+			  AND COALESCE(cm.cache_read_per1_m, 0) = 0
+			  AND COALESCE(cm.cache_write_per1_m, 0) = 0
+			  AND COALESCE(cm.multiplier, 0) = 0`)
+		if res.Error != nil {
+			return fmt.Errorf("把定价搬到渠道模型失败: %w", res.Error)
+		}
+		// 搬不到的必须点名：这些价格在新的结构里没有落脚处，
+		// 静默丢掉的话用户只会发现「某个模型突然算 0 元了」
+		var orphans []struct{ ModelKey string }
+		if err := s.db.Raw(`SELECT mp.model_key FROM model_pricings mp
+			WHERE NOT EXISTS (SELECT 1 FROM channel_models cm WHERE cm.public_name = mp.model_key)`).
+			Scan(&orphans).Error; err == nil {
+			for _, o := range orphans {
+				slog.Warn("定价没有对应的渠道模型，已随旧表一并删除，需要在新结构里重新配置", "model", o.ModelKey)
+			}
+		}
+		if res.RowsAffected > 0 {
+			slog.Info("定价已搬到渠道模型上", "条数", res.RowsAffected)
+		}
+	}
+
 	// 模型商彻底退场：表与各表上的归属列一并删掉
 	for _, stmt := range []string{
 		"ALTER TABLE channel_models DROP COLUMN IF EXISTS model_id",
 		"ALTER TABLE channels DROP COLUMN IF EXISTS provider_id",
 		"ALTER TABLE channel_groups DROP COLUMN IF EXISTS provider_id",
-		"ALTER TABLE model_pricings DROP COLUMN IF EXISTS provider_id",
-		// 定价改为纯手工：自动同步的来源、来源地址与优先级都不再有意义
-		"ALTER TABLE model_pricings DROP COLUMN IF EXISTS source",
-		"ALTER TABLE model_pricings DROP COLUMN IF EXISTS source_url",
-		"ALTER TABLE model_pricings DROP COLUMN IF EXISTS priority",
 		"ALTER TABLE request_logs DROP COLUMN IF EXISTS provider_id",
 		"DROP TABLE IF EXISTS pricing_sync_logs",
 		// 模板管理整个功能已下线：菜单、接口、实体都删了，
@@ -185,6 +245,9 @@ func (s *Store) migrateLegacySchema() error {
 		"DROP TABLE IF EXISTS channel_templates",
 		"DROP TABLE IF EXISTS models",
 		"DROP TABLE IF EXISTS providers",
+		// 价格已搬到渠道的模型白名单上（见上面那段迁移），
+		// 旧表留着只会在备份与排查时让人以为它还在生效
+		"DROP TABLE IF EXISTS model_pricings",
 	} {
 		if err := s.db.Exec(stmt).Error; err != nil {
 			return fmt.Errorf("删除模型商结构失败（%s）: %w", stmt, err)

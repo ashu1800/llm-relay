@@ -17,6 +17,10 @@ func bptr(v bool) *bool { return &v }
 // 于是「停用」这类操作点了保存也存不进去 —— 白名单里停用一个模型，它照样能被调用；
 // 建渠道时勾掉「启用」，渠道照样是开的。这类静默失败排查成本极高（数据看着正常），
 // 所以在这里逐个实体挡住，标签很容易被人「顺手补回来」。
+//
+// 同一类坑在数值字段上也会出现：ChannelModel.Multiplier（固定倍率）刻意不带
+// gorm default，0 表示「没配」，由代码归一到 1 —— 加了列默认值的话，
+// 「填了 0.5 却按 1 算」在界面上完全看不出来。
 func TestBooleanFieldsHaveNoGormDefault(t *testing.T) {
 	cases := []struct {
 		entity any
@@ -26,7 +30,6 @@ func TestBooleanFieldsHaveNoGormDefault(t *testing.T) {
 		{model.Channel{}, "Enabled"},
 		{model.ChannelModel{}, "Enabled"},
 		{model.APIKey{}, "Enabled"},
-		{model.ModelPricing{}, "Active"},
 	}
 	for _, c := range cases {
 		field, ok := reflect.TypeOf(c.entity).FieldByName(c.field)

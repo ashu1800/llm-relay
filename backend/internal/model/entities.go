@@ -113,7 +113,28 @@ type ChannelModel struct {
 	// 不带 gorm default：带默认值的字段在值为零（false）时会被 GORM 从 INSERT
 	// 里省掉，转而去用列默认值 true —— 「停用」就永远存不进去，界面上点了保存、
 	// 库里依然是启用。与渠道的 ProviderID 是同一个坑。
-	Enabled   bool      `gorm:"not null" json:"enabled"`
+	Enabled bool `gorm:"not null" json:"enabled"`
+
+	// ---- 价格 ----
+	//
+	// 价格随模型条目一起配置，而不是单独维护一张「模型 → 价格」的表：
+	// 同一个模型名在不同渠道的成本本来就不一样（官网直连 vs 中转站），
+	// 全局一份价只能取其一，用户还得自己在脑子里记住哪条渠道该按哪个价算。
+	//
+	// 单位是每 100 万 token 的美元价，与官网口径一致。
+	// 四个单价全为 0 表示「这个模型还没配价」，界面上会点名提醒 ——
+	// 缺价的直接后果是这笔调用被记成 0 元，而账面上完全看不出异常。
+	InputPer1M      decimal.Decimal `gorm:"column:input_per1_m;type:numeric(18,8);default:0" json:"input_per_1m"`
+	OutputPer1M     decimal.Decimal `gorm:"column:output_per1_m;type:numeric(18,8);default:0" json:"output_per_1m"`
+	CacheReadPer1M  decimal.Decimal `gorm:"column:cache_read_per1_m;type:numeric(18,8);default:0" json:"cache_read_per_1m"`
+	CacheWritePer1M decimal.Decimal `gorm:"column:cache_write_per1_m;type=numeric(18,8);default:0" json:"cache_write_per_1m"`
+	// Multiplier 是固定倍率（1 = 原价）。0 表示没配，由代码归一到 1 ——
+	// 与 ModelPricing 当年同一个坑：加了列默认值会让 0 由数据库静默改写，
+	// 「填了 0.5 却按 1 算」这种问题在界面上看不出来
+	Multiplier float64 `gorm:"column:multiplier;type:numeric(10,4);not null" json:"multiplier"`
+	// PeakRules 是时段倍率规则（命中时段时以它为准，优先于固定倍率）
+	PeakRules JSONList `gorm:"type:jsonb" json:"peak_rules"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -225,32 +246,6 @@ type RequestPayload struct {
 	RequestHeaders  JSONMap   `gorm:"type:jsonb" json:"request_headers"`
 	ResponseHeaders JSONMap   `gorm:"type:jsonb" json:"response_headers"`
 	CreatedAt       time.Time `json:"created_at"`
-}
-
-// ModelPricing 模型单价，全部由用户手工录入。
-// 金额按每 100 万 token 的美元价存储，便于与官网口径对齐。
-// PeakRules 描述倍率时段（如工作日 9:00-12:00 双倍）。
-type ModelPricing struct {
-	ID        uint   `gorm:"primaryKey" json:"id"`
-	ModelKey  string `gorm:"size:128;uniqueIndex;not null" json:"model_key"`
-	MatchType string `gorm:"size:16;not null;default:exact" json:"match_type"`
-	Currency  string `gorm:"size:8;not null;default:USD" json:"currency"`
-	// 列名见 columns.go：GORM 推导出的是 per1_m，与 json 名 per_1m 不同，
-	// 这里显式声明以便和原生映射对得上
-	InputPer1M      decimal.Decimal `gorm:"column:input_per1_m;type:numeric(18,8);default:0" json:"input_per_1m"`
-	OutputPer1M     decimal.Decimal `gorm:"column:output_per1_m;type:numeric(18,8);default:0" json:"output_per_1m"`
-	CacheReadPer1M  decimal.Decimal `gorm:"column:cache_read_per1_m;type:numeric(18,8);default:0" json:"cache_read_per_1m"`
-	CacheWritePer1M decimal.Decimal `gorm:"column:cache_write_per1_m;type:numeric(18,8);default:0" json:"cache_write_per_1m"`
-	PeakRules       JSONList        `gorm:"type:jsonb" json:"peak_rules"`
-	// Multiplier 是固定倍率（1 = 原价）。它与时段倍率是「或」的关系：
-	// 命中时段规则时用时段倍率，否则用固定倍率（见 pricing.Resolve）。
-	// 与 Enabled/Active 同一类坑：不加 gorm default 标签，
-	// 0 由代码统一归一到 1，免得「没填」被列默认值悄悄变成别的数
-	Multiplier float64 `gorm:"column:multiplier;type:numeric(10,4);not null" json:"multiplier"`
-	// 同 ChannelModel.Enabled：带 default 的布尔字段存不进 false
-	Active    bool      `gorm:"not null" json:"active"`
-	UpdatedAt time.Time `json:"updated_at"`
-	CreatedAt time.Time `json:"created_at"`
 }
 
 // Setting 键值型系统设置。

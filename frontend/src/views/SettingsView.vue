@@ -50,7 +50,7 @@ const runtimeRows = [
 const countCards = [
   { key: 'logs', label: '请求日志' },
   { key: 'payloads', label: '报文留存' },
-  { key: 'pricings', label: '定价条目' },
+  { key: 'priced', label: '已定价模型' },
   { key: 'channels', label: '渠道' },
   { key: 'models', label: '模型' },
   { key: 'keys', label: '密钥' },

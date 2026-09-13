@@ -18,8 +18,14 @@ import type { Proxy } from '@/api/types'
 import GroupTag from '@/components/GroupTag.vue'
 import ChannelIcon from '@/components/ChannelIcon.vue'
 import { PROTOCOLS, type Channel, type ChannelGroup, type ChannelBinding } from '@/api/types'
+import { emptyPrice } from '@/components/ModelPricingEditor.vue'
 
-type ChannelRow = Channel & { models?: string[]; model_count?: number }
+type ChannelRow = Channel & {
+  models?: string[]
+  model_count?: number
+  /** 白名单里还没配价的条数（由服务端按与计价引擎相同的判据算出） */
+  unpriced_count?: number
+}
 
 const loading = ref(false)
 const rows = ref<ChannelRow[]>([])
@@ -110,7 +116,7 @@ function openCreate() {
     icon: '',
     max_concurrency: 10,
     enabled: true,
-    models: [{ public_name: '', upstream_name: '', enabled: true }]
+    models: [{ public_name: '', upstream_name: '', enabled: true, ...emptyPrice() }]
   })
   modalOpen.value = true
 }
@@ -456,6 +462,11 @@ onMounted(load)
                  模型目录现在只存在于这些白名单里，列表是最常用的查看入口 -->
             <span v-else class="model-names" :title="(record.models || []).join('、')">
               {{ (record.models || []).join('、') }}
+              <!-- 漏配价的后果是这笔调用被记成 0 元，而账面上完全看不出异常，
+                   所以这里必须点名，而不是等用户自己去核对 -->
+              <span v-if="record.unpriced_count" class="unpriced-hint">
+                {{ record.unpriced_count }} 个未定价
+              </span>
             </span>
           </template>
         </a-table-column>
@@ -622,6 +633,15 @@ onMounted(load)
 /* 名称下方的「经 xxx」代理提示：比正文弱一档，不抢渠道名的注意力 */
 .sub-text { color: var(--color-text-secondary); font-size: 12px; }
 .model-names { color: var(--color-text); }
+/* 未定价提示：橙色而不是灰色 —— 它是一个待办，不是一句说明 */
+.unpriced-hint {
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--color-orange) 15%, transparent);
+  color: var(--color-orange);
+  font-size: 12px;
+}
 .muted { color: var(--color-text-secondary); }
 .danger-link { color: var(--color-red); }
 .disabled { color: var(--color-text-secondary); cursor: not-allowed; }

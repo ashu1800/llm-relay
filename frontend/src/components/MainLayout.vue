@@ -9,7 +9,6 @@ import {
   ApiOutlined,
   ClusterOutlined,
   GlobalOutlined,
-  DollarOutlined,
   SettingOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
@@ -48,7 +47,6 @@ const menus = [
   { key: '/console/channels', label: '渠道管理', icon: ApiOutlined },
   { key: '/console/groups', label: '分组管理', icon: ClusterOutlined },
   { key: '/console/proxies', label: '代理管理', icon: GlobalOutlined },
-  { key: '/console/pricing', label: '模型定价', icon: DollarOutlined },
   { key: '/console/system', label: '系统设置', icon: SettingOutlined }
 ]
 

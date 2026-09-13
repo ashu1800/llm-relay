@@ -24,7 +24,9 @@ func (s *Server) getSettings(c *gin.Context) {
 	var counts struct {
 		Logs     int64 `json:"logs"`
 		Payloads int64 `json:"payloads"`
-		Pricings int64 `json:"pricings"`
+		// Priced 是「已配价的渠道模型条数」：价格表下线后，最能说明
+		// 「定价配置是否完整」的就是它，而模型总数另有 models 一项
+		Priced   int64 `json:"priced"`
 		Channels int64 `json:"channels"`
 		Models   int64 `json:"models"`
 		Keys     int64 `json:"keys"`
@@ -33,7 +35,9 @@ func (s *Server) getSettings(c *gin.Context) {
 	if err := db.Raw(`SELECT
 		(SELECT COUNT(*) FROM request_logs)::bigint AS logs,
 		(SELECT COUNT(*) FROM request_payloads)::bigint AS payloads,
-		(SELECT COUNT(*) FROM model_pricings)::bigint AS pricings,
+		(SELECT COUNT(*) FROM channel_models
+			WHERE input_per1_m <> 0 OR output_per1_m <> 0
+			   OR cache_read_per1_m <> 0 OR cache_write_per1_m <> 0)::bigint AS priced,
 		(SELECT COUNT(*) FROM channels)::bigint AS channels,
 		(SELECT COUNT(DISTINCT public_name) FROM channel_models WHERE enabled = true)::bigint AS models,
 		(SELECT COUNT(*) FROM api_keys)::bigint AS keys,
@@ -75,7 +79,7 @@ func (s *Server) getSettings(c *gin.Context) {
 			"database_version":       dbVersion,
 		},
 		"counts": gin.H{
-			"logs": counts.Logs, "payloads": counts.Payloads, "pricings": counts.Pricings,
+			"logs": counts.Logs, "payloads": counts.Payloads, "priced": counts.Priced,
 			"channels": counts.Channels, "models": counts.Models,
 			"keys": counts.Keys, "groups": counts.Groups,
 		},

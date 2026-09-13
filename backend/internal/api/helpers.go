@@ -27,56 +27,54 @@ func parseDecimal(s string) (decimal.Decimal, error) {
 	return d, nil
 }
 
-// buildPricingRow 把请求载荷转成定价实体。
-func buildPricingRow(p pricingPayload) (model.ModelPricing, error) {
-	var row model.ModelPricing
-	if strings.TrimSpace(p.ModelKey) == "" {
-		return row, fmt.Errorf("model_key 必填")
-	}
-	row.ModelKey = strings.TrimSpace(p.ModelKey)
-	row.MatchType = orDefault(p.MatchType, "exact")
-	// 时段规则在保存时就校验：写错的窗口不会报错、只会永不命中，
-	// 用户会以为已经配好了双倍计费（错误信息里带第几条）
-	rules, err := pricing.NormalizeRules(p.PeakRules)
-	if err != nil {
-		return row, err
-	}
-	row.PeakRules = rules
-	if p.Multiplier != nil {
-		m := *p.Multiplier
-		if m < 0 || m > pricing.MaxMultiplier {
-			return row, fmt.Errorf("固定倍率需要在 0 到 %g 之间（1 表示原价）", pricing.MaxMultiplier)
-		}
-		if m == 0 {
-			m = 1
-		}
-		row.Multiplier = m
-	} else {
-		row.Multiplier = 1
-	}
-
+// applyPriceFields 把价格从载荷写到渠道模型行上。
+//
+// 校验放在保存路径上而不是事后：时段窗口写错（起止相同、格式不对）不会报错、
+// 只会永不命中，用户会以为「配了双倍计费却没生效」，那是最难查的一类问题。
+func applyPriceFields(row *model.ChannelModel, in whitelistItem) error {
 	fields := []struct {
 		name string
 		raw  string
 		dst  *decimal.Decimal
 	}{
-		{"input_per_1m", p.InputPer1M, &row.InputPer1M},
-		{"output_per_1m", p.OutputPer1M, &row.OutputPer1M},
-		{"cache_read_per_1m", p.CacheReadPer1M, &row.CacheReadPer1M},
-		{"cache_write_per_1m", p.CacheWritePer1M, &row.CacheWritePer1M},
+		{"输入单价", in.InputPer1M, &row.InputPer1M},
+		{"输出单价", in.OutputPer1M, &row.OutputPer1M},
+		{"缓存读单价", in.CacheReadPer1M, &row.CacheReadPer1M},
+		{"缓存写单价", in.CacheWritePer1M, &row.CacheWritePer1M},
 	}
 	for _, f := range fields {
+		// 空字符串就是 0：白名单是整表提交的，不填即表示这个模型不算钱
 		if strings.TrimSpace(f.raw) == "" {
+			*f.dst = decimal.Zero
 			continue
 		}
-		// 模板里的字段名与 json 名不同，这里用 json 名报错更贴近界面文案
 		d, err := parseDecimal(f.raw)
 		if err != nil {
-			return row, fmt.Errorf("%s 不是合法数字", f.name)
+			return fmt.Errorf("%s 不是合法数字（%s）", f.name, strings.TrimSpace(f.raw))
 		}
 		*f.dst = d
 	}
-	return row, nil
+
+	// 倍率归一：不填、填 0 都表示「没配，按 1 算」。
+	// 刻意不把 0 当成「免费」——那会让「忘了填」和「故意填 0」变成同一件事
+	m := 1.0
+	if in.Multiplier != nil {
+		m = *in.Multiplier
+	}
+	if m < 0 || m > pricing.MaxMultiplier {
+		return fmt.Errorf("固定倍率需要在 0 到 %g 之间（1 表示原价）", pricing.MaxMultiplier)
+	}
+	if m == 0 {
+		m = 1
+	}
+	row.Multiplier = m
+
+	rules, err := pricing.NormalizeRules(in.PeakRules)
+	if err != nil {
+		return err
+	}
+	row.PeakRules = rules
+	return nil
 }
 
 // nowUTC 统一用 UTC 落库，避免容器时区差异导致统计错位。

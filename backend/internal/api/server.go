@@ -82,7 +82,7 @@ func (s *Server) Register(r *gin.Engine) {
 		registerLogRoutes(admin, s)
 		registerBackupRoutes(admin, s)
 		registerSettingsRoutes(admin, s)
-		registerPricingRoutes(admin, s)
+
 		registerProxyRoutes(admin, s)
 		registerStatsRoutes(admin, s)
 		// 实时推送（WebSocket）：看板数值与请求日志由它主动推给前端

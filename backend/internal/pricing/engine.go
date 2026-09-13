@@ -18,9 +18,12 @@ import (
 // per1M 是单价的计价单位：每 100 万 token 的美元价。
 var per1M = decimal.NewFromInt(1000000)
 
-// Price 是某一时刻对某模型生效的单价。
+// Price 是某一时刻对「某渠道的某个模型」生效的单价。
 type Price struct {
-	ModelKey        string
+	// ChannelID + ModelName 是价格的归属：同一个模型名在不同渠道成本不同，
+	// 所以计费必须带上渠道，不能只按模型名查
+	ChannelID       uint
+	ModelName       string
 	Currency        string
 	InputPer1M      decimal.Decimal
 	OutputPer1M     decimal.Decimal
@@ -33,7 +36,7 @@ type Price struct {
 	PeakLabel string
 	// PeakApplied 只表示「时段规则命中」，固定倍率不算峰时
 	PeakApplied bool
-	Base        model.ModelPricing
+	Base        model.ChannelModel
 }
 
 // 倍率来源，写进定价快照，事后能一眼看出这笔钱是按时段算的还是按固定倍率算的。
@@ -58,7 +61,10 @@ func (p Price) Cost(u relay.Usage) decimal.Decimal {
 // Snapshot 是可写入日志的定价快照，保证历史账目不会因日后改价而漂移。
 func (p Price) Snapshot(at time.Time) model.JSONMap {
 	return model.JSONMap{
-		"model_key":          p.ModelKey,
+		// model_key 保留原键名：历史日志的解析与界面展示都按它取值，
+		// 换名字只会让新旧日志长得不一样
+		"model_key":          p.ModelName,
+		"channel_id":         p.ChannelID,
 		"currency":           p.Currency,
 		"input_per_1m":       p.InputPer1M.String(),
 		"output_per_1m":      p.OutputPer1M.String(),
@@ -83,16 +89,25 @@ func scale(price decimal.Decimal, tokens int) decimal.Decimal {
 	return price.Mul(decimal.NewFromInt(int64(tokens))).Div(per1M)
 }
 
-// Engine 负责把「模型名 + 时刻」解析成单价，带进程内缓存。
+// Engine 负责把「渠道 + 模型名 + 时刻」解析成单价，带进程内缓存。
+//
+// 缓存整张 channel_models（几百行）而不是按需查库：计费发生在每次请求结束时，
+// 那时候再查一次库等于给转发链路加一跳。价格改了由调用方 Invalidate。
 type Engine struct {
 	db    *gorm.DB
 	ttl   time.Duration
 	mu    sync.RWMutex
-	cache map[string]model.ModelPricing
-	// prefixes 保存以通配方式配置的规则，按模型名长度倒序，保证最长匹配优先
-	prefixes []model.ModelPricing
+	cache map[string]model.ChannelModel
+	// names 记住每个渠道有哪些模型：不是用来查价的，而是给「未配价」
+	// 这类统计用 —— 计价只需要 cache
 	loadedAt time.Time
 	lastErr  error
+}
+
+// cacheKey 拼出缓存键。用 NUL 分隔而不是 ":" 或 "-"：
+// 模型名里本来就可能有这些字符（claude-3-5-sonnet），拼起来会撞键。
+func cacheKey(channelID uint, model string) string {
+	return strconv.FormatUint(uint64(channelID), 10) + "\x00" + model
 }
 
 // NewEngine 构造计价引擎。
@@ -100,7 +115,7 @@ func NewEngine(db *gorm.DB, ttl time.Duration) *Engine {
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
-	return &Engine{db: db, ttl: ttl, cache: map[string]model.ModelPricing{}}
+	return &Engine{db: db, ttl: ttl, cache: map[string]model.ChannelModel{}}
 }
 
 // Invalidate 在定价被修改或同步后强制刷新缓存。
@@ -110,10 +125,14 @@ func (e *Engine) Invalidate() {
 	e.mu.Unlock()
 }
 
-// Resolve 解析模型在 at 时刻的单价。第二个返回值表示是否命中定价配置。
-func (e *Engine) Resolve(ctx context.Context, modelKey string, at time.Time) (Price, bool) {
-	key := strings.TrimSpace(modelKey)
-	if key == "" {
+// Resolve 解析「某个渠道的某个模型」在 at 时刻的单价。
+// 第二个返回值表示这条白名单记录是否存在且配了价。
+//
+// 两个都不满足时返回 false，调用方据此把费用记成 0 —— 这也是为什么
+// 渠道列表要显式提示「未配价的模型」：漏配的后果在账面上看不出异常。
+func (e *Engine) Resolve(ctx context.Context, channelID uint, modelName string, at time.Time) (Price, bool) {
+	key := strings.TrimSpace(modelName)
+	if key == "" || channelID == 0 {
 		return Price{}, false
 	}
 	e.refresh(ctx)
@@ -121,8 +140,14 @@ func (e *Engine) Resolve(ctx context.Context, modelKey string, at time.Time) (Pr
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	base, ok := e.lookupLocked(key)
+	base, ok := e.cache[cacheKey(channelID, key)]
 	if !ok {
+		return Price{}, false
+	}
+	if base.InputPer1M.IsZero() && base.OutputPer1M.IsZero() &&
+		base.CacheReadPer1M.IsZero() && base.CacheWritePer1M.IsZero() && base.Multiplier <= 1 {
+		// 四个单价全 0 且没有倍率 = 这条模型还没配价。
+		// 继续算下去会得到 0 元，与「配了价但单价是 0」分不开，不如如实说没价
 		return Price{}, false
 	}
 
@@ -144,8 +169,11 @@ func (e *Engine) Resolve(ctx context.Context, modelKey string, at time.Time) (Pr
 	dec := decimal.NewFromFloat(m)
 
 	return Price{
-		ModelKey:        base.ModelKey,
-		Currency:        base.Currency,
+		ChannelID: channelID,
+		ModelName: base.PublicName,
+		// 币种恒定美元：原来只有 ModelPricing 带 currency 字段，
+		// 而全站金额都按美元展示，留着那个字段只会让人以为能改
+		Currency:        "USD",
 		InputPer1M:      base.InputPer1M.Mul(dec),
 		OutputPer1M:     base.OutputPer1M.Mul(dec),
 		CacheReadPer1M:  base.CacheReadPer1M.Mul(dec),
@@ -158,20 +186,7 @@ func (e *Engine) Resolve(ctx context.Context, modelKey string, at time.Time) (Pr
 	}, true
 }
 
-// lookupLocked 先精确匹配模型名，再按前缀规则做最长匹配。
-func (e *Engine) lookupLocked(key string) (model.ModelPricing, bool) {
-	if p, ok := e.cache[key]; ok {
-		return p, true
-	}
-	for _, p := range e.prefixes {
-		if strings.HasPrefix(key, p.ModelKey) {
-			return p, true
-		}
-	}
-	return model.ModelPricing{}, false
-}
-
-// refresh 在缓存过期时重新载入定价表。
+// refresh 在缓存过期时重新载入价格。
 func (e *Engine) refresh(ctx context.Context) {
 	e.mu.RLock()
 	fresh := time.Since(e.loadedAt) < e.ttl && e.loadedAt != (time.Time{})
@@ -180,8 +195,10 @@ func (e *Engine) refresh(ctx context.Context) {
 		return
 	}
 
-	var rows []model.ModelPricing
-	err := e.db.WithContext(ctx).Where("active = ?", true).Find(&rows).Error
+	// 只取启用的白名单条目：模型停用之后它就不该再参与计费，
+	// 否则日志里会给一个根本没转发的模型算钱
+	var rows []model.ChannelModel
+	err := e.db.WithContext(ctx).Where("enabled = ?", true).Find(&rows).Error
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -193,19 +210,11 @@ func (e *Engine) refresh(ctx context.Context) {
 		e.lastErr = err
 		return
 	}
-	cache := make(map[string]model.ModelPricing, len(rows))
-	var prefixes []model.ModelPricing
+	cache := make(map[string]model.ChannelModel, len(rows))
 	for _, r := range rows {
-		if r.MatchType == "prefix" {
-			prefixes = append(prefixes, r)
-			continue
-		}
-		cache[r.ModelKey] = r
+		cache[cacheKey(r.ChannelID, r.PublicName)] = r
 	}
-	// 长前缀优先，避免 gpt- 规则抢占 gpt-5- 规则
-	sortByKeyLenDesc(prefixes)
 	e.cache = cache
-	e.prefixes = prefixes
 	e.loadedAt = time.Now()
 	e.lastErr = nil
 }
@@ -217,24 +226,16 @@ func (e *Engine) LastError() error {
 	return e.lastErr
 }
 
-func sortByKeyLenDesc(rows []model.ModelPricing) {
-	for i := 1; i < len(rows); i++ {
-		for j := i; j > 0 && len(rows[j].ModelKey) > len(rows[j-1].ModelKey); j-- {
-			rows[j], rows[j-1] = rows[j-1], rows[j]
-		}
-	}
-}
-
 // FormatCost 统一金额展示精度。
 func FormatCost(d decimal.Decimal) string {
 	return d.Round(8).String()
 }
 
-// Validate 校验定价行的合理性，供管理接口调用。
-func Validate(p model.ModelPricing) error {
-	if strings.TrimSpace(p.ModelKey) == "" {
-		return fmt.Errorf("模型名不能为空")
-	}
+// ValidatePrice 校验一行价格的合理性，供管理接口在保存渠道模型前调用。
+//
+// 时段规则的窗口合法性问题在 NormalizeRules 里查：窗口写错（起止相同、
+// 时间格式不对）不会报错、只会永不命中，用户会以为「配了却没生效」。
+func ValidatePrice(p model.ChannelModel) error {
 	if p.InputPer1M.IsNegative() || p.OutputPer1M.IsNegative() ||
 		p.CacheReadPer1M.IsNegative() || p.CacheWritePer1M.IsNegative() {
 		return fmt.Errorf("单价不能为负")

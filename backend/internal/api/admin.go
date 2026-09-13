@@ -78,6 +78,16 @@ type whitelistItem struct {
 	// ProxyID 让这一个模型走自己的代理；0 = 跟随渠道。
 	// 用值类型即可：白名单是整表提交，0 的语义就是「跟随渠道」，不存在歧义。
 	ProxyID uint `json:"proxy_id"`
+	// ---- 价格 ----
+	// 金额用字符串传：JSON 的浮点会把 0.15 变成 0.14999999999999999，
+	// 而单价要落进 numeric(18,8) 的列里
+	InputPer1M      string `json:"input_per_1m"`
+	OutputPer1M     string `json:"output_per_1m"`
+	CacheReadPer1M  string `json:"cache_read_per_1m"`
+	CacheWritePer1M string `json:"cache_write_per_1m"`
+	// Multiplier 用指针区分「没传」与「显式填 0」；0 与不传都归一成 1
+	Multiplier *float64       `json:"multiplier"`
+	PeakRules  model.JSONList `json:"peak_rules"`
 }
 
 // channelPayload 是渠道的写入载荷。
@@ -144,11 +154,28 @@ func normalizeWhitelist(items []whitelistItem) ([]model.ChannelModel, error) {
 		if it.Enabled != nil {
 			enabled = *it.Enabled
 		}
-		out = append(out, model.ChannelModel{
+		row := model.ChannelModel{
 			PublicName: name, UpstreamName: upstream, Enabled: enabled, ProxyID: it.ProxyID,
-		})
+		}
+		// 价格与模型一起提交（见 applyPriceFields）：校验失败时整表都不写，
+		// 免得出现「模型加进去了、价格没保存」这种半截状态
+		if err := applyPriceFields(&row, it); err != nil {
+			return nil, fmt.Errorf("模型 %s 的价格有误: %w", name, err)
+		}
+		out = append(out, row)
 	}
 	return out, nil
+}
+
+// invalidatePricing 让计价引擎丢掉缓存。
+//
+// 价格随渠道模型一起改，所以任何动到白名单的接口都必须喊一声：
+// 引擎缓存 5 分钟，不主动失效的话「改完价发一次请求发现还是老价钱」，
+// 用户会以为保存没成功而反复点保存。
+func (s *Server) invalidatePricing() {
+	if s.deps.Pricing != nil {
+		s.deps.Pricing.Invalidate()
+	}
 }
 
 // replaceChannelModels 用给定白名单整体替换某个渠道的条目。
@@ -176,6 +203,10 @@ type channelListItem struct {
 	model.Channel
 	Models     []string `json:"models"`
 	ModelCount int      `json:"model_count"`
+	// UnpricedCount 是白名单里还没配价的条数。由服务端算而不是前端遍历：
+	// 判据（四个单价全 0 且没有倍率）必须与计价引擎一字不差，
+	// 两边各写一份迟早会不一致
+	UnpricedCount int `json:"unpriced_count"`
 }
 
 func (s *Server) listChannels(c *gin.Context) {
@@ -195,6 +226,7 @@ func (s *Server) listChannels(c *gin.Context) {
 		ids = append(ids, ch.ID)
 	}
 	names := map[uint][]string{}
+	unpriced := map[uint]int{}
 	if len(ids) > 0 {
 		var rows []model.ChannelModel
 		if err := db.Where("channel_id IN ?", ids).Order("public_name").Find(&rows).Error; err != nil {
@@ -203,6 +235,13 @@ func (s *Server) listChannels(c *gin.Context) {
 		}
 		for _, r := range rows {
 			names[r.ChannelID] = append(names[r.ChannelID], r.PublicName)
+			// 「没配价」的判定与计价引擎一致：四个单价全 0 且没有倍率。
+			// 列表上要显式提示条数 —— 漏配价的后果是这笔调用被记成 0 元，
+			// 而账面上完全看不出异常，只能靠这里点名
+			if r.InputPer1M.IsZero() && r.OutputPer1M.IsZero() &&
+				r.CacheReadPer1M.IsZero() && r.CacheWritePer1M.IsZero() && r.Multiplier <= 1 {
+				unpriced[r.ChannelID]++
+			}
 		}
 	}
 
@@ -212,7 +251,9 @@ func (s *Server) listChannels(c *gin.Context) {
 		if list == nil {
 			list = []string{}
 		}
-		items = append(items, channelListItem{Channel: ch, Models: list, ModelCount: len(list)})
+		items = append(items, channelListItem{
+			Channel: ch, Models: list, ModelCount: len(list), UnpricedCount: unpriced[ch.ID],
+		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
 }
@@ -295,6 +336,7 @@ func (s *Server) createChannel(c *gin.Context) {
 			return
 		}
 	}
+	s.invalidatePricing()
 	c.JSON(http.StatusOK, ch)
 }
 
@@ -403,6 +445,7 @@ func (s *Server) updateChannel(c *gin.Context) {
 		writeUpdateError(c, err)
 		return
 	}
+	s.invalidatePricing()
 	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates), "models_replaced": p.Models != nil})
 }
 
@@ -526,12 +569,22 @@ type bindPayload struct {
 	UpstreamName string `json:"upstream_name"`
 	Enabled      *bool  `json:"enabled"`
 	ProxyID      uint   `json:"proxy_id"`
+	// 价格字段与 whitelistItem 一致，见那里的说明
+	InputPer1M      string         `json:"input_per_1m"`
+	OutputPer1M     string         `json:"output_per_1m"`
+	CacheReadPer1M  string         `json:"cache_read_per_1m"`
+	CacheWritePer1M string         `json:"cache_write_per_1m"`
+	Multiplier      *float64       `json:"multiplier"`
+	PeakRules       model.JSONList `json:"peak_rules"`
 }
 
 func (p bindPayload) whitelistItem() whitelistItem {
 	return whitelistItem{
 		PublicName: p.PublicName, UpstreamName: p.UpstreamName,
 		Enabled: p.Enabled, ProxyID: p.ProxyID,
+		InputPer1M: p.InputPer1M, OutputPer1M: p.OutputPer1M,
+		CacheReadPer1M: p.CacheReadPer1M, CacheWritePer1M: p.CacheWritePer1M,
+		Multiplier: p.Multiplier, PeakRules: p.PeakRules,
 	}
 }
 
@@ -569,6 +622,7 @@ func (s *Server) replaceChannelModelsAPI(c *gin.Context) {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
+	s.invalidatePricing()
 	c.JSON(http.StatusOK, gin.H{"channel_id": id, "total": len(items)})
 }
 
@@ -613,9 +667,16 @@ func (s *Server) bindChannelModel(c *gin.Context) {
 	err = db.Where("channel_id = ? AND public_name = ?", id, item.PublicName).First(&binding).Error
 	switch {
 	case errors.Is(err, gorm.ErrRecordNotFound):
+		// 价格与代理都从 item 整块拷过来：item 已经过 normalizeWhitelist
+		// （价格在那里校验并归一），漏拷任何一项都会表现为
+		// 「接口返回了新的绑定，但那一项没保存」——ProxyID 就曾经这样丢过
 		binding = model.ChannelModel{
 			ChannelID: id, PublicName: item.PublicName,
 			UpstreamName: item.UpstreamName, Enabled: item.Enabled,
+			ProxyID:    item.ProxyID,
+			InputPer1M: item.InputPer1M, OutputPer1M: item.OutputPer1M,
+			CacheReadPer1M: item.CacheReadPer1M, CacheWritePer1M: item.CacheWritePer1M,
+			Multiplier: item.Multiplier, PeakRules: item.PeakRules,
 		}
 		if err := db.Create(&binding).Error; err != nil {
 			writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
@@ -634,7 +695,10 @@ func (s *Server) bindChannelModel(c *gin.Context) {
 		}
 		binding.UpstreamName = item.UpstreamName
 		binding.Enabled = item.Enabled
+		// 这里刻意不动价格：载荷里没传价格时是空字符串，按 applyPriceFields
+		// 的语义等于 0，会把用户配好的价格悄悄清掉。改价走整表提交那条路
 	}
+	s.invalidatePricing()
 	c.JSON(http.StatusOK, binding)
 }
 
@@ -653,6 +717,7 @@ func (s *Server) unbindChannelModel(c *gin.Context) {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
+	s.invalidatePricing()
 	c.JSON(http.StatusOK, gin.H{"deleted": true})
 }
 

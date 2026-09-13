@@ -8,13 +8,14 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
 
 	"llm-relay/internal/model"
 )
 
 // registerBackupRoutes 挂载配置备份接口。
 //
-// 备份的是「配置」而不是「数据」：渠道、模型、绑定、密钥与手工定价。
+// 备份的是「配置」而不是「数据」：渠道、模型（含各自的价格）、绑定、代理与密钥。
 // 调用日志与统计属于运行数据，随数据库卷一起备份更合适，不做进这里。
 func registerBackupRoutes(g *gin.RouterGroup, s *Server) {
 	r := g.Group("/backup")
@@ -67,11 +68,26 @@ type backupBundle struct {
 	// Proxies 里的密码是密文，靠 proxyExport 显式带出来 ——
 	// model.Proxy.PasswordEnc 的 json tag 是 "-"，直接序列化会把密码整个丢掉，
 	// 恢复出来的代理会变成「没有密码」，而界面上看不出任何异常。
-	Proxies  []proxyExport        `json:"proxies"`
-	APIKeys  []apiKeyExport       `json:"api_keys"`
-	Pricings []model.ModelPricing `json:"pricings"`
-	// ManualPricings 是旧备份文件里的字段名，只为能继续读出来
-	ManualPricings []model.ModelPricing `json:"manual_pricings"`
+	Proxies []proxyExport  `json:"proxies"`
+	APIKeys []apiKeyExport `json:"api_keys"`
+	// Pricings 是**只读**的旧字段：价格已改随渠道模型配置（见 model.ChannelModel），
+	// 新备份不再导出它。保留定义只为能把老备份里的价格捞出来应用到对应的渠道模型上，
+	// 否则「导入旧备份」会静默丢掉全部价格。
+	Pricings       []legacyPricing `json:"pricings"`
+	ManualPricings []legacyPricing `json:"manual_pricings"`
+}
+
+// legacyPricing 是旧备份里定价条目的形状（model_pricings 表已下线）。
+// 字段名与当时的实体一致，这样老备份原样解析得出来。
+type legacyPricing struct {
+	ModelKey        string          `json:"model_key"`
+	Currency        string          `json:"currency"`
+	InputPer1M      decimal.Decimal `json:"input_per_1m"`
+	OutputPer1M     decimal.Decimal `json:"output_per_1m"`
+	CacheReadPer1M  decimal.Decimal `json:"cache_read_per_1m"`
+	CacheWritePer1M decimal.Decimal `json:"cache_write_per_1m"`
+	PeakRules       model.JSONList  `json:"peak_rules"`
+	Multiplier      float64         `json:"multiplier"`
 }
 
 // secretFingerprint 取主密钥的短哈希，用于判断备份能否在本实例解开。
@@ -131,12 +147,9 @@ func (s *Server) exportConfig(c *gin.Context) {
 				return nil
 			},
 		},
-		{
-			// 定价全部手工录入，都是不可再生的数据，必须整体导出
-			"模型定价", func() error {
-				return db.Order("id").Find(&b.Pricings).Error
-			},
-		},
+		// 「模型定价」这一步已取消：价格随渠道的模型白名单一起导出
+		// （见 channelExport.Models），单独再导一份只会出现两份真相。
+		// b.Pricings 保持为空数组，老版本的导入逻辑读到空值不会报错。
 	}
 	for _, step := range steps {
 		if err := step.run(); err != nil {
@@ -345,22 +358,31 @@ func (s *Server) importConfig(c *gin.Context) {
 	if len(pricings) == 0 {
 		pricings = b.ManualPricings
 	}
+	// 老备份里的价格：按模型名写到对应的渠道模型上。
+	// 新备份没有这个数组，这段对它是空转。
 	for i := range pricings {
 		p := pricings[i]
-		var exist model.ModelPricing
-		if err := db.Where("model_key = ?", p.ModelKey).First(&exist).Error; err == nil {
-			report.Skipped["模型定价"]++
+		// 旧备份里没有 multiplier 字段（那时还没有固定倍率），反序列化后是 0；
+		// 0 的语义是「没配」，由引擎归一到 1
+		res := db.Model(&model.ChannelModel{}).
+			Where("public_name = ?", p.ModelKey).
+			Where("COALESCE(input_per1_m,0) = 0 AND COALESCE(output_per1_m,0) = 0").
+			Where("COALESCE(cache_read_per1_m,0) = 0 AND COALESCE(cache_write_per1_m,0) = 0").
+			Updates(map[string]any{
+				"input_per1_m": p.InputPer1M, "output_per1_m": p.OutputPer1M,
+				"cache_read_per1_m": p.CacheReadPer1M, "cache_write_per1_m": p.CacheWritePer1M,
+				"multiplier": p.Multiplier, "peak_rules": p.PeakRules,
+			})
+		if res.Error != nil {
+			report.Warnings = append(report.Warnings, "定价 "+p.ModelKey+" 导入失败: "+res.Error.Error())
 			continue
 		}
-		p.ID = 0
-		// 旧备份里没有 multiplier 字段（那时还没有固定倍率），反序列化后是 0。
-		// 0 会被 GORM 从 INSERT 里省掉，而这一列是 not null 且没有默认值 ——
-		// 不归一的话「恢复旧备份」会直接写不进去
-		if p.Multiplier <= 0 {
-			p.Multiplier = 1
-		}
-		if err := db.Create(&p).Error; err != nil {
-			report.Warnings = append(report.Warnings, "定价 "+p.ModelKey+" 导入失败: "+err.Error())
+		if res.RowsAffected == 0 {
+			// 没有渠道在用这个模型（或它已经有价了）：如实说明，
+			// 不要让人以为价格恢复成功了
+			report.Warnings = append(report.Warnings,
+				"备份里的定价 "+p.ModelKey+" 没有对应的渠道模型（或该模型已有价格），已跳过")
+			report.Skipped["模型定价"]++
 			continue
 		}
 		report.Created["模型定价"]++

@@ -21,11 +21,13 @@ func (s *Server) finalizeLog(req *relay.RelayRequest, res *relay.RelayResult, us
 	if s.deps.GroupLimit != nil && entry.GroupID > 0 {
 		s.deps.GroupLimit.AddTokens(entry.GroupID, usage.BillableTokens(), time.Now())
 	}
-	if s.deps.Pricing != nil && entry.ModelRequested != "" {
+	// 价格是「渠道 × 模型」维度的：同一个模型名在不同渠道成本不同，
+	// 所以查价必须带上这次请求真正走的那条渠道（entry.ChannelID）
+	if s.deps.Pricing != nil && entry.ModelRequested != "" && entry.ChannelID > 0 {
 		// 必须用**服务器本地时间**：时段倍率（如工作日 9:00-12:00 双倍）
 		// 是按用户看到的钟点填的，传 UTC 会让窗口整体偏 8 小时
 		at := time.Now()
-		if p, ok := s.deps.Pricing.Resolve(context.Background(), entry.ModelRequested, at); ok {
+		if p, ok := s.deps.Pricing.Resolve(context.Background(), entry.ChannelID, entry.ModelRequested, at); ok {
 			entry.EstimatedCost = p.Cost(usage)
 			entry.PricingSnapshot = p.Snapshot(at)
 		}

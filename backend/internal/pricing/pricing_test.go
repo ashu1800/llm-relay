@@ -173,14 +173,14 @@ func TestCostIgnoresEmptyUsage(t *testing.T) {
 // 日后改价或改倍率规则都不能让旧日志里的金额跟着变。
 func TestSnapshotCarriesResolvedPrices(t *testing.T) {
 	p := Price{
-		ModelKey: "deepseek-v4-pro", Currency: "USD",
+		ChannelID: 7, ModelName: "deepseek-v4-pro", Currency: "USD",
 		InputPer1M:      decimal.RequireFromString("1.32"),
 		OutputPer1M:     decimal.RequireFromString("3.96"),
 		CacheReadPer1M:  decimal.RequireFromString("0.044"),
 		CacheWritePer1M: decimal.RequireFromString("1.32"),
 		Multiplier:      decimal.NewFromInt(2), Source: MultiplierSourcePeak,
 		PeakApplied: true, PeakLabel: "峰时",
-		Base: model.ModelPricing{Multiplier: 1.5},
+		Base: model.ChannelModel{Multiplier: 1.5},
 	}
 	snap := p.Snapshot(time.Date(2026, 9, 14, 10, 0, 0, 0, time.Local))
 
@@ -202,6 +202,14 @@ func TestSnapshotCarriesResolvedPrices(t *testing.T) {
 	// 时刻要带时区偏移：规则按本地时间判断，只记 UTC 事后没法核对
 	if s, _ := snap["resolved_at"].(string); !strings.Contains(s, "+") && !strings.HasSuffix(s, "Z") {
 		t.Fatalf("resolved_at 应带时区，实际 %v", snap["resolved_at"])
+	}
+	// 价格是「渠道 × 模型」维度的：快照必须记下渠道，
+	// 否则事后看到一笔金额无从判断它按哪条渠道的价算的
+	if snap["channel_id"] != uint(7) {
+		t.Fatalf("快照应记录渠道 ID，实际 %v", snap["channel_id"])
+	}
+	if snap["model_key"] != "deepseek-v4-pro" {
+		t.Fatalf("快照的 model_key 应保持原键名（历史日志按它解析），实际 %v", snap["model_key"])
 	}
 }
 
