@@ -220,7 +220,35 @@ function setLimit(row: APIKey) {
   })
 }
 
+// onCancel 处理「取消 / 再建一把」：已经看到明文时，这个按钮的语义是
+// 「再建一把」—— 清掉明文并重置表单，弹窗留着；其余情况就是普通关闭
+function onCancel() {
+  if (createdKey.value) {
+    createdKey.value = ''
+    form.name = ''
+    form.rate_limit_rpm = 0
+    form.allowed_models = []
+    form.allowed_groups = []
+    form.enabled = true
+    return
+  }
+  closeModal()
+}
+
+// closeModal 关掉弹窗并把「刚建出来的明文」清掉，下次打开是干净的表单
+function closeModal() {
+  modalOpen.value = false
+  createdKey.value = ''
+}
+
 async function save() {
+  // 刚创建完、弹窗还开着（在展示明文）时，确定按钮的语义是「完成」而不是
+  // 「再建一把」。原来它一直绑着创建动作，用户看完明文顺手点确定，
+  // 就会静默建出第二把一模一样的密钥 —— 而且可以无限点下去。
+  if (createdKey.value) {
+    closeModal()
+    return
+  }
   if (!form.name.trim()) {
     message.warning('名称必填')
     return
@@ -237,7 +265,7 @@ async function save() {
     if (editing.value) {
       await api.put('/keys/' + editing.value.id, { ...body, enabled: form.enabled })
       message.success('已更新')
-      modalOpen.value = false
+      closeModal()
       await load()
     } else {
       const res = await api.post<{ key: string }>('/keys', { ...body, enabled: form.enabled })
@@ -383,7 +411,16 @@ onMounted(() => {
       </DataState>
     </section>
 
-    <a-modal v-model:open="modalOpen" :title="title" :confirm-loading="saving" width="600px" @ok="save">
+    <a-modal
+      v-model:open="modalOpen"
+      :title="title"
+      :confirm-loading="saving"
+      width="600px"
+      :ok-text="createdKey ? '完成' : '确定'"
+      :cancel-text="createdKey ? '再建一把' : '取消'"
+      @ok="save"
+      @cancel="onCancel"
+    >
       <a-form layout="vertical">
         <a-form-item label="名称" required>
           <a-input v-model:value="form.name" placeholder="例如 本地客户端" />
