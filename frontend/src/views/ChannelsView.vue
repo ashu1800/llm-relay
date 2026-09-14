@@ -747,19 +747,21 @@ onBeforeUnmount(() => {
            「操作」列会盖住左边最后一列，表现为表头被截断、内容被压住。
            反过来偏大也不行 —— antd 会把多出来的宽度摊到各列上，
            于是「声明值」和实际渲染宽度对不上，量出来的数就没法用来核对。
-           1227 = 各列宽度之和（顺序 44 + 名称 170 + 模型 200 + 上游协议 125
+           1267 = 各列宽度之和（顺序 44 + 名称 210 + 模型 200 + 上游协议 125
            + 最近调用 174 + 分组 110 + 币种 86 + 启用 78 + 操作 240）。
-           「最近调用」占的就是原来「地址」那 174，所以总和没变。
+           名称 170 -> 210 是因为名称后面加了「代理」胶囊：胶囊约 42px，
+           原来那 170 减去图标与两处间距只剩 126px，长一点的渠道名会被挤成省略号。
+           「最近调用」占的就是原来「地址」那 174。
            「权重」列已去掉（顺序由列表本身表达，不再显示数字），
            换成 44px 的拖拽手柄列；操作列 292 -> 240 是更早那次改动。
-           改完实测（scripts/measure-tables.mjs，1440 视口）：容器 1182、表格 1227 -->
+           改完实测（scripts/measure-tables.mjs，1440 视口）：容器 1182、表格 1267 -->
       <a-table
         :data-source="visibleRows"
         :loading="loading"
         :pagination="false"
         row-key="id"
         size="small"
-        :scroll="{ x: 1227 }"
+        :scroll="{ x: 1267 }"
       >
         <template #emptyText>
           <a-empty
@@ -778,16 +780,23 @@ onBeforeUnmount(() => {
             </span>
           </template>
         </a-table-column>
-        <a-table-column title="名称" :width="170">
+        <a-table-column title="名称" :width="210">
           <template #default="{ record }">
             <div class="chan-title">
               <ChannelIcon :name="record.name" :icon="record.icon" :size="20" />
-              <span class="chan-name">{{ record.name }}</span>
-            </div>
-            <!-- 走了代理的渠道要能一眼看出来：排查「为什么这条渠道的错误
-                 和别的渠道不一样」时，第一件事就是确认它的出口 -->
-            <div v-if="proxyName(record.proxy_id)" class="sub-text">
-              经 {{ proxyName(record.proxy_id) }}
+              <!-- 名称带 title：加了「代理」胶囊之后这一格更挤，长名字会被
+                   省略号截掉，截掉的部分要能悬停看到 -->
+              <span class="chan-name" :title="record.name">{{ record.name }}</span>
+              <!-- 走了代理的渠道要能一眼看出来：排查「为什么这条渠道的错误
+                   和别的渠道不一样」时，第一件事就是确认它的出口。
+                   只挂一个「代理」胶囊，不再写「经 XXX 代理」：代理名一长
+                   就把名称挤成两行，而这里要回答的只是「有没有走代理」，
+                   具体是哪条代理放 title 里，悬停可见。 -->
+              <span
+                v-if="proxyName(record.proxy_id)"
+                class="proxy-tag"
+                :title="'经 ' + proxyName(record.proxy_id) + ' 代理'"
+              >代理</span>
             </div>
           </template>
         </a-table-column>
@@ -1138,11 +1147,26 @@ onBeforeUnmount(() => {
 .bind-footer { display: flex; align-items: center; gap: 8px; }
 .bind-hint { margin-right: auto; font-size: 12px; color: var(--color-text-secondary); }
 .unassigned { color: var(--color-text-secondary); }
-.chan-title { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+/* 名称那一格：图标 + 名字 + 可选的「代理」胶囊。
+   margin-bottom 跟着「经 xxx 代理」那行一起去掉：现在只有一行了 */
+.chan-title { display: flex; align-items: center; gap: 6px; }
 .icon-row { display: flex; align-items: center; gap: 8px; }
 .chan-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 名称下方的「经 xxx」代理提示：比正文弱一档，不抢渠道名的注意力 */
-.sub-text { color: var(--color-text-secondary); font-size: 12px; }
+/* 「代理」胶囊：中性配色，与分组胶囊（GroupTag）同一套尺寸，
+   但不参与分组配色 —— 它表达的是「出口」，与属于哪个分组无关。
+   flex: 0 0 auto 让它不被压缩：被压的应该是渠道名。 */
+.proxy-tag {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--color-border);
+  background: color-mix(in oklab, var(--color-text-secondary) 10%, transparent);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+  white-space: nowrap;
+}
 .model-names { color: var(--color-text); }
 /* 最近调用用等宽数字：这一列是时间量，比例字体下「分钟前」三个字的宽度
    会随数字变化，一列里参差不齐；tabular-nums 让它们对齐成一条竖线 */
