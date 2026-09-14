@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-cd "/path/to/llm-relay" || exit 1
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 P() { docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "$1" 2>&1; }
 ok=0; bad=0
 chk() { if [ "$2" = "$3" ]; then echo "  [通过] $1  $3"; ok=$((ok+1)); else echo "  [失败] $1  期望 $2 实际 $3"; bad=$((bad+1)); fi; }

@@ -1,5 +1,6 @@
 // 强制切到暗色主题后整页截图，用来检查暗色下的可读性。
 import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
 const ver = await (await fetch('http://127.0.0.1:9222/json/version')).json()
 const ws = new WebSocket(ver.webSocketDebuggerUrl)
 await new Promise((r, j) => { ws.onopen = r; ws.onerror = j })
@@ -21,7 +22,7 @@ const send = (method, params, sessionId) => {
   })
 }
 const page = process.argv[2] || '/console/dashboard'
-const outFile = process.argv[3] || '.shots/dark.png'
+const outFile = process.argv[3] || fileURLToPath(new URL('../.shots/dark.png', import.meta.url))
 const { targetId } = await send('Target.createTarget', { url: 'about:blank' })
 const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true })
 await send('Page.enable', {}, sessionId)

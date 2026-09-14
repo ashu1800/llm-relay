@@ -6,7 +6,7 @@
 # 测试会因为「上游不存在」而失败 —— 更糟的是，
 # 「停用分组后调不通」这种用例会因为同样的原因**假通过**。
 set -uo pipefail
-cd "/path/to/llm-relay" || exit 1
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 bash scripts/redeploy.sh || { echo "部署失败"; exit 1; }
 

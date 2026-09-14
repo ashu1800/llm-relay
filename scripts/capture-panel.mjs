@@ -1,9 +1,10 @@
 // 按面板标题关键字单独高清截取某张卡片。
 // 用法: node scripts/capture-panel.mjs <标题关键字> <输出png> [页面路径] [额外下边距]
 import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
 const key = process.argv[2]
-const outFile = process.argv[3] || '.shots/panel.png'
+const outFile = process.argv[3] || fileURLToPath(new URL('../.shots/panel.png', import.meta.url))
 const page = process.argv[4] || '/console/dashboard'
 const padBottom = Number(process.argv[5] || 0)
 

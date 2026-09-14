@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-cd "/path/to/llm-relay" || exit 1
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 fail=0
 for f in deploy/*.sh scripts/*.sh; do
   if ! bash -n "$f" 2>/dev/null; then

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 把运行中的实例从内置默认主密钥迁移到随机主密钥。
 set -uo pipefail
-cd "/path/to/llm-relay" || exit 1
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 OLD_SECRET="llm-relay-dev-secret-change-me"
 ENV_FILE=/opt/llm-relay/deploy/.env

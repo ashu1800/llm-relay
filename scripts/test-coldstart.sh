@@ -19,7 +19,7 @@ echo "  .env 仍在: $(test -f .env && echo 是 || echo 否)"
 echo
 echo "=== 从零重建（计时）==="
 START=$(date +%s)
-bash /path/to/llm-relay/deploy/install.sh > /tmp/cold.log 2>&1
+bash "$(dirname "${BASH_SOURCE[0]}")/../deploy/install.sh" > /tmp/cold.log 2>&1
 RC=$?
 END=$(date +%s)
 echo "  install.sh 退出码: $RC"

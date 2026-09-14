@@ -49,7 +49,7 @@ const shot = await send('Page.captureScreenshot', {
   format: 'png',
   clip: { x: box.面板.x, y: box.面板.y, width: box.面板.w, height: box.面板.h, scale: 2 }
 }, sessionId)
-fs.writeFileSync('.shots/heatmap.png', Buffer.from(shot.data, 'base64'))
+fs.writeFileSync(new URL('../.shots/heatmap.png', import.meta.url), Buffer.from(shot.data, 'base64'))
 console.log('已保存 .shots/heatmap.png')
 await send('Target.closeTarget', { targetId })
 ws.close()

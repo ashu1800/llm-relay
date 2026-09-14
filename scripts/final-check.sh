@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-cd "/path/to/llm-relay" || exit 1
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 echo "=== 提交历史 ==="
 git log --oneline | head -14
 echo

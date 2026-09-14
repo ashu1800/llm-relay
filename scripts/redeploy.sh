@@ -13,7 +13,7 @@
 # 所以那一步拷贝以前全靠手工 —— 忘了做就是「后端更新了、页面还是旧的」，
 # 而且不会有任何报错。
 set -uo pipefail
-cd "/path/to/llm-relay" || exit 1
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 # ---- 前端 ----
 # 只做类型检查，不在这里构建产物。

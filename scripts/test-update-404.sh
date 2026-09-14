@@ -36,7 +36,7 @@ chk "分组正常更新" "200" "$code"
 
 echo
 echo "=== 全接口回归 ==="
-bash /path/to/llm-relay/scripts/test-regression.sh 2>&1 | tail -8
+bash "$(dirname "${BASH_SOURCE[0]}")/test-regression.sh" 2>&1 | tail -8
 
 echo
 echo "通过 $pass 项，失败 $fail 项"

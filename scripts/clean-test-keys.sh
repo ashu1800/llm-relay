@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 清掉历史遗留的 regress 测试密钥。
 set -uo pipefail
-cd "/path/to/llm-relay" || exit 1
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 python3 - <<'PY'
 import json, urllib.request
 ADMIN = "http://127.0.0.1:8888/api/admin"

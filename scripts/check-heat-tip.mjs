@@ -91,7 +91,7 @@ if (tip === null) {
     format: 'png',
     clip: { x: panel.x, y: Math.max(0, panel.y - 110), width: panel.width, height: panel.height + 120, scale: 2 }
   }, sessionId)
-  fs.writeFileSync('.shots/heat-tip.png', Buffer.from(shot.data, 'base64'))
+  fs.writeFileSync(new URL('../.shots/heat-tip.png', import.meta.url), Buffer.from(shot.data, 'base64'))
   console.log('已保存 .shots/heat-tip.png')
 }
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 全仓凭据泄漏检查。用完整密钥值检索，避免扫描脚本匹配到自己的模式串。
-cd "/path/to/llm-relay" || exit 1
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 # 完整值从环境变量取，脚本本身不留凭据
 : "${DS_KEY:?请先 export DS_KEY / OA_KEY / PROXY_PASS}"

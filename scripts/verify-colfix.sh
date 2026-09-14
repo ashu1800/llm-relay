@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-cd "/path/to/llm-relay" || exit 1
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 BASE=http://127.0.0.1:8888/api/admin
 P() { docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "$1"; }
 

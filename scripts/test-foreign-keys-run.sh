@@ -3,7 +3,7 @@
 # 写成文件而不是内联命令：嵌套引号里的 SQL 太难拼对，
 # 今天已经在这上面栽过三次，每次都是肉眼看不出来的转义问题。
 set -uo pipefail
-cd "/path/to/llm-relay" || exit 1
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 cat > /tmp/cleanup-probe.sql <<'SQL'
 DELETE FROM channel_models WHERE channel_id IN (SELECT id FROM channels WHERE name = 'fk-cascade-probe');

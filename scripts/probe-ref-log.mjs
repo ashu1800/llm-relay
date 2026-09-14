@@ -52,6 +52,6 @@ const box = JSON.parse((await send('Runtime.evaluate', {
   returnByValue: true
 }, sessionId)).result.value)
 const shot = await send('Page.captureScreenshot', { format: 'png', clip: { x: box.x, y: box.y, width: box.width, height: box.height, scale: 2 } }, sessionId)
-fs.writeFileSync('.shots/ref-logs.png', Buffer.from(shot.data, 'base64'))
+fs.writeFileSync(new URL('../.shots/ref-logs.png', import.meta.url), Buffer.from(shot.data, 'base64'))
 console.log('已保存 .shots/ref-logs.png')
 ws.close()

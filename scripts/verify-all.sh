@@ -6,7 +6,7 @@
 # 所以上游必须在**所有会触发部署的脚本跑完之后**再起，
 # 否则依赖它的用例会以「上游不可达」失败，看起来像代码坏了。
 set -uo pipefail
-cd "/path/to/llm-relay" || exit 1
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 fail=0
 

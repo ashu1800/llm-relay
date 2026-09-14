@@ -84,7 +84,7 @@ llm-relay/
 ## 一键部署（WSL2 / Ubuntu 24.04）
 
 ```bash
-cd /path/to/llm-relay
+cd llm-relay
 # 方式一：WSL 免密直用 root（推荐，本机已验证）
 wsl -u root -- bash deploy/install.sh
 
@@ -276,3 +276,16 @@ rm -rf backend/internal/web/dist && cp -r frontend/dist backend/internal/web/dis
 `scripts/verify-all.sh` 会按顺序跑完上面这些可离线执行的用例并汇总，
 最后打印 `ALL_PASS`；日常改完代码跑它一次就够。
 （`test-coldstart.sh` 要拆容器与镜像，不在其中。）
+
+## 安全提醒
+
+管理接口**没有登录鉴权**（`deploy/.env.example` 里默认 `BIND_ADDR=127.0.0.1`
+只监听本机就是为此）。绑到 `0.0.0.0` 之前请自行加反向代理与访问控制 ——
+否则同网段的任何人都能读到你的上游密钥与全部调用日志。
+
+渠道里的上游密钥用 `RELAY_SECRET` 做 AES-GCM 加密后入库，所以这把主密钥
+务必自己生成并保管好：留空会退回程序内置的公开默认值，等于没有加密。
+
+## 许可证
+
+[MIT](LICENSE)

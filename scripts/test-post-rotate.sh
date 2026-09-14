@@ -36,5 +36,5 @@ echo "  已清理"
 
 echo
 echo "=== 全接口回归 ==="
-bash /path/to/llm-relay/scripts/test-regression.sh 2>&1 | tail -9
+bash "$(dirname "${BASH_SOURCE[0]}")/test-regression.sh" 2>&1 | tail -9
 echo DONE
