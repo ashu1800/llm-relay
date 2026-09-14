@@ -323,7 +323,16 @@ func (s *Server) createChannel(c *gin.Context) {
 		currency = model.CurrencyUSD
 	}
 	if p.GroupID == 0 {
-		p.GroupID = defaultGroupID(s)
+		// 没传分组就落到默认分组。默认分组可能被用户删掉或不设（见 store.Seed），
+		// 那种情况下不能瞎指一个 id：写死 1 的通病是「要么外键报错、要么进错组」
+		gid, ok := defaultGroupID(s)
+		if !ok {
+			writeUpstreamError(c, http.StatusBadRequest,
+				"没有默认分组，请在请求里指定 group_id，或先在分组管理里把一个分组设为默认",
+				"invalid_request_error")
+			return
+		}
+		p.GroupID = gid
 	}
 	// 代理存在性在这里校验：填一个不存在的 id，转发时才发现的话，
 	// 表现是「渠道莫名其妙不通」，而配置看起来完全正常
@@ -1442,10 +1451,17 @@ func orDefault(v, def string) string {
 	return v
 }
 
-func defaultGroupID(s *Server) uint {
+// defaultGroupID 取被标为默认分组的 id。
+//
+// 取不到时返回 ok=false，不再退到写死的 1。以前能这么退，是因为 Seed
+// 每次启动都会把「默认分组」建回来，这里几乎总是查得到；现在默认分组是
+// 用户可以不设、也可以删掉的（见 store.Seed），再返回 1 就可能落到一个
+// 不存在的分组上（外键拒绝，渠道建不出来），或者另一个不相干的分组上
+// （渠道静默进了错组）。取不到时由调用方决定怎么办，别在这里猜。
+func defaultGroupID(s *Server) (uint, bool) {
 	var g model.ChannelGroup
-	if err := s.deps.Store.DB().Where("is_default = ?", true).First(&g).Error; err == nil {
-		return g.ID
+	if err := s.deps.Store.DB().Where("is_default = ?", true).First(&g).Error; err != nil {
+		return 0, false
 	}
-	return 1
+	return g.ID, true
 }

@@ -242,12 +242,29 @@ func (s *Store) migrateLegacySchema() error {
 		}
 	}
 
-	// 模型商彻底退场：表与各表上的归属列一并删掉
+	// 模型商彻底退场：表与各表上的归属列一并删掉。
+	//
+	// ALTER 必须逐张表判断在不在：DROP COLUMN IF EXISTS 只容忍「列不存在」，
+	// 容忍不了「表不存在」。而这一步排在 AutoMigrate **之前**，全新库里这些表
+	// 还没建出来，于是新装用户第一次启动会直接以
+	// 「relation "channel_models" does not exist」失败 —— 与上面 hasTable
+	// 那段注释里写的是同一个坑，只是这里漏了守卫。
+	// DROP TABLE 不用判断：它自带 IF EXISTS。
+	for _, t := range []struct{ table, column string }{
+		{"channel_models", "model_id"},
+		{"channels", "provider_id"},
+		{"channel_groups", "provider_id"},
+		{"request_logs", "provider_id"},
+	} {
+		if !s.hasTable(t.table) {
+			continue
+		}
+		stmt := "ALTER TABLE " + t.table + " DROP COLUMN IF EXISTS " + t.column
+		if err := s.db.Exec(stmt).Error; err != nil {
+			return fmt.Errorf("删除模型商结构失败（%s）: %w", stmt, err)
+		}
+	}
 	for _, stmt := range []string{
-		"ALTER TABLE channel_models DROP COLUMN IF EXISTS model_id",
-		"ALTER TABLE channels DROP COLUMN IF EXISTS provider_id",
-		"ALTER TABLE channel_groups DROP COLUMN IF EXISTS provider_id",
-		"ALTER TABLE request_logs DROP COLUMN IF EXISTS provider_id",
 		"DROP TABLE IF EXISTS pricing_sync_logs",
 		// 模板管理整个功能已下线：菜单、接口、实体都删了，
 		// 表留着只会在备份/排查时让人以为它还在生效
@@ -344,12 +361,32 @@ func (s *Store) normalizeGroupStrategies() error {
 }
 
 // Seed 写入首次启动所需的基线数据，可重复执行。
+//
+// 默认分组只在「一个分组都没有」时创建，也就是全新安装那一次。
+//
+// 原来写的是 Where(Name: "默认分组").FirstOrCreate(...)：判断依据是**名字**，
+// 于是用户在界面上把这个分组改名或删掉之后，下次重启又会凭空冒出一个同名分组、
+// 并被设成默认 —— 现象是「我明明删掉了，重启它又回来了」。
+// 分组只要存在过，怎么增删都归用户管，这里不再插手。
+//
+// 唯一的例外是把分组删到一个不剩：那种库与全新安装没有区别（渠道必须挂在分组下，
+// 有渠道就不可能一个分组都没有），按全新安装处理。
 func (s *Store) Seed() error {
-	group := model.ChannelGroup{}
-	if err := s.db.Where(model.ChannelGroup{Name: "默认分组"}).
-		Attrs(model.ChannelGroup{Strategy: model.StrategyFailover, IsDefault: true, Enabled: true}).
-		FirstOrCreate(&group).Error; err != nil {
-		return fmt.Errorf("初始化默认分组失败: %w", err)
+	var groupCount int64
+	if err := s.db.Model(&model.ChannelGroup{}).Count(&groupCount).Error; err != nil {
+		return fmt.Errorf("统计分组数量失败: %w", err)
+	}
+	if groupCount == 0 {
+		g := model.ChannelGroup{
+			Name:      "默认分组",
+			Strategy:  model.StrategyFailover,
+			IsDefault: true,
+			Enabled:   true,
+		}
+		if err := s.db.Create(&g).Error; err != nil {
+			return fmt.Errorf("初始化默认分组失败: %w", err)
+		}
+		slog.Info("全新安装：已创建默认分组", "id", g.ID)
 	}
 
 	defaults := []model.Setting{
@@ -376,20 +413,23 @@ func (s *Store) Seed() error {
 // 库里就会留下指向不存在行的引用，而且没有任何东西会报错 ——
 // 往后的表现是「渠道莫名其妙不参与路由」这类查不到原因的问题。
 //
-// 必须在 Seed 之后调用：回填模板分组需要默认分组已经存在。
-// 也必须在 AutoMigrate 之后：表得先建出来。
+// 必须在 AutoMigrate 之后调用：表得先建出来。
+// （这里的顺序注记曾经是「必须在 Seed 之后，因为要回填模板分组」——
+// 回填语句随模板管理下线一起删掉了，见下面的注释，别再照着它排顺序。）
 //
 // 用原生 SQL 而不是 GORM 的 association tag：后者要求给实体加关联字段，
 // 会改变实体的 JSON 形状，还会让 AutoMigrate 的行为取决于字段定义；
 // 直接把要建的约束写清楚更好读。每条都是 DROP IF EXISTS 后重建，可重复执行。
 func (s *Store) EnsureForeignKeys() error {
+	// 一个分组都没有时先不加：这时也不会有渠道（渠道必须挂在分组下），
+	// 加了拦不住什么，反而可能让「库里存着指向旧分组的渠道」这种历史数据
+	// 直接把启动卡死。等有分组了，下次启动自然会建上。
 	var grp model.ChannelGroup
 	if err := s.db.Order("is_default DESC, id").First(&grp).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			// 一个分组都没有，此时加外键也拦不住什么，留到有分组之后再建
 			return nil
 		}
-		return fmt.Errorf("查找默认分组失败: %w", err)
+		return fmt.Errorf("查找分组失败: %w", err)
 	}
 
 	// 注意：这里曾经有一段「回填 channel_templates.group_id」的语句

@@ -271,12 +271,25 @@ func (s *Server) importConfig(c *gin.Context) {
 		// 映射不到就落到本机默认分组。
 		// 原来是「映射不到就保留旧 ID」—— 那个 ID 在本机可能指向另一个分组，
 		// 或者根本不存在，渠道会因此静默地不参与路由。
+		// 本机也可能压根没有默认分组（用户把它删了，见 store.Seed）：
+		// 那就落到 id 最小的分组，但**落到哪个分组必须写进报告** ——
+		// 悄悄改变归属正是这段代码一开始要避免的事
 		if mapped, ok := groupIDMap[ch.GroupID]; ok {
 			ch.GroupID = mapped
-		} else {
-			ch.GroupID = defaultGroupID(s)
+		} else if gid, ok := defaultGroupID(s); ok {
+			ch.GroupID = gid
 			report.Warnings = append(report.Warnings,
 				"渠道 "+ch.Name+" 的原始分组在本机不存在，已归入默认分组")
+		} else {
+			var fallback model.ChannelGroup
+			if err := db.Order("id").First(&fallback).Error; err != nil {
+				report.Warnings = append(report.Warnings,
+					"渠道 "+ch.Name+" 的原始分组在本机不存在，本机也没有任何分组，该渠道已跳过")
+				continue
+			}
+			ch.GroupID = fallback.ID
+			report.Warnings = append(report.Warnings,
+				"渠道 "+ch.Name+" 的原始分组在本机不存在，本机也没有默认分组，已归入「"+fallback.Name+"」")
 		}
 		// 代理同样要重新映射。不映射的话，备份里指向代理 #2 的渠道
 		// 恢复后会指向本机的 #2 —— 那是另一条线路，流量会从非预期的出口出去，

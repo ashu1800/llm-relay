@@ -159,7 +159,9 @@ async function load() {
     // 分组表到手后才能校验存下来的筛选值是否还指向一个存在的分组
     applyStoredGroupFilter()
     if (!form.group_id && groups.value.length) {
-      form.group_id = groups.value.find((x) => x.is_default)?.id ?? groups.value[0].id
+      // groups.value[0] 要带 ?.：默认分组是用户可以删掉的（见后端 store.Seed），
+      // 而「一个分组都没有」时这一行会直接 TypeError
+      form.group_id = groups.value.find((x) => x.is_default)?.id ?? groups.value[0]?.id ?? 0
     }
   } catch (e: any) {
     loadError.value = e.message || '加载失败'
