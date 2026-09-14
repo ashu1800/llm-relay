@@ -10,6 +10,7 @@ import ChannelOption from '@/components/ChannelOption.vue'
 import { onLive } from '@/composables/useLive'
 import { symbolOf } from '@/utils/money'
 import { channelOption } from '@/utils/channelOption'
+import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
 import type { Channel, ChannelGroup, Paged, RequestLog } from '@/api/types'
 
 // 分组表：日志里的模型、密钥、分组三处标签共用该请求所属分组的颜色。
@@ -66,6 +67,18 @@ const query = reactive({
 // 它们从 URL 进来（?trace_id=… / ?status_class=error），以可关闭的小标签
 // 出现在工具栏末尾 —— 平时不占地方，要用时也没丢。
 const extra = reactive({ trace_id: '', status_class: '' })
+
+// 上次选的筛选条件记在 localStorage 里（工具见 utils/persistedChoice.ts，
+// 看板的四个筛选用的是同一套）。键名带 logs- 前缀、与看板的 dashboard-*
+// 分开：两个页面的「分组 / 渠道」是各自独立的视角，共用一份会互相改。
+//
+// 只记工具栏这四个，不记 trace_id / status_class：那两个是「顺着一条报错
+// 查下去」的临时条件，下次打开网页还被它们筛着，会看到一张恒为 0 条的列表，
+// 而且不记得自己什么时候套上的。
+const GROUP_KEY = 'logs-group'
+const CHANNEL_KEY = 'logs-channel'
+const MODEL_KEY = 'logs-model'
+const RANGE_KEY = 'logs-range'
 
 // 表格体的高度上限：把视口减掉表头、工具栏、分页与各处内边距，剩下的都给行。
 // 201 = 120（表体以上的部分：内容区 8 + 视图 8 + 面板边框 1 + 工具栏 64 + 表头 39）
@@ -183,28 +196,83 @@ function syncFilters() {
   }
 }
 
+/** 把当前四个筛选写进 localStorage（改了哪个都要写，包括被 syncFilters 夹回「全部」的那些） */
+function persistFilters() {
+  writeStoredChoice(GROUP_KEY, query.group_id)
+  writeStoredChoice(CHANNEL_KEY, query.channel_id)
+  writeStoredChoice(MODEL_KEY, query.model)
+  writeStoredChoice(RANGE_KEY, query.range)
+}
+
+/**
+ * 恢复上次的筛选。
+ *
+ * 必须在分组 / 渠道到手之后调用：候选集来自它们，而存下来的值可能指向
+ * 已经删掉的分组 / 渠道 / 模型 —— 那种状态的表现是列表恒为 0 条，
+ * 从界面上完全看不出原因（看板的 applyStoredFilters 是同一套做法）。
+ * 顺序也是固定的：分组 → 渠道 → 模型，因为后一级的候选由前一级收窄，
+ * 反过来校验会算出「分组 A + 属于 B 的渠道」这种共存状态。
+ *
+ * 从 URL 带了条件进来的那一次直接不恢复（调用方保证 applyUrlFilters 已经跑过）：
+ * 那种链接是要发给别人、或以后自己再打开的，同一个链接应该在哪台机器上、
+ * 隔多久打开都显示同一批记录。若再与收件人自己记着的渠道筛选相交，
+ * 链接会显示成一张空表 —— 看起来像日志丢了，而且两个人看到的还不一样。
+ * 这里只是「这一次不套用」，不写回存储：用户并没有改自己的视角，
+ * 下次正常进来还是要恢复它。
+ */
+function applyStoredFilters() {
+  if (extra.trace_id || extra.status_class) return
+  query.group_id = readStoredChoice(
+    GROUP_KEY,
+    [ALL, ...groups.value.map((g) => String(g.id))],
+    ALL
+  )
+  query.channel_id = readStoredChoice(
+    CHANNEL_KEY,
+    [ALL, ...visibleChannels.value.map((c) => String(c.id))],
+    ALL
+  )
+  query.model = readStoredChoice(MODEL_KEY, [ALL, ...visibleModels.value], ALL)
+  // '' 是合法值（不限时间），readStoredChoice 用 includes 判断，
+  // 空串与「没存过」是两种情况，不会把「不限时间」误当成没存过
+  query.range = readStoredChoice(RANGE_KEY, rangeOptions.map((o) => o.value), 'today')
+  // 夹过 / 回退过的结果立刻写回去，免得存储里一直留着一个用不了的值
+  persistFilters()
+}
+
 // 三个下拉都用 @change + v-model：a-select 的 change 传的是**值**
 // （a-radio-group 传的是事件对象，两者不一样，看板上踩过），
 // 这里仍显式赋值一次 —— 不依赖 v-model 与 change 的先后顺序。
 function onGroupChange(v: string) {
   query.group_id = v
   syncFilters()
+  persistFilters()
   search()
 }
 
 function onChannelChange(v: string) {
   query.channel_id = v
   syncFilters()
+  persistFilters()
   search()
 }
 
 function onModelChange(v: string) {
   query.model = v
+  persistFilters()
+  search()
+}
+
+function onRangeChange(v: string) {
+  query.range = v
+  persistFilters()
   search()
 }
 
 // applyUrlFilters 只在进入页面时读一次 URL：这个页面的筛选状态不进地址栏，
 // 免得用户以为地址栏能当书签用、却越用越乱。
+// （工具栏那四个筛选改成了记在本地，见上面的 logs-* 键 ——
+//   记在本地是「下次打开还是这个视角」，与「把地址栏当书签」是两件事。）
 function applyUrlFilters() {
   const tid = String(route.query.trace_id || '').trim()
   if (tid) extra.trace_id = tid
@@ -535,12 +603,19 @@ onLive('logs', (items: RequestLog[]) => {
   total.value += fresh.length
 })
 
-onMounted(() => {
+onMounted(async () => {
   // 分组与渠道必须先加载：三列标签的颜色、三个下拉的候选、渠道列的名称
-  // 都取自它们，拿不到就会退回「按名字派生」，三列出现三种颜色（实测踩过）
-  loadGroups()
-  // URL 里的额外条件要在第一次取数之前生效，否则会先闪一次全量列表
+  // 都取自它们，拿不到就会退回「按名字派生」，三列出现三种颜色（实测踩过）。
+  // 恢复筛选也要等它们 —— 恢复时要按真实候选集校验，否则会恢复出一条
+  // 已经不存在的渠道，列表恒为 0 条
+  await loadGroups()
+  // URL 里的额外条件要在第一次取数之前生效，否则会先闪一次全量列表。
+  // 顺序也必须在 applyStoredFilters 之前：后者要靠 extra 判断「这次是带条件的链接」
+  // （见 applyStoredFilters 的说明，顺序反了就判不出来）
   applyUrlFilters()
+  // 上次的筛选也要在第一次取数之前生效，理由同上：先闪一次全量再跳成
+  // 筛选结果，会让人以为是两次不同的查询
+  applyStoredFilters()
   load()
 })
 </script>
@@ -584,7 +659,7 @@ onMounted(() => {
           v-model:value="query.range"
           :options="rangeOptions"
           style="width: 130px"
-          @change="search"
+          @change="onRangeChange"
         />
         <!-- 额外条件：只从 URL 或详情里进来，平时不占地方 -->
         <a-tag
