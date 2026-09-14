@@ -18,6 +18,14 @@ Dockerfile text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
 
+# 无扩展名但这几个是文本：不声明的话 autocrlf=true 会把它们在检出时
+# 转成 CRLF（git add 时会警告「LF will be replaced by CRLF」）。
+go.mod text eol=lf
+go.sum text eol=lf
+.dockerignore text eol=lf
+.gitattributes text eol=lf
+.gitignore text eol=lf
+
 # 其余文本文件统一走 LF。
 #
 # 前端源码与 markdown 用 LF 不影响 Windows 上的编辑器/构建
