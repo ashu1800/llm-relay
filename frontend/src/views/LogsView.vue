@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { ReloadOutlined, DownloadOutlined } from '@ant-design/icons-vue'
 import { useRoute } from 'vue-router'
@@ -66,6 +66,18 @@ const query = reactive({
 // 它们从 URL 进来（?trace_id=… / ?status_class=error），以可关闭的小标签
 // 出现在工具栏末尾 —— 平时不占地方，要用时也没丢。
 const extra = reactive({ trace_id: '', status_class: '' })
+
+// 表格体的高度上限：把视口减掉表头、工具栏、分页与各处内边距，剩下的都给行。
+// 201 = 120（表体以上的部分：内容区 8 + 视图 8 + 面板边框 1 + 工具栏 64 + 表头 39）
+//     + 81（表体以下的部分：分页 24 + 上下外边距 32 + 面板边框 1 + 面板下边距 8
+//            + 视图下边距 8 + 内容区下边距 8）
+// 尾部这几层外边距会叠加，少减 8px 内容区就会多出一条 8px 的滚动条（实测踩过）。
+//
+// 为什么锁死而不是让它按内容长：一页 50 行、每行约 40px，放开就是 2100px 的表格，
+// 筛选栏与分页要滚很久才够得着；参考站也是这个做法（实测 .ant-table-fixed-header，
+// 表体 1074px 内部滚动、表头固定）。改这里之前整个文档都在滚，左侧菜单还会被一起带走。
+// 用 calc 而不是写死的像素：窗口高度不同、以后调整工具栏高度都不用跟着改。
+const TABLE_BODY_Y = 'calc(100vh - 201px)'
 
 const route = useRoute()
 
@@ -237,18 +249,26 @@ async function loadGroups() {
   }
 }
 
-async function load() {
-  loading.value = true
-  loadError.value = ''
+/**
+ * 取当前筛选条件下的第一页。
+ *
+ * silent 用于实时推送触发的重取：不显示加载态（否则表格每隔一两秒就变暗一次）、
+ * 失败不弹提示也不清空列表 —— 一次网络抖动不该把用户正在看的日志抹掉。
+ */
+async function load(opts: { silent?: boolean } = {}) {
+  const silent = !!opts.silent
+  if (!silent) loading.value = true
+  if (!silent) loadError.value = ''
   try {
     const res = await api.get<Paged<RequestLog>>('/logs?' + buildParams(true).toString())
     rows.value = res.items || []
     total.value = res.total || 0
   } catch (e: any) {
+    if (silent) return
     loadError.value = e.message || '加载失败'
     message.error(e.message)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
@@ -468,13 +488,45 @@ const pagination = computed(() => ({
 }))
 
 // 实时插入：服务端每秒查一次新日志（id 增量），有就推过来。
-// 只在「看的是第一页且没有任何筛选」时插进去 —— 翻了页或筛过之后，
-// 新来的日志不一定属于当前视图，硬插会让列表与筛选条件对不上。
+//
+// 分三种情况：
+// 1. 没有任何筛选且在第一页 —— 直接插到第一行（保留滚动动画，不重绘整页）；
+// 2. 有筛选（分组/渠道/模型，或 trace / 仅失败深链）且在第一页 —— 隔一小段
+//    安静地重取一次当前查询。新日志符不符合筛选只有服务端知道，客户端不重复
+//    实现一遍筛选语义（以后加一个筛选条件就会漏一处，而且错得很安静）；
+// 3. 翻了页 —— 什么都不做：重取会让用户正在看的第二页变成另外一批行。
+const liveReloadDelay = 1500
+let liveTimer: number | null = null
+let liveReloading = false
+
+function scheduleSilentReload() {
+  if (liveTimer !== null) return
+  liveTimer = window.setTimeout(async () => {
+    liveTimer = null
+    // 上一次还没回来就跳过这一轮：慢查询堆起来只会让列表更晚更新
+    if (liveReloading) return
+    liveReloading = true
+    try {
+      await load({ silent: true })
+    } finally {
+      liveReloading = false
+    }
+  }, liveReloadDelay)
+}
+
+onUnmounted(() => {
+  if (liveTimer !== null) window.clearTimeout(liveTimer)
+})
+
 onLive('logs', (items: RequestLog[]) => {
   if (!Array.isArray(items) || !items.length) return
   if (query.page !== 1) return
-  if (query.group_id !== ALL || query.channel_id !== ALL || query.model !== ALL) return
-  if (extra.trace_id || extra.status_class) return
+  const filtered =
+    query.group_id !== ALL || query.channel_id !== ALL || query.model !== ALL || !!extra.trace_id || !!extra.status_class
+  if (filtered) {
+    scheduleSilentReload()
+    return
+  }
   // 新日志的时间一定落在当前时间范围里（今天/近 1 小时……），
   // 只有「不限时间」之外的范围需要担心，而边界只差几毫秒，不值得再过滤一次
   const fresh = items.filter((it) => !rows.value.some((r) => r.id === it.id))
@@ -498,7 +550,7 @@ onMounted(() => {
     <section class="panel manage-panel">
       <div class="manage-toolbar">
         <div class="toolbar-left">
-          <a-button :loading="loading" @click="load"><ReloadOutlined /> 刷新</a-button>
+          <a-button :loading="loading" @click="load()"><ReloadOutlined /> 刷新</a-button>
           <a-button :loading="exporting" @click="exportCsv"><DownloadOutlined /> 导出</a-button>
         </div>
         <!-- 三个下拉都是「改了即生效」，所以没有「查询」按钮（左侧也已有「刷新」） -->
@@ -553,7 +605,7 @@ onMounted(() => {
         :has-data="rows.length > 0"
         :loading="loading"
         title="请求日志加载失败"
-        @retry="load"
+        @retry="load()"
       >
       <a-table
         :data-source="rows"
@@ -561,7 +613,7 @@ onMounted(() => {
         :pagination="pagination"
         row-key="id"
         size="small"
-        :scroll="{ x: 1384 }"
+        :scroll="{ x: 1384, y: TABLE_BODY_Y }"
       >
         <template #emptyText>
           <a-empty description="当前筛选条件下没有日志，可放宽筛选条件：把时间范围改成「近 7 天」，或把分组 / 渠道 / 模型改回「全部」" />
@@ -569,17 +621,14 @@ onMounted(() => {
         <a-table-column title="请求时间" :width="155" fixed="left">
           <template #default="{ record }">{{ fmtTime(record.created_at) }}</template>
         </a-table-column>
-        <a-table-column title="模型" :width="155">
+        <!-- 模型名带 ellipsis：不加的话长模型名会在这里折成两三行，
+             把整行从 40px 顶到 98px（50 行就是 5000px 的页面）；
+             完整名字悬停可见，详情里也有 -->
+        <a-table-column title="模型" :width="155" ellipsis>
           <template #default="{ record }">
             <!-- 模型、密钥、分组三处用的是同一个组件与同一个颜色：
                  它们描述的是「这次请求属于哪个分组」，颜色因此必须一致 -->
             <GroupTag :name="record.model_requested" v-bind="tagColorOf(record.group_id)" />
-            <div
-              v-if="record.model_upstream && record.model_upstream !== record.model_requested"
-              class="sub-text"
-            >
-              上游：{{ record.model_upstream }}
-            </div>
           </template>
         </a-table-column>
         <a-table-column title="状态" :width="72">
@@ -719,7 +768,6 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 .toolbar-left { display: flex; gap: var(--gap); }
-.sub-text { font-size: 12px; color: var(--color-text-secondary); }
 .token-cell { font-variant-numeric: tabular-nums; }
 /* 详情里的「只看这条链路」：贴着 trace_id 放，弱化成次要操作，
    别让人以为它是个必须点的按钮 */

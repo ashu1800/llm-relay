@@ -48,7 +48,8 @@
   --color-primary-a20: rgba(200, 120, 100, 0.2);
 
   /* ---- 布局尺寸（实测）---- */
-  --size-nav-height: 64px;
+  /* 参考站的顶栏是 64px（记录见 docs/ui-spec.md），我们这边没有顶栏：
+     品牌与主题切换都在侧栏里，右侧内容直接顶到最上面 */
   --size-sidebar-width: 224px;
   --size-menu-item-height: 32px;
   --size-control-height: 24px;

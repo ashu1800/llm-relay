@@ -32,6 +32,11 @@ WHERE=$(cat <<'SQL'
     'csrf-ok-probe','wl-probe-key','key'
   )
   OR starts_with(model_requested, 'wl-probe-')
+  -- test-channel-order.sh 建的密钥与模型都是 ord-probe- 前缀。
+  -- 这条是漏网后补上的：跑完那轮用例，看板的「模型调用分析」里一直挂着一个
+  -- ord-probe-model（0.6%），看着像一个真实模型。
+  OR starts_with(api_key_name, 'ord-probe-')
+  OR starts_with(model_requested, 'ord-probe-')
   -- 定价套件（test-pricing*.sh / test-cost.sh）建的模型名一律 __ 前缀：
   -- 跑到一半被打断时，日志由这里兜底清掉。starts_with 是字面匹配，
   -- 不会像 LIKE '__%' 那样把真实模型名一起命中

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   ApiOutlined,
   DollarOutlined,
@@ -240,9 +240,16 @@ function dayKey(d: Date) {
   )
 }
 
-async function load() {
-  loading.value = true
-  loadError.value = ''
+/**
+ * 取当前时间范围与筛选下的全部统计。
+ *
+ * silent 用于实时推送触发的重取：不显示加载态（否则每两秒闪一次骨架），
+ * 失败也不把页面上的数字换掉 —— 宁可显示旧数字，也不能显示错的。
+ */
+async function load(opts: { silent?: boolean } = {}) {
+  const silent = !!opts.silent
+  if (!silent) loading.value = true
+  if (!silent) loadError.value = ''
   try {
     const q = statsQuery()
     // 「服务状态」卡片移除后，healthz 与 system/info 已无人读取，
@@ -261,9 +268,10 @@ async function load() {
     byChannel.value = ch.items || []
     heat.value = hm.items || []
   } catch (e: any) {
+    if (silent) return
     loadError.value = e.message || '加载失败'
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
@@ -643,18 +651,45 @@ const heatTotal = computed(() => heat.value.reduce((a, b) => a + b.requests, 0))
 
 
 // 实时数值：服务端每两秒比一次今日汇总，变了才推。
-// 这里只做字段合并 —— 它不带 range 等本地查询字段，
-// 整个替换会把页面依赖的其它字段抹掉。
+//
+// 推送来的永远是「今天 + 全站」那一份（见 live.go），所以：
+// - 当前正好是「今天 + 全站」→ 直接合并（它不带 range 等本地查询字段，
+//   整个替换会把页面依赖的其它字段抹掉，这里只做字段合并）；
+// - 当前是别的视角（近 7 天 / 筛了分组或渠道）→ 合并不了，但**收到推送本身
+//   就说明有新流量**（服务端只在数据真的变了才推），于是借这个信号隔一小段
+//   安静地重取一次当前视角。以前这里是直接 return，选着「近 7 天」或某个分组时
+//   卡片就再也不动了，只能靠手点「刷新」。
+const liveReloadDelay = 1500
+let liveTimer: number | null = null
+let liveReloading = false
+
+function scheduleSilentReload() {
+  if (liveTimer !== null) return
+  liveTimer = window.setTimeout(async () => {
+    liveTimer = null
+    // 上一次还没回来就跳过这一轮：慢查询堆起来只会让数字更晚才更新
+    if (liveReloading) return
+    liveReloading = true
+    try {
+      await load({ silent: true })
+    } finally {
+      liveReloading = false
+    }
+  }, liveReloadDelay)
+}
+
+onUnmounted(() => {
+  if (liveTimer !== null) window.clearTimeout(liveTimer)
+})
+
 onLive('stats', (data: Record<string, unknown>) => {
   // 首屏还没加载完时忽略推送：那一份由 load() 负责，
   // 提前合并会得到一个缺字段的 summary
   if (!summary.value) return
-  // 推来的永远是「今天 + 全站」那一份（见 live.go），所以只在这个视角下合并。
-  // 否则选着「近7天」或某个分组时，卡片会在两秒后被悄悄换成今天的全站数字：
-  // 两个数看上去都像真的，谁也不会去怀疑。
-  // 筛选视角靠「刷新」按钮取数 —— 要让推送按筛选走，得给每个订阅者存一份
-  // 筛选状态，那是另一件事。
-  if (range.value !== 'today' || groupFilter.value !== ALL || channelFilter.value !== ALL) return
+  if (range.value !== 'today' || groupFilter.value !== ALL || channelFilter.value !== ALL) {
+    scheduleSilentReload()
+    return
+  }
   summary.value = { ...summary.value, ...(data as object) } as Summary
 })
 
@@ -701,7 +736,7 @@ onMounted(async () => {
         <template #optionLabel="opt"><ChannelOption :option="opt" /></template>
       </a-select>
       <template #right>
-        <a-button :loading="loading" @click="load"><ReloadOutlined /> 刷新</a-button>
+        <a-button :loading="loading" @click="load()"><ReloadOutlined /> 刷新</a-button>
       </template>
     </PageToolbar>
 
@@ -711,7 +746,7 @@ onMounted(async () => {
       :loading="loading"
       title="看板数据加载失败"
       hint="看板数据来自后端统计接口，请确认后端服务是否正常，然后重试。"
-      @retry="load"
+      @retry="load()"
     >
     <!-- 概览四卡 -->
     <section class="overview-row">
