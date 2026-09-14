@@ -6,8 +6,10 @@ import { useRoute } from 'vue-router'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import GroupTag from '@/components/GroupTag.vue'
+import ChannelOption from '@/components/ChannelOption.vue'
 import { onLive } from '@/composables/useLive'
 import { symbolOf } from '@/utils/money'
+import { channelOption } from '@/utils/channelOption'
 import type { Channel, ChannelGroup, Paged, RequestLog } from '@/api/types'
 
 // 分组表：日志里的模型、密钥、分组三处标签共用该请求所属分组的颜色。
@@ -131,16 +133,11 @@ const visibleChannels = computed(() =>
     : channels.value.filter((c) => String(c.group_id) === query.group_id)
 )
 
-// 渠道名没有唯一约束（不同分组可以重名），所以选项里带上分组名：
-// 否则下拉里出现两个「D1」时，分不清要选哪一个
-function channelLabel(c: Channel) {
-  const g = groups.value.find((x) => x.id === c.group_id)
-  return g ? c.name + ' · ' + g.name : c.name
-}
-
+// 渠道选项：图标 + 名字，分组名只在「全部分组」时才补上
+// （见 utils/channelOption.ts，数据看板用的是同一个函数）
 const channelOptions = computed(() => [
   { value: ALL, label: '全部渠道' },
-  ...visibleChannels.value.map((c) => ({ value: String(c.id), label: channelLabel(c) }))
+  ...visibleChannels.value.map((c) => channelOption(c, groups.value, query.group_id === ALL))
 ])
 
 // 模型候选取渠道白名单（/channels 的 models）：它是系统当前认识的模型全集。
@@ -511,12 +508,20 @@ onMounted(() => {
           style="width: 150px"
           @change="onGroupChange"
         />
+        <!-- 240px = 最长的一条「图标 + 渠道名 · 分组名」量出来的
+             （CommanCode · DeepSeek 的文字需要 203px，加图标与间距后约 225px）；
+             给窄了会把分组名截成「DeepSe…」，而分组名正是重名渠道之间唯一的区分 -->
         <a-select
           v-model:value="query.channel_id"
           :options="channelOptions"
-          style="width: 200px"
+          style="width: 240px"
           @change="onChannelChange"
-        />
+        >
+          <!-- 下拉项与选中值是 antd 的两个插槽，内容交给同一个组件渲染：
+               分开写迟早会出现「下拉里有图标、选完就没了」这种不一致 -->
+          <template #option="opt"><ChannelOption :option="opt" /></template>
+          <template #optionLabel="opt"><ChannelOption :option="opt" /></template>
+        </a-select>
         <a-select
           v-model:value="query.model"
           :options="modelOptions"

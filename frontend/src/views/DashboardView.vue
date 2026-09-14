@@ -20,6 +20,8 @@ import { useChartTheme } from '@/utils/chartTheme'
 import DataState from '@/components/DataState.vue'
 import type { Channel, ChannelGroup } from '@/api/types'
 import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
+import { channelOption } from '@/utils/channelOption'
+import ChannelOption from '@/components/ChannelOption.vue'
 
 type Summary = {
   requests: number
@@ -115,16 +117,8 @@ const groupOptions = computed(() => [
   ...filterGroups.value.map((g) => ({ value: String(g.id), label: g.name }))
 ])
 
-// 渠道名没有唯一约束（不同分组可以重名），所以选项里带上分组名：
-// 否则下拉里出现两个「D1」时，分不清要选哪一个
-function channelLabel(c: Channel) {
-  const g = filterGroups.value.find((x) => x.id === c.group_id)
-  return g ? c.name + ' · ' + g.name : c.name
-}
-
-// 当前分组下可见的渠道：选了分组就只列它的渠道。
-// 不这么收窄的话，「分组 A + 属于分组 B 的渠道」这种组合能选出来，
-// 而它查出来永远是 0，看起来像数据丢了。
+// 渠道选项：图标 + 名字，分组名只在「全部分组」时才补上
+// （见 utils/channelOption.ts，请求日志页用的是同一个函数）
 const visibleChannels = computed(() =>
   groupFilter.value === ALL
     ? filterChannels.value
@@ -133,7 +127,7 @@ const visibleChannels = computed(() =>
 
 const channelOptions = computed(() => [
   { value: ALL, label: '全部渠道' },
-  ...visibleChannels.value.map((c) => ({ value: String(c.id), label: channelLabel(c) }))
+  ...visibleChannels.value.map((c) => channelOption(c, filterGroups.value, groupFilter.value === ALL))
 ])
 
 function persistFilters() {
@@ -693,12 +687,19 @@ onMounted(async () => {
         style="width: 150px"
         @change="onGroupChange"
       />
+      <!-- 240px = 最长的一条「图标 + 渠道名 · 分组名」量出来的，
+           与请求日志页同一个宽度；给窄了会把分组名截掉 -->
       <a-select
         v-model:value="channelFilter"
         :options="channelOptions"
-        style="width: 200px"
+        style="width: 240px"
         @change="onChannelChange"
-      />
+      >
+        <!-- 下拉项与选中值是 antd 的两个插槽，内容交给同一个组件渲染：
+             分开写迟早会出现「下拉里有图标、选完就没了」这种不一致 -->
+        <template #option="opt"><ChannelOption :option="opt" /></template>
+        <template #optionLabel="opt"><ChannelOption :option="opt" /></template>
+      </a-select>
       <template #right>
         <a-button :loading="loading" @click="load"><ReloadOutlined /> 刷新</a-button>
       </template>
