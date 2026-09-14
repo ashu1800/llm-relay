@@ -14,6 +14,12 @@ import (
 	"llm-relay/internal/model"
 )
 
+// maxImportBodyBytes 是配置导入的请求体上限。
+//
+// 比常规管理接口（8 MB）宽，因为备份里含全部分组、渠道、模型白名单与价格、
+// 密钥与代理；但仍要有上限 —— 无界的 JSON 解析可以被用来打满内存。
+const maxImportBodyBytes = 64 << 20
+
 // registerBackupRoutes 挂载配置备份接口。
 //
 // 备份的是「配置」而不是「数据」：渠道、模型（含各自的价格）、绑定、代理与密钥。
@@ -177,6 +183,12 @@ type importReport struct {
 }
 
 func (s *Server) importConfig(c *gin.Context) {
+	// 导入需要比常规管理接口更大的额度：备份包含全部分组、渠道、
+	// 模型白名单（含价格）、密钥与代理，条数多时 JSON 会明显变大。
+	// 放宽到 64 MB 而不是取消上限 —— 无界才是问题所在。
+	if c.Request.Body != nil {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxImportBodyBytes)
+	}
 	var b backupBundle
 	if err := c.ShouldBindJSON(&b); err != nil {
 		writeUpstreamError(c, http.StatusBadRequest, "备份文件解析失败: "+err.Error(), "invalid_request_error")

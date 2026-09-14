@@ -83,8 +83,10 @@ func (s *Server) Register(r *gin.Engine) {
 	// ---- 管理后台 API：本地自用，不做登录 ----
 	//
 	// 不做登录不等于可以不做来源校验：没有这道中间件，浏览器里任意一个网页
-	// 都能用表单提交触发管理操作（详见 sameOriginOnly 的说明）
-	admin := r.Group("/api/admin", sameOriginOnly())
+	// 都能用表单提交触发管理操作（详见 sameOriginOnly 的说明）。
+	// limitAdminBody 给所有管理接口加上请求体上限 —— 这些接口的输入
+	// 全部来自网络，而原来只有转发链路设了上限。
+	admin := r.Group("/api/admin", sameOriginOnly(), limitAdminBody)
 	{
 		admin.GET("/system/info", s.systemInfo)
 		registerChannelRoutes(admin, s)

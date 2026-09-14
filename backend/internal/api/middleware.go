@@ -56,6 +56,24 @@ func sameOriginOnly() gin.HandlerFunc {
 
 const ctxAPIKey = "llm_relay_api_key"
 
+// maxAdminBodyBytes 是管理接口请求体的上限。
+//
+// 原来整个项目只有转发链路设了上限（relay_handler 里的
+// MaxRequestBodyMB），16 处管理接口的 ShouldBindJSON 都是无界的 ——
+// 一个超大 JSON 就能把进程内存打满，连带影响所有在途的转发请求。
+//
+// 8 MB 远大于任何真实管理请求：渠道白名单整表替换、配置导入是最大的两种，
+// 实测都在 1 MB 以内。导入接口单独放宽（见 admin_backup.go）。
+const maxAdminBodyBytes = 8 << 20
+
+// limitAdminBody 给管理接口加上请求体大小上限。
+func limitAdminBody(c *gin.Context) {
+	if c.Request.Body != nil {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAdminBodyBytes)
+	}
+	c.Next()
+}
+
 // profileForPath 按请求路径推断入站协议。
 // 鉴权失败发生在协议分发之前，若统一用 OpenAI 错误结构，
 // Anthropic 客户端会因为解析不到 {"type":"error"} 而报出难懂的错。

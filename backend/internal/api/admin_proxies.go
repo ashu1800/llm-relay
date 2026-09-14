@@ -2,7 +2,9 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"gorm.io/gorm"
 
 	"llm-relay/internal/model"
+	"llm-relay/internal/netguard"
 	"llm-relay/internal/proxy"
 )
 
@@ -60,7 +63,7 @@ func proxyView(p model.Proxy) gin.H {
 func (s *Server) listProxies(c *gin.Context) {
 	var items []model.Proxy
 	if err := s.deps.Store.DB().Order("id").Find(&items).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	out := make([]gin.H, 0, len(items))
@@ -120,7 +123,7 @@ func (s *Server) createProxy(c *gin.Context) {
 			writeUpstreamError(c, http.StatusConflict, "代理名已存在: "+name, "invalid_request_error")
 			return
 		}
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, proxyView(row))
@@ -214,7 +217,7 @@ func (s *Server) updateProxy(c *gin.Context) {
 			writeUpstreamError(c, http.StatusConflict, "代理名已存在", "invalid_request_error")
 			return
 		}
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	// 改了连接参数就把旧状态清干净，免得界面显示的成功记录与当前配置对不上
@@ -222,7 +225,7 @@ func (s *Server) updateProxy(c *gin.Context) {
 		if err := db.Model(&model.Proxy{}).Where("id = ?", id).Updates(map[string]any{
 			"last_status": "unknown", "last_error": "", "last_latency_ms": 0, "last_tested_at": nil,
 		}).Error; err != nil {
-			writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+			writeInternalError(c, err)
 			return
 		}
 	}
@@ -240,7 +243,7 @@ func (s *Server) deleteProxy(c *gin.Context) {
 	// 而用户以为它还在走代理 —— 「配置看起来生效、实际没生效」是最难查的一类问题
 	var used int64
 	if err := db.Model(&model.Channel{}).Where("proxy_id = ?", id).Count(&used).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	if used > 0 {
@@ -252,7 +255,7 @@ func (s *Server) deleteProxy(c *gin.Context) {
 	// 删掉代理后那个模型要到转发时才失败
 	var usedByModel int64
 	if err := db.Model(&model.ChannelModel{}).Where("proxy_id = ?", id).Count(&usedByModel).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	if usedByModel > 0 {
@@ -321,15 +324,27 @@ func (s *Server) testProxyDraft(c *gin.Context) {
 	}
 	// 编辑已有代理时没提交的凭据沿用库里的：否则用户会看到
 	// 「明明没改密码却测不通」
+	//
+	// 但只在「目标仍然是库里那个服务器」时才沿用。否则任何人都能发
+	// {id: 1, host: "attacker.com"} 让服务用代理 #1 的密码去连攻击者的机器 ——
+	// 管理接口没有鉴权（设计如此），这等于把库里的代理凭据交出去。
+	// 改了地址就让用户重新输一次密码，代价很小。
 	if body.ID > 0 && (body.Password == nil || body.Username == nil) {
 		var row model.Proxy
 		if err := s.deps.Store.DB().First(&row, body.ID).Error; err == nil {
-			stored, _ := s.proxyConfigOf(row)
-			if body.Password == nil {
-				cfg.Password = stored.Password
-			}
-			if body.Username == nil {
-				cfg.Username = stored.Username
+			if sameProxyTarget(row, cfg) {
+				stored, _ := s.proxyConfigOf(row)
+				if body.Password == nil {
+					cfg.Password = stored.Password
+				}
+				if body.Username == nil {
+					cfg.Username = stored.Username
+				}
+			} else if body.Password == nil {
+				writeUpstreamError(c, http.StatusBadRequest,
+					"改动代理地址后需要重新填写密码：沿用库里的密码只允许在地址不变时使用",
+					"invalid_request_error")
+				return
 			}
 		}
 	}
@@ -337,8 +352,47 @@ func (s *Server) testProxyDraft(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
+	// SSRF 防护：test_url 由调用方指定，且状态码与耗时会被回显 ——
+	// 不校验的话它就是一个可用的内网端口扫描器。
+	if err := checkTestURL(body.TestURL); err != nil {
+		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
+	}
 	res := proxy.Test(c.Request.Context(), cfg, body.TestURL, proxyTestTimeout)
 	c.JSON(http.StatusOK, proxyTestView(res))
+}
+
+// sameProxyTarget 判断请求体里的拨号目标是否与库中那一行一致。
+// 只比协议/主机/端口，不涉及凭据。
+func sameProxyTarget(row model.Proxy, cfg proxy.Config) bool {
+	return strings.EqualFold(strings.TrimSpace(row.Protocol), strings.TrimSpace(cfg.Protocol)) &&
+		strings.EqualFold(strings.TrimSpace(row.Host), strings.TrimSpace(cfg.Host)) &&
+		row.Port == cfg.Port
+}
+
+// checkTestURL 校验代理测试目标。
+//
+// 空串表示用默认测试地址（gstatic 的 204），那是最常见也最安全的用法。
+// 显式指定时必须指向公网 —— 否则这个接口能被用来探测内网。
+func checkTestURL(raw string) error {
+	u := strings.TrimSpace(raw)
+	if u == "" {
+		return nil
+	}
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return fmt.Errorf("测试地址无法解析: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("测试地址只支持 http/https")
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("测试地址缺少主机名")
+	}
+	if _, err := netguard.CheckHost(parsed.Hostname()); err != nil {
+		return err
+	}
+	return nil
 }
 
 // proxyConfigOf 把库里的行转成拨号配置（密码在这里解密）。

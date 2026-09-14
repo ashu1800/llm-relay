@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"llm-relay/internal/model"
+	"llm-relay/internal/netguard"
 	"llm-relay/internal/proxy"
 )
 
@@ -76,7 +77,7 @@ func (s *Server) channelIcon(c *gin.Context) {
 		return
 	}
 	if err := db.Model(&model.Channel{}).Where("id = ?", id).Update("icon", icon).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "icon": icon})
@@ -94,6 +95,14 @@ func (s *Server) fetchUpstreamIcon(ctx context.Context, ch model.Channel) (strin
 	// 只支持 http(s)：file:// 之类会让这个接口变成任意文件读取
 	if base.Scheme != "http" && base.Scheme != "https" {
 		return "", errors.New("只支持从 http/https 的上游地址抓图标")
+	}
+	// SSRF 防护：这个接口会用请求体里的 base_url 发真实请求，
+	// 而 base_url 是可以被调用者指定的。只校验 scheme 挡不住
+	// http://127.0.0.1:6379/ 这类探测 —— 本机端口扫描、内网服务发现、
+	// 读云元数据（169.254.169.254）都能做到，而且返回状态码与耗时会被回显，
+	// 等于给了一个内网探测器。
+	if _, err := netguard.CheckHost(base.Hostname()); err != nil {
+		return "", err
 	}
 
 	// 总超时：6 个候选地址各 8 秒，最坏情况要跑将近一分钟，
@@ -124,6 +133,10 @@ func (s *Server) fetchUpstreamIcon(ctx context.Context, ch model.Channel) (strin
 		defer tr.CloseIdleConnections()
 		client.Transport = tr
 	}
+	// 补上禁跳转 + 建连校验。
+	// 禁跳转是必需的：目标通过 302 跳到内网时，如果跟随就等于绕过了上面的校验。
+	// DialContext 的校验兜住 DNS rebinding（校验时是公网 IP、建连时是内网 IP）。
+	client = netguard.GuardedClient(client)
 
 	// 候选地址：站点根目录下的常见图标，以及 BaseURL 自己那一层。
 	// 用 url.URL 拼而不是字符串拼接：BaseURL 带 query 时（如 /v1?k=1），

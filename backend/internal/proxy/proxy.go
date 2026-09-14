@@ -212,6 +212,15 @@ func Test(ctx context.Context, cfg Config, testURL string, timeout time.Duration
 	if testURL == "" {
 		testURL = DefaultTestURL
 	}
+	// 注意：这里**不**做内网地址拦截。
+	//
+	// 本函数是通用拨号测试工具，单元测试会用 127.0.0.1 上的假服务来验证
+	// 「测试通过但转发不通」这类问题；把它写死成「只允许公网」会让这些
+	// 测试无法进行，也会挡住将来「本机自建上游」的合理用法。
+	//
+	// SSRF 的边界在**入口**：管理接口的 test_url 由调用方指定，因此
+	// api 层用 netguard 校验（见 admin_proxies.go 的 checkTestURL）。
+	// 未受信任的输入不该走到这里。
 	start := time.Now()
 	tr, err := cfg.Transport(timeout)
 	if err != nil {
