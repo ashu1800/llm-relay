@@ -367,7 +367,12 @@ onMounted(() => {
         title="密钥列表加载失败"
         @retry="load"
       >
-      <a-table :data-source="rows" :loading="loading" :pagination="false" row-key="id" size="small" :scroll="{ x: 1170 }">
+      <!-- scroll.x 必须不小于各列宽度之和（名称 150 + 密钥 170 + 模型白名单 160
+           + 分组白名单 180 + 最后使用 150 + 限流 130 + 状态 90 + 操作 200 = 1230）：
+           声明偏小时右侧固定的「操作」列会盖住左边最后一列，
+           表现为表头被截断、单元格内容被压住，而且不报错。
+           原来写的是 1170、少了 60。核对脚本：scripts/check-table-widths.mjs -->
+      <a-table :data-source="rows" :loading="loading" :pagination="false" row-key="id" size="small" :scroll="{ x: 1230 }">
         <template #emptyText>
           <a-empty description="还没有密钥，点「新建密钥」创建第一个" />
         </template>

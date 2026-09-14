@@ -190,13 +190,18 @@ onMounted(load)
         title="分组列表加载失败"
         @retry="load"
       >
+      <!-- scroll.x 必须不小于各列宽度之和（名称 200 + 备注 220 + 路由策略 120
+           + 每分钟额度 170 + 是否默认 100 + 是否启用 100 + 操作 150 = 1060）：
+           声明偏小时右侧固定的「操作」列会盖住左边最后一列，
+           表现为表头被截断、单元格内容被压住，而且不报错。
+           原来写的是 1040、少了 20。核对脚本：scripts/check-table-widths.mjs -->
       <a-table
         :data-source="rows"
         :loading="loading"
         :pagination="false"
         row-key="id"
         size="small"
-        :scroll="{ x: 1040 }"
+        :scroll="{ x: 1060 }"
       >
         <a-table-column title="名称" :width="200">
           <template #default="{ record }">

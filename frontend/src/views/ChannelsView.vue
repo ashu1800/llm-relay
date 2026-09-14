@@ -818,7 +818,16 @@ onBeforeUnmount(() => {
           </template>
         </a-table-column>
         <a-table-column title="上游协议" :width="125">
-          <template #default="{ record }">{{ protocolLabel(record.protocol) }}</template>
+          <template #default="{ record }">
+            <!-- 这一列装不下完整名字：最长的「OpenAI Chat Completions」单行要 171px，
+                 而列实际只有 129px，不处理就折成两行、把每一行都从 40 顶到 60
+                 （其它页的行高都是 40）。用省略号截住，完整名字放 title 悬停可见。
+                 用行内块自己截，而不是给列加 ellipsis：单元格是居中的，
+                 直接在居中文本上截会在左右两边各切一刀，看不出哪里被截了。 -->
+            <span class="proto-name" :title="protocolLabel(record.protocol)">
+              {{ protocolLabel(record.protocol) }}
+            </span>
+          </template>
         </a-table-column>
         <a-table-column title="最近调用" :width="174">
           <template #default="{ record }">
@@ -1168,6 +1177,15 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 .model-names { color: var(--color-text); }
+/* 上游协议那一列：行内块自己截断（原因见模板里的注释） */
+.proto-name {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
 /* 最近调用用等宽数字：这一列是时间量，比例字体下「分钟前」三个字的宽度
    会随数字变化，一列里参差不齐；tabular-nums 让它们对齐成一条竖线 */
 .last-used {
