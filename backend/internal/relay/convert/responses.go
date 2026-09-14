@@ -49,13 +49,69 @@ func ResponsesRequestToOpenAIChat(body []byte) ([]byte, error) {
 	}
 
 	var messages []any
-	if ins := strings.TrimSpace(asString(src["instructions"])); ins != "" {
-		messages = append(messages, map[string]any{"role": "system", "content": ins})
+	// instructions 在 Responses 规范里可以有两种形态：
+	// 一个字符串，或者内容块数组（与 messages 的 content 同构）。
+	// 只认字符串的话，数组形态会被静默丢掉 —— 系统提示承载的是人设、
+	// 安全约束、输出格式要求，丢了以后表现为「模型不听话」，
+	// 而不是任何一条报错。这里两种都收。
+	if sys := responsesInstructionsToText(src["instructions"]); sys != "" {
+		messages = append(messages, map[string]any{"role": "system", "content": sys})
 	}
 	messages = append(messages, responsesInputToMessages(src["input"])...)
 
 	out["messages"] = messages
 	return json.Marshal(out)
+}
+
+// responsesInstructionsToText 把 instructions 归一成纯文本。
+//
+// 数组形态形如 [{"type":"input_text","text":"..."}, ...]，
+// 也可能混入 {"type":"text","text":"..."}（两种叫法都出现过）。
+// 非文本块（图片等）在这里没有意义，跳过而不是让整段失效。
+func responsesInstructionsToText(v any) string {
+	switch ins := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(ins)
+	case []any:
+		var parts []string
+		for _, raw := range ins {
+			switch item := raw.(type) {
+			case string:
+				if s := strings.TrimSpace(item); s != "" {
+					parts = append(parts, s)
+				}
+			case map[string]any:
+				// 明确跳过非文本块（图片等），避免把 base64 塞进 system
+				if t, _ := item["type"].(string); t != "" && !isTextBlockType(t) {
+					continue
+				}
+				if s := strings.TrimSpace(asString(item["text"])); s != "" {
+					parts = append(parts, s)
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	case map[string]any:
+		// 单个内容块
+		if t, _ := ins["type"].(string); t != "" && !isTextBlockType(t) {
+			return ""
+		}
+		return strings.TrimSpace(asString(ins["text"]))
+	default:
+		return ""
+	}
+}
+
+// isTextBlockType 判断内容块类型是不是文本。
+func isTextBlockType(t string) bool {
+	switch t {
+	case "text", "input_text", "output_text":
+		return true
+	default:
+		return false
+	}
 }
 
 // responsesInputToMessages 把 input 展开成 Chat 的 messages。

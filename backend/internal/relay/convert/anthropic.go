@@ -45,7 +45,9 @@ func AnthropicRequestToOpenAIChat(body []byte) ([]byte, error) {
 	}
 
 	var messages []any
-	if sys := flattenAnthropicSystem(src["system"]); sys != "" {
+	// 用 isEmptyContent 而不是 sys != nil：没有 system 时上面返回的是空字符串，
+	// 接口值本身不是 nil，直接判 nil 会插进一条空的 system 消息
+	if sys := anthropicSystemToOpenAI(src["system"]); !isEmptyContent(sys) {
 		messages = append(messages, map[string]any{"role": "system", "content": sys})
 	}
 
@@ -76,30 +78,37 @@ func AnthropicRequestToOpenAIChat(body []byte) ([]byte, error) {
 			}
 			switch asString(blk["type"]) {
 			case "text":
-				textParts = append(textParts, map[string]any{
+				part := map[string]any{
 					"type": "text", "text": asString(blk["text"]),
-				})
+				}
+				carryCacheControl(part, blk)
+				textParts = append(textParts, part)
 			case "image":
 				if part := anthropicImageToOpenAI(blk); part != nil {
+					carryCacheControl(part, blk)
 					textParts = append(textParts, part)
 				}
 			case "tool_use":
 				args, _ := json.Marshal(blk["input"])
-				toolCalls = append(toolCalls, map[string]any{
+				toolCall := map[string]any{
 					"id":   asString(blk["id"]),
 					"type": "function",
 					"function": map[string]any{
 						"name":      asString(blk["name"]),
 						"arguments": string(args),
 					},
-				})
+				}
+				carryCacheControl(toolCall, blk)
+				toolCalls = append(toolCalls, toolCall)
 			case "tool_result":
 				// Anthropic 把工具结果塞在 user 消息里，OpenAI 要求独立的 tool 消息
-				toolResults = append(toolResults, map[string]any{
+				result := map[string]any{
 					"role":         "tool",
 					"tool_call_id": asString(blk["tool_use_id"]),
 					"content":      flattenToolResult(blk["content"]),
-				})
+				}
+				carryCacheControl(result, blk)
+				toolResults = append(toolResults, result)
 			}
 		}
 
@@ -114,13 +123,16 @@ func AnthropicRequestToOpenAIChat(body []byte) ([]byte, error) {
 		}
 
 		msg := map[string]any{"role": role}
+		// 只有一个 text 块时收成纯字符串，报文更简单、上游兼容性也更好。
+		// 但它带着 cache_control 时必须保留数组形态 —— 收成字符串就把
+		// 缓存断点丢了，而断点通常正好落在最后一条 user 消息上。
+		var singleText map[string]any
 		if len(textParts) == 1 {
-			if t, ok := textParts[0].(map[string]any); ok && asString(t["type"]) == "text" {
-				msg["content"] = asString(t["text"])
-			} else {
-				msg["content"] = textParts
-			}
-		} else if len(textParts) > 1 {
+			singleText = asMap(textParts[0])
+		}
+		if singleText != nil && asString(singleText["type"]) == "text" && takeCacheControl(singleText) == nil {
+			msg["content"] = asString(singleText["text"])
+		} else if len(textParts) > 0 {
 			msg["content"] = textParts
 		} else {
 			msg["content"] = ""
@@ -135,23 +147,105 @@ func AnthropicRequestToOpenAIChat(body []byte) ([]byte, error) {
 	return json.Marshal(out)
 }
 
-// flattenAnthropicSystem 把 system 字段（字符串或内容块数组）拍平成纯文本。
-func flattenAnthropicSystem(v any) string {
+// anthropicSystemToOpenAI 把 Anthropic 的 system 字段转成通用语里的 content。
+//
+// system 可以是纯字符串，也可以是内容块数组。是数组、且其中带 cache_control 时，
+// 转成 OpenAI 的多模态数组形式并**保留缓存断点**（见 carryCacheControl）；
+// 否则拍平成纯文本，保持与原来一致的最简形态。
+//
+// 为什么必须保留：Anthropic 的提示缓存完全靠 cache_control 断点驱动。
+// 丢掉它之后上游永远不会有缓存命中 —— 多轮对话每一轮都按全量输入计费，
+// 长 system prompt 的场景成本会差好几倍，而用户看到的只是「缓存命中率一直是 0」，
+// 很难联想到是中转站把断点吃掉了。
+func anthropicSystemToOpenAI(v any) any {
 	switch s := v.(type) {
 	case string:
 		return s
 	case []any:
-		var parts []string
+		parts := make([]any, 0, len(s))
+		hasBreakpoint := false
 		for _, item := range s {
-			if blk := asMap(item); blk != nil {
-				if t := asString(blk["text"]); t != "" {
-					parts = append(parts, t)
-				}
+			blk := asMap(item)
+			if blk == nil {
+				continue
 			}
+			text := asString(blk["text"])
+			if text == "" {
+				continue
+			}
+			part := map[string]any{"type": "text", "text": text}
+			if cc := asMap(blk["cache_control"]); cc != nil {
+				part["cache_control"] = cc
+				hasBreakpoint = true
+			}
+			parts = append(parts, part)
 		}
-		return strings.Join(parts, "\n")
+		if len(parts) == 0 {
+			return ""
+		}
+		// 没有断点时保持原来的纯文本形态：上游 OpenAI 兼容端点对
+		// 内容数组的支持参差不齐，没必要为一组纯文本引入数组
+		if !hasBreakpoint {
+			texts := make([]string, 0, len(parts))
+			for _, p := range parts {
+				texts = append(texts, asString(asMap(p)["text"]))
+			}
+			return strings.Join(texts, "\n")
+		}
+		return parts
 	default:
 		return ""
+	}
+}
+
+// cacheControlKey 是通用语里承载 Anthropic 提示缓存断点的附加字段。
+//
+// 为什么需要一个"私有"字段：站内通用语是 OpenAI Chat 形状，而 OpenAI 的请求体
+// 里没有与 cache_control 对应的概念。中转站要支持「入站 Anthropic -> 出站 Anthropic」
+// 时保住断点，就必须有个地方暂存它。
+//
+// 安全性：这个字段只在**出站目标也是 Anthropic** 时才被重新读出来
+// （见 upstream_anthropic.go 的 takeCacheControl）。发给其它上游前会被
+// stripCacheControl 清掉，因为各家对未知字段的态度不一，严格校验的会直接 400。
+const cacheControlKey = "cache_control"
+
+// carryCacheControl 把源块上的 cache_control 抄到目标块上。
+func carryCacheControl(dst, src map[string]any) {
+	if dst == nil || src == nil {
+		return
+	}
+	if cc := asMap(src[cacheControlKey]); cc != nil {
+		dst[cacheControlKey] = cc
+	}
+}
+
+// takeCacheControl 从块上取出 cache_control（供出站 Anthropic 使用）。
+func takeCacheControl(blk map[string]any) map[string]any {
+	if blk == nil {
+		return nil
+	}
+	return asMap(blk[cacheControlKey])
+}
+
+// stripCacheControl 递归移除通用语里的 cache_control 附加字段。
+//
+// 用于出站目标是「非 Anthropic」协议的场景：那些上游不认识这个字段，
+// 严格校验的实现会直接 400。与其赌它被忽略，不如主动清掉。
+func stripCacheControl(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		delete(t, cacheControlKey)
+		for _, sub := range t {
+			stripCacheControl(sub)
+		}
+		return t
+	case []any:
+		for _, sub := range t {
+			stripCacheControl(sub)
+		}
+		return t
+	default:
+		return v
 	}
 }
 

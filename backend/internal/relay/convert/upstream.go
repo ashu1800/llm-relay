@@ -2,11 +2,34 @@ package convert
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 
 	"llm-relay/internal/model"
 )
+
+// ErrUnsupportedContent 表示请求体本身含有目标上游协议表达不了的内容。
+//
+// 这是**客户端**的问题，不是渠道的问题 —— 换一条渠道结果一样。
+// 调用方（relay 包）据此跳过重试、不记渠道失败，直接回 400。
+// 若不区分，发一次音频会让每个渠道都白试一遍，并把健康渠道记成故障。
+var ErrUnsupportedContent = errors.New("请求内容无法转换为上游协议")
+
+// unsupportedContentError 带上具体原因，便于回一条能读懂的错误。
+type unsupportedContentError struct {
+	reason string
+}
+
+func (e *unsupportedContentError) Error() string { return e.reason }
+
+// Unwrap 让 errors.Is(err, ErrUnsupportedContent) 成立，
+// 调用方分类时不必关心具体是哪种内容块。
+func (e *unsupportedContentError) Unwrap() error { return ErrUnsupportedContent }
+
+func errUnsupportedContent(reason string) error {
+	return &unsupportedContentError{reason: reason}
+}
 
 // 出站协议适配的入口。
 //
@@ -40,19 +63,66 @@ func UpstreamRequest(protocol, path string, body []byte, upstreamModel string) (
 		if err != nil {
 			return "", nil, err
 		}
-		return "/v1/responses", out, nil
+		return "/v1/responses", stripCacheControlFromJSON(out), nil
 	case model.ProtocolGemini:
 		out, err := OpenAIChatToGeminiRequest(body)
 		if err != nil {
 			return "", nil, err
 		}
-		return GeminiUpstreamPath(upstreamModel, requestIsStream(body)), out, nil
+		return GeminiUpstreamPath(upstreamModel, requestIsStream(body)), stripCacheControlFromJSON(out), nil
 	default:
 		// openai-chat / openai-responses / openai-embeddings / custom：
 		// 上游本来就是 OpenAI 形状（responses 与 embeddings 也走 OpenAI 端点），
-		// 不需要改写
-		return path, body, nil
+		// 不需要改写。
+		//
+		// 但要清掉通用语里可能残留的 cache_control 附加字段：它是为
+		// 「入站 Anthropic -> 出站 Anthropic」暂存断点用的，OpenAI 兼容端点
+		// 不认识它。严格校验的实现（如 Azure OpenAI）会直接 400。
+		return path, stripCacheControlFromJSON(body), nil
 	}
+}
+
+// stripCacheControlFromJSON 解析 JSON、递归清掉 cache_control 后再序列化。
+//
+// 解析失败时原样返回：这个函数只负责去除一个附加字段，
+// 不该因为请求体不是合法 JSON 就让整次转发失败（上游会给出更准确的错误）。
+func stripCacheControlFromJSON(body []byte) []byte {
+	var v any
+	if err := json.Unmarshal(body, &v); err != nil {
+		return body
+	}
+	if !containsKey(v, cacheControlKey) {
+		// 绝大多数请求都没有这个字段，直接返回原文避免无谓的重新序列化
+		return body
+	}
+	stripCacheControl(v)
+	out, err := json.Marshal(v)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// containsKey 递归判断结构里是否存在某个键。
+func containsKey(v any, key string) bool {
+	switch t := v.(type) {
+	case map[string]any:
+		if _, ok := t[key]; ok {
+			return true
+		}
+		for _, sub := range t {
+			if containsKey(sub, key) {
+				return true
+			}
+		}
+	case []any:
+		for _, sub := range t {
+			if containsKey(sub, key) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // requestIsStream 读请求体里的 stream 标记。

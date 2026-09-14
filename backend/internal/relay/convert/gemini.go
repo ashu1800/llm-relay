@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 )
 
@@ -352,10 +353,22 @@ type GeminiStreamTranslator struct {
 	splitter sseSplitter
 	model    string
 
-	toolSeen   map[string]bool
-	usage      map[string]any
+	// toolCalls 累积本次流里出现的工具调用。
+	//
+	// Gemini 的 functionCall 是一个完整对象（name + args），没法像 Chat 那样
+	// 先给 name、再一片片追加 arguments 字符串，所以只能攒起来在收尾时一次性发出。
+	// 按 index 归并：Chat 的分片带 index，同一个调用的 name 只会出现在第一片里。
+	toolCalls map[int]*pendingToolCall
+	usage     map[string]any
+	// emitted 记录已经写出的调用下标，避免收尾时重复发。
+	emitted    map[int]bool
 	finishSent bool
-	anySent    bool
+}
+
+// pendingToolCall 是一个正在累积的工具调用。
+type pendingToolCall struct {
+	name string
+	args strings.Builder
 }
 
 // NewGeminiTranslator 按是否流式返回对应的改写器。
@@ -368,7 +381,11 @@ func NewGeminiTranslator(w io.Writer, model string, stream bool) Translator {
 
 // NewGeminiStreamTranslator 构造 Gemini 流式改写器。
 func NewGeminiStreamTranslator(w io.Writer, model string) *GeminiStreamTranslator {
-	return &GeminiStreamTranslator{w: w, model: model, toolSeen: map[string]bool{}}
+	return &GeminiStreamTranslator{
+		w: w, model: model,
+		toolCalls: map[int]*pendingToolCall{},
+		emitted:   map[int]bool{},
+	}
 }
 
 // Write 接收上游原始字节并输出 Gemini 事件流。
@@ -414,18 +431,30 @@ func (t *GeminiStreamTranslator) handleChunk(payload []byte) error {
 			parts = append(parts, map[string]any{"text": txt})
 		}
 		if calls, ok := delta["tool_calls"].([]any); ok {
-			for _, craw := range calls {
+			for i, craw := range calls {
 				call := asMap(craw)
 				if call == nil {
 					continue
 				}
-				fn := asMap(call["function"])
-				name := asString(fnName(fn))
-				// Gemini 的函数调用是整体对象，无法增量拼接，累积到收尾时一次性发出
-				if name == "" {
-					continue
+				// Chat 的分片带 index；缺省时用数组下标兜底（单调用场景两者一致）
+				idx := asInt(call["index"])
+				if _, has := call["index"]; !has {
+					idx = i
 				}
-				t.toolSeen[name] = true
+				pend := t.toolCalls[idx]
+				if pend == nil {
+					pend = &pendingToolCall{}
+					t.toolCalls[idx] = pend
+				}
+				if fn := asMap(call["function"]); fn != nil {
+					// name 只在第一片出现；后续分片为空串，不能覆盖已有值
+					if name := asString(fnName(fn)); name != "" {
+						pend.name = name
+					}
+					if frag := asString(fn["arguments"]); frag != "" {
+						pend.args.WriteString(frag)
+					}
+				}
 			}
 		}
 	}
@@ -433,10 +462,55 @@ func (t *GeminiStreamTranslator) handleChunk(payload []byte) error {
 	if len(parts) == 0 {
 		return nil
 	}
-	t.anySent = true
 	return writeGeminiSSE(t.w, map[string]any{
 		"candidates": []any{map[string]any{
 			"content": map[string]any{"role": "model", "parts": parts},
+			"index":   0,
+		}},
+		"modelVersion": t.model,
+	})
+}
+
+// flushToolCalls 把累积到的工具调用补发出去。
+//
+// 没有这一步时，凡是「只回工具调用、没有正文」的流会在收尾处变成
+// parts: [] + finishReason: STOP —— 客户端收到一个语法完全合法、
+// 状态为正常结束的空回复，而模型其实想调工具。对话就此中断且没有任何报错。
+func (t *GeminiStreamTranslator) flushToolCalls() error {
+	if len(t.toolCalls) == 0 {
+		return nil
+	}
+	toolParts := make([]any, 0, len(t.toolCalls))
+	// 按 index 排序，保证同一轮里多个调用的顺序稳定
+	idxs := make([]int, 0, len(t.toolCalls))
+	for idx := range t.toolCalls {
+		idxs = append(idxs, idx)
+	}
+	sort.Ints(idxs)
+	for _, idx := range idxs {
+		pend := t.toolCalls[idx]
+		if pend.name == "" || t.emitted[idx] {
+			continue
+		}
+		t.emitted[idx] = true
+		// 参数是分片拼起来的 JSON 字符串，解析失败时退成空对象：
+		// 宁可给出「无参数调用」也不要把半截 JSON 发出去。
+		var args any = map[string]any{}
+		if raw := strings.TrimSpace(pend.args.String()); raw != "" {
+			if err := json.Unmarshal([]byte(raw), &args); err != nil {
+				args = map[string]any{}
+			}
+		}
+		toolParts = append(toolParts, map[string]any{
+			"functionCall": map[string]any{"name": pend.name, "args": args},
+		})
+	}
+	if len(toolParts) == 0 {
+		return nil
+	}
+	return writeGeminiSSE(t.w, map[string]any{
+		"candidates": []any{map[string]any{
+			"content": map[string]any{"role": "model", "parts": toolParts},
 			"index":   0,
 		}},
 		"modelVersion": t.model,
@@ -471,6 +545,9 @@ func (t *GeminiStreamTranslator) Close() error {
 	})
 	if flushErr != nil {
 		return flushErr
+	}
+	if err := t.flushToolCalls(); err != nil {
+		return err
 	}
 	if t.finishSent {
 		return nil

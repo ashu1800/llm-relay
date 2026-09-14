@@ -96,6 +96,7 @@ func OpenAIChatToAnthropicResponse(body []byte, fallbackModel string) ([]byte, e
 					content = append(content, map[string]any{"type": "text", "text": t})
 				}
 				if calls, ok := msg["tool_calls"].([]any); ok {
+					var toolUseBlocks int
 					for _, c := range calls {
 						call := asMap(c)
 						if call == nil {
@@ -120,8 +121,15 @@ func OpenAIChatToAnthropicResponse(body []byte, fallbackModel string) ([]byte, e
 							block["name"] = asString(fn["name"])
 						}
 						content = append(content, block)
+						toolUseBlocks++
 					}
-					if len(content) > 0 {
+					// 只有真的发出了 tool_use 块才改判，且**不能覆盖 max_tokens**。
+					//
+					// 原来的写法是「只要 content 非空就置 tool_use」，于是模型在
+					// 输出工具调用时撞上 max_tokens（长参数工具很常见）会被报成
+					// tool_use —— 客户端据此认为参数完整并拿去执行，实际拿到的是
+					// 被从中间截断的 JSON。这是静默的数据损坏，不是显示问题。
+					if toolUseBlocks > 0 && stopReason != "max_tokens" {
 						stopReason = "tool_use"
 					}
 				}

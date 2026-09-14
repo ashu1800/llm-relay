@@ -36,6 +36,8 @@ type geminiUpstreamStream struct {
 	// 全都写 0 的话下游改写器会把多个调用叠进同一个内容块（只剩最后一个）
 	toolCalls int
 	readErr   error
+	// readBuf 是复用的读缓冲区，避免每轮 Read 都分配 16KB
+	readBuf []byte
 	// writeErr 是转换/写出过程中的错误，交给 Read 抛给调用方
 	writeErr error
 }
@@ -49,14 +51,26 @@ func (s *geminiUpstreamStream) Read(p []byte) (int, error) {
 		if s.readErr != nil {
 			return 0, s.readErr
 		}
-		buf := make([]byte, 16*1024)
-		n, err := s.src.Read(buf)
+		// 复用同一个缓冲区：原来每轮都 make 一次，长流会持续制造垃圾
+		if s.readBuf == nil {
+			s.readBuf = make([]byte, 16*1024)
+		}
+		n, err := s.src.Read(s.readBuf)
 		if n > 0 {
-			s.feed(buf[:n])
+			s.feed(s.readBuf[:n])
 		}
 		if err != nil {
-			// Gemini 的流没有结束事件，靠连接关闭表示结束：
-			// 正常收尾要自己补出 finish_reason 与 [DONE]
+			// Gemini 的流没有结束事件，靠连接关闭表示结束。
+			//
+			// 但「连接关了」有两种含义，必须分开：
+			//   - 上游已经给过 finishReason -> 正常收尾
+			//   - 一帧 finishReason 都没见到就断了 -> 是截断
+			// 原来的实现把后者也补成 finish_reason:"stop" + [DONE]，
+			// 而 relay_handler 只把**非 EOF** 错误当截断，于是干净断开
+			// 被完整地伪装成「模型答完了」，客户端与计费都按成功处理。
+			if err == io.EOF && !s.sawFinishReason() {
+				err = io.ErrUnexpectedEOF
+			}
 			s.finish()
 			s.readErr = err
 			if err != io.EOF {
@@ -73,10 +87,19 @@ func (s *geminiUpstreamStream) Read(p []byte) (int, error) {
 	return n, nil
 }
 
+// sawFinishReason 表示上游明确报过结束原因。
+func (s *geminiUpstreamStream) sawFinishReason() bool {
+	return s.stopReason != ""
+}
+
 // Close 关闭上游连接。
 func (s *geminiUpstreamStream) Close() error { return s.src.Close() }
 
 func (s *geminiUpstreamStream) feed(p []byte) {
+	// 写失败后不再解析后续分片，与 Anthropic / Responses 两个包装器保持一致
+	if s.writeErr != nil {
+		return
+	}
 	splitter := &sseSplitter{buf: s.buf}
 	splitter.feed(p, func(line []byte) {
 		payload := dataPayload(line)

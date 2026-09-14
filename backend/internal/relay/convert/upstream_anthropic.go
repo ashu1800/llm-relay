@@ -67,14 +67,35 @@ func OpenAIChatToAnthropicRequest(body []byte) ([]byte, error) {
 		}
 	}
 
-	system, messages := openAIMessagesToAnthropic(src["messages"])
-	if system != "" {
+	system, messages, err := openAIMessagesToAnthropic(src["messages"])
+	if err != nil {
+		// 内容块无法转换（例如音频）时直接失败，不静默丢内容。
+		// 调用方会把这个错误变成一条可读的 400，用户能立刻知道原因。
+		return nil, err
+	}
+	// system 为空字符串或空数组时都不要写进请求体：
+	// Anthropic 对 system: "" 是接受的，但对 system: [] 会报 400
+	if !isEmptyContent(system) {
 		out["system"] = system
 	}
 	if len(messages) > 0 {
 		out["messages"] = messages
 	}
 	return json.Marshal(out)
+}
+
+// isEmptyContent 判断 system 之类的字段是否为空（空串或空数组）。
+func isEmptyContent(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return true
+	case string:
+		return t == ""
+	case []any:
+		return len(t) == 0
+	default:
+		return false
+	}
 }
 
 // openAIStopList 把 stop（字符串或数组）统一成字符串数组。
@@ -182,9 +203,12 @@ func openAIToolChoiceToAnthropic(v any) any {
 //
 // 另外 Anthropic 要求 user / assistant 严格交替，所以连续的同角色消息要合并
 // （OpenAI 允许连着两条 user，Anthropic 不允许）。
-func openAIMessagesToAnthropic(v any) (string, []any) {
+func openAIMessagesToAnthropic(v any) (any, []any, error) {
 	list, _ := v.([]any)
-	var systemParts []string
+	// system 可能是纯文本（最常见），也可能是带 cache_control 的块数组
+	var systemParts []any
+	var systemTexts []string
+	systemHasBreakpoint := false
 	messages := make([]any, 0, len(list))
 
 	appendMessage := func(role string, blocks []any) {
@@ -211,20 +235,45 @@ func openAIMessagesToAnthropic(v any) (string, []any) {
 		role := asString(m["role"])
 		switch role {
 		case "system", "developer":
-			if t := flattenTextContent(m["content"]); t != "" {
-				systemParts = append(systemParts, t)
+			// system 带断点时保留块结构，否则拍平成文本（与原来一致的最简形态）
+			if blocks, ok := m["content"].([]any); ok && contentHasCacheControl(blocks) {
+				for _, item := range blocks {
+					blk := asMap(item)
+					if blk == nil {
+						continue
+					}
+					if t := asString(blk["text"]); t != "" {
+						part := map[string]any{"type": "text", "text": t}
+						if cc := takeCacheControl(blk); cc != nil {
+							part["cache_control"] = cc
+							systemHasBreakpoint = true
+						}
+						systemParts = append(systemParts, part)
+					}
+				}
+			} else if t := flattenTextContent(m["content"]); t != "" {
+				systemTexts = append(systemTexts, t)
 			}
 			continue
 		case "tool", "function":
-			appendMessage("user", []any{map[string]any{
+			blk := map[string]any{
 				"type":        "tool_result",
 				"tool_use_id": asString(m["tool_call_id"]),
 				"content":     flattenTextContent(m["content"]),
-			}})
+			}
+			// tool 消息上的断点也要带上：多轮工具调用的场景里，
+			// 断点通常就落在最后一条 tool_result 上
+			if cc := takeCacheControl(m); cc != nil {
+				blk["cache_control"] = cc
+			}
+			appendMessage("user", []any{blk})
 			continue
 		}
 
-		blocks := openAIContentToAnthropic(m["content"])
+		blocks, err := openAIContentToAnthropic(m["content"])
+		if err != nil {
+			return nil, nil, err
+		}
 		if calls, ok := m["tool_calls"].([]any); ok {
 			for _, c := range calls {
 				call := asMap(c)
@@ -240,6 +289,9 @@ func openAIMessagesToAnthropic(v any) (string, []any) {
 				if fn != nil {
 					block["name"] = asString(fn["name"])
 				}
+				if cc := takeCacheControl(call); cc != nil {
+					block["cache_control"] = cc
+				}
 				blocks = append(blocks, block)
 			}
 		}
@@ -249,7 +301,26 @@ func openAIMessagesToAnthropic(v any) (string, []any) {
 			appendMessage("user", blocks)
 		}
 	}
-	return strings.Join(systemParts, "\n\n"), messages
+	// 有断点时返回块数组，否则返回原来的纯文本
+	if systemHasBreakpoint {
+		return systemParts, messages, nil
+	}
+	if len(systemParts) > 0 {
+		for _, p := range systemParts {
+			systemTexts = append(systemTexts, asString(asMap(p)["text"]))
+		}
+	}
+	return strings.Join(systemTexts, "\n\n"), messages, nil
+}
+
+// contentHasCacheControl 判断内容块数组里是否带了缓存断点。
+func contentHasCacheControl(blocks []any) bool {
+	for _, item := range blocks {
+		if takeCacheControl(asMap(item)) != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // parseToolArguments 解析工具参数。Anthropic 的 input 必须是对象，
@@ -267,13 +338,13 @@ func parseToolArguments(args string) any {
 }
 
 // openAIContentToAnthropic 转换消息内容：字符串与多模态数组都要支持。
-func openAIContentToAnthropic(v any) []any {
+func openAIContentToAnthropic(v any) ([]any, error) {
 	switch c := v.(type) {
 	case string:
 		if c == "" {
-			return nil
+			return nil, nil
 		}
-		return []any{map[string]any{"type": "text", "text": c}}
+		return []any{map[string]any{"type": "text", "text": c}}, nil
 	case []any:
 		out := make([]any, 0, len(c))
 		for _, item := range c {
@@ -283,16 +354,41 @@ func openAIContentToAnthropic(v any) []any {
 			}
 			switch asString(part["type"]) {
 			case "text":
-				out = append(out, map[string]any{"type": "text", "text": asString(part["text"])})
+				blk := map[string]any{"type": "text", "text": asString(part["text"])}
+				// 恢复入站时暂存的提示缓存断点。丢掉它就等于关掉了 Anthropic 的
+				// 提示缓存 —— 多轮对话里每一轮都会按全量输入计费。
+				if cc := takeCacheControl(part); cc != nil {
+					blk["cache_control"] = cc
+				}
+				out = append(out, blk)
 			case "image_url":
 				if blk := openAIImageToAnthropic(asMap(part["image_url"])); blk != nil {
+					if cc := takeCacheControl(part); cc != nil {
+						blk["cache_control"] = cc
+					}
 					out = append(out, blk)
+				}
+			case "input_audio":
+				// 显式拒绝而不是静默丢弃。
+				//
+				// Anthropic 的 Messages API 不接受音频块。原来这里没有 default
+				// 分支，音频会被无声吃掉 —— 用户看到的是「模型忽略了我的语音」，
+				// 而不是「这个协议不支持音频」，会花很多时间去查提示词。
+				// 换成一条可读的错误，把原因说清楚。
+				return nil, errUnsupportedContent("Anthropic 协议不支持音频输入（input_audio），请改用文本或图片")
+			case "file":
+				return nil, errUnsupportedContent("Anthropic 协议不支持文件输入（file），请改用文本或图片")
+			default:
+				// 其它未知类型同样拒绝：宁可报错也不要静默丢内容。
+				// 类型名带上，便于判断是哪个客户端发了什么。
+				if t := asString(part["type"]); t != "" {
+					return nil, errUnsupportedContent("内容块类型 " + t + " 无法转换为 Anthropic 协议")
 				}
 			}
 		}
-		return out
+		return out, nil
 	default:
-		return nil
+		return nil, nil
 	}
 }
 

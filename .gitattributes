@@ -1,0 +1,45 @@
+# 换行符：显式声明，不依赖每个人的 core.autocrlf。
+#
+# 为什么必须写这个文件：本机 core.autocrlf=true 且仓库里没有 .gitattributes，
+# 于是全新 clone 时 git 会把文本文件一律检成 CRLF —— 对 shell 脚本是致命的：
+#
+#     $ bash -n scripts/verify-all.sh
+#     scripts/verify-all.sh: line 12: syntax error near unexpected token `$'\r''
+#
+# 脚本本身的逻辑没问题，纯粹是行尾被改了。这类故障很费时间：
+# 报错指向的行号是假的，而且「本地能跑、新机器上炸」。
+#
+# 仓库里现有的 .sh 在 index 里存的确实是 LF（用 git cat-file 逐字节确认过），
+# 所以问题不在已提交的内容，而在检出行为 —— 用 eol=lf 把它钉死。
+*.sh text eol=lf
+
+# 容器与部署脚本同样是 Linux 侧执行，按 LF 处理
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# 其余文本文件统一走 LF。
+#
+# 前端源码与 markdown 用 LF 不影响 Windows 上的编辑器/构建
+# （Go 与 vite 都接受 LF，且 vite 产物本来就是 LF）。
+*.go text eol=lf
+*.ts text eol=lf
+*.vue text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.mjs text eol=lf
+
+# 二进制：明确标记，免得 git 去猜（也不会被 autocrlf 碰）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.gz binary
+*.sqlite binary
+*.exe binary
