@@ -331,12 +331,16 @@ async function testChannel(row: ChannelRow) {
   testingId.value = row.id
   try {
     const res = await api.post<ChannelTestResult>('/channels/' + row.id + '/test', {})
+    // 停用的渠道也允许测：排查与「先调好再启用」都要用到。
+    // 但必须说清楚这次成功不等于已经生效，否则会以为改完就能用了
+    const disabledHint = row.enabled ? null : '这条渠道当前是停用状态，测通也不会参与路由；要让它生效请点「启用」'
     if (res.ok) {
       Modal.success({
         title: row.name + ' 连通正常（' + res.latency_ms + ' ms）',
         content: h('div', [
           h('div', '模型：' + (res.model || '-') + (res.upstream_model && res.upstream_model !== res.model ? ' → ' + res.upstream_model : '')),
-          h('div', res.reply ? '回复：' + res.reply : '上游返回 ' + (res.status_code || 200) + '，但没有正文（推理型模型可能把内容放在 reasoning 里）')
+          h('div', res.reply ? '回复：' + res.reply : '上游返回 ' + (res.status_code || 200) + '，但没有正文（推理型模型可能把内容放在 reasoning 里）'),
+          disabledHint ? h('div', { style: 'margin-top:8px;color:#d46b08' }, disabledHint) : null
         ])
       })
     } else {

@@ -157,6 +157,15 @@ echo "=== 9. 停用渠道后它的模型不再可用 ==="
 curl -s -X PUT "$API/channels/$CID" -H 'Content-Type: application/json' -d '{"enabled":false}' -o /dev/null
 MODELS2=$(curl -s "$BASE/v1/models" -H "Authorization: Bearer $SK")
 chk "停用渠道后 wl-probe-a 消失" "0" "$(echo "$MODELS2" | jqg "sum(1 for m in d['data'] if m['id']=='wl-probe-a')")"
+
+# 停用只表示「不参与路由」，不代表不能与上游通话：排查故障、以及「先把配置
+# 调好再启用」都要在停用状态下验证。这里钉住「停用也能测连通性」。
+# 探测渠道指向的是不存在的上游，所以预期 ok:false、但不是被 400 挡在门外 ——
+# 关键是必须真的打到了上游（有 status_code 或网络层错误），而不是直接拒绝。
+TEST_R=$(curl -s -X POST "$API/channels/$CID/test" -H 'Content-Type: application/json' -d '{}')
+chk "停用渠道也能发起连通性测试（不被 400 直接拒绝）" "True" "$(echo "$TEST_R" | jqg "'error' not in d or '停用' not in d.get('error','')")"
+chk "测试确实打到了上游（返回了结果结构）" "True" "$(echo "$TEST_R" | jqg "'ok' in d")"
+
 curl -s -X PUT "$API/channels/$CID" -H 'Content-Type: application/json' -d '{"enabled":true}' -o /dev/null
 
 echo

@@ -63,11 +63,15 @@ func (s *Server) testChannel(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
-	if !ch.Enabled {
-		// 停用的渠道测通了也不能用，先说清楚，免得白高兴
-		writeUpstreamError(c, http.StatusBadRequest, "渠道已停用，测通了也不会参与路由", "invalid_request_error")
-		return
-	}
+	// 停用的渠道**照样可以测**。
+	//
+	// 原来的写法在这里直接拒绝（「渠道已停用，测通了也不会参与路由」），
+	// 但这恰好挡住了最需要它的场景：排查一条渠道为什么不可用、或者先把配置
+	// 调好再启用，都得在停用状态下先验证。停用只是「不参与路由」，
+	// 与「能不能与上游通上话」是两件事。
+	//
+	// 状态仍然如实记录（见 recordChannelTest）：探测结果会写进 health_status，
+	// 列表里那条渠道依旧显示「已禁用」——停用不会被探测结果掩盖。
 
 	plain := ""
 	if ch.APIKeyEnc != "" {
