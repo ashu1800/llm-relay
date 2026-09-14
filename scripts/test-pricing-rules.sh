@@ -216,7 +216,37 @@ fi
 chk "缺口不影响正常规则：有效规则仍然生效" "2" "$(curl -s "$API/channels/$CID/models" | jqg "d['items'][0]['peak_rules'][0]['multiplier']")"
 
 echo
-echo "=== 10. 清理探测数据 ==="
+echo "=== 10. 渠道列表带出「最近调用」 ==="
+# 这一列由列表接口从请求日志聚合（MAX(created_at) per channel_id），
+# 而不是在转发链路上写渠道行：健康状态那两处 Update 是有意节流的
+# （只在状态变化时写），为了一个展示用的时间给每次请求加一次写库不划算。
+last_used_of() {
+  curl -s "$API/channels" | python3 -c "
+import sys, json
+for c in json.load(sys.stdin)['items']:
+    if c['id'] == $1:
+        print(c.get('last_used_at') or '')
+        break
+"
+}
+# 正例：上面这一串用例真的调通过这条渠道
+chk "被调用过的渠道有最近调用时间" "yes" \
+  "$(case "$(last_used_of "$CID")" in 20*) echo yes ;; *) echo no ;; esac)"
+# 反例：新建但没调用过的渠道必须为空 —— 否则这一列就成了「不管有没有
+# 调用都显示点东西」，看不出渠道到底是死的还是活的
+UNUSED=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
+  \"name\": \"${CNAME}-unused\", \"group_id\": $GID, \"protocol\": \"openai-chat\",
+  \"base_url\": \"http://slow-upstream:9999\", \"api_key\": \"mock-key\"
+}" | jqg "d['id']")
+chk "没被调用过的渠道没有最近调用时间" "" "$(last_used_of "$UNUSED")"
+curl -s -X DELETE "$API/channels/$UNUSED" >/dev/null
+# 报出来的时刻必须就是日志里的最大时刻（用纪元秒比，绕开时区与毫秒格式）
+chk "时刻与日志里的最大时刻一致" \
+  "$(P "SELECT EXTRACT(EPOCH FROM MAX(created_at))::bigint FROM request_logs WHERE channel_id=$CID")" \
+  "$(printf '%s' "$(last_used_of "$CID")" | python3 -c "import sys,datetime;print(int(datetime.datetime.fromisoformat(sys.stdin.read().strip()).timestamp()))")"
+
+echo
+echo "=== 11. 清理探测数据 ==="
 curl -s -X DELETE "$API/channels/$CID" >/dev/null
 for kid in $(P "SELECT id FROM api_keys WHERE name='$KNAME'"); do
   curl -s -X DELETE "$API/keys/$kid" >/dev/null

@@ -433,6 +433,41 @@ function fmtCheckedAt(v: string | null | undefined) {
   return isNaN(d.getTime()) ? '' : d.toLocaleString('zh-CN', { hour12: false })
 }
 
+// 与 LogsView 的 fmtTime 同一口径：手工补零成 YYYY-MM-DD HH:mm:ss。
+// 不用 toLocaleString，免得同一份数据在别的区域设置下变成 09/14/2026。
+function fmtTime(v: string | null | undefined) {
+  if (!v) return '—'
+  const d = new Date(v)
+  if (isNaN(d.getTime())) return '—'
+  const p = (n: number) => (n < 10 ? '0' + n : String(n))
+  return (
+    d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+    ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds())
+  )
+}
+
+// 最近调用显示成「多久以前」而不是时刻：扫一眼列表要判断的是
+// 「这条渠道还在不在干活」，相对时间一眼就能比出哪条是活的、哪条是陈的，
+// 而一串时刻得先在脑子里做减法。精确时刻放在悬停提示里（见模板）。
+// 超过一周就不再说「几天前」了，那时候「具体哪天」比「大概多久」有用。
+//
+// 这个文案是「加载时刻」的快照：页面开着不动，它不会自己变旧为新的。
+// 列表本来就靠「刷新」拉取，没有为这一列单独挂定时器 —— 那会让表格
+// 每隔一段时间重渲染一次，而拖拽排序正依赖着 DOM 的稳定。
+function fmtAgo(v: string | null | undefined) {
+  if (!v) return '—'
+  const d = new Date(v)
+  if (isNaN(d.getTime())) return '—'
+  const sec = Math.floor((Date.now() - d.getTime()) / 1000)
+  // 时钟回拨或服务端时间略快时会出现负数，按「刚刚」处理，不显示「-3 秒前」
+  if (sec < 60) return '刚刚'
+  if (sec < 3600) return Math.floor(sec / 60) + ' 分钟前'
+  if (sec < 86400) return Math.floor(sec / 3600) + ' 小时前'
+  if (sec < 7 * 86400) return Math.floor(sec / 86400) + ' 天前'
+  const p = (n: number) => (n < 10 ? '0' + n : String(n))
+  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes())
+}
+
 /** 开关的悬停说明：说清当前状态、以及这个状态意味着什么。 */
 function enableTip(row: Channel) {
   if (!row.enabled) return ['已停用：不参与任何路由', '打开开关即可重新接回流量']
@@ -709,7 +744,8 @@ onBeforeUnmount(() => {
            反过来偏大也不行 —— antd 会把多出来的宽度摊到各列上，
            于是「声明值」和实际渲染宽度对不上，量出来的数就没法用来核对。
            1227 = 各列宽度之和（顺序 44 + 名称 170 + 模型 200 + 上游协议 125
-           + 地址 174 + 分组 110 + 币种 86 + 启用 78 + 操作 240）。
+           + 最近调用 174 + 分组 110 + 币种 86 + 启用 78 + 操作 240）。
+           「最近调用」占的就是原来「地址」那 174，所以总和没变。
            「权重」列已去掉（顺序由列表本身表达，不再显示数字），
            换成 44px 的拖拽手柄列；操作列 292 -> 240 是更早那次改动。
            改完实测（scripts/measure-tables.mjs，1440 视口）：容器 1182、表格 1227 -->
@@ -771,7 +807,32 @@ onBeforeUnmount(() => {
         <a-table-column title="上游协议" :width="125">
           <template #default="{ record }">{{ protocolLabel(record.protocol) }}</template>
         </a-table-column>
-        <a-table-column title="地址" data-index="base_url" :width="174" ellipsis />
+        <a-table-column title="最近调用" :width="174">
+          <template #default="{ record }">
+            <!-- 最近调用 = 这条渠道最近一次真的承接了请求（故障转移跳过的
+                 尝试不算，它们没落 channel_id）。这一列回答的是「这条渠道
+                 是不是还在干活」：备份渠道、被停用的渠道、白名单配错的渠道
+                 都会长时间停在同一时刻或干脆没有记录 -->
+            <a-tooltip v-if="record.last_used_at">
+              <template #title>
+                {{ fmtTime(record.last_used_at) }}
+                <br />
+                这条渠道最近一次承接请求的时间
+              </template>
+              <span class="last-used">{{ fmtAgo(record.last_used_at) }}</span>
+            </a-tooltip>
+            <!-- 没有记录不给「从未调用」这种断言：日志过了保留期会被自动清理，
+                 那时这里也是空的，说成「从未」就是在编事实 -->
+            <a-tooltip v-else>
+              <template #title>
+                请求日志里没有这条渠道的记录。
+                <br />
+                可能是一直没被用上，也可能是调用早于日志保留期已被清理
+              </template>
+              <span class="last-used none">无记录</span>
+            </a-tooltip>
+          </template>
+        </a-table-column>
         <a-table-column title="分组" :width="110">
           <template #default="{ record }">
             <!-- 分组名用全站统一的胶囊：颜色与分组管理里配的一致，
@@ -967,6 +1028,15 @@ onBeforeUnmount(() => {
 /* 名称下方的「经 xxx」代理提示：比正文弱一档，不抢渠道名的注意力 */
 .sub-text { color: var(--color-text-secondary); font-size: 12px; }
 .model-names { color: var(--color-text); }
+/* 最近调用用等宽数字：这一列是时间量，比例字体下「分钟前」三个字的宽度
+   会随数字变化，一列里参差不齐；tabular-nums 让它们对齐成一条竖线 */
+.last-used {
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+/* 「无记录」比正常时间弱一档：它是个空状态，不该和真时间抢同样的分量 */
+.last-used.none { color: var(--color-text-secondary); }
 /* 未定价提示：橙色而不是灰色 —— 它是一个待办，不是一句说明 */
 .unpriced-hint {
   margin-left: 4px;
@@ -983,6 +1053,19 @@ onBeforeUnmount(() => {
 .enable-cell { display: inline-flex; align-items: center; gap: 6px; }
 /* 异常提示用橙色，与「未定价」那类待办同色系；只在探测失败时出现 */
 .health-warn { color: var(--color-orange); font-size: 13px; }
+/* 「顺序」表头在 44px 的列里折成了上下两行，把整行表头从 39px 顶到 61px：
+   antd 在每侧留 8px 内边距，44px 的列只剩 28px 给文字，而这两个字正好是
+   28px 宽，卡在折行的边界上。这里只收窄这一列的内边距，**不加列宽** ——
+   列宽总和 1227 是量过的（见表格上方的注释），而且窄窗口下表格本来就在横向
+   溢出、固定的「操作」列已经在挤左邻列，再加宽只会让那个问题更明显。
+   选择器要一路写到 `> tr > th` 而不是只写 `.ant-table-thead th`：
+   antd 自己的内边距规则带 4 个类（.ant-table-wrapper .ant-table
+   .ant-table-small .ant-table-thead），写短了会被它压住、改了等于没改
+   （实测：短选择器下内边距仍是 8px、表头仍是 61px） */
+:deep(.ant-table-wrapper .ant-table .ant-table-thead > tr > th:first-child) {
+  padding-left: 4px;
+  padding-right: 4px;
+}
 /* 拖拽手柄：平时低调，悬停才明显 —— 它是个辅助操作，
    不该和「测试/编辑」那些动作抢注意力。grab 光标是唯一的可拖拽提示 */
 .drag-handle {

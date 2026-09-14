@@ -217,6 +217,14 @@ type channelListItem struct {
 	// 判据（四个单价全 0 且没有倍率）必须与计价引擎一字不差，
 	// 两边各写一份迟早会不一致
 	UnpricedCount int `json:"unpriced_count"`
+	// LastUsedAt 是这条渠道最近一次实际承接请求的时间（没有则为 null）。
+	//
+	// 取自请求日志而不是渠道行上的字段：日志里记的是**最终承接这次请求的渠道**
+	// （故障转移跳过的那些尝试只进 Trail，不落 channel_id），所以它回答的是
+	// 「这条渠道最近一次真的干活是什么时候」，而不是「最近一次被尝试」。
+	// 也正因为如此，这里不需要在转发链路上加写库动作 ——
+	// 健康状态那两处 Update 是有意节流的（只在状态变化时写）
+	LastUsedAt *time.Time `json:"last_used_at"`
 }
 
 func (s *Server) listChannels(c *gin.Context) {
@@ -255,6 +263,28 @@ func (s *Server) listChannels(c *gin.Context) {
 		}
 	}
 
+	// 最近调用时间：一次聚合查出这批渠道各自最后一次被用上的时刻。
+	// 用 id 列表约束范围，避免全表聚合 —— 日志表是唯一会无界增长的表
+	lastUsed := map[uint]*time.Time{}
+	if len(ids) > 0 {
+		var rows []struct {
+			ChannelID uint
+			LastUsed  time.Time
+		}
+		if err := db.Model(&model.RequestLog{}).
+			Select("channel_id, MAX(created_at) AS last_used").
+			Where("channel_id IN ?", ids).
+			Group("channel_id").
+			Scan(&rows).Error; err != nil {
+			writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+			return
+		}
+		for _, r := range rows {
+			t := r.LastUsed
+			lastUsed[r.ChannelID] = &t
+		}
+	}
+
 	items := make([]channelListItem, 0, len(channels))
 	for _, ch := range channels {
 		list := names[ch.ID]
@@ -263,6 +293,7 @@ func (s *Server) listChannels(c *gin.Context) {
 		}
 		items = append(items, channelListItem{
 			Channel: ch, Models: list, ModelCount: len(list), UnpricedCount: unpriced[ch.ID],
+			LastUsedAt: lastUsed[ch.ID],
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
