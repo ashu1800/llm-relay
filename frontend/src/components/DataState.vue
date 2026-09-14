@@ -21,13 +21,20 @@ withDefaults(
     title?: string
     // 失败时给用户的下一步建议
     hint?: string
+    // 加载成功但一条数据都没有。与「加载失败」是两回事，必须分开呈现 ——
+    // 把失败显示成空列表，用户会去别处找原因。
+    empty?: boolean
+    // 空态文案，例如「还没有配置代理」
+    emptyText?: string
   }>(),
   {
     error: '',
     hasData: false,
     loading: false,
     title: '加载失败',
-    hint: '请确认后端服务是否正常，然后重试。'
+    hint: '请确认后端服务是否正常，然后重试。',
+    empty: false,
+    emptyText: '暂无数据'
   }
 )
 
@@ -44,7 +51,9 @@ const emit = defineEmits<{ retry: [] }>()
     :message="error"
   >
     <template #action>
-      <a @click="emit('retry')">重试</a>
+      <!-- 用 a-button 而不是裸 <a>：没有 href 的 <a> 拿不到隐式 tabindex，
+           Tab 键永远聚焦不到、回车也触发不了，键盘用户就卡在这一步。 -->
+      <a-button type="link" size="small" @click="emit('retry')">重试</a-button>
     </template>
   </a-alert>
 
@@ -60,6 +69,11 @@ const emit = defineEmits<{ retry: [] }>()
   <div v-else-if="loading && !hasData" class="ds-panel">
     <a-spin />
     <div class="ds-hint">加载中…</div>
+  </div>
+
+  <!-- 加载成功但确实没有数据 -->
+  <div v-else-if="empty && !loading" class="ds-panel">
+    <a-empty :description="emptyText" />
   </div>
 
   <slot v-else />
@@ -81,11 +95,17 @@ const emit = defineEmits<{ retry: [] }>()
 .ds-title {
   font-size: 15px;
   font-weight: 600;
-  color: var(--color-red);
+  /* 标题是正文文字，用 --text-red（白底 5.44:1）而不是 --color-red。
+     后者 #ea4343 在白底上只有 3.90:1、深色底上 3.38:1，都不达标 ——
+     而这是「加载失败」的标题，恰恰是最需要一眼看清的一句。 */
+  color: var(--text-red);
 }
 .ds-msg {
   max-width: 560px;
-  color: var(--color-text-primary);
+  /* 变量名是 --color-text，不存在 --color-text-primary。
+     写错时 var() 解析失败会让整条声明失效，color 静默回退成继承值 ——
+     看起来「差不多对」，所以这类错误很容易一直留着。 */
+  color: var(--color-text);
   word-break: break-all;
 }
 .ds-hint {

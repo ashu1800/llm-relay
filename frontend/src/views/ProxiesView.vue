@@ -46,6 +46,11 @@ async function load() {
     const res = await api.get<{ items: Proxy[] }>('/proxies')
     rows.value = res.items || []
   } catch (e: any) {
+    // 失败时清空列表：旧数据配上错误提示容易被当成「当前真实的代理列表」，
+    // 清空后由 DataState 统一呈现「加载失败 + 重试」，不会退化成「暂无数据」。
+    // 这里原来少了这一行，于是刷新失败时表格里还留着上一次的数据 ——
+    // 用户看到的是「代理都还在」，而实际上一条都没读回来。
+    rows.value = []
     loadError.value = e.message || '加载失败'
     message.error(e.message)
   } finally {
@@ -224,7 +229,18 @@ onMounted(load)
         <span class="toolbar-hint">共 {{ rows.length }} 个代理，启用 {{ activeCount }} 个</span>
       </div>
 
-      <DataState :loading="loading" :error="loadError" :empty="!rows.length" empty-text="还没有配置代理">
+      <!-- DataState 的契约是 error / hasData / loading / title / hint / empty / emptyText。
+           这里原来传的是 :empty 与 empty-text（连字符写法）—— 两个都不是它认识的
+           prop，而且 DataState 的根节点是 Fragment，属性没法透传下来，
+           于是 Vue 每次挂载都会报 "Extraneous non-props attributes"，
+           想显示的「还没有配置代理」也从未生效（一路退到 antd 的「暂无数据」）。 -->
+      <DataState
+        :loading="loading"
+        :error="loadError"
+        :has-data="rows.length > 0"
+        :empty="!loading && !loadError && rows.length === 0"
+        empty-text="还没有配置代理"
+      >
         <a-table
           :data-source="rows"
           row-key="id"
@@ -269,13 +285,21 @@ onMounted(load)
           </a-table-column>
           <a-table-column title="操作" :width="190" fixed="right">
             <template #default="{ record }">
-              <a :class="{ disabled: testing === record.id }" @click="testing === null && testRow(record)">
+              <!-- 用 a-button 而不是裸 <a>：无 href 的 <a> 键盘不可达，
+                   而且 .disabled 只是视觉上的 class，点击仍会触发 -->
+              <a-button
+                type="link"
+                size="small"
+                :loading="testing === record.id"
+                :disabled="testing !== null && testing !== record.id"
+                @click="testRow(record)"
+              >
                 <ThunderboltOutlined /> {{ testing === record.id ? '测试中…' : '测试' }}
-              </a>
+              </a-button>
               <a-divider type="vertical" />
-              <a @click="openEdit(record)">编辑</a>
+              <a-button type="link" size="small" @click="openEdit(record)">编辑</a-button>
               <a-divider type="vertical" />
-              <a class="danger" @click="remove(record)">删除</a>
+              <a-button type="link" size="small" danger @click="remove(record)">删除</a-button>
             </template>
           </a-table-column>
         </a-table>
@@ -361,8 +385,7 @@ onMounted(load)
    那里没有 --color-danger / --color-text-tertiary 这两个名字，
    写了不会报错，只是颜色悄悄失效、退回默认色 */
 .sub-text { color: var(--color-text-secondary); font-size: 12px; margin-top: 2px; }
-.fail-text { color: var(--color-red); }
-.danger { color: var(--color-red); }
+.fail-text { color: var(--text-red); }
 .disabled { color: var(--color-text-secondary); cursor: not-allowed; }
 .field-hint { color: var(--color-text-secondary); font-size: 12px; margin-top: 4px; }
 .field-hint.inline { margin-left: 8px; }
@@ -370,3 +393,4 @@ onMounted(load)
 .modal-footer { display: flex; align-items: center; justify-content: space-between; }
 .footer-right { display: flex; gap: 8px; }
 </style>
+

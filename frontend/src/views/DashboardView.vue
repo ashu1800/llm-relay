@@ -211,11 +211,18 @@ function statsQuery() {
 }
 
 
-// 与 theme.css 的语义色保持一致，保证图表和界面同色系
+// 与 theme.css 的语义色保持一致，保证图表和界面同色系。
 // 图表配色跟着主题走：option 里不再写死颜色（详见 utils/chartTheme.ts）
 const ct = useChartTheme()
 
-const PALETTE = ['#c87864', '#8b5cf5', '#06b6d4', '#10b37d', '#f59e0b', '#ea4343', '#6b7280', '#3b82f6']
+// 色板已抽进 useChartTheme()，这里只留一个取值入口。
+// 原来这里是一份写死的 8 色数组，暗色主题下会用到 #6b7280（对 #303030 仅 2.73:1）
+// 与 #f59e0b（对白卡片仅 2.15:1）—— 前者在深色底上几乎看不见。
+// 统一走 ct.value.palette：那里的值来自 --color-*，暗色已被整体换成提亮版。
+function paletteColor(i: number) {
+  const p = ct.value.palette
+  return p[i % p.length]
+}
 
 function n(v: number | undefined) {
   return (v ?? 0).toLocaleString('zh-CN')
@@ -287,13 +294,18 @@ const trendCurrencies = computed(() => {
   return currencyKeys(seen)
 })
 const trendLegend = computed(() => trendCurrencies.value.map((c) => '消费 ' + symbolOf(c)).concat(['请求数']))
-// 第一条沿用原来的消费色（看板上「钱」一直是这个橙色）
-const TREND_COLORS = ['#f59e0b', '#8b5cf5', '#06b6d4', '#10b37d']
 
 const trendOption = computed(() => {
   const labels = series.value.map((p) => fmtBucket(p.ts, seriesBucket.value))
-  const REQ = '#06b6d4'
-  // 圆点是空心的：填充用卡片底色、描边用线色
+  // 线色从主题取，不写死：#f59e0b 在白卡片上只有 2.15:1，
+  // #06b6d4 在深色底上偏暗，两套主题都需要各自的提亮/加深版。
+  const p = ct.value.palette
+  // 第一条沿用消费色（看板上「钱」一直是橙的），其余按色板顺延
+  const TREND_COLORS = [p[4], p[1], p[2], p[3]]
+  const REQ = p[2]
+  // 圆点是空心的：填充用卡片底色、描边用线色。
+  // 填充色不能写死 #fff —— 暗色卡片是 #303030，白点会变成刺眼实心圆。
+  const pointFill = ct.value.pointFill
   const lineSeries = (name: string, color: string, data: number[]) => ({
     name,
     type: 'line',
@@ -301,7 +313,7 @@ const trendOption = computed(() => {
     symbol: 'circle',
     symbolSize: 7,
     lineStyle: { width: 2, color },
-    itemStyle: { color: '#fff', borderColor: color, borderWidth: 2 },
+    itemStyle: { color: pointFill, borderColor: color, borderWidth: 2 },
     data
   })
   const axisName = { color: ct.value.secondary, fontSize: 11 }
@@ -369,11 +381,18 @@ const trendOption = computed(() => {
 // 名称、颜色、取值三样写在同一项里，是为了让它们不可能对不上：
 // 早先的写法把颜色放在一张按名称索引的表里，靠字符串在另一处再匹配一次，
 // 改了一处的名字而忘了另一处就会静默退回默认色，不会有任何报错。
-const TOKEN_PARTS: { name: string; color: string; pick: (s: Summary | null) => number }[] = [
-  { name: '输入（未命中）', color: '#c87864', pick: (s) => s?.prompt_tokens ?? 0 },
-  { name: '缓存命中', color: '#e0a090', pick: (s) => s?.cached_tokens ?? 0 },
-  { name: '输出', color: '#f2d3c9', pick: (s) => s?.completion_tokens ?? 0 }
-]
+//
+// 色值来自 ct（CSS 变量）：原来写死的 #e0a090 / #f2d3c9 对白卡片分别只有
+// 2.19:1 与 1.41:1，几乎看不见；而且与 LogsView 里同一组概念
+// （.tk-in/.tk-out/.tk-cache）用的 --token-* 是两套色 —— 同一件事两种颜色。
+// 现在两边都从 --text-terracotta / --text-green / --text-purple 取，暗色自动换档。
+const TOKEN_PARTS = computed<
+  { name: string; color: string; pick: (s: Summary | null) => number }[]
+>(() => [
+  { name: '输入（未命中）', color: ct.value.tokenInput, pick: (s) => s?.prompt_tokens ?? 0 },
+  { name: '缓存命中', color: ct.value.tokenCache, pick: (s) => s?.cached_tokens ?? 0 },
+  { name: '输出', color: ct.value.tokenOutput, pick: (s) => s?.completion_tokens ?? 0 }
+])
 
 // 实时推送的数值：金额与成功率不是整数，滚动组件用 format 预设走不同的格式化。
 // 用 computed 而不是直接传字符串：滚动需要的是**数字**，
@@ -416,9 +435,10 @@ const rateValue = computed(() => (summary.value ? summary.value.success_rate * 1
 
 const compositionOption = computed(() => {
   const s = summary.value
-  const data = TOKEN_PARTS.map((p) => ({ name: p.name, value: p.pick(s) }))
+  // 颜色随类别带过来，不靠名字再查一遍 —— 查表那一步在名字改字时会静默退回默认色
+  const data = TOKEN_PARTS.value.map((p) => ({ name: p.name, value: p.pick(s), color: p.color }))
     .filter((x) => x.value > 0)
-    .map((x) => ({ ...x, itemStyle: { color: TOKEN_PARTS.find((p) => p.name === x.name)?.color } }))
+    .map((x) => ({ name: x.name, value: x.value, itemStyle: { color: x.color } }))
   return {
     tooltip: { trigger: 'item', valueFormatter: (v: number) => n(v) + ' 词元' },
     legend: { bottom: 0, icon: 'circle', textStyle: { fontSize: 12, color: ct.value.text } },
@@ -439,11 +459,11 @@ const compositionOption = computed(() => {
 // 模型配色：按 byModel 的原始顺序统一分配，条形图与饼图共用同一份。
 //
 // 两张图必须共用，否则同一个模型会显示成两种颜色：
-// 饼图会先滤掉零消耗的模型，如果它自己按 PALETTE 下标取色，
+// 饼图会先滤掉零消耗的模型，如果它自己按色板下标取色，
 // 只要滤掉一个，它后面所有模型的颜色就整体错位了。
 const modelColors = computed(() => {
   const m = new Map<string, string>()
-  byModel.value.forEach((x, i) => m.set(x.name, PALETTE[i % PALETTE.length]))
+  byModel.value.forEach((x, i) => m.set(x.name, paletteColor(i)))
   return m
 })
 
@@ -492,7 +512,7 @@ const modelBarOption = computed(() => {
         // 每个模型一个颜色：既能一眼区分，也便于和右侧饼图里的同名模型对上号
         data: items.map((x) => ({
           value: x.requests,
-          itemStyle: { color: modelColors.value.get(x.name) || '#c87864' }
+          itemStyle: { color: modelColors.value.get(x.name) || paletteColor(0) }
         }))
       }
     ]
@@ -529,11 +549,11 @@ const modelPieOption = computed(() => {
     .map((x) => ({
       name: x.name,
       value: Number(x.costs?.[pieCur.value] ?? 0),
-      itemStyle: { color: modelColors.value.get(x.name) || '#c87864' }
+      itemStyle: { color: modelColors.value.get(x.name) || paletteColor(0) }
     }))
     .filter((x) => x.value > 0)
   return {
-    color: PALETTE,
+    color: ct.value.palette,
     tooltip: { trigger: 'item', valueFormatter: (v: number) => moneyText(v, pieCur.value) },
     legend: { type: 'scroll', bottom: 0, icon: 'circle', textStyle: { fontSize: 12, color: ct.value.text } },
     series: [
@@ -981,14 +1001,45 @@ onMounted(async () => {
 }
 
 /* 五档配色：0 档中性底色，1~4 逐级加深主色（对应参考站的 level-0..4）。
-   0 档用 color-mix 把文字色压到 10% 透明度 —— 这在亮色下正好等于
+   0 档用 color-mix 把文字色压到 12% 透明度 —— 这在亮色下正好约等于
    参考站实测的 rgba(48,48,48,0.1)，暗色下又自动跟着换成浅色，
-   比写死字面值或借用 --color-border（偏深）都合适。 */
-.heatmap-cell-level-0 { background: color-mix(in srgb, var(--color-text) 10%, transparent); }
-.heatmap-cell-level-1 { background: rgba(200, 120, 100, 0.28); }
-.heatmap-cell-level-2 { background: rgba(200, 120, 100, 0.52); }
-.heatmap-cell-level-3 { background: rgba(200, 120, 100, 0.76); }
-.heatmap-cell-level-4 { background: rgb(200, 120, 100); }
+   比写死字面值或借用 --color-border（偏深）都合适。
+
+   1~4 档全部走 color-mix，不再写死 rgba(200,120,100,…)：
+   写死的问题有两个 ——
+   ① 那个字面值是浅色主题的 --color-primary，深色主题下主色已换成 #e8a48c，
+      于是热力图成了页面上唯一不跟随主题的色块（实测深色下最亮档对卡片
+      只有 3.17:1，与周边格格不入）；
+   ② 原来的 28/52/76/100% 四档**太密**，相邻档对比度实测只有
+      1.12 / 1.32 / 1.36 / 1.37 —— 都在「几乎看不出差别」的区间，
+      热力图最主要的用途（一眼看出哪几个时段忙）等于失效。
+
+   现在的档位是 30/55/78/100%，实测相邻档对比度：
+     浅色 1.40 / 1.53 / 1.56 / 1.60（最差 1.40）
+     深色 1.60 / 1.64 / 1.50 / 1.42（最差 1.40）
+   全幅（0 档到 4 档）浅色 4.76:1、深色 4.84:1，与原来写死时的
+   2.76 / 3.17 相比，忙闲差异终于是看得见的。
+
+   取色用 --text-primary-ink 而不是 --color-primary：热力图是大色块，
+   深色相在白底上才有足够动态范围（--color-primary 白底仅 3.32:1，
+   拉不出五档）。--text-primary-ink 两套主题下都是「同色相的可读深/亮版」，
+   正好满足需要。
+   与卡片的底色 --color-fg 混合，所以不需要为暗色主题再写一份。 */
+.heatmap-cell-level-0 {
+  background: color-mix(in srgb, var(--color-text) 12%, var(--color-fg));
+}
+.heatmap-cell-level-1 {
+  background: color-mix(in srgb, var(--text-primary-ink) 30%, var(--color-fg));
+}
+.heatmap-cell-level-2 {
+  background: color-mix(in srgb, var(--text-primary-ink) 55%, var(--color-fg));
+}
+.heatmap-cell-level-3 {
+  background: color-mix(in srgb, var(--text-primary-ink) 78%, var(--color-fg));
+}
+.heatmap-cell-level-4 {
+  background: var(--text-primary-ink);
+}
 
 /* DataState 的错误提示自带左右外边距（为列表页的面板布局设计），
    这里外层已经有内边距，去掉以免出现双重缩进 */

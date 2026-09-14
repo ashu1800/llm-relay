@@ -272,7 +272,12 @@ function submit() {
   border: 1px solid var(--color-border); border-radius: 4px;
   font-size: 12px; cursor: pointer; color: var(--color-text-secondary);
 }
-.day-chip.on { background: var(--color-primary); border-color: var(--color-primary); color: #fff; }
+/* 选中态如实心按钮：用 --solid-primary-* 这一对，而不是
+   `background: var(--color-primary); color: #fff`。
+   后者是 #c87864 + 白字，只有 3.32:1，而「周一」这些字样是 12px 正文，
+   按 AA 需 4.5:1。这一对在浅色下是深底白字（4.84:1）、
+   深色下是浅底深字（6.98:1），两套主题都达标。 */
+.day-chip.on { background: var(--solid-primary-bg); border-color: var(--solid-primary-bg); color: var(--solid-primary-fg); }
 .time-input {
   border: 1px solid var(--color-border); border-radius: var(--radius-control);
   padding: 1px 4px; font-family: var(--font-family-mono); font-size: 12px;

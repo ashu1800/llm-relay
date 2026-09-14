@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '@/api/client'
 import {
@@ -53,6 +53,43 @@ const menus = [
 const collapsed = ref(false)
 const isActive = (key: string) => route.path === key
 const go = (key: string) => router.push(key)
+
+// ---- 窄屏自动收起侧栏 ----
+//
+// 侧栏固定 224px。窗口一窄，它就要占掉一大半宽度，内容区被压成一条缝 ——
+// 表格虽然有横向滚动（各页都配了 :scroll="{ x }"），但连「一屏能看见两列」
+// 都做不到时，滚动也救不回来。
+//
+// 用 matchMedia 而不是纯 CSS：收起是**组件状态**（collapsed 同时决定
+// 菜单文字、侧栏宽度、footer 排布），CSS 改不动它。两者混用还会打架。
+//
+// 跨过断点时跟随视口，但用户在同一档内手动展开/收起后不再被覆盖 ——
+// 所以只在断点**变化**时写 collapsed，不在每次 resize 时写。
+const NARROW = '(max-width: 900px)'
+let narrowMq: MediaQueryList | null = null
+const onNarrowChange = (e: MediaQueryListEvent | MediaQueryList) => {
+  collapsed.value = e.matches
+}
+
+onMounted(async () => {
+  if (typeof window !== 'undefined' && window.matchMedia) {
+    narrowMq = window.matchMedia(NARROW)
+    // 首屏就按当前宽度定：窄屏进来时不该先闪一下展开态
+    collapsed.value = narrowMq.matches
+    narrowMq.addEventListener('change', onNarrowChange)
+  }
+  try {
+    const info = await api.get<{ using_default_secret?: boolean }>('/system/info')
+    usingDefaultSecret.value = !!info.using_default_secret
+  } catch {
+    // 拿不到系统信息不影响正常使用，静默即可
+  }
+})
+
+onUnmounted(() => {
+  narrowMq?.removeEventListener('change', onNarrowChange)
+  narrowMq = null
+})
 </script>
 
 <template>
@@ -88,18 +125,28 @@ const go = (key: string) => router.push(key)
           </div>
 
           <div class="sidebar-footer">
-            <button class="console-menu-item" @click="collapsed = !collapsed">
-              <MenuUnfoldOutlined v-if="collapsed" class="console-menu-icon" />
-              <MenuFoldOutlined v-else class="console-menu-icon" />
+            <!-- 收起时只剩一个图标，读屏会念成「menu-fold」这种图标名。
+                 aria-label 给它一个真实的动作名；展开态有可见文字，
+                 aria-label 与之一致即可，不会重复朗读。 -->
+            <button
+              class="console-menu-item"
+              :aria-label="collapsed ? '展开侧栏' : '收起侧栏'"
+              :aria-expanded="!collapsed"
+              @click="collapsed = !collapsed"
+            >
+              <MenuUnfoldOutlined v-if="collapsed" class="console-menu-icon" aria-hidden="true" />
+              <MenuFoldOutlined v-else class="console-menu-icon" aria-hidden="true" />
               <span v-if="!collapsed" class="console-menu-label">收起侧栏</span>
             </button>
             <button
               class="nav-icon-btn"
               :title="themeStore.isDark ? '切换浅色' : '切换深色'"
+              :aria-label="themeStore.isDark ? '切换到浅色主题' : '切换到深色主题'"
+              :aria-pressed="themeStore.isDark"
               @click="themeStore.toggle()"
             >
-              <BulbOutlined v-if="!themeStore.isDark" />
-              <BulbFilled v-else />
+              <BulbOutlined v-if="!themeStore.isDark" aria-hidden="true" />
+              <BulbFilled v-else aria-hidden="true" />
             </button>
           </div>
         </aside>
@@ -140,6 +187,12 @@ const go = (key: string) => router.push(key)
      （实测日志页侧栏 5117px），滚到底时左侧菜单早就出视口了
      （实测第一个菜单项在 -4209px 处），「收起侧栏」也被顶到页面最下面。 */
   height: 100vh;
+  /* 移动端浏览器（iOS Safari、Chrome Android 带地址栏时）的 100vh 是
+     「地址栏收起后」的高度，于是页面底部会被地址栏盖住一截，
+     而 .main-layout 是 overflow:hidden，被盖住的部分根本滚不出来。
+     dvh 是**动态**视口高度，跟着地址栏伸缩走。
+     两行都写：不认 dvh 的老浏览器退回上一行的 100vh，行为与现在一致。 */
+  height: 100dvh;
   overflow: hidden;
   background: var(--color-bg);
 }
@@ -164,8 +217,12 @@ const go = (key: string) => router.push(key)
   height: 32px;
   flex: 0 0 32px;
   border-radius: var(--radius-pill);
-  background: var(--color-primary);
-  color: #fff;
+  /* 白字压在主色 #c87864 上只有 3.32:1，不达 AA。
+     品牌标是首屏第一眼看到的东西，也是「LLM Relay」这个名字的载体，
+     不该是整页最难读的一处。这里改用主色加深一档作底色：白字 4.84:1。
+     深色主题会在下面再覆盖成提亮版（白字在深色底上本来就不合适）。 */
+  background: var(--brand-mark-bg);
+  color: var(--brand-mark-fg);
   font-size: 13px;
   font-weight: 700;
 }
@@ -174,7 +231,8 @@ const go = (key: string) => router.push(key)
   font-family: var(--font-family-display);
   font-size: 17px;
   font-weight: 600;
-  color: var(--color-primary);
+  /* 品牌名也是正文文字：主色在白底上 3.32:1、深色底上 3.98:1，都不够 */
+  color: var(--text-primary-ink);
   white-space: nowrap;
   overflow: hidden;
 }
@@ -197,6 +255,25 @@ const go = (key: string) => router.push(key)
 
 .nav-icon-btn:hover {
   background: var(--color-icon-hover-bg);
+}
+
+/* 触摸目标：WCAG 2.2 的 2.5.8 要求可点区域至少 24×24 CSS 像素
+   （按钮本身的可见尺寸 32px 已达标），这里只在**粗指针**设备上
+   把纵向命中区撑到 44px —— 手机上一排小圆钮很容易点偏，
+   而撑开命中区不影响桌面端的视觉密度。 */
+@media (pointer: coarse) {
+  .nav-icon-btn,
+  .console-sidebar.is-collapsed .console-menu-item {
+    min-height: 44px;
+  }
+}
+
+/* 窄屏下进一步收紧内容边距：宽度本来就紧张，8px 的四周留白
+   在 360px 的屏幕上等于白白吃掉 4% 的可视宽度 */
+@media (max-width: 600px) {
+  .content-inner { padding: 4px; }
+  /* 侧栏收起态的 56px 在手机上仍偏宽，收到 44px */
+  .console-sidebar.is-collapsed { width: 44px; flex-basis: 44px; }
 }
 
 /* ---------- 侧边栏 ---------- */
@@ -259,14 +336,17 @@ const go = (key: string) => router.push(key)
   transition: background 0.2s var(--ease-expo), color 0.2s var(--ease-expo);
 }
 
+/* 实测选中态：主色 20% 透明底 + 主色文字
+   文字色用 --text-primary-ink 而不是 --color-primary：
+   后者在浅色底上 2.50:1、深色底上 3.66:1，菜单项是主要导航，
+   读不清的代价比标题更大。底色仍用主色，观感不变。 */
 .console-menu-item:hover {
-  color: var(--color-primary);
+  color: var(--text-primary-ink);
   background: var(--color-primary-a20);
 }
 
-/* 实测选中态：主色 20% 透明底 + 主色文字 */
 .console-menu-item.active {
-  color: var(--color-primary);
+  color: var(--text-primary-ink);
   background: var(--color-primary-a20);
 }
 

@@ -32,6 +32,21 @@ const shown = ref(props.value ?? 0)
 let raf = 0
 let fallbackTimer: number | null = null
 
+// 系统开启了「减弱动态效果」时不做补间，直接跳到目标值。
+//
+// CSS 的 @media (prefers-reduced-motion) 管不到这里：数字补间是 JS 逐帧算的，
+// 不走 transition/animation，全站那条归零规则对它无效。
+// 而它恰好是全站幅度最大的动效之一 —— 看板上的大字号数字持续滚动，
+// 正是前庭功能障碍用户最容易感到不适的一类动效。
+//
+// 用 matchMedia 而不是读 CSS 变量：变量值是 "500ms" 这样的字符串，
+// 而这里需要的是数值；而且媒体查询本身就能表达「用户要什么」，
+// 不必再经过一层令牌转换。
+const reduceMotion =
+  typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia('(prefers-reduced-motion: reduce)')
+    : null
+
 const text = computed(() => {
   if (props.value === null || props.value === undefined) return '--'
   return applyFormat(shown.value)
@@ -63,6 +78,12 @@ watch(
     }
     const from = shown.value
     if (from === to) return
+    // 减弱动态效果：直接落到目标值，不启动补间
+    if (reduceMotion?.matches) {
+      cancelAnimationFrame(raf)
+      shown.value = to
+      return
+    }
     const start = performance.now()
     const dur = Math.max(1, props.duration)
     cancelAnimationFrame(raf)

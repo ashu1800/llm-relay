@@ -766,7 +766,7 @@ onMounted(async () => {
         </a-table-column>
         <a-table-column title="操作" :width="72" fixed="right">
           <template #default="{ record }">
-            <a @click="openDetail(record)">详情</a>
+            <a-button type="link" size="small" @click="openDetail(record)">详情</a-button>
           </template>
         </a-table-column>
       </a-table>
@@ -777,7 +777,9 @@ onMounted(async () => {
       <a-descriptions v-if="current" :column="1" bordered size="small">
         <a-descriptions-item label="Trace ID">
           {{ current.trace_id }}
-          <a class="trace-link" @click="onlyThisTrace">只看这条链路</a>
+          <a-button type="link" size="small" class="trace-link" @click="onlyThisTrace">
+            只看这条链路
+          </a-button>
         </a-descriptions-item>
         <a-descriptions-item label="请求模型">
           <GroupTag :name="current.model_requested" v-bind="tagColorOf(current.group_id)" />
@@ -882,6 +884,7 @@ onMounted(async () => {
   background: var(--color-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-control);
-  color: var(--color-red);
+  /* 错误详情是正文，用 --text-red（白底 5.44:1）而不是 --color-red（3.90:1） */
+  color: var(--text-red);
 }
 </style>

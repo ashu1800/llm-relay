@@ -237,9 +237,14 @@ onMounted(load)
         </a-table-column>
         <a-table-column title="操作" :width="150" fixed="right">
           <template #default="{ record }">
+            <!-- 用 a-button 而不是裸 <a>：无 href 的 <a> 键盘不可达 -->
             <a-space>
-              <a @click="openEdit(record)"><EditOutlined /> 编辑</a>
-              <a class="danger-link" @click="confirmDelete(record)"><DeleteOutlined /> 删除</a>
+              <a-button type="link" size="small" @click="openEdit(record)">
+                <EditOutlined /> 编辑
+              </a-button>
+              <a-button type="link" size="small" danger @click="confirmDelete(record)">
+                <DeleteOutlined /> 删除
+              </a-button>
             </a-space>
           </template>
         </a-table-column>
@@ -386,5 +391,5 @@ onMounted(load)
 .group-tag.is-custom { --gt-base: var(--gt-color); }
 :root[data-theme='dark'] .group-tag { --gt-l: 0.80; }
 :root[data-theme='dark'] .group-tag.is-custom { --gt-base: color-mix(in oklab, var(--gt-color) 62%, white); }
-.danger-link { color: var(--color-red); }
 </style>
+

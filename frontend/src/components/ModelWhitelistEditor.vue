@@ -319,7 +319,8 @@ function applyBulk() {
   border: none;
   border-radius: var(--radius-control);
   background: color-mix(in oklab, var(--color-primary) 13%, transparent);
-  color: var(--color-primary);
+  /* 13% 主色底上主色文字只有 2.89:1；ink 版 5.17:1 */
+  color: var(--text-primary-ink);
   font-family: var(--font-family-mono);
   font-size: 12px;
   cursor: pointer;
@@ -343,7 +344,10 @@ function applyBulk() {
   border: none;
   border-radius: var(--radius-control);
   background: transparent;
-  color: var(--color-red);
+  /* 删除图标是唯一的功能提示，用 --text-red（白底 5.44:1）而不是
+     --color-red（3.90:1）—— 图标本身适用 3:1，但它同时承担了
+     「这是删除」的语义，深色主题下 3.38:1 也不够看清 */
+  color: var(--text-red);
   cursor: pointer;
   transition: background 0.15s var(--ease-expo);
 }

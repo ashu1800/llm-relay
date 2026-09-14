@@ -5,9 +5,9 @@
 // 图例最容易漏，因为不设 textStyle.color 时 echarts 用的是自带默认色 #333，
 // 在暗色背景上等于隐形；坐标轴标签同理。
 //
-// 变量本身已由 stores/theme.ts 在切换主题时同步写好（apply 里 setProperty），
-// 所以这里读到的就是当前主题的值。颜色仍然只在 theme.ts 定义一处，
-// 图表跟着走，不需要再维护第二份色表。
+// 颜色仍然只在 theme.css 定义一处：本文件只负责把变量读出来交给 echarts。
+// 界面主题由 data-theme 属性切换（见 stores/theme.ts），所以这里读到的
+// 就是当前主题生效后的值。
 import { computed } from 'vue'
 import { useThemeStore } from '@/stores/theme'
 
@@ -22,6 +22,21 @@ export function useChartTheme() {
     const css = (name: string, fallback: string) =>
       getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
 
+    // 语义色读的是 --color-*（不是 --text-*）：这两组的分工是
+    // 「大色块 / 图形」用 --color-*，「正文文字」用 --text-*。
+    // 图表里的柱、饼、线都属于前者，用 --color-* 才对得上设计意图；
+    // 暗色主题下这组已被整体替换成提亮版（见 theme.css 的 dark 块），
+    // 所以同一个色相在两套主题下都是可见的。
+    const palette = [
+      css('--color-primary', dark ? '#e8a48c' : '#c87864'),
+      css('--color-purple', dark ? '#ab8ef2' : '#8b5cf5'),
+      css('--color-blue', dark ? '#4dd0e1' : '#06b6d4'),
+      css('--color-green', dark ? '#45c79a' : '#10b37d'),
+      css('--color-orange', dark ? '#e0a83c' : '#f59e0b'),
+      css('--color-red', dark ? '#f08a7a' : '#ea4343'),
+      css('--color-gray', dark ? '#9aa1ac' : '#6b7280')
+    ]
+
     return {
       /** 图例文字、需要看清的主要标签 */
       text: css('--color-text', dark ? '#c8c8c8' : '#303030'),
@@ -34,6 +49,23 @@ export function useChartTheme() {
       border: css('--color-border', dark ? '#424242' : '#d9d9d9'),
       /** 网格线：比边框再淡一档，两套主题下都不抢视线 */
       split: dark ? 'rgba(255, 255, 255, 0.10)' : 'rgba(0, 0, 0, 0.06)',
+
+      /** 多序列图表的分类色板（饼图、柱状图按类别取色） */
+      palette,
+      /**
+       * 折线圆点的**填充**色。
+       *
+       * 不能写死 #fff：卡片底色在暗色主题下是 #303030，
+       * 白点会渲染成 13.2:1 的刺眼实心圆 —— 与「空心圆点」的设计意图正好相反。
+       * 用卡片底色填充、线色描边，才能在两套主题下都保持空心观感。
+       */
+      pointFill: css('--color-fg', dark ? '#303030' : '#ffffff'),
+
+      /** 词元构成三段（与 LogsView 的 .tk-in/.tk-out/.tk-cache 同源） */
+      tokenInput: css('--text-terracotta', dark ? '#e59a80' : '#b15840'),
+      tokenCache: css('--text-green', dark ? '#45c79a' : '#0b7d59'),
+      tokenOutput: css('--text-purple', dark ? '#ab8ef2' : '#7c4ddb'),
+
       dark
     }
   })

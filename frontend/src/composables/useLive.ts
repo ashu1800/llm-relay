@@ -13,6 +13,10 @@ const handlers = new Map<string, Set<Handler>>()
 let socket: WebSocket | null = null
 let retry = 0
 let reconnectTimer: number | null = null
+let watchdogTimer: number | null = null
+
+/** 多久没收到任何消息就认为连接已经死了。服务端 1s/2s 各推一次，取 45s 很宽松 */
+const STALE_MS = 45000
 
 /** 连接状态：界面上用它显示「实时/已断开」，断线时数字不再跳动是正常现象 */
 export const liveConnected = ref(false)
@@ -36,21 +40,57 @@ function dispatch(msg: any) {
   })
 }
 
+// 半开连接看门狗。
+//
+// 只靠 onclose 是不够的：休眠恢复、NAT/代理超时、网线拔掉这些情况下
+// TCP 连接可以长时间停在「看起来还开着」的状态，浏览器不会派发 close，
+// 于是数字静静地不再更新，界面却仍显示「实时」。
+// 服务端有稳定的推送节奏，所以「一段时间一条都没收到」就是一个可靠的
+// 死亡判据；此时主动 close，让 onclose 里的重连逻辑接手。
+function armWatchdog() {
+  disarmWatchdog()
+  watchdogTimer = window.setTimeout(() => {
+    watchdogTimer = null
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      console.warn('实时连接超过 ' + STALE_MS / 1000 + ' 秒没有收到数据，按断开处理')
+      socket.close()
+    }
+  }, STALE_MS)
+}
+
+function disarmWatchdog() {
+  if (watchdogTimer !== null) {
+    window.clearTimeout(watchdogTimer)
+    watchdogTimer = null
+  }
+}
+
 function connect() {
-  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+  // CLOSING(2) 也要挡住：此时再 new 一个会留下两条连接
+  if (
+    socket &&
+    (socket.readyState === WebSocket.OPEN ||
+      socket.readyState === WebSocket.CONNECTING ||
+      socket.readyState === WebSocket.CLOSING)
+  ) {
     return
   }
+  let ws: WebSocket
   try {
-    socket = new WebSocket(socketURL())
+    ws = new WebSocket(socketURL())
   } catch {
     scheduleReconnect()
     return
   }
-  socket.onopen = () => {
+  socket = ws
+  ws.onopen = () => {
     liveConnected.value = true
     retry = 0
+    armWatchdog()
   }
-  socket.onmessage = (ev) => {
+  ws.onmessage = (ev) => {
+    // 收到任何一帧都说明链路还活着
+    if (socket === ws) armWatchdog()
     try {
       dispatch(JSON.parse(ev.data))
     } catch {
@@ -58,13 +98,22 @@ function connect() {
       // 但也没必要因此把连接断开
     }
   }
-  socket.onclose = () => {
-    liveConnected.value = false
+  ws.onclose = () => {
+    // 关键：只有「当前这条」连接关闭时才清理状态。
+    //
+    // 原来的实现无条件 socket = null，于是这个时序会出错：
+    //   卸载旧页面（close #1，socket=null）-> 立刻挂载新页面（新建 #2）
+    //   -> #1 的 onclose 此刻才派发 -> 把 #2 的引用清掉
+    //   -> 退避重连又建了 #3，而 #2 再也无人引用、永远不会被关闭。
+    // 结果是连接泄漏，且 #2/#3 同时推送导致消息被处理两次。
+    if (socket !== ws) return
     socket = null
+    liveConnected.value = false
+    disarmWatchdog()
     // 还有人订阅才重连；没人订阅时让它断着，省得空转
     if (handlers.size > 0) scheduleReconnect()
   }
-  socket.onerror = () => {
+  ws.onerror = () => {
     // onerror 之后一定会跟一个 onclose，重连逻辑写在那边，避免重复调度
   }
 }
@@ -97,9 +146,20 @@ export function onLive(type: string, fn: Handler) {
       s.delete(fn)
       if (s.size === 0) handlers.delete(type)
     }
-    if (handlers.size === 0 && socket) {
-      socket.close()
+    if (handlers.size === 0) {
+      // 先摘掉引用再 close：这样 close 派发回来的 onclose 会发现
+      // socket !== ws（socket 已是 null），不会误伤将来新建的连接。
+      // 同时取消待执行的重连，否则没人订阅了还会建一条空转连接。
+      const closing = socket
       socket = null
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer)
+        reconnectTimer = null
+      }
+      retry = 0
+      disarmWatchdog()
+      liveConnected.value = false
+      if (closing) closing.close()
     }
   })
 }

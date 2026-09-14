@@ -1,9 +1,13 @@
 /* LLM Relay 主题令牌 —— 全部数值实测自参考站 llm.ohub.vip */
 :root {
   /* ---- 颜色 ---- */
+  /* 主色只用于**填充、边框、图标**（非文本，WCAG 阈值 3:1）。
+     凡是读的字都要用下面 --text-* 那一组：
+     #c87864 对白底只有 3.32:1，达不到正文要求的 4.5:1。 */
   --color-primary: #c87864;
-  --color-secondary: #afbeaf;
-  --color-highlight: #afbeaf;
+  /* 参考站还有一对 --color-secondary / --color-highlight（都是 #afbeaf），
+     本项目从未引用过，已删除 —— 留着会让人以为存在「次要色」的用法约定。
+     docs/ui-spec.md 里仍按原样记录着参考站的值，那是描述参考站而非本项目的令牌表。 */
   --color-bg: #f8f5ee;
   --color-fg: #ffffff;
   --color-fg-shadow: 0 0 0.5rem 0 rgba(0, 0, 0, 0.1);
@@ -17,19 +21,52 @@
   --color-blue: #06b6d4;
   --color-purple: #8b5cf5;
   --color-gray: #6b7280;
-  --color-icon: #06b6d4;
+  /* 图标色。原来和 --color-blue 共用 #06b6d4，但那个值在白底上只有
+     2.43:1 —— 图标不适用正文的 4.5:1，可 WCAG 1.4.11 要求「非文本内容」
+     至少 3:1，2.43 连这条也达不到，侧栏那几个图标在浅色主题下是发虚的。
+     这里取同色相压深的一档（白底 4.96:1），与 --text-blue 同源。
+     深色主题下换成提亮版。 */
+  --color-icon: #127a94;
   --color-icon-hover-bg: rgba(6, 182, 212, 0.12);
+
+  /* 主色作为**文字**时的可读版本。
+     --color-primary (#c87864) 在白底上只有 3.32:1，低于 WCAG AA 正文要求的
+     4.5:1。它当按钮底色、边框、图标都合适（那些不适用文字对比度要求），
+     但用作正文/标题文字就不达标了。这里给同色相加深的一档，专供文字。
+     深色主题在下方换成提亮版：深色底上要往亮的方向走。 */
+  --text-primary-ink: #94523f; /* 白底 5.94:1；菜单选中底(#f4e4e0) 4.81:1 */
+
+  /* 品牌标记（侧栏左上角的圆角方块）。
+     底色不能用 --color-primary：白字压在上面只有 3.32:1，不达 AA。
+     这里用主色加深一档，白字 4.84:1。深色主题下换成提亮底色 + 深色字。 */
+  --brand-mark-bg: #b15840;
+  --brand-mark-fg: #ffffff;
+
+  /* ---- 主色实心块 + 其上的文字 ----
+     凡是「主色铺底、上面写字」的地方（antd 的 type="primary" 按钮、
+     计费时段选中的星期胶囊等）都用这一对，不要自己写
+     `background: var(--color-primary); color: #fff`：
+     #c87864 上压白字只有 3.32:1，14px 正文按 AA 要 4.5:1。
+
+     浅色主题：深底 + 白字（4.84:1）
+     深色主题：浅底 + 深字（6.98:1）—— 深色底上放深色块的话，
+     块本身相对卡片只有 2.73:1 的轮廓对比，按钮会糊进背景。
+     两个值都必须成对使用，只换其中一个会得到比原来更差的结果。 */
+  --solid-primary-bg: #b15840;
+  --solid-primary-fg: #ffffff;
 
   /* ---- 正文用语义色 ----
      上面那组 --color-* 是给图标底色与图表选的，直接拿来当正文颜色对比度不够：
      例如 #10b37d 在白底上只有 2.7:1，低于 WCAG AA 要求的 4.5:1。
      这里给出同色相、加深到可读的一档，只用于表格与列表里的文字。
      深色主题在下方按同一语义换成提亮版。 */
-  --text-green: #0b7d59;      /* 5.19:1 */
-  --text-amber: #a86a10;      /* 4.51:1 */
-  --text-red: #c0392b;        /* 5.43:1 */
-  --text-purple: #7c4ddb;     /* 5.42:1 */
-  --text-terracotta: #b15840; /* 4.87:1 */
+  --text-green: #0b7d59;      /* 5.13:1 */
+  --text-amber: #a16207;      /* 4.92:1 */
+  --text-red: #c0392b;        /* 5.44:1 */
+  --text-purple: #7c4ddb;     /* 5.33:1 */
+  --text-terracotta: #b15840; /* 4.84:1 */
+  --text-blue: #0e7490;       /* 5.36:1 —— 青色相要压到很深才够，见 StatCard 的说明 */
+  --text-gray: #5b6270;       /* 6.13:1 */
 
   /* 词元构成三段的配色。与看板「消耗分布」同源：
      输入是花钱的那部分（陶土色），缓存命中是省下来的（绿），输出单独一色。
@@ -44,8 +81,10 @@
   --latency-mid: var(--text-amber);
   --latency-slow: var(--text-red);
 
-  /* 主色 20% 透明：菜单选中态背景 */
-  --color-primary-a20: rgba(200, 120, 100, 0.2);
+  /* 主色 20% 透明：菜单选中态背景。
+     用 color-mix 从 --color-primary 派生，而不是再抄一遍 rgba(200,120,100,.2)：
+     抄一遍就意味着主色改了两处要对齐，漏一处菜单底色就和品牌色不是同一个颜色。 */
+  --color-primary-a20: color-mix(in srgb, var(--color-primary) 20%, transparent);
 
   /* ---- 布局尺寸（实测）---- */
   /* 参考站的顶栏是 64px（记录见 docs/ui-spec.md），我们这边没有顶栏：
@@ -116,6 +155,11 @@
 
   /* ---- 动效 ---- */
   --ease-expo: cubic-bezier(0.2, 1, 0.3, 1);
+  /* 这里原来还有一个「动效时长」变量（500ms），但全项目没有一处引用它：
+     各组件的 transition 都是自己写的字面值（0.15s / 0.2s）。删掉以免误导 ——
+     读代码的人会以为改那一个值就能统一调时长，实际不会。
+     真正生效的降级在文件末尾的 prefers-reduced-motion 块里，
+     那里用 !important 直接压 animation/transition 时长，不经过变量。 */
 
   /* ---- 滚动条 ---- */
   --scrollbar-thumb: #dcdcdc;
@@ -133,12 +177,45 @@
   --color-border: #424242;
   --scrollbar-thumb: rgba(100, 100, 100);
 
+  /* 语义色的深色版。
+     这一块原来只覆盖了下面 5 个「文字用」变量，六个 --color-*
+     语义色完全没动 —— 它们是从浅色主题继承下来的。
+     后果是深色模式下凡是直接引用 --color-green/--color-red 之类的地方
+     都拿到浅色底上挑选的深色值，其中三个连 AA 都不到：
+       --color-red   #ea4343 在 #303030 上 3.38:1
+       --color-green #10b37d 在 #303030 上 4.88:1（勉强）
+       --color-purple #8b5cf5 在 #303030 上 3.11:1
+       --color-gray  #6b7280 在 #303030 上 2.73:1（StatCard 的数值就用了它）
+     这里给出同色相、提亮到深色底上可读的一档。
+     注意它们仍然同时用于图标底色与图表（大面积色块），
+     那些场景不适用 4.5:1 的文字要求，提亮后观感也更协调。 */
+  --color-red: #f08a7a;    /* 5.42:1 */
+  --color-orange: #e0a83c; /* 6.18:1 */
+  --color-green: #45c79a;  /* 6.22:1 */
+  --color-blue: #4dd0e1;   /* 7.18:1 */
+  --color-purple: #ab8ef2; /* 4.95:1 */
+  --color-gray: #9aa1ac;   /* 5.07:1 */
+  --color-icon: #4dd0e1;
+  --color-icon-hover-bg: rgba(77, 208, 225, 0.16);
+
+  /* 主色当文字用：深色底上往亮的方向调 */
+  --text-primary-ink: #e8a48c; /* 面板 6.36:1；菜单选中底 4.88:1 */
+
+  /* 品牌标记：深色主题下用亮底 + 深字（亮底上的白字不可读） */
+  --brand-mark-bg: #e8a48c;
+  --brand-mark-fg: #3a241d;
+  /* 深色主题反过来：浅底 + 深字，两个值必须一起换 */
+  --solid-primary-bg: #e8a48c;
+  --solid-primary-fg: #3a241d;
+
   /* 正文用语义色的深色版：对比度按面板底色 #303030 计算，均在 4.5:1 以上 */
-  --text-green: #45c79a;      /* 5.90:1 */
-  --text-amber: #e0a83c;      /* 5.81:1 */
-  --text-red: #f08a7a;        /* 5.13:1 */
-  --text-purple: #ab8ef2;     /* 4.70:1 */
-  --text-terracotta: #e59a80; /* 5.53:1 */
+  --text-green: #45c79a;      /* 6.22:1 */
+  --text-amber: #e0a83c;      /* 6.18:1 */
+  --text-red: #f08a7a;        /* 5.42:1 */
+  --text-purple: #ab8ef2;     /* 4.95:1 */
+  --text-terracotta: #e59a80; /* 5.82:1 */
+  --text-blue: #4dd0e1;       /* 7.18:1 */
+  --text-gray: #9aa1ac;       /* 5.07:1 */
 }
 
 html, body, #app {
@@ -173,7 +250,10 @@ body {
 .section-title {
   font-size: 16px;
   font-weight: 700;
-  color: var(--color-primary);
+  /* 用 --text-primary-ink 而不是 --color-primary：
+     后者在白底上只有 3.32:1、深色底上 3.66:1，都不满足 AA 的 4.5:1。
+     主色本身没问题（按钮底色、边框、图标都该用它），只是不能当正文文字。 */
+  color: var(--text-primary-ink);
   margin: 0 0 var(--gap) 0;
   line-height: 1.15;
 }
@@ -193,7 +273,11 @@ body {
 ::-webkit-scrollbar-track { background: var(--scrollbar-track); }
 ::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: calc(var(--scrollbar-width) / 2); }
 
-a { color: var(--color-primary); text-decoration: none; }
+/* 链接文字用 --text-primary-ink，不用 --color-primary。
+   #c87864 在白底上 3.32:1、米白底上 3.05:1，都不达 WCAG AA 正文的 4.5:1。
+   --color-primary 只用于填充、边框、图标（非文本，阈值 3:1）；
+   凡是**读的字**都要走 --text-* 那一组。 */
+a { color: var(--text-primary-ink); text-decoration: none; }
 a:hover { opacity: 0.85; }
 
 /* ---- Ant Design Vue 局部覆写，贴合参考站实测值 ---- */
@@ -240,4 +324,25 @@ a:hover { opacity: 0.85; }
 
 .ant-btn-primary {
   box-shadow: none;
+}
+
+/* 尊重系统的「减弱动态效果」设置。
+   全站此前没有任何 prefers-reduced-motion 处理，而这里的动效并不算少：
+   AnimatedNumber 的数字滚动（500ms）、菜单展开、弹窗淡入、图表动画。
+   对前庭功能障碍（ vestibular disorders ）用户，这些滚动与缩放会引发
+   眩晕、恶心甚至偏头痛 —— 这不是偏好问题，是可访问性问题。
+
+   注意不能简单地把所有 transition/animation 设成 none：
+   antd 的部分组件靠 animationend 事件推进状态（例如波纹、加载态），
+   直接取消会让它们卡住。所以统一压到 0.01ms 而不是 0 ——
+   视觉上已经是瞬时的，事件仍然会触发。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

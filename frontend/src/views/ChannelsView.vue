@@ -382,7 +382,14 @@ interface ChannelTestResult {
 }
 
 async function testChannel(row: ChannelRow) {
-  if (testingId.value) return
+  // 只挡同一行：原来用 if (testingId.value) return 会让「A 行在测时点 B 行」
+  // 被静默吞掉 —— 按钮看起来点了没反应。现在 B 行按钮是 disabled 的，
+  // 这里再兜一层只防同一行的重复提交。
+  if (testingId.value === row.id) return
+  if (testingId.value) {
+    message.info('上一项测试还在进行中，请稍候')
+    return
+  }
   testingId.value = row.id
   try {
     const res = await api.post<ChannelTestResult>('/channels/' + row.id + '/test', {})
@@ -494,7 +501,12 @@ const togglingId = ref(0)
 // 反过来（先不动、等接口回来再跳）会让开关看起来「点了没反应」。
 // 失败时回滚成原值 —— 界面绝不能停在一个与库里不一致的位置上。
 async function toggleChannel(row: ChannelRow, next: boolean) {
-  if (togglingId.value) return
+  // 与 testChannel 同理：只挡同一行，点别的行时给出提示而不是静默丢弃
+  if (togglingId.value === row.id) return
+  if (togglingId.value) {
+    message.info('上一项操作还在进行中，请稍候')
+    return
+  }
   togglingId.value = row.id
   row.enabled = next
   try {
@@ -882,6 +894,7 @@ onBeforeUnmount(() => {
                   size="small"
                   :checked="record.enabled"
                   :loading="togglingId === record.id"
+                  :disabled="togglingId !== 0 && togglingId !== record.id"
                   @change="(v: any) => toggleChannel(record, !!v)"
                 />
                 <!-- 异常才额外给一个图标：开关本身只有「开/关」两态，
@@ -899,14 +912,29 @@ onBeforeUnmount(() => {
         </a-table-column>
         <a-table-column title="操作" :width="240" fixed="right">
           <template #default="{ record }">
+            <!-- 操作项统一用 a-button type="link"：裸 <a> 没有 href 就没有
+                 隐式 tabindex，键盘用户 Tab 不到、回车也点不动。
+                 禁用态交给 :disabled，它会带上 aria-disabled 并阻止点击。 -->
             <a-space>
-              <a :class="{ disabled: testingId === record.id }" @click="testChannel(record)">
+              <a-button
+                type="link"
+                size="small"
+                :loading="testingId === record.id"
+                :disabled="testingId !== null && testingId !== record.id"
+                @click="testChannel(record)"
+              >
                 <ThunderboltOutlined />
                 {{ testingId === record.id ? '测试中…' : '测试' }}
-              </a>
-              <a @click="openBindings(record)"><LinkOutlined /> 模型</a>
-              <a @click="openEdit(record)"><EditOutlined /> 编辑</a>
-              <a class="danger-link" @click="confirmDelete(record)"><DeleteOutlined /> 删除</a>
+              </a-button>
+              <a-button type="link" size="small" @click="openBindings(record)">
+                <LinkOutlined /> 模型
+              </a-button>
+              <a-button type="link" size="small" @click="openEdit(record)">
+                <EditOutlined /> 编辑
+              </a-button>
+              <a-button type="link" size="small" danger @click="confirmDelete(record)">
+                <DeleteOutlined /> 删除
+              </a-button>
             </a-space>
           </template>
         </a-table-column>
@@ -1151,7 +1179,8 @@ onBeforeUnmount(() => {
   font-size: 12px;
   line-height: 1.8;
 }
-.bind-intro b { color: var(--color-primary); font-weight: 600; }
+/* 加粗的说明文字是正文，用 ink 版（主色在白底上只有 3.32:1） */
+.bind-intro b { color: var(--text-primary-ink); font-weight: 600; }
 /* 抽屉底部：提示靠左、按钮靠右 */
 .bind-footer { display: flex; align-items: center; gap: 8px; }
 .bind-hint { margin-right: auto; font-size: 12px; color: var(--color-text-secondary); }
@@ -1205,7 +1234,6 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 .muted { color: var(--color-text-secondary); }
-.danger-link { color: var(--color-red); }
 .disabled { color: var(--color-text-secondary); cursor: not-allowed; }
 /* 开关与异常图标同一行：图标紧跟在开关右侧，间距小一点才像「附属提示」 */
 .enable-cell { display: inline-flex; align-items: center; gap: 6px; }
@@ -1234,9 +1262,13 @@ onBeforeUnmount(() => {
   color: var(--color-text-secondary);
   cursor: grab;
 }
-.drag-handle:hover { color: var(--color-primary); }
+/* 拖拽把手是图标（非文本，阈值 3:1），但 --color-primary 在浅色下
+   对白卡片 3.32:1 只是刚过线、在深色下 3.98:1 也偏弱；
+   --text-primary-ink 是主色的可读版，两套主题下都很清楚。 */
+.drag-handle:hover { color: var(--text-primary-ink); }
 .drag-handle:active { cursor: grabbing; }
 /* 拖动中的行：半透明让下面的落点看得见（sortablejs 的 ghostClass） */
 .row-ghost { opacity: 0.4; background: color-mix(in oklab, var(--color-primary) 10%, transparent); }
-.row-chosen .drag-handle { color: var(--color-primary); }
+.row-chosen .drag-handle { color: var(--text-primary-ink); }
 </style>
+

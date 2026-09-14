@@ -50,13 +50,18 @@ withDefaults(defineProps<{
 
 /* 每种色调只在这里定义一次，图标与数值共用。
    用自定义属性而不是给每个色调各写一条选择器：
-   否则加一种色调要改两处，迟早会漏。 */
-.tone-purple { --tone-color: var(--color-purple); --tone-bg: rgba(139, 92, 245, 0.15); }
-.tone-orange { --tone-color: var(--color-orange); --tone-bg: rgba(245, 158, 11, 0.15); }
-.tone-blue   { --tone-color: var(--color-blue);   --tone-bg: rgba(6, 182, 212, 0.15); }
-.tone-green  { --tone-color: var(--color-green);  --tone-bg: rgba(16, 179, 125, 0.15); }
-.tone-red    { --tone-color: var(--color-red);    --tone-bg: rgba(234, 67, 67, 0.15); }
-.tone-gray   { --tone-color: var(--color-gray);   --tone-bg: rgba(107, 114, 128, 0.15); }
+   否则加一种色调要改两处，迟早会漏。
+
+   --tone-color 给图标用（大面积色块 + 图形，不适用文字的 4.5:1 要求），
+   --tone-ink 给数值文字用 —— 它们必须是可读的正文色。
+   两者分开是因为语义色本身在白底上普遍偏浅（#10b37d 只有 2.70:1），
+   而深色主题下又要往相反方向调，靠同一个变量做不到两边都达标。 */
+.tone-purple { --tone-color: var(--color-purple); --tone-bg: rgba(139, 92, 245, 0.15); --tone-ink: var(--text-purple); }
+.tone-orange { --tone-color: var(--color-orange); --tone-bg: rgba(245, 158, 11, 0.15); --tone-ink: var(--text-amber); }
+.tone-blue   { --tone-color: var(--color-blue);   --tone-bg: rgba(6, 182, 212, 0.15);  --tone-ink: var(--text-blue); }
+.tone-green  { --tone-color: var(--color-green);  --tone-bg: rgba(16, 179, 125, 0.15); --tone-ink: var(--text-green); }
+.tone-red    { --tone-color: var(--color-red);    --tone-bg: rgba(234, 67, 67, 0.15);  --tone-ink: var(--text-red); }
+.tone-gray   { --tone-color: var(--color-gray);   --tone-bg: rgba(107, 114, 128, 0.15); --tone-ink: var(--text-gray); }
 
 .summary-icon {
   width: 48px;
@@ -87,7 +92,9 @@ withDefaults(defineProps<{
   font-size: 24px;
   font-weight: 700;
   line-height: 1.2;
-  color: var(--tone-color);
+  /* 数值是正文内容，用 --tone-ink 而不是 --tone-color：
+     后者在浅色底上普遍只有 2.4–4.2:1，读起来发虚 */
+  color: var(--tone-ink);
   font-variant-numeric: tabular-nums;
   word-break: break-all;
 }

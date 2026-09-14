@@ -11,6 +11,32 @@
     <!-- 移动端浏览器地址栏/状态栏跟着站点主色，避免出现一条突兀的白带 -->
     <meta name="theme-color" content="#c87864" />
     <title>LLM Relay</title>
+    <!-- 在首次绘制之前就把 data-theme 定下来，避免深色模式闪白。
+         主题色的定义全在 styles/theme.css 里，但那份 CSS 由打包产物加载，
+         而打包产物是 module script，浏览器要等到 HTML 解析完才去取 ——
+         这段时间页面已经用浅色底画过一帧了。深色偏好的用户每次刷新都会
+         先看到一下刺眼的白屏（FOUC）。
+
+         注意这里只设属性、不设颜色：色值仍然只有 CSS 一份，
+         不会出现 JS/CSS 两套定义漂移的问题。 -->
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('llm-relay-theme')
+          // 历史遗留的非法值（例如更早版本存过的 'auto'）必须忽略，
+          // 否则 data-theme 会变成一个没有对应样式块的值
+          if (saved !== 'dark' && saved !== 'light') {
+            saved = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'dark'
+              : 'light'
+          }
+          document.documentElement.setAttribute('data-theme', saved)
+        } catch (e) {
+          // localStorage 在隐私模式下会抛异常。取不到偏好不算错误，
+          // 用默认的浅色继续渲染即可 —— 绝不能让这段脚本阻断页面。
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="app"></div>

@@ -41,9 +41,12 @@ defineProps<{
 /* 这个类在模板里一直挂着，却从未定义过 ——
    accentTitle 这个 prop 因此完全不起作用，配色也没生效。
    注意模板里写的是 accentTitle !== false，也就是默认为真，
-   所以标题默认就该是主色。 */
+   所以标题默认就该是主色。
+
+   用 --text-primary-ink 而不是 --color-primary：后者在白底上只有 3.32:1，
+   而标题是正文内容，需要 4.5:1。主色本身仍然用在按钮底色与边框上。 */
 .section-title.is-accent {
-  color: var(--color-primary);
+  color: var(--text-primary-ink);
 }
 
 .panel-header-extra {

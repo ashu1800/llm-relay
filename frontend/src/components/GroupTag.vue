@@ -54,7 +54,22 @@ const vars = computed(() => groupVars(style.value))
 }
 
 .group-tag.is-custom {
-  --gt-base: var(--gt-color);
+  /* 自定义色也要压到同一条明度线上。
+     原来这里是 --gt-base: var(--gt-color) 直接沿用用户选的原色，
+     于是 L=0.47 这条约束只对自动配色生效，自定义色全部绕过 ——
+     而自定义色恰恰是最不可控的一类：取色器给什么就是什么。
+     实测（13% 自身做底，文字用原色）：
+       #ffff00 1.05:1   #00ff00 1.27:1   #a0d911 1.57:1   #faad14 1.74:1
+       #13c2c2 1.98:1   #52c41a 2.03:1   #fa8c16 2.13:1   #8c8c8c 2.95:1
+       #eb2f96 3.25:1   #f5222d 3.34:1   #1677ff 3.47:1
+     十三个预设里只有一个（#722ed1）达标，黄色与纯绿几乎和底色同亮 ——
+     那不是「颜色浅」，是根本读不出来。
+
+     压暗用 oklab 混黑而不是改 HSL 的 L：oklab 的 L 是感知均匀的，
+     混黑后各色相的观感深度一致，色相也不会像 HSL 那样偏掉。
+     取 50% 是量出来的：0.50 时十三个预设最差值 5.27:1，
+     0.45 时 4.37:1 仍有个别不达标，0.55 则过暗、分组之间失去区分度。 */
+  --gt-base: color-mix(in oklab, var(--gt-color) 50%, black);
 }
 
 /* 深色主题：同一个色相在深底上必须提亮才够对比 */
@@ -63,8 +78,9 @@ const vars = computed(() => groupVars(style.value))
 }
 
 /* 自定义色在深底上同理：直接沿用原色的话，深蓝/深紫几乎看不见背景边界。
-   用 color-mix 往白里兑，保持色相不变。 */
+   同样用 oklab 混白保持感知均匀：混白 55% 时十三个预设最差值 4.83:1。
+   注意方向与浅色主题相反 —— 浅色底要压暗，深色底要提亮。 */
 :root[data-theme='dark'] .group-tag.is-custom {
-  --gt-base: color-mix(in oklab, var(--gt-color) 62%, white);
+  --gt-base: color-mix(in oklab, var(--gt-color) 45%, white);
 }
 </style>

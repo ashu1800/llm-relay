@@ -430,11 +430,18 @@ onMounted(() => {
              原来写 190 会让链接被压缩到从词中间换行 -->
         <a-table-column title="操作" :width="200" fixed="right">
           <template #default="{ record }">
+            <!-- 用 a-button 而不是裸 <a>：无 href 的 <a> 键盘不可达 -->
             <a-space>
-              <a @click="openEdit(record)"><EditOutlined /> 编辑</a>
-              <a @click="setLimit(record)">改限额</a>
-              <a @click="toggle(record)">{{ record.enabled ? '停用' : '启用' }}</a>
-              <a class="danger-link" @click="confirmDelete(record)"><DeleteOutlined /> 删除</a>
+              <a-button type="link" size="small" @click="openEdit(record)">
+                <EditOutlined /> 编辑
+              </a-button>
+              <a-button type="link" size="small" @click="setLimit(record)">改限额</a-button>
+              <a-button type="link" size="small" @click="toggle(record)">
+                {{ record.enabled ? '停用' : '启用' }}
+              </a-button>
+              <a-button type="link" size="small" danger @click="confirmDelete(record)">
+                <DeleteOutlined /> 删除
+              </a-button>
             </a-space>
           </template>
         </a-table-column>
@@ -549,7 +556,9 @@ onMounted(() => {
   padding: 1px 8px;
   border-radius: var(--radius-control);
   background: color-mix(in oklab, var(--color-primary) 13%, transparent);
-  color: var(--color-primary);
+  /* 13% 主色底上主色文字只有 2.89:1；ink 版 5.17:1。
+     底色仍留在主色系里，观感不变。 */
+  color: var(--text-primary-ink);
   font-family: var(--font-family-mono);
   font-size: 12px;
   line-height: 18px;
@@ -562,7 +571,6 @@ onMounted(() => {
 .key-pill:hover .key-copy { opacity: 0.75; }
 
 .group-tag-list { display: inline-flex; flex-wrap: wrap; gap: 4px; }
-.danger-link { color: var(--color-red); }
 .key-box {
   display: flex;
   align-items: center;
@@ -575,3 +583,4 @@ onMounted(() => {
 }
 .key-box code { flex: 1; font-family: var(--font-family-mono); font-size: 12px; }
 </style>
+

@@ -5,56 +5,29 @@ type ThemeMode = 'light' | 'dark'
 
 const STORAGE_KEY = 'llm-relay-theme'
 
-// 主题令牌对齐参考站 llm.ohub.vip 的 light / dark 两套配置
-const LIGHT = {
-  primary: '#c87864',
-  secondary: '#afbeaf',
-  highlight: '#afbeaf',
-  bg: '#f8f5ee',
-  fg: '#ffffff',
-  fgShadow: '0 0 0.5rem 0 rgba(0, 0, 0, 0.1)',
-  text: '#303030',
-  textSecondary: 'rgba(48, 48, 48, 0.65)',
-  border: '#d9d9d9',
-  scrollbarThumb: 'rgba(220, 220, 220)',
-  scrollbarTrack: 'transparent'
-}
-
-const DARK = {
-  primary: '#c87864',
-  secondary: '#afbeaf',
-  highlight: '#afbeaf',
-  bg: '#202020',
-  fg: '#303030',
-  fgShadow: '0 0 0.5rem 0 rgba(0, 0, 0, 0.8)',
-  text: '#c8c8c8',
-  textSecondary: 'rgba(200, 200, 200, 0.65)',
-  border: '#424242',
-  scrollbarThumb: 'rgba(100, 100, 100)',
-  scrollbarTrack: 'transparent'
-}
-
+// 主题切换只做一件事：在 <html> 上设置 data-theme 属性。
+//
+// 所有颜色令牌的定义都在 styles/theme.css 里一处维护
+// （:root 是浅色，:root[data-theme='dark'] 是深色）。
+//
+// 这里以前还在 JS 里存了一份同样的色值，并在运行时用
+// document.documentElement.style.setProperty 逐个写进去。那是两个问题：
+//
+//   1. 双份定义会漂移。同一份色值改了一处、忘了另一处，表现就是
+//      「改了 CSS 不生效」——内联样式的优先级高于样式表，实际生效的
+//      永远是 JS 那份，而排查时看 CSS 怎么都看不出问题。
+//   2. 用 JS 重新声明变量等于放弃了 CSS 的层叠能力：深色主题本该只是
+//      覆盖几个变量（下面的 dark 块就是这么写的），却被迫把每个变量
+//      都在两套 JS 对象里抄一遍。
+//
+// 现在深色主题新增一个变量只需要在 CSS 的 dark 块里写一行，
+// 不会再出现「加在 CSS 里但不生效」的情况。
 export const useThemeStore = defineStore('theme', () => {
-  const mode = ref<ThemeMode>((localStorage.getItem(STORAGE_KEY) as ThemeMode) || 'light')
+  const mode = ref<ThemeMode>(readStoredMode())
   const isDark = ref(mode.value === 'dark')
 
   function apply(next: ThemeMode) {
-    const t = next === 'dark' ? DARK : LIGHT
-    const root = document.documentElement
-    root.setAttribute('data-theme', next)
-    // 字体栈只在 theme.css 里定义一处。此前这里也写了一份并在运行时覆盖，
-    // 两份定义一旦不同步就会出现「改了 CSS 不生效」的怪象。
-    root.style.setProperty('--color-primary', t.primary)
-    root.style.setProperty('--color-secondary', t.secondary)
-    root.style.setProperty('--color-highlight', t.highlight)
-    root.style.setProperty('--color-bg', t.bg)
-    root.style.setProperty('--color-fg', t.fg)
-    root.style.setProperty('--color-fg-shadow', t.fgShadow)
-    root.style.setProperty('--color-text', t.text)
-    root.style.setProperty('--color-text-secondary', t.textSecondary)
-    root.style.setProperty('--color-border', t.border)
-    root.style.setProperty('--scrollbar-thumb', t.scrollbarThumb)
-    root.style.setProperty('--scrollbar-track', t.scrollbarTrack)
+    document.documentElement.setAttribute('data-theme', next)
     isDark.value = next === 'dark'
   }
 
@@ -62,10 +35,41 @@ export const useThemeStore = defineStore('theme', () => {
     mode.value = mode.value === 'dark' ? 'light' : 'dark'
   }
 
-  watch(mode, (v) => {
-    localStorage.setItem(STORAGE_KEY, v)
-    apply(v)
-  }, { immediate: true })
+  watch(
+    mode,
+    (v) => {
+      try {
+        localStorage.setItem(STORAGE_KEY, v)
+      } catch {
+        // 隐私模式下 localStorage 会抛异常。主题偏好存不下不影响使用，
+        // 但不能让这个异常打断 apply —— 否则页面主题会停在切换前的状态。
+      }
+      apply(v)
+    },
+    { immediate: true }
+  )
 
   return { mode, isDark, apply, toggle }
 })
+
+// readStoredMode 读取并校验本地存储里的主题。
+//
+// 必须校验：localStorage 里的值可能是任意历史遗留内容（例如更早版本
+// 存过 'auto'），而它只在登录页/主布局初始化时读一次 —— 取到非法值会让
+// apply() 把 data-theme 设成一个没有对应样式块的值，页面直接退回无主题状态。
+function readStoredMode(): ThemeMode {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (raw === 'dark' || raw === 'light') {
+      return raw
+    }
+  } catch {
+    // 忽略：下面回落到默认值
+  }
+  // 没有显式偏好时跟随系统。这是用户对「深色模式」最普遍的预期，
+  // 而且不引入第三个状态 —— 一旦用户手动切过，就以他自己的选择为准。
+  if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches) {
+    return 'dark'
+  }
+  return 'light'
+}
