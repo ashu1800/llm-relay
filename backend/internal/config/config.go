@@ -118,6 +118,11 @@ func Load(path string) (*Config, error) {
 }
 
 // applyEnv 让容器编排可以通过环境变量覆盖任意关键配置。
+//
+// 覆盖率是刻意做全的：Dockerfile 里设了 CONFIG_PATH=/app/config.yaml，
+// 但仓库里没有这个文件、编排也没挂载它，而 Load 对「文件不存在」是静默
+// 跳过的。也就是说容器部署下，凡是这里没有环境变量入口的字段就**无法调整**，
+// 且不会有任何提示。新增配置项时请一并在这里补上入口。
 func applyEnv(c *Config) {
 	setStr(&c.Server.Host, "SERVER_HOST")
 	setInt(&c.Server.Port, "SERVER_PORT")
@@ -129,8 +134,13 @@ func applyEnv(c *Config) {
 	setStr(&c.Database.Password, "DB_PASSWORD")
 	setStr(&c.Database.DBName, "DB_NAME")
 	setStr(&c.Database.SSLMode, "DB_SSLMODE")
+	setStr(&c.Database.TimeZone, "DB_TIMEZONE")
 
+	setDuration(&c.Relay.UpstreamTimeout, "RELAY_UPSTREAM_TIMEOUT")
+	setDuration(&c.Relay.FirstByteTimeout, "RELAY_FIRST_BYTE_TIMEOUT")
 	setInt(&c.Relay.MaxRetries, "RELAY_MAX_RETRIES")
+	setInt(&c.Relay.MaxRequestBodyMB, "RELAY_MAX_REQUEST_BODY_MB")
+	setInt(&c.Relay.LogRetentionDays, "RELAY_LOG_RETENTION_DAYS")
 	setStr(&c.Relay.PayloadStorageMode, "RELAY_PAYLOAD_STORAGE_MODE")
 	setInt(&c.Relay.PayloadMaxKB, "RELAY_PAYLOAD_MAX_KB")
 	setInt(&c.Relay.MaxConcurrency, "RELAY_MAX_CONCURRENCY")
@@ -141,6 +151,36 @@ func applyEnv(c *Config) {
 	setStr(&c.Log.Level, "LOG_LEVEL")
 	setStr(&c.Log.Format, "LOG_FORMAT")
 }
+
+// envKeys 列出所有被 applyEnv 识别的环境变量。
+//
+// 供 /api/admin/system/info 回给前端渲染「修改位置」提示。原来这份清单在
+// SettingsView.vue 里手写了一份，13 条里有 6 条写的是根本不存在的变量名
+// （RELAY_LOG_LEVEL、RELAY_UPSTREAM_TIMEOUT…），用户照着设完全没有反应
+// 也不会报错。清单放在这里就不会再漂移。
+func envKeys() map[string]string {
+	return map[string]string{
+		"host":                   "SERVER_HOST",
+		"port":                   "SERVER_PORT",
+		"mode":                   "GIN_MODE",
+		"log_level":              "LOG_LEVEL",
+		"log_format":             "LOG_FORMAT",
+		"upstream_timeout_sec":   "RELAY_UPSTREAM_TIMEOUT",
+		"first_byte_timeout_sec": "RELAY_FIRST_BYTE_TIMEOUT",
+		"max_retries":            "RELAY_MAX_RETRIES",
+		"max_request_body_mb":    "RELAY_MAX_REQUEST_BODY_MB",
+		"log_retention_days":     "RELAY_LOG_RETENTION_DAYS",
+		"payload_storage_mode":   "RELAY_PAYLOAD_STORAGE_MODE",
+		"payload_max_kb":         "RELAY_PAYLOAD_MAX_KB",
+		"max_concurrency":        "RELAY_MAX_CONCURRENCY",
+		"default_rpm":            "RELAY_DEFAULT_RPM",
+		"secret":                 "RELAY_SECRET",
+		"database":               "DB_HOST / DB_PORT / DB_USER / DB_PASSWORD / DB_NAME / DB_SSLMODE / DB_TIMEZONE",
+	}
+}
+
+// EnvKeys 供 api 层读取环境变量映射（公开出去以便 handler 直接调用）。
+func EnvKeys() map[string]string { return envKeys() }
 
 func (c *Config) validate() error {
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
@@ -166,4 +206,23 @@ func setInt(dst *int, key string) {
 			*dst = n
 		}
 	}
+}
+
+// setDuration 接受 Go 的 duration 写法（300s / 5m / 2h）。
+// 解析失败时保留原值 —— 配置项写错不该让服务起不来，
+// 但要能看出来它没生效。
+func setDuration(dst *time.Duration, key string) {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(v))
+	if err != nil {
+		// 纯数字按秒处理，"300" 比 "300s" 更符合直觉
+		if n, err2 := strconv.Atoi(strings.TrimSpace(v)); err2 == nil {
+			*dst = time.Duration(n) * time.Second
+		}
+		return
+	}
+	*dst = d
 }

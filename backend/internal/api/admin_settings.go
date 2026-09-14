@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"llm-relay/internal/config"
 )
 
 // registerSettingsRoutes 挂载系统设置接口。
@@ -42,7 +44,7 @@ func (s *Server) getSettings(c *gin.Context) {
 		(SELECT COUNT(DISTINCT public_name) FROM channel_models WHERE enabled = true)::bigint AS models,
 		(SELECT COUNT(*) FROM api_keys)::bigint AS keys,
 		(SELECT COUNT(*) FROM channel_groups)::bigint AS groups`).Scan(&counts).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 
@@ -83,6 +85,10 @@ func (s *Server) getSettings(c *gin.Context) {
 			"keys": counts.Keys, "groups": counts.Groups,
 		},
 		"log_span": gin.H{"earliest": span.Earliest, "latest": span.Latest},
+		// env_keys 是「每个运行时字段由哪个环境变量决定」的唯一事实来源。
+		// 前端不再自己维护一份手写清单 —— 那份清单曾经 13 条里错 6 条，
+		// 用户照着设一个不存在的变量不会有任何反应，比不提示更糟。
+		"env_keys": config.EnvKeys(),
 	})
 }
 
@@ -96,7 +102,7 @@ func (s *Server) cleanupData(c *gin.Context) {
 	}
 	out, err := s.runCleanup(days)
 	if err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 

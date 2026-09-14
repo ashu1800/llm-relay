@@ -19,6 +19,11 @@ const runtime = ref<Record<string, any>>({})
 const counts = ref<Record<string, number>>({})
 const span = ref<Record<string, string | null>>({})
 const cleaning = ref(false)
+// 每个运行时字段由哪个环境变量决定，由后端 /settings 的 env_keys 提供。
+// 之前这份清单在前端手写，13 条里错了 6 条（RELAY_LOG_LEVEL、
+// RELAY_UPSTREAM_TIMEOUT 之类根本不存在的变量名），用户照着设完全没有反应，
+// 而且不会报错 —— 比不提示更糟。改为以后端为准，两边不会再漂移。
+const envKeys = ref<Record<string, string>>({})
 
 const exporting = ref(false)
 const importing = ref(false)
@@ -30,21 +35,34 @@ const report = ref<{ created: Record<string, number>; skipped: Record<string, nu
 
 // 运行参数只读：它们来自环境变量与 yaml，进程启动后不可变。
 // 与其做出改了不生效的假开关，不如直接告诉用户改哪里。
+//
+// hint 的来源见上方 envKeys 的说明：不再手写字面量，改从后端拿。
 const runtimeRows = [
-  { key: 'listen', label: '监听地址', hint: 'deploy/.env 的 BIND_ADDR 与 APP_PORT' },
-  { key: 'mode', label: '运行模式', hint: 'GIN_MODE' },
-  { key: 'log_level', label: '日志级别', hint: 'RELAY_LOG_LEVEL' },
-  { key: 'log_format', label: '日志格式', hint: 'RELAY_LOG_FORMAT' },
-  { key: 'upstream_timeout_sec', label: '上游总超时（秒）', hint: 'RELAY_UPSTREAM_TIMEOUT' },
-  { key: 'first_byte_timeout_sec', label: '首字节超时（秒）', hint: 'RELAY_FIRST_BYTE_TIMEOUT' },
-  { key: 'max_retries', label: '最大重试次数', hint: 'RELAY_MAX_RETRIES' },
-  { key: 'max_request_body_mb', label: '请求体上限（MB）', hint: 'RELAY_MAX_REQUEST_BODY_MB' },
-  { key: 'log_retention_days', label: '日志保留天数', hint: 'RELAY_LOG_RETENTION_DAYS' },
-  { key: 'payload_storage_mode', label: '报文留存模式', hint: 'RELAY_PAYLOAD_STORAGE_MODE' },
-  { key: 'payload_max_kb', label: '单条报文上限（KB）', hint: 'RELAY_PAYLOAD_MAX_KB' },
-  { key: 'max_concurrency', label: '上游并发上限', hint: 'RELAY_MAX_CONCURRENCY' },
-  { key: 'default_rpm', label: '默认每分钟请求上限', hint: 'RELAY_DEFAULT_RPM' },
+  { key: 'listen', label: '监听地址' },
+  { key: 'mode', label: '运行模式' },
+  { key: 'log_level', label: '日志级别' },
+  { key: 'log_format', label: '日志格式' },
+  { key: 'upstream_timeout_sec', label: '上游总超时（秒）' },
+  { key: 'first_byte_timeout_sec', label: '首字节超时（秒）' },
+  { key: 'max_retries', label: '最大重试次数' },
+  { key: 'max_request_body_mb', label: '请求体上限（MB）' },
+  { key: 'log_retention_days', label: '日志保留天数' },
+  { key: 'payload_storage_mode', label: '报文留存模式' },
+  { key: 'payload_max_kb', label: '单条报文上限（KB）' },
+  { key: 'max_concurrency', label: '上游并发上限' },
+  { key: 'default_rpm', label: '默认每分钟请求上限' }
 ]
+
+// listen 的提示是特殊的一条：它由 SERVER_HOST/SERVER_PORT 决定，
+// 而容器部署下宿主机侧的端口还多一层 BIND_ADDR 映射，所以单独说明。
+const LISTEN_HINT = 'SERVER_HOST / SERVER_PORT（Docker 部署的宿主机端口另由 deploy/.env 的 BIND_ADDR 决定）'
+
+// hintOf 取该字段对应的环境变量名。拿不到时返回 undefined，
+// 界面上不显示提示 —— 宁可不说，也不给一个错的变量名。
+function hintOf(key: string): string | undefined {
+  if (key === 'listen') return LISTEN_HINT
+  return envKeys.value[key]
+}
 
 const countCards = [
   { key: 'logs', label: '请求日志' },
@@ -75,6 +93,7 @@ async function load() {
     runtime.value = res.runtime || {}
     counts.value = res.counts || {}
     span.value = res.log_span || {}
+    envKeys.value = res.env_keys || {}
     loaded.value = true
   } catch (e: any) {
     loadError.value = e.message || '加载失败'
@@ -213,7 +232,13 @@ onMounted(load)
             <span class="mono">{{ fmtBool(runtime[record.key]) }}</span>
           </template>
         </a-table-column>
-        <a-table-column title="修改位置" data-index="hint" />
+        <a-table-column title="修改位置" :width="280">
+          <template #default="{ record }">
+            <!-- 拿不到环境变量名时不显示，而不是显示一个错的 -->
+            <span v-if="hintOf(record.key)" class="mono">{{ hintOf(record.key) }}</span>
+            <span v-else class="muted">—</span>
+          </template>
+        </a-table-column>
         <template #emptyText>
           <a-empty description="运行参数列表为空，请确认后端版本与前端的参数项一致，然后点「刷新」重试" />
         </template>
@@ -303,7 +328,8 @@ onMounted(load)
 .head-sub { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
 .count-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 12px; }
 .count-item { text-align: center; padding: 10px 4px; border-radius: 8px; background: var(--color-bg); }
-.count-value { font-size: 20px; font-weight: 600; color: var(--color-primary); }
+/* 数值是正文，用 ink 版；--color-primary 在 --color-bg 上只有 3.05:1 */
+.count-value { font-size: 20px; font-weight: 600; color: var(--text-primary-ink); }
 .count-label { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
 .span-line { margin-top: 12px; font-size: 12px; color: var(--color-text-secondary); }
 /* 等宽片段用全站那一套等宽字族，而不是就地写死一串：
@@ -311,6 +337,7 @@ onMounted(load)
    片段会落到浏览器给 monospace 配的中文字体（Windows 上又是宋体），
    于是又出现一种和左侧菜单不一致的中文字。变量里已经补好了中文回退。 */
 .mono { font-family: var(--font-family-mono); }
+.muted { color: var(--color-text-secondary); }
 .dim { color: var(--color-text-secondary); font-size: 12px; }
 .db-line { margin-top: 12px; display: flex; align-items: center; gap: 8px; }
 .note-panel .note { font-size: 13px; line-height: 1.9; color: var(--color-text-secondary); }
