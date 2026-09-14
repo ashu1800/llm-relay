@@ -18,28 +18,44 @@ fi
 
 jqget() { python3 -c "import sys,json;d=json.load(sys.stdin);print(d$1)" 2>/dev/null; }
 
+# 用 --data-binary @- 从标准输入喂 JSON，而不是 -d "{...}"。
+#
+# 后者会把整个请求体（含上游 api_key 明文）放进 curl 的命令行参数里 ——
+# 同机任何用户 ps aux 就能读到。这些是**真实**的上游密钥，
+# 而脚本运行的场景（排障、验收）往往正发生在共享主机上。
+# 走标准输入不留任何可读痕迹。
+post_json() {
+  curl -s -X POST "$BASE$1" -H 'Content-Type: application/json' --data-binary @-
+}
+
 echo "===== 1. 创建 DeepSeek 渠道 ====="
-CH1=$(curl -s -X POST "$BASE/api/admin/channels" -H 'Content-Type: application/json' -d "{
-  \"name\": \"ohub-deepseek\",
-  \"protocol\": \"openai-chat\",
-  \"base_url\": \"$DS_BASE\",
-  \"api_key\": \"$DS_KEY\",
-  \"weight\": 1,
-  \"enabled\": true
-}")
+CH1=$(post_json /api/admin/channels <<JSON
+{
+  "name": "ohub-deepseek",
+  "protocol": "openai-chat",
+  "base_url": "$DS_BASE",
+  "api_key": "$DS_KEY",
+  "weight": 1,
+  "enabled": true
+}
+JSON
+)
 echo "$CH1" | head -c 400; echo
 ID1=$(echo "$CH1" | jqget "['id']")
 
 echo
 echo "===== 2. 创建 OpenAI 渠道 ====="
-CH2=$(curl -s -X POST "$BASE/api/admin/channels" -H 'Content-Type: application/json' -d "{
-  \"name\": \"fast-openai\",
-  \"protocol\": \"openai-chat\",
-  \"base_url\": \"$OA_BASE\",
-  \"api_key\": \"$OA_KEY\",
-  \"weight\": 1,
-  \"enabled\": true
-}")
+CH2=$(post_json /api/admin/channels <<JSON
+{
+  "name": "fast-openai",
+  "protocol": "openai-chat",
+  "base_url": "$OA_BASE",
+  "api_key": "$OA_KEY",
+  "weight": 1,
+  "enabled": true
+}
+JSON
+)
 echo "$CH2" | head -c 400; echo
 ID2=$(echo "$CH2" | jqget "['id']")
 

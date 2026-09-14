@@ -17,16 +17,30 @@
 #
 #  可用环境变量覆盖：
 #    INSTALL_DIR        安装目录，默认 /opt/llm-relay
-#    PORT               服务端口，默认 8888
 #    USE_PROXY          auto | yes | no，默认 auto
 #    UPSTREAM_SOCKS     上游 socks5，默认见下
 #    UPSTREAM_HTTP      上游 http 代理，可选
+#  （端口固定 8888，改绑地址请设 deploy/.env 的 BIND_ADDR，见其注释）
 # ============================================================
 set -uo pipefail
 
+# 默认 umask 022 会让脚本创建的所有文件都是 0644（同机其他用户可读），
+# 而这个脚本会写出 .env（含数据库密码与主密钥）、代理凭据与数据库备份 ——
+# 这几类内容都不该被同机其他用户读到。改成 077 后：
+#   · 显式 chmod 600 的文件仍是 600（下面那些调用不变）
+#   · 忘了 chmod 的新文件默认就是 600/700，不再需要每处都记住
+# 已有安装不受影响（.env 早就是 600），但新建的备份与新写的凭据会立刻受益。
+umask 077
+
 APP_NAME="llm-relay"
 INSTALL_DIR="${INSTALL_DIR:-/opt/llm-relay}"
-PORT="${PORT:-8888}"
+# PORT 只用于最后打印的访问地址与端口。真正生效的是 compose 里的
+# 宿主端口映射 —— 容器内固定 8888，宿主侧由 deploy/.env 的 BIND_ADDR
+# 决定绑定地址，端口号本身在 docker-compose.yml 里写死为 8888:8888。
+# 所以这里不再提供 PORT 覆盖：允许它和实际映射不一致时，脚本会打印一个
+# 根本连不上的地址（例如 PORT=9000 而实际发布的是 8888），
+# 那种「装好了但打不开、且提示里的地址是错的」最难排查。
+PORT=8888
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # 代理凭据不再内置。可先 export UPSTREAM_SOCKS / UPSTREAM_HTTP，
@@ -256,11 +270,17 @@ log "备份现有数据库（迁移前的安全网）"
 if docker ps --format '{{.Names}}' | grep -qx "${APP_NAME}-postgres"; then
   BACKUP_DIR="${INSTALL_DIR}/backups"
   mkdir -p "$BACKUP_DIR"
+  # 备份里有全部渠道的上游密钥（密文）、渠道配置与请求日志，
+  # 目录与文件都收窄到属主可读可进：原来的默认权限（0755 目录 + 0644 文件）
+  # 让同机任何用户都能把整库读走。
+  chmod 700 "$BACKUP_DIR"
   BACKUP_FILE="$BACKUP_DIR/pre-migrate-$(date +%Y%m%d-%H%M%S).sql"
   # 用 pg_dump 做逻辑备份：与数据库版本无关，恢复时不必先建同名容器
   if docker exec "${APP_NAME}-postgres" pg_dump -U "${DB_USER:-llmrelay}" -d "${DB_NAME:-llm_relay}" > "$BACKUP_FILE" 2>/dev/null; then
     gzip -f "$BACKUP_FILE"
+    chmod 600 "${BACKUP_FILE}.gz"
     log "已备份到 ${BACKUP_FILE}.gz（$(du -h "${BACKUP_FILE}.gz" | cut -f1)）"
+    log "恢复方式：见 deploy/restore.sh（备份在未压缩前也可直接用 psql 导入）"
     # 只留最近 10 份，避免长期升级把磁盘占满
     ls -1t "$BACKUP_DIR"/pre-migrate-*.sql.gz 2>/dev/null | tail -n +11 | xargs -r rm -f
   else
@@ -271,13 +291,17 @@ else
   log "没有正在运行的数据库容器，跳过备份（首次安装）"
 fi
 
-# ---------- 6. 构建并启动 ----------
-log "构建镜像并启动容器（首次构建较慢，请耐心等待）"
+# ---------- 6. 构建镜像 ----------
+# 只构建，不在这里启动 —— 启动交给第 7 步注册的 systemd 单元，
+# 让「谁负责守护」只有一个答案。原来这里先 up -d 起容器、第 7 步只 enable 单元，
+# 结果是单元从未被启动过：`systemctl is-active llm-relay` 报 inactive，
+# 而容器明明在跑，任何人用 systemctl 判断服务状态都会得到错误结论。
+log "构建镜像（首次构建较慢，请耐心等待）"
 cd "$INSTALL_DIR/deploy"
-docker compose --env-file "$ENV_FILE" up -d --build || die "docker compose 启动失败，请查看上面的日志"
+docker compose --env-file "$ENV_FILE" build || die "docker compose 构建失败，请查看上面的日志"
 
-# ---------- 7. 注册 systemd 服务 ----------
-log "注册 llm-relay.service（开机自启）"
+# ---------- 7. 注册并启动 systemd 服务 ----------
+log "注册 llm-relay.service（开机自启 + 进程守护）"
 cat > /etc/systemd/system/llm-relay.service <<EOF
 [Unit]
 Description=LLM Relay - 本地大模型中转服务
@@ -286,13 +310,25 @@ After=docker.service network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
-WorkingDirectory=$INSTALL_DIR/deploy
-ExecStart=/usr/bin/docker compose --env-file $ENV_FILE up -d
+# 用前台 up（不加 -d）而不是 oneshot + up -d。
+#
+# 两者都能把容器跑起来，区别在 systemd 眼里的「active」是什么意思：
+#   oneshot + up -d  → 进程立刻退出，靠 RemainAfterExit 假装常驻。
+#                      用户在命令行执行 docker compose down 之后，
+#                      systemctl status 依旧显示 active，不报错也不重启 ——
+#                      单元状态与真实状态完全脱钩。
+#   前台 up          → compose 进程一直挂着（已实测：它 attach 到容器并常驻），
+#                      容器没了它就退出，systemd 的 active/inactive 才是真的。
+#
+# 实测行为（在本机验证过）：前台 up 收到 SIGTERM 会优雅停掉容器；
+# 容器正常停完后 compose 以 0 退出，单元转 inactive —— 此时
+# systemctl status 说「没在跑」是对的。意外退出（非 0）才触发 Restart。
+ExecStart=/usr/bin/docker compose --env-file $ENV_FILE up --no-color
 ExecStop=/usr/bin/docker compose --env-file $ENV_FILE down
 ExecReload=/usr/bin/docker compose --env-file $ENV_FILE restart
+WorkingDirectory=$INSTALL_DIR/deploy
 TimeoutStartSec=0
+TimeoutStopSec=120
 Restart=on-failure
 RestartSec=10
 
@@ -300,7 +336,9 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable llm-relay.service >/dev/null 2>&1 || true
+# enable --now 一步到位：既开机自启，也立刻用 systemd 拉起。
+# 只 enable 不 start 是前面那个「inactive 却在跑」的直接原因。
+systemctl enable --now llm-relay.service >/dev/null 2>&1 || true
 
 # ---------- 8. 健康检查 ----------
 log "等待服务就绪"

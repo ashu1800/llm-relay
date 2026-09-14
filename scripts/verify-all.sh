@@ -5,18 +5,68 @@
 # 而 install.sh 重建 compose 项目时会把挂在同一网络上的临时容器一并清掉。
 # 所以上游必须在**所有会触发部署的脚本跑完之后**再起，
 # 否则依赖它的用例会以「上游不可达」失败，看起来像代码坏了。
+#
+# 本脚本自己也要能可靠地判失败，所以这里**不加 -e**（很多命令的「失败」
+# 是被显式检查的，中途退出会漏跑后面的用例），但也绝不能把「没输出」
+# 当成通过 —— 判据见下面 pass_or_fail 的说明。
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 fail=0
 
+# pass_or_fail <用例名> <输出>
+#
+# 判据要求**出现明确的通过标志**（ALL_PASS），而不是「没看到 HAS_FAILURE」。
+#
+# 原来的写法是 grep -q HAS_FAILURE，只要输出里没有这行就算过。
+# 但脚本在打印标志之前就崩掉时（语法错误、set -e 提前退出、curl 卡死被
+# 上层超时杀掉、磁盘写满），输出里同样没有 HAS_FAILURE ——
+# 于是一个**根本没跑完**的用例被算作通过。这是最坏的一类假阳性：
+# 判据本身偏向了「看起来绿」，整套验证因此不可信。
+#
+# 现在改成「必须证明自己跑到了最后」：
+#   · ALL_PASS  → 通过
+#   · 其它任何情况（含 HAS_FAILURE、空输出、中止）→ 失败
+pass_or_fail() {
+  local name="$1" out="$2"
+  if printf '%s\n' "$out" | grep -q ALL_PASS; then
+    return 0
+  fi
+  fail=1
+  # 把最后几行原样打出来：崩溃类失败的现场在末尾，
+  # 只打印匹配「失败」的行在那种情况下什么都匹配不到
+  echo "  !! $name 未报告 ALL_PASS，判为失败。输出末尾："
+  printf '%s\n' "$out" | tail -15 | sed 's/^/     /'
+  return 1
+}
+
 # 开跑前先清一次：上一次跑到一半中断时会留下测试日志
 bash scripts/purge-test-logs.sh
 echo
 
+# 这两个脚本没有 ALL_PASS 标志：test-regression.sh 以 DONE 收尾，
+# test-foreign-keys.sh 只打印计数。它们按各自的标志判定。
 for s in test-regression.sh test-foreign-keys.sh; do
   echo "########## $s ##########"
-  bash "scripts/$s" 2>&1 | tail -3 || fail=1
+  out=$(bash "scripts/$s" 2>&1)
+  printf '%s\n' "$out" | tail -3
+  case "$s" in
+    test-regression.sh)
+      # 正常结束时最后一行是 DONE；四个入站协议的探测结果在它之前
+      printf '%s\n' "$out" | grep -q '^DONE$' || {
+        fail=1
+        echo "  !! $s 没有跑到结尾（缺少 DONE 标志）"
+      }
+      ;;
+    *)
+      # 计数行是唯一的结构化输出，缺失即说明中途挂了
+      printf '%s\n' "$out" | grep -qE '^通过 [0-9]+ 项，失败 [0-9]+ 项$' || {
+        fail=1
+        echo "  !! $s 没有输出计数行（可能中途失败）"
+      }
+      printf '%s\n' "$out" | grep -q '失败 0 项' || fail=1
+      ;;
+  esac
   echo
 done
 
@@ -59,11 +109,12 @@ for s in test-group-update.py test-key-whitelist.py test-delete-semantics.py \
          test-accept-encoding.py test-log-filters.py test-stats-filters.py test-csrf.py; do
   echo "########## $s ##########"
   out=$(python3 "scripts/$s" 2>&1)
-  echo "$out" | tail -1
-  echo "$out" | grep -q ALL_PASS || { fail=1; echo "$out" | grep "失败\]" | head -5; }
+  printf '%s\n' "$out" | tail -1
+  pass_or_fail "$s" "$out"
   echo
 done
-# bash 用例：没有统一的通过标志，按「没有 HAS_FAILURE」判定
+
+# bash 用例：同样以 ALL_PASS 为唯一通过标志。
 # 依赖 mock 上游的用例自己会拉起它（test-pricing-rules.sh → slow-upstream，
 # test-cost.sh → proto-upstream），所以上面那次网络重建不会让它们变 502。
 # test-default-group.sh 用同一个镜像另起一个容器、另建一个空库跑（要验的正是
@@ -73,11 +124,8 @@ for s in test-default-group.sh test-model-whitelist.sh test-upstream-protocol.sh
          test-group-quota.sh test-proxies.sh test-egress-proxy.sh test-live.sh test-purge-scope.sh test-cost.sh test-legacy-column-add.sh; do
   echo "########## $s ##########"
   out=$(bash "scripts/$s" 2>&1)
-  echo "$out" | tail -1
-  if echo "$out" | grep -q HAS_FAILURE; then
-    fail=1
-    echo "$out" | grep -E "失败" | head -5
-  fi
+  printf '%s\n' "$out" | tail -1
+  pass_or_fail "$s" "$out"
   echo
 done
 

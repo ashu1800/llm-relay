@@ -7,3 +7,12 @@ docs
 scripts
 *.md
 .env
+
+# 本地调试产物，不该进构建上下文。
+#
+# .chrome-profile 是 164.6 MB 的浏览器配置目录、.shots 是 10.4 MB 的截图，
+# 两者合计约 175 MB。docker build 会把整个上下文打包发给 daemon，
+# 白传这么久只为了让它们被 ADD/COPY 排除在外。
+# 顺带一提：浏览器 profile 里通常带着登录 Cookie，本来也不该进镜像层。
+.chrome-profile
+.shots

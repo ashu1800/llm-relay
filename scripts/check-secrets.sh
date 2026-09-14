@@ -8,10 +8,25 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 : "${PROXY_PASS:?请先 export DS_KEY / OA_KEY / PROXY_PASS}"
 
 status=0
+
+# 关键：**不要**用 `grep -F "$val"` 检索凭据。
+#
+# 那会把真实密钥放进 grep 自己的命令行参数，同机任何用户 ps aux 就能读到 ——
+# 一个「检查凭据有没有泄漏」的脚本自己成了泄漏点，而运行它的人
+# 恰恰是刚怀疑过泄漏、最需要谨慎的时候。
+#
+# 改为把待查值写进一个 600 权限的临时文件，再用 grep -f 从文件读模式：
+# 密钥只出现在文件内容里（属主可读），不进任何进程的 argv。
+TMP_PATTERNS="$(mktemp)"
+chmod 600 "$TMP_PATTERNS"
+# shellcheck disable=SC2064
+trap "rm -f '$TMP_PATTERNS'" EXIT INT TERM
+
 echo "=== 历史提交中检索完整凭据值 ==="
 for pair in "DeepSeek:$DS_KEY" "OpenAI:$OA_KEY" "代理密码:$PROXY_PASS"; do
   name="${pair%%:*}"; val="${pair#*:}"
-  n=$(git log -p --all 2>/dev/null | grep -cF "$val" || true)
+  printf '%s\n' "$val" > "$TMP_PATTERNS"
+  n=$(git log -p --all 2>/dev/null | grep -cFf "$TMP_PATTERNS" || true)
   if [ "$n" = "0" ]; then
     echo "  $name -> 未出现"
   else
@@ -24,10 +39,12 @@ echo
 echo "=== 工作区文件中检索完整凭据值 ==="
 for pair in "DeepSeek:$DS_KEY" "OpenAI:$OA_KEY" "代理密码:$PROXY_PASS"; do
   name="${pair%%:*}"; val="${pair#*:}"
-  hit=$(grep -rlF "$val" --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist . 2>/dev/null || true)
+  printf '%s\n' "$val" > "$TMP_PATTERNS"
+  hit=$(grep -rlFf "$TMP_PATTERNS" --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist . 2>/dev/null || true)
   if [ -z "$hit" ]; then
     echo "  $name -> 无"
   else
+    # 只打印命中的**文件名**，绝不打印内容 —— 那等于把密钥又打出来一遍
     echo "  $name -> $hit  <-- 泄漏！"
     status=1
   fi

@@ -15,11 +15,30 @@ services:
       TZ: UTC
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
+    # 日志轮转。Docker 默认的 json-file 驱动**没有上限**：
+    # 这个服务是长跑的，请求日志 + postgres 输出会持续写进
+    # /var/lib/docker/containers/<id>/*-json.log，几个月就能吃掉几十 GB，
+    # 而磁盘满的表现是数据库先崩，根因却在一个没人会想到的日志文件上。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-llmrelay} -d ${DB_NAME:-llm_relay}"]
+      # 用 pg_isready 但不带 -U/-d：带用户名时它会尝试实际认证，
+      # 而这里只需要判断「服务是否接受连接」。认证失败与「服务没起来」
+      # 会返回不同的退出码，健康检查若把认证失败也算不健康，
+      # 容器就会在凭据轮换期间被反复重启。
+      #
+      # 另外必须显式指定宿主：默认走 Unix socket，而官方镜像的 socket
+      # 在容器内是通的，这里保留 -h 127.0.0.1 让它走 TCP，
+      # 与后端连接方式一致（后端也是 TCP），避免「socket 通了 TCP 没通」
+      # 这种健康但不可用的情况。
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432"]
       interval: 10s
       timeout: 5s
       retries: 12
+      start_period: 30s
     networks: [relay]
 
   # 这里曾经挂过一个 redis 容器，但后端从未接入任何 Redis 客户端
@@ -64,6 +83,23 @@ services:
       - "${BIND_ADDR:-127.0.0.1}:8888:8888"
     volumes:
       - ./data/relay:/data
+    # 同 postgres：不限的话 json-file 会无限增长
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # 用 /readyz 而不是 /healthz：healthz 只说明进程活着，
+    # 而这里真正要判断的是「能不能接请求」—— 数据库连不上时
+    # 进程活得好好的（healthz 返回 200），但每个请求都会 500。
+    # readyz 会实际探一次数据库，那才是这个容器该有的健康定义。
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- -T 3 http://127.0.0.1:8888/readyz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # 启动时要跑迁移，给足时间再开始判失败
+      start_period: 40s
     networks: [relay]
 
 networks:

@@ -26,6 +26,18 @@ echo "  install.sh 退出码: $RC"
 echo "  冷启动总耗时: $((END-START)) 秒"
 tail -3 /tmp/cold.log
 
+# install.sh 失败时必须让本脚本也失败。
+# 原来这里只把退出码打印出来、继续往下跑，最后无条件 echo COLDSTART_DONE ——
+# 于是「冷启动彻底失败」在调用方（verify-all 之类）看来是一次成功。
+# 这个用例的全部价值就是验证从零重建可行，装不上就等于没验证。
+if [ "$RC" != "0" ]; then
+  echo "  !! install.sh 退出码非 0，冷启动失败"
+  echo "  ---- /tmp/cold.log 末尾 ----"
+  tail -25 /tmp/cold.log
+  echo "COLDSTART_FAILED"
+  exit 1
+fi
+
 echo
 echo "=== 启动后的健康检查 ==="
 for _ in $(seq 1 60); do
@@ -64,6 +76,31 @@ import sys,json
 for k in json.load(sys.stdin)['items']:
     if k['name']=='coldstart': print(k['id'])
 ")
-[ -n "$KID" ] && curl -s -o /dev/null -X DELETE "http://127.0.0.1:8888/api/admin/keys/$KID"
-echo "  测试密钥已清理"
+# 删除失败要报出来：残留的测试密钥会一直占用配额，也让下次跑这个脚本时
+# 「同名密钥」的状态不确定
+if [ -n "$KID" ]; then
+  if curl -s -o /dev/null -X DELETE "http://127.0.0.1:8888/api/admin/keys/$KID"; then
+    echo "  测试密钥已清理"
+  else
+    echo "  !! 测试密钥 #$KID 删除失败，请手工清理"
+    CLEANUP_FAILED=yes
+  fi
+else
+  echo "  !! 没有找到名为 coldstart 的测试密钥（创建可能失败了）"
+  CLEANUP_FAILED=yes
+fi
+
+# 真实调用必须成功。这是整个用例的最后一环：容器起来了、数据在、
+# 但渠道调不通的话，前面对冷启动「成功」的结论就是错的。
+if [ "$code" != "200" ]; then
+  echo "  !! 真实调用返回 HTTP $code，响应体："
+  head -c 400 /tmp/cs.json; echo
+  echo "COLDSTART_FAILED"
+  exit 1
+fi
+
+if [ "${CLEANUP_FAILED:-no}" = "yes" ]; then
+  echo "COLDSTART_PARTIAL（功能正常，但清理未完成）"
+  exit 1
+fi
 echo COLDSTART_DONE

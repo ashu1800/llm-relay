@@ -6,14 +6,19 @@
 //
 // 用法：
 //
-//	RELAY_SECRET=<新密钥> DB_... go run ./cmd/rotate-secret -old-secret <旧密钥>
+//	RELAY_SECRET=<新密钥> OLD_SECRET=<旧密钥> DB_... go run ./cmd/rotate-secret
 //	# 加 -dry-run 只检查不改动
+//
+// 更推荐把两个密钥都从标准输入喂进来（见 -stdin）：环境变量虽然不出现在
+// 进程列表里，但 docker exec -e 这种调用方式仍会把值写进 docker 客户端的 argv。
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -25,12 +30,45 @@ import (
 )
 
 func main() {
-	oldSecret := flag.String("old-secret", "", "旧的主密钥（当前加密时用的）")
+	oldSecretFlag := flag.String("old-secret", "", "旧的主密钥。建议改用 OLD_SECRET 环境变量或 -stdin，见下")
 	dryRun := flag.Bool("dry-run", false, "只检查能否解密，不写回数据库")
+	readStdin := flag.Bool("stdin", false, "从标准输入按行读取新旧主密钥（第一行旧、第二行新），最安全的方式")
 	flag.Parse()
 
-	if *oldSecret == "" {
-		fatal("必须通过 -old-secret 指定旧主密钥")
+	// 旧主密钥的取值优先级：标准输入 > 环境变量 > 命令行参数。
+	//
+	// 命令行参数的可见性比多数人以为的差得多：同一台机器上的任何用户
+	// 都能通过 /proc/<pid>/cmdline 或 ps aux 读到别人进程的完整 argv，
+	// 而且 shell 历史、systemd journal、CI 日志里也会留一份。
+	// 对一个「用来轮换主密钥」的工具来说，把旧密钥暴露在 argv 里
+	// 等于让这次轮换白做 —— 旧密钥本来就是因为怀疑泄漏才要换掉。
+	//
+	// -old-secret 仍然保留：手工排障时最方便，且老文档与脚本还在用。
+	var oldSecret, stdinNewSecret string
+	if *readStdin {
+		// 第一行旧密钥、第二行新密钥。用 ReadString 而不是 Scanner：
+		// Scanner 的默认缓冲上限是 64KB，对密钥来说远远够用，
+		// 但它会静默截断超长行 —— 宁可在这里显式处理换行。
+		r := bufio.NewReader(os.Stdin)
+		first, err := r.ReadString('\n')
+		if err != nil && first == "" {
+			fatal("从标准输入读取旧主密钥失败: %v", err)
+		}
+		second, err := r.ReadString('\n')
+		if err != nil && second == "" {
+			fatal("从标准输入读取新主密钥失败: %v", err)
+		}
+		oldSecret = strings.TrimRight(first, "\r\n")
+		stdinNewSecret = strings.TrimRight(second, "\r\n")
+	}
+	if oldSecret == "" {
+		oldSecret = os.Getenv("OLD_SECRET")
+	}
+	if oldSecret == "" {
+		oldSecret = *oldSecretFlag
+	}
+	if oldSecret == "" {
+		fatal("必须指定旧主密钥：推荐管道输入（-stdin），也支持 OLD_SECRET 环境变量或 -old-secret")
 	}
 
 	cfg, err := config.Load(os.Getenv("CONFIG_PATH"))
@@ -38,14 +76,19 @@ func main() {
 		fatal("加载配置失败: %v", err)
 	}
 	newSecret := cfg.Security.Secret
-	if newSecret == "" {
-		fatal("新主密钥为空，请通过 RELAY_SECRET 环境变量指定")
+	if *readStdin && stdinNewSecret != "" {
+		// 命令行给的新密钥覆盖配置文件里的：-stdin 模式下配置文件里那个
+		// 通常是旧的（.env 还没改），以管道传入的为准
+		newSecret = stdinNewSecret
 	}
-	if newSecret == *oldSecret {
+	if newSecret == "" {
+		fatal("新主密钥为空，请通过 RELAY_SECRET 环境变量或 -stdin 的第二行指定")
+	}
+	if newSecret == oldSecret {
 		fatal("新旧主密钥相同，无需轮换")
 	}
 
-	oldCipher, err := secure.NewCipher(*oldSecret)
+	oldCipher, err := secure.NewCipher(oldSecret)
 	if err != nil {
 		fatal("旧主密钥不可用: %v", err)
 	}

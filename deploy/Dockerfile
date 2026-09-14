@@ -31,7 +31,11 @@ ARG VERSION=dev
 RUN go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/llm-relay ./cmd/server
 
 # ---------- Stage 3: 运行时 ----------
-FROM alpine:3.20
+# 固定到 3.24 而不是原来的 3.20：3.20 的支持期已在 2026-04-01 结束，
+# 之后不再有安全更新，而基础镜像里的漏洞是直接进产物的。
+# 查证来源 https://endoflife.date/alpine —— 3.24 支持到 2028-06-01。
+# 升级时同步改这一行即可（Alpine 每个小版本大约支持两年）。
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata curl \
  && addgroup -S relay && adduser -S -G relay relay
 WORKDIR /app
@@ -41,6 +45,15 @@ USER relay
 EXPOSE 8888
 ENV CONFIG_PATH=/app/config.yaml \
     DATA_DIR=/data
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:8888/healthz || exit 1
+# 探 /readyz 而不是 /healthz。
+#
+# healthz 的语义是「进程还活着」，它不碰数据库 —— 数据库连不上时它照样
+# 返回 200，而这个容器此刻对任何请求都只会回 500。用它当健康检查，
+# 编排层会认为一切正常，故障因此不会被自动发现或重启。
+# readyz 会实际探一次数据库，那才是「能对外服务」的定义。
+#
+# start-period 给 40s：启动时要跑 schema 迁移，迁移期间 readyz 会失败，
+# 那属于正常启动过程而不是故障。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8888/readyz || exit 1
 ENTRYPOINT ["/app/llm-relay"]

@@ -49,7 +49,22 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $APT_PROXY_OPT \
   docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin privoxy 2>&1 | tail -6
 
 log "5/5 版本确认"
-docker --version || echo "docker 未安装成功"
-docker compose version 2>/dev/null || echo "compose 插件缺失"
-privoxy --version 2>/dev/null | head -1 || echo "privoxy 缺失"
+# 逐项校验而不是只打印。原来这里每个命令都接一个 `|| echo "xx 未安装成功"`，
+# 然后无条件 echo BOOT_DONE —— 三个组件全没装上也是 BOOT_DONE。
+# 调用方（安装文档里的引导步骤）据此认为环境就绪，接着会在
+# 更靠后的步骤里以难懂的方式失败。
+boot_fail=""
+docker --version >/dev/null 2>&1 || { echo "  !! docker 未安装成功"; boot_fail="$boot_fail docker"; }
+docker compose version >/dev/null 2>&1 || { echo "  !! compose 插件缺失"; boot_fail="$boot_fail compose"; }
+# privoxy 只在走代理的场景需要，缺失时降级为警告
+if ! privoxy --version >/dev/null 2>&1; then
+  warn "privoxy 缺失（仅在需要通过代理拉取镜像时才需要）"
+fi
+docker --version 2>/dev/null | sed 's/^/  /'
+docker compose version 2>/dev/null | sed 's/^/  /'
+
+if [ -n "$boot_fail" ]; then
+  echo "BOOT_FAILED:$boot_fail"
+  exit 1
+fi
 echo "BOOT_DONE"
