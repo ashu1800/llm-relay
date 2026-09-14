@@ -9,8 +9,7 @@ import {
   LinkOutlined,
   ThunderboltOutlined,
   CloudDownloadOutlined,
-  CheckCircleOutlined,
-  StopOutlined
+  WarningOutlined
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
@@ -398,20 +397,64 @@ async function testChannel(row: ChannelRow) {
   }
 }
 
-// 启用 / 禁用渠道：与编辑弹窗里那个开关是同一个字段，只是把最常用的一个动作
-// 提到列表上 —— 上游出问题时要做的第一件事就是先把这条渠道摘出去，
-// 而原来得进编辑弹窗、拨开关、再保存三步。
+// 启用 / 禁用渠道：与编辑弹窗里那个开关是同一个字段。
 //
-// 不弹二次确认：这是可逆的一键操作（再点一下就回来了），与密钥列表的启用/停用
-// 保持一致；真正不可逆的删除才需要确认。
-async function toggleChannel(row: ChannelRow) {
-  const next = !row.enabled
+// 这一列同时承担了两件事：能不能改（是否启用）、以及改完是不是真的有用
+// （最近一次探测的结果）。原来这两件事分在两处 —— 状态列一个标签、
+// 操作列一个「启用/禁用」，同一个字段两个入口，操作列还被占去一格。
+//
+// 健康状态没有丢，只是挪进了开关的 tooltip：正常/未探测是常态，不值得每行
+// 都摊开文字；而「异常」必须一眼看见，所以额外给一个图标（形状 + 颜色，
+// 不靠颜色单独表意）。点开图表就能看到最近一次的错误原文。
+type HealthInfo = { text: string; degraded: boolean }
+
+function healthInfo(row: Channel): HealthInfo {
+  if (row.health_status === 'degraded') return { text: '最近一次探测异常', degraded: true }
+  if (row.health_status === 'healthy') return { text: '最近一次探测正常', degraded: false }
+  return { text: '还没探测过', degraded: false }
+}
+
+function fmtCheckedAt(v: string | null | undefined) {
+  if (!v) return ''
+  const d = new Date(v)
+  return isNaN(d.getTime()) ? '' : d.toLocaleString('zh-CN', { hour12: false })
+}
+
+/** 开关的悬停说明：说清当前状态、以及这个状态意味着什么。 */
+function enableTip(row: Channel) {
+  if (!row.enabled) return ['已停用：不参与任何路由', '打开开关即可重新接回流量']
+  const h = healthInfo(row)
+  const lines = ['已启用 · ' + h.text]
+  if (row.last_error) lines.push('最近错误：' + row.last_error)
+  const at = fmtCheckedAt(row.last_checked_at)
+  if (at) lines.push('探测时间：' + at)
+  if (!row.last_checked_at) lines.push('点「测试」可以验证它是否真的能连上上游')
+  return lines
+}
+
+// 正在切换的渠道 id。切换期间开关显示 loading：这是要走一次网络请求的写操作，
+// 没有反馈的话用户会以为没点上而反复点。
+const togglingId = ref(0)
+
+// 切完立刻改本地值（乐观更新），再落库。
+//
+// 不等接口返回再刷新：开关是纯视觉的即时控件，先转过去再回滚才符合直觉；
+// 反过来（先不动、等接口回来再跳）会让开关看起来「点了没反应」。
+// 失败时回滚成原值 —— 界面绝不能停在一个与库里不一致的位置上。
+async function toggleChannel(row: ChannelRow, next: boolean) {
+  if (togglingId.value) return
+  togglingId.value = row.id
+  row.enabled = next
   try {
     await api.put('/channels/' + row.id, { enabled: next })
     message.success(next ? '已启用' : '已禁用，不再路由到这条渠道')
+    // 后端会顺带更新 health_status 等字段，拉一次保持两边一致
     await load()
   } catch (e: any) {
+    row.enabled = !next
     message.error(e.message)
+  } finally {
+    togglingId.value = 0
   }
 }
 
@@ -479,13 +522,6 @@ function protocolLabel(value: string) {
   return PROTOCOLS.find((p) => p.value === value)?.label ?? value
 }
 
-function healthTag(row: Channel) {
-  if (!row.enabled) return { color: 'default', text: '已禁用' }
-  if (row.health_status === 'healthy') return { color: 'green', text: '正常' }
-  if (row.health_status === 'degraded') return { color: 'orange', text: '异常' }
-  return { color: 'blue', text: '未探测' }
-}
-
 onMounted(load)
 </script>
 
@@ -521,15 +557,20 @@ onMounted(load)
       >
       <!-- scroll.x 必须不小于各列宽度之和：声明偏小时，固定在右侧的
            「操作」列会盖住左边最后一列，表现为表头被截断、内容被压住。
-           1230 = 各列宽度之和（名称列 150 -> 170 是为了放下「经 xxx」那行代理信息，
-           操作列 190 -> 230 是为了放下「测试」），实测容器宽 1182（scripts/measure-tables.mjs） -->
+           1241 = 各列宽度之和（名称 170 + 模型 200 + 上游协议 125 + 地址 174
+           + 分组 110 + 权重 58 + 币种 86 + 启用 78 + 操作 240）。
+           操作列 292 -> 240：原来有 5 个动作，停用/启用已挪到「启用」列的开关上。
+           改完实测（scripts/measure-tables.mjs，1440 视口）：容器 1182、表格 1241，
+           溢出 59px，靠横向滚动 —— 与密钥信息(48px)、请求日志(100px)一致，
+           不是这一页独有的问题。改动前是「各列之和 1293 > scroll.x 1211」，
+           正是上面警告的那种状态；现在两者相等，固定列不会再盖住最后一列 -->
       <a-table
         :data-source="visibleRows"
         :loading="loading"
         :pagination="false"
         row-key="id"
         size="small"
-        :scroll="{ x: 1211 }"
+        :scroll="{ x: 1241 }"
       >
         <template #emptyText>
           <a-empty
@@ -590,12 +631,33 @@ onMounted(load)
             {{ symbolOf(record.currency) }}{{ record.currency }}
           </template>
         </a-table-column>
-        <a-table-column title="状态" :width="78">
+        <a-table-column title="启用" :width="78">
           <template #default="{ record }">
-            <a-tag :color="healthTag(record).color">{{ healthTag(record).text }}</a-tag>
+            <a-tooltip>
+              <template #title>
+                <div v-for="(line, i) in enableTip(record)" :key="i">{{ line }}</div>
+              </template>
+              <span class="enable-cell">
+                <a-switch
+                  size="small"
+                  :checked="record.enabled"
+                  :loading="togglingId === record.id"
+                  @change="(v: any) => toggleChannel(record, !!v)"
+                />
+                <!-- 异常才额外给一个图标：开关本身只有「开/关」两态，
+                     表示不了「开着但连不上」。用图标而不是只换颜色，
+                     色觉障碍下同样能看见。
+                     图标不再挂自己的 title：它就在外层 tooltip 里，
+                     再挂一个原生 title 会同时冒出两个提示、内容还重复 -->
+                <WarningOutlined
+                  v-if="record.enabled && healthInfo(record).degraded"
+                  class="health-warn"
+                />
+              </span>
+            </a-tooltip>
           </template>
         </a-table-column>
-        <a-table-column title="操作" :width="292" fixed="right">
+        <a-table-column title="操作" :width="240" fixed="right">
           <template #default="{ record }">
             <a-space>
               <a :class="{ disabled: testingId === record.id }" @click="testChannel(record)">
@@ -604,11 +666,6 @@ onMounted(load)
               </a>
               <a @click="openBindings(record)"><LinkOutlined /> 模型</a>
               <a @click="openEdit(record)"><EditOutlined /> 编辑</a>
-              <a @click="toggleChannel(record)">
-                <CheckCircleOutlined v-if="!record.enabled" />
-                <StopOutlined v-else />
-                {{ record.enabled ? '禁用' : '启用' }}
-              </a>
               <a class="danger-link" @click="confirmDelete(record)"><DeleteOutlined /> 删除</a>
             </a-space>
           </template>
@@ -761,4 +818,8 @@ onMounted(load)
 .muted { color: var(--color-text-secondary); }
 .danger-link { color: var(--color-red); }
 .disabled { color: var(--color-text-secondary); cursor: not-allowed; }
+/* 开关与异常图标同一行：图标紧跟在开关右侧，间距小一点才像「附属提示」 */
+.enable-cell { display: inline-flex; align-items: center; gap: 6px; }
+/* 异常提示用橙色，与「未定价」那类待办同色系；只在探测失败时出现 */
+.health-warn { color: var(--color-orange); font-size: 13px; }
 </style>
