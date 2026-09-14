@@ -59,6 +59,11 @@ func (s *Service) SetChannelState(st *ChannelState) { s.state = st }
 // 而不是「这次请求最终会不会成功」。跟着重试会把「上游在限流」
 // 这种一眼能看出的状态藏起来，那正是用户点这个按钮时想知道的。
 func (s *Service) Probe(ctx context.Context, cand Candidate, body []byte) (*Attempt, error) {
+	// 传的是站内通用语（Chat）的路径，与真实转发完全一致：
+	// 探测报文也是 Chat 形状，由 convert.UpstreamRequest 按渠道协议统一改写路径与报文
+	// （Anthropic -> /v1/messages，Responses -> /v1/responses，Gemini 把模型名写进路径）。
+	// 这里**不要**提前把路径换成目标协议的端点：那样会被 isChatPath 判成非对话请求，
+	// 于是报文不再被转换，上游收到一个 Chat 形状的请求，报「input is required」。
 	return s.fwd.Do(ctx, cand, "/v1/chat/completions", body, http.Header{}, false)
 }
 

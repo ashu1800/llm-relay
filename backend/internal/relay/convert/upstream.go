@@ -33,6 +33,14 @@ func UpstreamRequest(protocol, path string, body []byte, upstreamModel string) (
 			return "", nil, err
 		}
 		return "/v1/messages", out, nil
+	case model.ProtocolOpenAIResponses:
+		// Responses 是**另一套端点**（POST /v1/responses），报文也与 Chat 不同：
+		// 不能只换路径，必须整体改写（instructions / input 事件数组 / 扁平 tools）。
+		out, err := OpenAIChatToResponsesRequest(body)
+		if err != nil {
+			return "", nil, err
+		}
+		return "/v1/responses", out, nil
 	case model.ProtocolGemini:
 		out, err := OpenAIChatToGeminiRequest(body)
 		if err != nil {
@@ -75,6 +83,12 @@ func UpstreamResponseBody(protocol string, body []byte, upstreamModel string) []
 			return body
 		}
 		return out
+	case model.ProtocolOpenAIResponses:
+		out, err := ResponsesResponseToOpenAIChat(body, upstreamModel)
+		if err != nil {
+			return body
+		}
+		return out
 	default:
 		return body
 	}
@@ -87,6 +101,8 @@ func UpstreamStream(protocol string, r io.ReadCloser, upstreamModel string) io.R
 		return NewAnthropicStreamToOpenAIChat(r, upstreamModel)
 	case model.ProtocolGemini:
 		return NewGeminiStreamToOpenAIChat(r, upstreamModel)
+	case model.ProtocolOpenAIResponses:
+		return NewResponsesStreamToOpenAIChat(r, upstreamModel)
 	default:
 		return r
 	}
@@ -105,6 +121,8 @@ func UpstreamErrorMessage(protocol string, body []byte) string {
 		return AnthropicErrorMessage(body)
 	case model.ProtocolGemini:
 		return GeminiErrorMessage(body)
+	case model.ProtocolOpenAIResponses:
+		return ResponsesUpstreamErrorMessage(body)
 	default:
 		// OpenAI 形状的上游同样把原因放在 error.message 里
 		var payload map[string]any

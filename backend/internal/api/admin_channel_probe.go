@@ -199,7 +199,12 @@ func extractReply(body []byte) string {
 				// 推理型模型（deepseek-reasoner 这一类）会把正文先写进
 				// reasoning_content；只看 content 会拿到空字符串，
 				// 界面上就变成「通了但什么都没返回」
-				Reasoning string `json:"reasoning_content"`
+				ReasoningContent string `json:"reasoning_content"`
+				// 站内统一格式用的是 reasoning：Anthropic / Responses / Gemini
+				// 这几个出站适配器都把思维链放在这个字段（见 convert 包）。
+				// 少了它，测 GLM 这类「预算全花在思考上」的模型时正文为空，
+				// 明明通了却显示不出任何内容。
+				Reasoning string `json:"reasoning"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
@@ -207,6 +212,9 @@ func extractReply(body []byte) string {
 		return ""
 	}
 	msg := strings.TrimSpace(parsed.Choices[0].Message.Content)
+	if msg == "" {
+		msg = strings.TrimSpace(parsed.Choices[0].Message.ReasoningContent)
+	}
 	if msg == "" {
 		msg = strings.TrimSpace(parsed.Choices[0].Message.Reasoning)
 	}
