@@ -210,6 +210,29 @@ function fmtTime(t: string) {
   )
 }
 
+// 计价时刻：快照里存的是 RFC3339（如 2026-09-14T09:58:08+08:00），原样摆出来是给机器看的
+// —— T 分隔、带秒级以上的偏移量，和同一行里的其他文案不是一种语气。
+// 这里把它改成与日志列表列一致的 YYYY-MM-DD HH:mm:ss，但**不做时区换算**：
+// 那个偏移量正是服务器判定「工作日高峰」时用的时钟（时段规则按服务器本地时区判断），
+// 换成访客所在时区后 09:58 会显示成 01:58，跟同一行的时段标签对不上。
+// 只有访客时区与快照不一致时，才把偏移量补在括号里，免得墙上时间被误读成本地时间。
+function fmtTimeAt(t: string) {
+  if (!t) return '—'
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})$/.exec(t)
+  // 形态不认识时退回按浏览器时区解析：显示原文比显示 ISO 串更糟
+  if (!m) return fmtTime(t)
+  const wall = m[1] + ' ' + m[2]
+  const off = m[3]
+  const offMin =
+    off === 'Z'
+      ? 0
+      : (off[0] === '-' ? -1 : 1) * (Number(off.slice(1, 3)) * 60 + Number(off.slice(-2)))
+  // getTimezoneOffset 返回的是「UTC 减本地」，符号与 RFC3339 相反，这里取反后再比
+  if (offMin === -new Date().getTimezoneOffset()) return wall
+  const abs = Math.abs(offMin)
+  return wall + ' (UTC' + (offMin < 0 ? '-' : '+') + pad2(Math.floor(abs / 60)) + ':' + pad2(abs % 60) + ')'
+}
+
 function fmtMs(v: number) {
   if (!v) return '-'
   return v >= 1000 ? (v / 1000).toFixed(2) + 's' : v + 'ms'
@@ -269,7 +292,7 @@ function multiplierSourceText(row: RequestLog) {
   } else {
     parts.push('原价')
   }
-  if (s.resolved_at) parts.push('计价时刻 ' + s.resolved_at)
+  if (s.resolved_at) parts.push('计价时刻 ' + fmtTimeAt(s.resolved_at))
   return parts.join('；')
 }
 
