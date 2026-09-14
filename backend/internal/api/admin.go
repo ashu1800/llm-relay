@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -36,7 +37,34 @@ func writeUpdateError(c *gin.Context, err error) {
 		writeUpstreamError(c, http.StatusNotFound, "记录不存在", "not_found_error")
 		return
 	}
-	writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+	writeInternalError(c, err)
+}
+
+// writeInternalError 回一个不含内部细节的 500，同时把完整错误写进服务端日志。
+//
+// 为什么不能直接把 err.Error() 交给客户端：Postgres 的约束错误里带着数据。
+// 例如唯一索引冲突的报文是
+//
+//	ERROR: duplicate key value violates unique constraint "idx_channel_model"
+//	DETAIL: Key (channel_id, public_name)=(3, gpt-4o) already exists.
+//
+// 表名、列名、索引名、以及**实际的列值**全在里面。这个管理接口没有鉴权
+// （设计如此，靠同源中间件兜底），把库结构与被拒的数据一起回显出去，
+// 等于额外给出一个信息面；而错误信息对用户定位问题也没帮助 ——
+// 用户要做的是「换个名字」或「先删掉那条」，这由后端翻译成人话更合适。
+//
+// 完整错误进 slog：排障时看服务端日志，那里本来就有。
+//
+// 措辞对读写都成立（`/v1/models` 这类只读接口也会用到它），
+// 所以用「本次请求未生效」而不是「操作未被应用」。
+func writeInternalError(c *gin.Context, err error) {
+	slog.Error("接口内部错误",
+		"path", c.Request.URL.Path,
+		"method", c.Request.Method,
+		"err", err,
+	)
+	writeUpstreamError(c, http.StatusInternalServerError,
+		"服务端处理失败，本次请求未生效；详情见服务端日志", "internal_error")
 }
 
 func parseID(c *gin.Context) (uint, bool) {
@@ -235,7 +263,7 @@ func (s *Server) listChannels(c *gin.Context) {
 		q = q.Where("group_id = ?", gid)
 	}
 	if err := q.Find(&channels).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 
@@ -248,7 +276,7 @@ func (s *Server) listChannels(c *gin.Context) {
 	if len(ids) > 0 {
 		var rows []model.ChannelModel
 		if err := db.Where("channel_id IN ?", ids).Order("public_name").Find(&rows).Error; err != nil {
-			writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+			writeInternalError(c, err)
 			return
 		}
 		for _, r := range rows {
@@ -276,7 +304,7 @@ func (s *Server) listChannels(c *gin.Context) {
 			Where("channel_id IN ?", ids).
 			Group("channel_id").
 			Scan(&rows).Error; err != nil {
-			writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+			writeInternalError(c, err)
 			return
 		}
 		for _, r := range rows {
@@ -383,25 +411,30 @@ func (s *Server) createChannel(c *gin.Context) {
 		HealthStatus: "unknown",
 	}
 	// 新渠道排在分组末尾，返回的 JSON 里也要带上它实际拿到的优先级，
-	// 否则界面拿到的是 0，与库里不一致
+	// 否则界面拿到的是 0，与库里不一致。
+	//
+	// 白名单必须和渠道在**同一个事务**里写：
+	// 原来白名单写失败时渠道已经落库并占掉了 weight 序号，界面上报
+	// 「创建失败」，用户重试就多出一条同名渠道（channels.name 没有唯一索引），
+	// 而多出来的那条还会参与路由。updateChannel 早就是同一事务，这里补齐。
 	if err := s.deps.Store.DB().Transaction(func(tx *gorm.DB) error {
 		w, err := appendChannelToGroup(tx, ch.GroupID)
 		if err != nil {
 			return err
 		}
 		ch.Weight = w
-		return tx.Create(&ch).Error
-	}); err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
-		return
-	}
-	// 白名单随渠道一起建：建渠道时就能把「这条渠道能跑哪些模型」填完，
-	// 不用再回列表点一次「模型」
-	if p.Models != nil {
-		if err := replaceChannelModels(s.deps.Store.DB(), ch.ID, whitelist); err != nil {
-			writeUpstreamError(c, http.StatusInternalServerError, "写入模型白名单失败: "+err.Error(), "internal_error")
-			return
+		if err := tx.Create(&ch).Error; err != nil {
+			return err
 		}
+		// 白名单随渠道一起建：建渠道时就能把「这条渠道能跑哪些模型」填完，
+		// 不用再回列表点一次「模型」
+		if p.Models != nil {
+			return replaceChannelModels(tx, ch.ID, whitelist)
+		}
+		return nil
+	}); err != nil {
+		writeInternalError(c, err)
+		return
 	}
 	s.invalidatePricing()
 	c.JSON(http.StatusOK, ch)
@@ -569,6 +602,11 @@ func modelAllowed(list model.StringList, name string) bool {
 // 白名单里写 ID 或分组名都认：纯数字按 ID，否则按名字查。
 // 一条都解析不出来时返回错误而不是放行 —— 放行等于「删掉那个分组就能绕过限制」，
 // 那这份白名单也就没有存在的意义了。调用方据此回 403 并说明原因。
+//
+// 数字 ID 也要查库确认存在。原来只做 ParseUint 就收下，于是一个不存在的
+// 分组 ID（例如手滑多打一位）会被当成「解析成功」，len(ids) 非 0，下面那道
+// 「一条都没解析出来就报错」的保护就失效了。结果是白名单静默匹配不到任何渠道，
+// 请求全部 403，而界面上完全看不出原因 —— 排查时不会有人想到是白名单。
 func (s *Server) resolveGroupWhitelist(list model.StringList) ([]uint, error) {
 	if len(list) == 0 {
 		return nil, nil
@@ -581,11 +619,15 @@ func (s *Server) resolveGroupWhitelist(list model.StringList) ([]uint, error) {
 		if item == "" {
 			continue
 		}
+		var g model.ChannelGroup
 		if n, err := strconv.ParseUint(item, 10, 32); err == nil {
-			ids = append(ids, uint(n))
+			if err := db.First(&g, uint(n)).Error; err != nil {
+				unresolved = append(unresolved, item+" (ID 不存在)")
+				continue
+			}
+			ids = append(ids, g.ID)
 			continue
 		}
-		var g model.ChannelGroup
 		if err := db.Where("name = ?", item).First(&g).Error; err != nil {
 			unresolved = append(unresolved, item)
 			continue
@@ -594,6 +636,10 @@ func (s *Server) resolveGroupWhitelist(list model.StringList) ([]uint, error) {
 	}
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("密钥的分组白名单 %v 无法解析（分组可能已被删除或改名）", unresolved)
+	}
+	// 部分解析失败也要报出来：静默丢掉一项，用户会以为整份白名单都生效了
+	if len(unresolved) > 0 {
+		return nil, fmt.Errorf("密钥的分组白名单里有 %v 无法解析（分组可能已被删除或改名）", unresolved)
 	}
 	return ids, nil
 }
@@ -607,7 +653,7 @@ func (s *Server) resolveGroupWhitelist(list model.StringList) ([]uint, error) {
 func deleteByID(c *gin.Context, db *gorm.DB, dest any, id uint, notFound string) bool {
 	res := db.Delete(dest, id)
 	if res.Error != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, res.Error.Error(), "internal_error")
+		writeInternalError(c, res.Error)
 		return false
 	}
 	if res.RowsAffected == 0 {
@@ -643,7 +689,7 @@ func (s *Server) deleteChannel(c *gin.Context) {
 		// 一个「不存在的优先级」，而序号本身也不再能表示「第几个被尝试」
 		return renumberGroupChannels(tx, ch.GroupID)
 	}); err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"id": id, "deleted": true})
@@ -688,7 +734,7 @@ func (s *Server) reorderChannels(c *gin.Context) {
 			writeUpstreamError(c, http.StatusBadRequest, invalid.Error(), "invalid_request_error")
 			return
 		}
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"group_id": p.GroupID, "ordered": len(p.IDs)})
@@ -710,7 +756,7 @@ func (s *Server) listChannelModels(c *gin.Context) {
 	var rows []model.ChannelModel
 	if err := s.deps.Store.DB().Where("channel_id = ?", id).
 		Order("public_name").Find(&rows).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"items": rows, "total": len(rows)})
@@ -771,7 +817,7 @@ func (s *Server) replaceChannelModelsAPI(c *gin.Context) {
 	if err := db.Transaction(func(tx *gorm.DB) error {
 		return replaceChannelModels(tx, id, items)
 	}); err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	s.invalidatePricing()
@@ -831,18 +877,18 @@ func (s *Server) bindChannelModel(c *gin.Context) {
 			Multiplier: item.Multiplier, PeakRules: item.PeakRules,
 		}
 		if err := db.Create(&binding).Error; err != nil {
-			writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+			writeInternalError(c, err)
 			return
 		}
 	case err != nil:
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	default:
 		if err := db.Model(&binding).Updates(map[string]any{
 			"upstream_name": item.UpstreamName,
 			"enabled":       item.Enabled,
 		}).Error; err != nil {
-			writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+			writeInternalError(c, err)
 			return
 		}
 		binding.UpstreamName = item.UpstreamName
@@ -866,7 +912,7 @@ func (s *Server) unbindChannelModel(c *gin.Context) {
 	}
 	if err := s.deps.Store.DB().Where("id = ? AND channel_id = ?", bid, id).
 		Delete(&model.ChannelModel{}).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	s.invalidatePricing()
@@ -886,7 +932,7 @@ func registerGroupRoutes(g *gin.RouterGroup, s *Server) {
 func (s *Server) listGroups(c *gin.Context) {
 	var items []model.ChannelGroup
 	if err := s.deps.Store.DB().Order("id").Find(&items).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
@@ -987,7 +1033,7 @@ func (s *Server) createGroup(c *gin.Context) {
 		return tx.Create(&gr).Error
 	})
 	if err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gr)
@@ -1109,7 +1155,7 @@ func (s *Server) deleteGroup(c *gin.Context) {
 	// 查不出来就不该往下删。
 	var count int64
 	if err := db.Model(&model.Channel{}).Where("group_id = ?", id).Count(&count).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	if count > 0 {
@@ -1140,7 +1186,7 @@ func registerKeyRoutes(g *gin.RouterGroup, s *Server) {
 func (s *Server) listKeys(c *gin.Context) {
 	var items []model.APIKey
 	if err := s.deps.Store.DB().Order("id DESC").Find(&items).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
@@ -1169,7 +1215,7 @@ func (s *Server) createKey(c *gin.Context) {
 	}
 	plain, err := secure.GenerateAPIKey()
 	if err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	enc, err := s.deps.Cipher.Encrypt(plain)
@@ -1188,7 +1234,7 @@ func (s *Server) createKey(c *gin.Context) {
 		k.RateLimitRPM = *p.RateLimitRPM
 	}
 	if err := s.deps.Store.DB().Create(&k).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	s.invalidateKeyCache()
@@ -1352,12 +1398,12 @@ func (s *Server) listLogs(c *gin.Context) {
 
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	var items []model.RequestLog
 	if err := q.Order("id DESC").Offset((page - 1) * size).Limit(size).Find(&items).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items, "total": total, "page": page, "page_size": size})
@@ -1379,7 +1425,7 @@ func (s *Server) exportLogs(c *gin.Context) {
 	}
 	var total int64
 	if err := filters.Count(&total).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	exported := total
@@ -1389,7 +1435,7 @@ func (s *Server) exportLogs(c *gin.Context) {
 
 	var items []model.RequestLog
 	if err := filters.Order("id DESC").Limit(int(exported)).Find(&items).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 
@@ -1421,6 +1467,7 @@ func (s *Server) exportLogs(c *gin.Context) {
 			if j > 0 {
 				b.WriteByte(',')
 			}
+			cell = csvNeutralize(cell)
 			// CSV 转义：字段里有逗号、引号或换行时要用引号包起来
 			if strings.ContainsAny(cell, ",\"\n\r") {
 				b.WriteString(`"` + strings.ReplaceAll(cell, `"`, `""`) + `"`)
@@ -1431,6 +1478,26 @@ func (s *Server) exportLogs(c *gin.Context) {
 		b.WriteByte('\n')
 	}
 	c.String(http.StatusOK, b.String())
+}
+
+// csvNeutralize 阻止导出的 CSV 被 Excel / WPS 当成公式执行。
+//
+// 原来只转义了逗号引号换行，但以 = + - @ 开头的单元格会被表格软件
+// 当作公式求值 —— 而 model_requested、channel_name、api_key_name、trace_id
+// 都是可控输入（模型名来自上游返回、渠道名与密钥名由用户填）。
+// 典型利用是 =HYPERLINK(...) 或 =cmd|'/c calc'!A0。
+//
+// 处理方式遵循 OWASP 建议：前置一个单引号，表格软件会按文本显示，
+// 单元格内容本身不变。制表符与回车也一并处理（同样是公式起始字符）。
+func csvNeutralize(cell string) string {
+	if cell == "" {
+		return cell
+	}
+	switch cell[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + cell
+	}
+	return cell
 }
 
 func (s *Server) logDetail(c *gin.Context) {

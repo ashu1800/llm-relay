@@ -41,7 +41,9 @@ func (s *Server) listModels(c *gin.Context) {
 
 	var names []string
 	if err := q.Order("channel_models.public_name").Pluck("channel_models.public_name", &names).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		// 这个接口是 /v1/models，客户端是任意 OpenAI 兼容工具。
+		// 同样不能把原始 DB 错误回显出去（表名、列名、被拒数据都在里面）。
+		writeInternalError(c, err)
 		return
 	}
 	now := time.Now().Unix()
@@ -211,6 +213,12 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 		if errors.Is(relayErr, relay.ErrGroupLimited) {
 			status, errType = http.StatusTooManyRequests, "rate_limit_error"
 			c.Header("Retry-After", "60")
+		}
+		// 请求内容无法转换（例如给 Anthropic 渠道发音频）是**客户端**的错，
+		// 不是上游的错：回 400 而不是 502。502 会让客户端以为上游坏了去重试，
+		// 而重试多少次结果都一样 —— 用户真正要做的是改请求。
+		if errors.Is(relayErr, relay.ErrRequestUnsupported) {
+			status, errType = http.StatusBadRequest, "invalid_request_error"
 		}
 		p.writeError(c, status, relayErr.Error(), errType)
 		s.finalizeLog(req, res, relay.Usage{}, status, relayErr.Error(), 0, totalMs, nil, nil)

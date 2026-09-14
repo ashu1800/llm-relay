@@ -14,6 +14,7 @@ import (
 	"gorm.io/gorm"
 
 	"llm-relay/internal/model"
+	"llm-relay/internal/relay/convert"
 )
 
 // Options 控制转发行为，避免让 relay 包依赖全局配置。
@@ -161,6 +162,17 @@ var ErrNoChannel = errors.New("没有可用的渠道")
 // 混成一个错误会让用户跑去改一个根本没配错的配置。
 var ErrGroupLimited = errors.New("分组已达每分钟额度")
 
+// ErrRequestUnsupported 表示请求本身无法转成目标上游协议（例如发音频给 Anthropic）。
+//
+// 为什么必须单独一个类型：这是**客户端**的问题，不是渠道的问题。
+// 若按普通上游错误处理，会连带走两条错路 ——
+// ① 逐个渠道重试一遍（每个都必然同样失败，白白消耗上游配额）；
+// ② markChannelFailure 记上一笔失败，健康的渠道被误判成故障，
+//    重试次数够了还会被冷却摘掉。用户发一次音频，可能把好渠道打进冷却。
+//
+// 定义在 convert 包（错误由那边产生），这里做个别名让本包调用方少一个 import。
+var ErrRequestUnsupported = convert.ErrUnsupportedContent
+
 // noChannelReason 说明为什么没有可用渠道。
 //
 // 特意把「被密钥白名单挡住」讲清楚：否则从「没有可用的渠道: 模型 xxx」
@@ -283,6 +295,15 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 			// 这一次没成，名额当场归还，让其它请求能用
 			if acquired {
 				s.state.Release(cand.Channel.ID)
+			}
+			// 请求本身无法转换时立刻停手：换渠道结果一样，重试只是
+			// 白耗上游配额，还会把健康渠道一笔笔记成失败（见
+			// ErrRequestUnsupported 的说明）。直接返回，交给上层回 400。
+			if errors.Is(err, ErrRequestUnsupported) {
+				res.Trail = append(res.Trail, AttemptTrail{
+					ChannelID: cand.Channel.ID, ChannelName: cand.Channel.Name, Error: err.Error(),
+				})
+				return res, err
 			}
 			res.Trail = append(res.Trail, AttemptTrail{
 				ChannelID: cand.Channel.ID, ChannelName: cand.Channel.Name, Error: err.Error(),
