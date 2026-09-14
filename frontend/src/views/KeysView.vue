@@ -200,6 +200,7 @@ function cleanList(v: string[]) {
 function setLimit(row: APIKey) {
   let input = String(row.rate_limit_rpm)
   Modal.confirm({
+    centered: true,
     title: '设置每分钟请求上限 · ' + row.name,
     content: () =>
       h('div', [
@@ -311,6 +312,7 @@ async function toggle(row: APIKey) {
 
 function confirmDelete(row: APIKey) {
   Modal.confirm({
+    centered: true,
     title: '确认删除密钥',
     content: '使用该密钥的客户端将立即无法调用。',
     okType: 'danger',
@@ -442,6 +444,7 @@ onMounted(() => {
       width="600px"
       :ok-text="createdKey ? '完成' : '确定'"
       :cancel-text="createdKey ? '再建一把' : '取消'"
+      centered
       @ok="save"
       @cancel="onCancel"
     >

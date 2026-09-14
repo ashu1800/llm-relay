@@ -230,7 +230,7 @@ function applyBulk() {
       @save="savePrice"
     />
 
-    <a-modal v-model:open="bulkOpen" title="批量粘贴模型清单" width="560px" @ok="applyBulk">
+    <a-modal v-model:open="bulkOpen" title="批量粘贴模型清单" width="560px" centered @ok="applyBulk">
       <div class="field-hint" style="margin-bottom: 8px">
         一行一个模型。只写模型名表示「上游同名」；用 <code>对外名=上游名</code> 可以做映射。
         重复的对外名会自动跳过。

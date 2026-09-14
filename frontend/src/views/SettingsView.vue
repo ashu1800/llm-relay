@@ -87,6 +87,7 @@ async function load() {
 function confirmCleanup() {
   const days = runtime.value.log_retention_days
   Modal.confirm({
+    centered: true,
     title: '清理过期数据',
     content: '将删除 ' + days + ' 天前的请求日志及其报文，此操作不可撤销。',
     okType: 'danger',
@@ -258,7 +259,7 @@ onMounted(load)
     </section>
     </DataState>
 
-    <a-modal v-model:open="reportOpen" title="导入结果" :footer="null" width="520px">
+    <a-modal v-model:open="reportOpen" title="导入结果" :footer="null" width="520px" centered>
       <a-descriptions :column="1" bordered size="small">
         <a-descriptions-item label="新增">
           {{ sumOf(report.created) }} 项

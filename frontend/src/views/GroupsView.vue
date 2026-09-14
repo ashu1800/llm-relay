@@ -151,6 +151,7 @@ async function save() {
 
 function confirmDelete(row: ChannelGroup) {
   Modal.confirm({
+    centered: true,
     title: '确认删除分组',
     content: '删除后不可恢复。若分组下仍有渠道或模板，后端会拒绝删除并说明原因。',
     okType: 'danger',
@@ -244,7 +245,7 @@ onMounted(load)
       </DataState>
     </section>
 
-    <a-modal v-model:open="modalOpen" :title="title" :confirm-loading="saving" width="560px" @ok="save">
+    <a-modal v-model:open="modalOpen" :title="title" :confirm-loading="saving" width="560px" centered @ok="save">
       <a-form layout="vertical">
         <a-form-item label="分组名称" required>
           <a-input v-model:value="form.name" placeholder="例如 高优先级" />

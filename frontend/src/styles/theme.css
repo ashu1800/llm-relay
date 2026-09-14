@@ -226,6 +226,17 @@ a:hover { opacity: 0.85; }
   font-family: var(--font-family-list);
 }
 
+/* 弹窗内容区自己滚，标题栏与按钮栏始终留在视口里。
+   表单类弹窗（新建渠道那类是十段纵向表单）会一路长到屏幕外面去：
+   底部的「确定 / 取消」够不着，弹窗看着像被切掉了半截。
+   这里给内容区一个「视口高度减掉上下留白 + 标题栏 + 按钮栏」的上限，
+   超了就内部滚动 —— 配合各弹窗上的 centered，弹窗本体始终完整居中。
+   矮弹窗不受影响：max-height 只在需要时才生效。 */
+.ant-modal-body {
+  max-height: calc(100vh - 200px);
+  overflow-y: auto;
+}
+
 .ant-btn-primary {
   box-shadow: none;
 }

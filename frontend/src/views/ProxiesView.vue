@@ -117,6 +117,7 @@ async function save() {
 
 function remove(row: Proxy) {
   Modal.confirm({
+    centered: true,
     title: '删除代理「' + row.name + '」？',
     content: '已经有渠道在用它时删不掉 —— 要先让那些渠道改用别的代理或直连。',
     okText: '删除',
@@ -286,6 +287,7 @@ onMounted(load)
       :title="editing ? '编辑代理' : '新建代理'"
       :confirm-loading="saving"
       width="560px"
+      centered
       @ok="save"
     >
       <a-form layout="vertical">

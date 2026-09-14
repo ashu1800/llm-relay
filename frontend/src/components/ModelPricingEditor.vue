@@ -188,6 +188,7 @@ function submit() {
     :open="open"
     :title="'定价 · ' + modelName"
     width="640px"
+    centered
     @update:open="(v: boolean) => emit('update:open', v)"
   >
     <a-form layout="vertical">

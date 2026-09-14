@@ -11,7 +11,8 @@ import {
   ThunderboltOutlined,
   CloudDownloadOutlined,
   HolderOutlined,
-  WarningOutlined
+  WarningOutlined,
+  InfoCircleOutlined
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
@@ -315,6 +316,7 @@ async function save() {
 
 function confirmDelete(row: Channel) {
   Modal.confirm({
+    centered: true,
     title: '确认删除渠道',
     content: '将同时解除该渠道下的所有模型绑定，此操作不可撤销。',
     okType: 'danger',
@@ -895,38 +897,104 @@ onBeforeUnmount(() => {
       </DataState>
     </section>
 
-    <a-modal v-model:open="modalOpen" :title="title" :confirm-loading="saving" width="720px" @ok="save">
-      <a-form layout="vertical">
-        <a-form-item label="渠道名称" required>
-          <a-input v-model:value="form.name" placeholder="例如 ohub-deepseek" />
-        </a-form-item>
-        <a-form-item label="上游协议" required>
-          <a-select v-model:value="form.protocol" :options="PROTOCOLS" />
-          <div class="field-hint">
-            客户端用哪种协议请求都行：会先归一成 OpenAI Chat，再按这里选的协议转成上游格式。
-          </div>
-        </a-form-item>
-        <a-form-item label="上游地址" required>
-          <a-input v-model:value="form.base_url" placeholder="https://api.example.com 或 https://api.example.com/v1" />
-        </a-form-item>
-        <a-form-item label="记账币种" required>
-          <a-select v-model:value="form.currency" :options="CURRENCY_OPTIONS" style="width: 220px" />
-          <div class="field-hint">
-            这家上游按什么币种给你开账单，就选哪个：下面的单价按它录入，日志与看板也按它统计。
-            不同币种之间<b>不做任何换算、也不相加</b>，所以改了币种之后已填的单价需要自己重填。
-          </div>
-        </a-form-item>
-        <a-form-item :label="editing ? 'API Key（留空表示不修改）' : 'API Key'">
-          <a-input-password v-model:value="form.api_key" placeholder="sk-..." />
-        </a-form-item>
-        <a-form-item label="所属分组">
-          <a-select v-model:value="form.group_id">
-            <a-select-option v-for="g in groups" :key="g.id" :value="g.id">{{ g.name }}</a-select-option>
-          </a-select>
-          <div class="field-hint">分组决定路由与权限范围，模型由下面的白名单决定。</div>
+    <!-- centered + theme.css 里的 .ant-modal-body 上限：弹窗始终完整居中，
+         上下留白固定，内容长了滚内容区而不是把弹窗顶出屏幕。
+         760 与白名单抽屉同宽：白名单有六个格子，再窄模型名就被截了 -->
+    <a-modal
+      v-model:open="modalOpen"
+      :title="title"
+      :confirm-loading="saving"
+      :width="760"
+      centered
+      ok-text="保存"
+      @ok="save"
+    >
+      <!-- 表单排布：短字段两列并排、长字段整行，说明文字移到标签旁的 ⓘ 里。
+           纵向一列排下来时每个字段要占掉「标签 + 控件 + 两三行说明」，
+           十段表单就是一千多像素高，找字段得一路滚 -->
+      <a-form layout="vertical" class="channel-form">
+        <a-row :gutter="12">
+          <a-col :span="12">
+            <a-form-item label="渠道名称" required>
+              <a-input v-model:value="form.name" placeholder="例如 ohub-deepseek" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item required>
+              <template #label>
+                上游协议
+                <a-tooltip title="客户端用哪种协议请求都行：会先归一成 OpenAI Chat，再按这里选的协议转成上游格式。">
+                  <InfoCircleOutlined class="label-hint" />
+                </a-tooltip>
+              </template>
+              <a-select v-model:value="form.protocol" :options="PROTOCOLS" />
+            </a-form-item>
+          </a-col>
+        </a-row>
+
+        <a-form-item required>
+          <template #label>
+            上游地址
+            <a-tooltip title="填到 /v1 或只填域名都行，转发时会按所选协议补全路径。">
+              <InfoCircleOutlined class="label-hint" />
+            </a-tooltip>
+          </template>
+          <a-input v-model:value="form.base_url" placeholder="https://api.example.com/v1" />
         </a-form-item>
 
-        <a-form-item label="渠道图标">
+        <a-row :gutter="12">
+          <a-col :span="10">
+            <a-form-item required>
+              <template #label>
+                记账币种
+                <a-tooltip title="这家上游按什么币种给你开账单就选哪个：下面的单价按它录入，日志与看板也按它统计。">
+                  <InfoCircleOutlined class="label-hint" />
+                </a-tooltip>
+              </template>
+              <a-select v-model:value="form.currency" :options="CURRENCY_OPTIONS" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="14">
+            <a-form-item :label="editing ? 'API Key（留空表示不修改）' : 'API Key'">
+              <a-input-password v-model:value="form.api_key" placeholder="sk-..." />
+            </a-form-item>
+          </a-col>
+        </a-row>
+        <!-- 币种不换算这条留在页面上而不是收进 ⓘ：它正是「改币种之后单价要重填」
+             的原因，而用户改币种的那一刻不会去悬停一个图标 -->
+        <div class="form-note">不同币种之间不做任何换算、也不相加；改了币种之后，已填的单价需要自己重填。</div>
+
+        <a-row :gutter="12">
+          <a-col :span="10">
+            <a-form-item>
+              <template #label>
+                所属分组
+                <a-tooltip title="分组决定路由与权限范围；这条渠道能跑哪些模型由下面的白名单决定。">
+                  <InfoCircleOutlined class="label-hint" />
+                </a-tooltip>
+              </template>
+              <a-select v-model:value="form.group_id">
+                <a-select-option v-for="g in groups" :key="g.id" :value="g.id">{{ g.name }}</a-select-option>
+              </a-select>
+            </a-form-item>
+          </a-col>
+          <a-col :span="14">
+            <a-form-item label="启用">
+              <div class="switch-row">
+                <a-switch v-model:checked="form.enabled" />
+                <span class="switch-hint">停用的渠道不参与路由</span>
+              </div>
+            </a-form-item>
+          </a-col>
+        </a-row>
+
+        <a-form-item>
+          <template #label>
+            渠道图标
+            <a-tooltip title="「从上游获取」会去渠道的上游站点抓一次 favicon；抓不到就用默认图标（渠道名首字母）。也可以直接填一个 emoji。">
+              <InfoCircleOutlined class="label-hint" />
+            </a-tooltip>
+          </template>
           <div class="icon-row">
             <ChannelIcon :name="form.name" :icon="form.icon" :size="28" />
             <a-input
@@ -938,55 +1006,51 @@ onBeforeUnmount(() => {
               <CloudDownloadOutlined /> 从上游获取
             </a-button>
           </div>
-          <div class="field-hint">
-            「从上游获取」会去渠道的上游站点抓一次 favicon；抓不到就用默认图标（渠道名首字母）。
-            也可以直接填一个 emoji 当图标。
-          </div>
         </a-form-item>
 
-        <a-row :gutter="8">
+        <a-row :gutter="12">
           <a-col :span="14">
-            <a-form-item label="出站代理">
+            <a-form-item>
+              <template #label>
+                出站代理
+                <a-tooltip title="代理不可用时请求直接失败，不会悄悄改成直连。">
+                  <InfoCircleOutlined class="label-hint" />
+                </a-tooltip>
+              </template>
               <a-select v-model:value="form.proxy_id">
                 <a-select-option :value="0">直连（不使用代理）</a-select-option>
                 <a-select-option v-for="p in proxies" :key="p.id" :value="p.id">
                   {{ p.name }}（{{ p.protocol }}://{{ p.host }}:{{ p.port }}）{{ p.enabled ? '' : ' · 已停用' }}
                 </a-select-option>
               </a-select>
-              <div class="field-hint">代理不可用时请求直接失败，不会悄悄改成直连。</div>
             </a-form-item>
           </a-col>
           <a-col :span="10">
-            <a-form-item label="并发上限">
+            <a-form-item>
+              <template #label>
+                并发上限
+                <a-tooltip title="同时发往这条上游的请求数上限；0 表示不限制。">
+                  <InfoCircleOutlined class="label-hint" />
+                </a-tooltip>
+              </template>
               <a-input-number v-model:value="form.max_concurrency" :min="0" style="width: 100%" />
-              <div class="field-hint">0 表示不限制。</div>
             </a-form-item>
           </a-col>
         </a-row>
 
-        <a-form-item label="模型白名单与映射" required>
+        <a-form-item required>
+          <template #label>
+            模型白名单与映射
+            <a-tooltip title="「模型映射」把客户端请求的模型名换成上游真正认识的模型名，留空表示同名；需要单独出口的模型可以在「代理」列覆盖渠道设置。">
+              <InfoCircleOutlined class="label-hint" />
+            </a-tooltip>
+          </template>
           <ModelWhitelistEditor v-model:items="form.models" :proxies="proxies" :currency="form.currency" />
-          <div class="field-hint">
-            只有写在这里的模型才会被路由到这条渠道。「模型映射」把客户端请求的模型名
-            换成上游真正认识的模型名，留空表示同名；需要单独出口的模型可以在「代理」列覆盖渠道设置。
-          </div>
         </a-form-item>
 
-        <a-row :gutter="8">
-          <a-col :span="12">
-            <a-form-item label="启用">
-              <a-switch v-model:checked="form.enabled" />
-              <div class="field-hint">停用的渠道不参与路由。</div>
-            </a-form-item>
-          </a-col>
-          <a-col :span="12">
-            <a-form-item label="优先级">
-              <div class="field-hint" style="margin-top: 0">
-                {{ editing ? '在列表里拖动这一行即可调整，越靠上越优先。' : '新渠道会排在所属分组的最后。' }}
-              </div>
-            </a-form-item>
-          </a-col>
-        </a-row>
+        <div class="form-note">
+          优先级：{{ editing ? '在列表里拖动这一行即可调整，越靠上越优先。' : '新渠道会排在所属分组的最后。' }}
+        </div>
       </a-form>
     </a-modal>
 
@@ -1033,6 +1097,30 @@ onBeforeUnmount(() => {
 .toolbar-spacer { flex: 1; }
 .toolbar-hint { color: var(--color-text-secondary); font-size: 13px; }
 .field-hint { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
+/* ---- 渠道表单（弹窗里那一段）----
+   antd 纵向表单每个字段下方留 24px，字段一多整页就散。
+   收到 12px 后再把标签与控件贴紧一点，一屏能多放两三段。 */
+.channel-form :deep(.ant-form-item) { margin-bottom: 12px; }
+.channel-form :deep(.ant-form-item-label) { padding-bottom: 2px; }
+.channel-form :deep(.ant-form-item-label > label) { height: 22px; }
+/* 标签旁的 ⓘ：说明文字收进 tooltip 后，标签本身要给出「这里有说明」的线索。
+   用小一号的次要色，别让它跟标签抢注意力 */
+.label-hint {
+  margin-left: 4px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  cursor: help;
+}
+/* 整行说明（不挂在某个输入框下面，所以左边距按表单项对齐） */
+.form-note {
+  margin: -4px 0 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+/* 开关与它的说明同一行：开关只有 16px 高，下面再单起一行说明太浪费 */
+.switch-row { display: flex; align-items: center; gap: 8px; height: 32px; }
+.switch-hint { font-size: 12px; color: var(--color-text-secondary); }
 /* 白名单抽屉的说明块：用左侧一道主色竖线代替整块告警底色。
    这句话是「怎么填」的说明，不是需要警惕的异常状态；用 a-alert 会得到
    一整块主题色底 + 图标，在抽屉里比它要说明的表格还抢眼 */
