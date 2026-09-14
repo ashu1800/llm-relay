@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
-import { ReloadOutlined, DownloadOutlined, SearchOutlined } from '@ant-design/icons-vue'
+import { ReloadOutlined, DownloadOutlined } from '@ant-design/icons-vue'
+import { useRoute } from 'vue-router'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import GroupTag from '@/components/GroupTag.vue'
 import { onLive } from '@/composables/useLive'
 import { symbolOf } from '@/utils/money'
-import type { ChannelGroup, Paged, RequestLog } from '@/api/types'
+import type { Channel, ChannelGroup, Paged, RequestLog } from '@/api/types'
 
 // 分组表：日志里的模型、密钥、分组三处标签共用该请求所属分组的颜色。
 //
@@ -43,16 +44,31 @@ const total = ref(0)
 const detailOpen = ref(false)
 const current = ref<RequestLog | null>(null)
 
+// 'all' 是这个项目里「全部」的哨兵值（渠道页与看板同一套）。
+// 不用 0：后端的约定是「不传参数＝不筛选」，而界面上的「全部分组」与
+// 「分组 id=0」是两件事，混用迟早出错
+const ALL = 'all'
+
 const query = reactive({
   page: 1,
   page_size: 50,
-  model: '',
-  trace_id: '',
-  // '' 表示不限；'success' / 'error' 走状态码区间，其余按精确状态码
-  status: '',
+  group_id: ALL,
+  channel_id: ALL,
+  model: ALL,
   // '' 表示不限时间范围
   range: 'today'
 })
+
+// 工具栏之外的额外条件：工具栏只留分组 / 渠道 / 模型三个下拉，
+// 但 trace_id（从一条报错跳到完整链路）与「只看失败」是排障时要用的。
+// 它们从 URL 进来（?trace_id=… / ?status_class=error），以可关闭的小标签
+// 出现在工具栏末尾 —— 平时不占地方，要用时也没丢。
+const extra = reactive({ trace_id: '', status_class: '' })
+
+const route = useRoute()
+
+// 渠道列表：三个下拉的候选与渠道列都取自它（分组列表另见 groups）
+const channels = ref<Channel[]>([])
 
 // 「今天」按本地零点算，而不是「最近 24 小时」：
 // 后者在早上看会把昨天的调用也算进来，与看板上的今日口径对不上 ——
@@ -63,14 +79,6 @@ const rangeOptions = [
   { value: '7d', label: '近 7 天' },
   { value: '30d', label: '近 30 天' },
   { value: '', label: '不限时间' }
-]
-
-const statusOptions = [
-  { value: '', label: '全部状态' },
-  { value: 'success', label: '仅成功' },
-  { value: 'error', label: '仅失败' },
-  { value: '429', label: '429 限流' },
-  { value: '502', label: '502 上游错误' }
 ]
 
 // rangeToSince 把「近 N 小时/天」换算成绝对时刻。
@@ -98,30 +106,137 @@ function buildParams(includePaging: boolean): URLSearchParams {
     params.set('page', String(query.page))
     params.set('page_size', String(query.page_size))
   }
-  if (query.model.trim()) params.set('model', query.model.trim())
-  if (query.trace_id.trim()) params.set('trace_id', query.trace_id.trim())
-  if (query.status === 'success' || query.status === 'error') {
-    params.set('status_class', query.status)
-  } else if (query.status.trim()) {
-    params.set('status', query.status.trim())
-  }
+  // 三个下拉：'all' 就是不传（后端「不传参数＝不筛选」）
+  if (query.group_id !== ALL) params.set('group_id', query.group_id)
+  if (query.channel_id !== ALL) params.set('channel_id', query.channel_id)
+  if (query.model !== ALL) params.set('model', query.model)
+  // URL 带来的额外条件，同样要进导出，否则导出的不是当前看到的这批
+  if (extra.trace_id) params.set('trace_id', extra.trace_id)
+  if (extra.status_class) params.set('status_class', extra.status_class)
   const since = rangeToSince(query.range)
   if (since) params.set('since', since)
   return params
+}
+
+const groupOptions = computed(() => [
+  { value: ALL, label: '全部分组' },
+  ...groups.value.map((g) => ({ value: String(g.id), label: g.name }))
+])
+
+// 选了分组就只列它的渠道。不收窄的话「分组 A + 属于分组 B 的渠道」这种组合
+// 能选出来，而它查出来永远是 0 条，看起来像日志丢了。
+const visibleChannels = computed(() =>
+  query.group_id === ALL
+    ? channels.value
+    : channels.value.filter((c) => String(c.group_id) === query.group_id)
+)
+
+// 渠道名没有唯一约束（不同分组可以重名），所以选项里带上分组名：
+// 否则下拉里出现两个「D1」时，分不清要选哪一个
+function channelLabel(c: Channel) {
+  const g = groups.value.find((x) => x.id === c.group_id)
+  return g ? c.name + ' · ' + g.name : c.name
+}
+
+const channelOptions = computed(() => [
+  { value: ALL, label: '全部渠道' },
+  ...visibleChannels.value.map((c) => ({ value: String(c.id), label: channelLabel(c) }))
+])
+
+// 模型候选取渠道白名单（/channels 的 models）：它是系统当前认识的模型全集。
+// 不从「这段时间有流量的模型」取 —— 那样下拉会随流量变动，
+// 昨天用过的模型今天就选不出来了。
+const visibleModels = computed(() => {
+  const src =
+    query.channel_id === ALL
+      ? visibleChannels.value
+      : visibleChannels.value.filter((c) => String(c.id) === query.channel_id)
+  return [...new Set(src.flatMap((c) => c.models || []))].sort()
+})
+
+const modelOptions = computed(() => [
+  { value: ALL, label: '全部模型' },
+  ...visibleModels.value.map((m) => ({ value: m, label: m }))
+])
+
+// syncFilters 把下级筛选夹回合法值：换了分组，原来选的渠道可能已不属于它；
+// 换了分组或渠道，原来选的模型可能已不在候选里。
+// 不夹的话查询条件会停在一个空集合上（列表恒为 0 条），而界面上看不出原因。
+function syncFilters() {
+  if (
+    query.channel_id !== ALL &&
+    !visibleChannels.value.some((c) => String(c.id) === query.channel_id)
+  ) {
+    query.channel_id = ALL
+  }
+  if (query.model !== ALL && !visibleModels.value.includes(query.model)) {
+    query.model = ALL
+  }
+}
+
+// 三个下拉都用 @change + v-model：a-select 的 change 传的是**值**
+// （a-radio-group 传的是事件对象，两者不一样，看板上踩过），
+// 这里仍显式赋值一次 —— 不依赖 v-model 与 change 的先后顺序。
+function onGroupChange(v: string) {
+  query.group_id = v
+  syncFilters()
+  search()
+}
+
+function onChannelChange(v: string) {
+  query.channel_id = v
+  syncFilters()
+  search()
+}
+
+function onModelChange(v: string) {
+  query.model = v
+  search()
+}
+
+// applyUrlFilters 只在进入页面时读一次 URL：这个页面的筛选状态不进地址栏，
+// 免得用户以为地址栏能当书签用、却越用越乱。
+function applyUrlFilters() {
+  const tid = String(route.query.trace_id || '').trim()
+  if (tid) extra.trace_id = tid
+  const sc = String(route.query.status_class || '').trim()
+  if (sc === 'error' || sc === 'success') extra.status_class = sc
+}
+
+function clearExtra(key: 'trace_id' | 'status_class') {
+  extra[key] = ''
+  search()
+}
+
+// 详情里的「只看这条链路」：原来工具栏上有个 trace_id 输入框，
+// 但 trace_id 是从日志详情里才看得到的东西 —— 入口放在看得见它的地方更顺手。
+function onlyThisTrace() {
+  if (!current.value) return
+  extra.trace_id = current.value.trace_id
+  detailOpen.value = false
+  search()
 }
 
 // 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
 // 表格紧接着显示「暂无数据」，用户会以为这段时间本来就没有调用
 const loadError = ref('')
 
-// loadGroups 只在首次加载时取一次：分组是低频变更的配置，
-// 跟着每次翻页/刷新去拉一份纯属浪费（日志页刷新很频繁）
+// loadGroups 只在首次加载时取一次：分组与渠道是低频变更的配置，
+// 跟着每次翻页/刷新去拉一份纯属浪费（日志页刷新很频繁）。
+//
+// 它同时是三件事的数据源，所以拿不到时的降级要各自说明：
+// 分组颜色（模型/密钥/分组三列标签）、三个下拉的候选、渠道列的名称。
 async function loadGroups() {
   try {
-    const res = await api.get<{ items: ChannelGroup[] }>('/groups')
-    groups.value = res.items || []
+    const [g, c] = await Promise.all([
+      api.get<{ items: ChannelGroup[] }>('/groups'),
+      api.get<{ items: Channel[] }>('/channels')
+    ])
+    groups.value = g.items || []
+    channels.value = c.items || []
   } catch {
-    // 拿不到分组不影响看日志：标签会退回按名字派生的颜色
+    // 拿不到不影响看日志：标签会退回按名字派生的颜色，下拉只剩「全部」，
+    // 渠道列显示日志里记下的名字
   }
 }
 
@@ -356,12 +471,13 @@ const pagination = computed(() => ({
 }))
 
 // 实时插入：服务端每秒查一次新日志（id 增量），有就推过来。
-// 只在「看的是第一页且没有筛选」时插进去 —— 翻了页或筛了模型时，
+// 只在「看的是第一页且没有任何筛选」时插进去 —— 翻了页或筛过之后，
 // 新来的日志不一定属于当前视图，硬插会让列表与筛选条件对不上。
 onLive('logs', (items: RequestLog[]) => {
   if (!Array.isArray(items) || !items.length) return
   if (query.page !== 1) return
-  if (query.model.trim() || query.trace_id.trim() || query.status) return
+  if (query.group_id !== ALL || query.channel_id !== ALL || query.model !== ALL) return
+  if (extra.trace_id || extra.status_class) return
   // 新日志的时间一定落在当前时间范围里（今天/近 1 小时……），
   // 只有「不限时间」之外的范围需要担心，而边界只差几毫秒，不值得再过滤一次
   const fresh = items.filter((it) => !rows.value.some((r) => r.id === it.id))
@@ -371,9 +487,11 @@ onLive('logs', (items: RequestLog[]) => {
 })
 
 onMounted(() => {
-  // 分组必须先加载：模型/密钥/分组三列的颜色都取自它，
-  // 拿不到就会退回「按名字派生」，三列出现三种颜色（实测踩过）
+  // 分组与渠道必须先加载：三列标签的颜色、三个下拉的候选、渠道列的名称
+  // 都取自它们，拿不到就会退回「按名字派生」，三列出现三种颜色（实测踩过）
   loadGroups()
+  // URL 里的额外条件要在第一次取数之前生效，否则会先闪一次全量列表
+  applyUrlFilters()
   load()
 })
 </script>
@@ -386,27 +504,24 @@ onMounted(() => {
           <a-button :loading="loading" @click="load"><ReloadOutlined /> 刷新</a-button>
           <a-button :loading="exporting" @click="exportCsv"><DownloadOutlined /> 导出</a-button>
         </div>
-        <a-input
-          v-model:value="query.model"
-          placeholder="按模型筛选"
-          allow-clear
-          style="width: 170px"
-          @press-enter="search"
-        >
-          <template #prefix><SearchOutlined /></template>
-        </a-input>
-        <a-input
-          v-model:value="query.trace_id"
-          placeholder="trace_id 精确查找"
-          allow-clear
-          style="width: 200px"
-          @press-enter="search"
+        <!-- 三个下拉都是「改了即生效」，所以没有「查询」按钮（左侧也已有「刷新」） -->
+        <a-select
+          v-model:value="query.group_id"
+          :options="groupOptions"
+          style="width: 150px"
+          @change="onGroupChange"
         />
         <a-select
-          v-model:value="query.status"
-          :options="statusOptions"
-          style="width: 130px"
-          @change="search"
+          v-model:value="query.channel_id"
+          :options="channelOptions"
+          style="width: 200px"
+          @change="onChannelChange"
+        />
+        <a-select
+          v-model:value="query.model"
+          :options="modelOptions"
+          style="width: 180px"
+          @change="onModelChange"
         />
         <a-select
           v-model:value="query.range"
@@ -414,7 +529,18 @@ onMounted(() => {
           style="width: 130px"
           @change="search"
         />
-        <a-button type="primary" @click="search">查询</a-button>
+        <!-- 额外条件：只从 URL 或详情里进来，平时不占地方 -->
+        <a-tag
+          v-if="extra.trace_id"
+          closable
+          :title="extra.trace_id"
+          @close="clearExtra('trace_id')"
+        >
+          链路 {{ extra.trace_id.slice(0, 8) }}…
+        </a-tag>
+        <a-tag v-if="extra.status_class" closable @close="clearExtra('status_class')">
+          {{ extra.status_class === 'error' ? '仅失败' : '仅成功' }}
+        </a-tag>
       </div>
 
       <DataState
@@ -430,10 +556,10 @@ onMounted(() => {
         :pagination="pagination"
         row-key="id"
         size="small"
-        :scroll="{ x: 1274 }"
+        :scroll="{ x: 1384 }"
       >
         <template #emptyText>
-          <a-empty description="当前筛选条件下没有日志，可放宽筛选条件：把时间范围改成「近 7 天」，或清空模型 / trace_id" />
+          <a-empty description="当前筛选条件下没有日志，可放宽筛选条件：把时间范围改成「近 7 天」，或把分组 / 渠道 / 模型改回「全部」" />
         </template>
         <a-table-column title="请求时间" :width="155" fixed="left">
           <template #default="{ record }">{{ fmtTime(record.created_at) }}</template>
@@ -465,6 +591,15 @@ onMounted(() => {
         <a-table-column title="分组" :width="110" ellipsis>
           <template #default="{ record }">
             <GroupTag :name="groupName(record.group_id)" v-bind="tagColorOf(record.group_id)" />
+          </template>
+        </a-table-column>
+        <!-- 渠道列是随「按渠道筛选」一起加的：筛了渠道却在列表里看不出
+             每行走的是哪条渠道，这个筛选等于只生效一半。
+             失败请求没走到渠道（channel_id=0）、渠道事后被删都会是空值，显示 — -->
+        <a-table-column title="渠道" :width="110" ellipsis>
+          <template #default="{ record }">
+            <span v-if="record.channel_name">{{ record.channel_name }}</span>
+            <span v-else class="muted">—</span>
           </template>
         </a-table-column>
         <a-table-column title="词元（输入/输出/缓存）" :width="180">
@@ -511,7 +646,10 @@ onMounted(() => {
 
     <a-drawer v-model:open="detailOpen" title="调用详情" width="720">
       <a-descriptions v-if="current" :column="1" bordered size="small">
-        <a-descriptions-item label="Trace ID">{{ current.trace_id }}</a-descriptions-item>
+        <a-descriptions-item label="Trace ID">
+          {{ current.trace_id }}
+          <a class="trace-link" @click="onlyThisTrace">只看这条链路</a>
+        </a-descriptions-item>
         <a-descriptions-item label="请求模型">
           <GroupTag :name="current.model_requested" v-bind="tagColorOf(current.group_id)" />
         </a-descriptions-item>
@@ -578,6 +716,9 @@ onMounted(() => {
 .toolbar-left { display: flex; gap: var(--gap); }
 .sub-text { font-size: 12px; color: var(--color-text-secondary); }
 .token-cell { font-variant-numeric: tabular-nums; }
+/* 详情里的「只看这条链路」：贴着 trace_id 放，弱化成次要操作，
+   别让人以为它是个必须点的按钮 */
+.trace-link { margin-left: 8px; font-size: 12px; }
 
 /* 模型、密钥、分组三列各是一个胶囊，用的是同一个组件（components/GroupTag.vue）
    与同一个颜色 —— 该请求所属分组的颜色。

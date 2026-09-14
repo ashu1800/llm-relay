@@ -1294,6 +1294,16 @@ func (s *Server) logFilters(c *gin.Context) (*gorm.DB, bool) {
 	case "error":
 		q = q.Where("status_code >= 400")
 	}
+	// 分组筛选：界面上「按分组看」是常态视角。
+	// 不 join channels 取它现在的分组 —— 日志里的归属是当时那一刻的快照，
+	// 渠道后来换了分组不该把历史账挪到新分组去（与 cost_currency 同一个道理）。
+	if gid := strings.TrimSpace(c.Query("group_id")); gid != "" {
+		v, err := strconv.ParseUint(gid, 10, 64)
+		if err != nil || v == 0 {
+			return bad("group_id", gid)
+		}
+		q = q.Where("group_id = ?", v)
+	}
 	if cid := strings.TrimSpace(c.Query("channel_id")); cid != "" {
 		v, err := strconv.ParseUint(cid, 10, 64)
 		if err != nil || v == 0 {
