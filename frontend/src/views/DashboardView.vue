@@ -18,6 +18,8 @@ import { costsText, currencyKeys, moneyText, primaryCurrency, symbolOf } from '@
 import EChart from '@/components/EChart.vue'
 import { useChartTheme } from '@/utils/chartTheme'
 import DataState from '@/components/DataState.vue'
+import type { Channel, ChannelGroup } from '@/api/types'
+import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
 
 type Summary = {
   requests: number
@@ -87,7 +89,133 @@ const ranges = [
   { key: '7d', label: '近7天' },
   { key: '30d', label: '近30天' }
 ]
+// ---- 筛选条件（时间范围 / 分组 / 渠道）全部持久化 ----
+//
+// 为什么要持久化：「只看某个分组」是常态视角，每次打开页面、或从别的页面
+// 切回来都要重选一遍，是纯粹的重复劳动。与渠道列表页的筛选同一套做法
+// （见 utils/persistedChoice.ts）。
+const RANGE_KEY = 'dashboard-range'
+const GROUP_KEY = 'dashboard-group'
+const CHANNEL_KEY = 'dashboard-channel'
+
+// 哨兵值用 'all' 而不是 0：后端的约定是「不传参数＝不筛选」，
+// 而界面上的「全部分组」与「分组 id=0」是两件事，混用迟早出错
+const ALL = 'all'
+
 const range = ref('today')
+const groupFilter = ref<string>(ALL)
+const channelFilter = ref<string>(ALL)
+// 筛选下拉的候选：来自管理接口，不是统计接口 —— 统计接口只回有流量的渠道，
+// 而「筛一条今天还没被用过的渠道」是合理需求（结果就是 0）
+const filterGroups = ref<ChannelGroup[]>([])
+const filterChannels = ref<Channel[]>([])
+
+const groupOptions = computed(() => [
+  { value: ALL, label: '全部分组' },
+  ...filterGroups.value.map((g) => ({ value: String(g.id), label: g.name }))
+])
+
+// 渠道名没有唯一约束（不同分组可以重名），所以选项里带上分组名：
+// 否则下拉里出现两个「D1」时，分不清要选哪一个
+function channelLabel(c: Channel) {
+  const g = filterGroups.value.find((x) => x.id === c.group_id)
+  return g ? c.name + ' · ' + g.name : c.name
+}
+
+// 当前分组下可见的渠道：选了分组就只列它的渠道。
+// 不这么收窄的话，「分组 A + 属于分组 B 的渠道」这种组合能选出来，
+// 而它查出来永远是 0，看起来像数据丢了。
+const visibleChannels = computed(() =>
+  groupFilter.value === ALL
+    ? filterChannels.value
+    : filterChannels.value.filter((c) => String(c.group_id) === groupFilter.value)
+)
+
+const channelOptions = computed(() => [
+  { value: ALL, label: '全部渠道' },
+  ...visibleChannels.value.map((c) => ({ value: String(c.id), label: channelLabel(c) }))
+])
+
+function persistFilters() {
+  writeStoredChoice(RANGE_KEY, range.value)
+  writeStoredChoice(GROUP_KEY, groupFilter.value)
+  writeStoredChoice(CHANNEL_KEY, channelFilter.value)
+}
+
+// 存下来的筛选值可能指向已经删掉的分组 / 渠道。那种状态的表现是
+// 「所有数字都是 0」，从界面上完全看不出原因 —— 所以列表到手后校验一次，
+// 不合法就退回「全部」（与渠道列表页的 applyStoredGroupFilter 同一套做法）。
+function applyStoredFilters() {
+  range.value = readStoredChoice(RANGE_KEY, ranges.map((r) => r.key), 'today')
+  groupFilter.value = readStoredChoice(
+    GROUP_KEY,
+    [ALL, ...filterGroups.value.map((g) => String(g.id))],
+    ALL
+  )
+  // 渠道的允许集合按「当前分组下可见的渠道」算，否则会恢复出
+  // 「分组 A + 属于 B 的渠道」这种共存状态
+  channelFilter.value = readStoredChoice(
+    CHANNEL_KEY,
+    [ALL, ...visibleChannels.value.map((c) => String(c.id))],
+    ALL
+  )
+  persistFilters()
+}
+
+async function loadFilters() {
+  try {
+    const [g, c] = await Promise.all([
+      api.get<{ items: ChannelGroup[] }>('/groups'),
+      api.get<{ items: Channel[] }>('/channels')
+    ])
+    filterGroups.value = g.items || []
+    filterChannels.value = c.items || []
+  } catch {
+    // 拉不到就只剩「全部」两个选项，看板本身照常取数 ——
+    // 一个筛选框不该让整页打不开
+  }
+  applyStoredFilters()
+}
+
+// 注意：a-radio-group 的 change 给的是**事件对象**，不是值（a-select 给的是值，
+// 两者不一样）。所以这里不接收参数、也不赋值 —— v-model 已经更新过 range。
+// 之前写成 onRangeChange(v) { range.value = v }，range 就变成了一个事件对象：
+// 查询串成了 ?range=[object Object]，后端认不出、退回「今天」，
+// 存储里也写进 "[object Object]" —— 界面上筛选项看着是选中的，数据却是今天的。
+function onRangeChange() {
+  persistFilters()
+  load()
+}
+
+function onGroupChange(v: string) {
+  groupFilter.value = v
+  // 换分组后原来选的渠道可能不属于新分组，那组组合查出来永远是 0
+  if (!channelOptions.value.some((o) => o.value === channelFilter.value)) {
+    channelFilter.value = ALL
+  }
+  persistFilters()
+  load()
+}
+
+function onChannelChange(v: string) {
+  channelFilter.value = v
+  persistFilters()
+  load()
+}
+
+// 只有筛选条件、不含时间范围：热力图的时间轴是固定的近 7 天，不吃 range。
+// 分组 / 渠道不选时不带参数（后端把「不传」当作不筛选）
+function filterSuffix() {
+  let s = ''
+  if (groupFilter.value !== ALL) s += '&group_id=' + groupFilter.value
+  if (channelFilter.value !== ALL) s += '&channel_id=' + channelFilter.value
+  return s
+}
+
+function statsQuery() {
+  return '?range=' + range.value + filterSuffix()
+}
+
 
 // 与 theme.css 的语义色保持一致，保证图表和界面同色系
 // 图表配色跟着主题走：option 里不再写死颜色（详见 utils/chartTheme.ts）
@@ -122,7 +250,7 @@ async function load() {
   loading.value = true
   loadError.value = ''
   try {
-    const q = '?range=' + range.value
+    const q = statsQuery()
     // 「服务状态」卡片移除后，healthz 与 system/info 已无人读取，
     // 一并去掉：它们挂在 Promise.all 里，任何一个失败都会让整个看板报错
     const [s, ts, m, ch, hm] = await Promise.all([
@@ -130,7 +258,7 @@ async function load() {
       api.get<{ bucket: string; items: SeriesPoint[] }>('/stats/timeseries' + q),
       api.get<{ items: GroupItem[] }>('/stats/models' + q + '&limit=8'),
       api.get<{ items: GroupItem[] }>('/stats/channels' + q + '&limit=8'),
-      api.get<{ items: HeatItem[] }>('/stats/heatmap?days=' + HEAT_DAYS)
+      api.get<{ items: HeatItem[] }>('/stats/heatmap?days=' + HEAT_DAYS + filterSuffix())
     ])
     summary.value = s
     series.value = ts.items || []
@@ -191,7 +319,8 @@ const trendOption = computed(() => {
     yAxis: [
       {
         type: 'value',
-        name: '金额',
+        // 筛选把币种钉死时把符号写进轴名：这时左轴上的数只可能是那一种钱
+        name: scopeCurrency.value ? '金额（' + symbolOf(scopeCurrency.value) + '）' : '金额',
         nameTextStyle: axisName,
         splitLine: { lineStyle: { color: ct.value.split, type: 'dashed' } },
         axisLine: { show: false },
@@ -251,7 +380,29 @@ const TOKEN_PARTS: { name: string; color: string; pick: (s: Summary | null) => n
 // 之所以不做「合计」：SUM 只在同一币种内成立，把人民币和美元加起来会得到一个
 // 既不是人民币也不是美元的数，而且账面上看不出任何异常。
 const costCurrencies = computed(() => currencyKeys(summary.value?.costs))
-const costCur = computed(() => primaryCurrency(summary.value?.costs))
+// 筛选范围把币种钉死时就用它，否则按原来的规则（CNY 优先，其余进提示）。
+//
+// 为什么需要：筛到一条只记美元账的渠道时，若还按「人民币优先」，
+// 大数字会是 ¥0.0000、真实金额被塞进「另有 $…」—— 同一块卡片上，
+// 最显眼的位置显示的是一个恒为 0 的数。
+const scopeCurrency = computed(() => {
+  if (channelFilter.value !== ALL) {
+    const c = filterChannels.value.find((x) => String(x.id) === channelFilter.value)
+    return (c?.currency ?? '').toUpperCase()
+  }
+  if (groupFilter.value !== ALL) {
+    const set = new Set(
+      filterChannels.value
+        .filter((c) => String(c.group_id) === groupFilter.value)
+        .map((c) => (c.currency ?? '').toUpperCase())
+    )
+    // 分组里混着两种币就不猜：交给 primaryCurrency，硬挑一个会让另一半金额
+    // 看起来像不存在
+    if (set.size === 1) return [...set][0]
+  }
+  return ''
+})
+const costCur = computed(() => scopeCurrency.value || primaryCurrency(summary.value?.costs))
 const costValue = computed(() => (summary.value ? Number(summary.value.costs?.[costCur.value] ?? 0) : null))
 const costHint = computed(() => {
   const rest = costCurrencies.value.filter((c) => c !== costCur.value)
@@ -356,9 +507,15 @@ const pieCurrencies = computed(() => {
 })
 const pieCurrency = ref('')
 watch(
-  pieCurrencies,
-  (list) => {
-    // 选中的币种消失了（换时间范围）就回到第一个，不留一个空图
+  [pieCurrencies, scopeCurrency],
+  ([list, scoped]) => {
+    // 筛选范围钉死了币种就跟着它走：筛到美元渠道而饼图还在算人民币占比，
+    // 会得到一张全是 0 的图
+    if (scoped && list.includes(scoped)) {
+      pieCurrency.value = scoped
+      return
+    }
+    // 选中的币种消失了（换时间范围 / 换筛选）就回到第一个，不留一个空图
     if (!list.includes(pieCurrency.value)) pieCurrency.value = list[0] ?? ''
   },
   { immediate: true }
@@ -498,24 +655,50 @@ onLive('stats', (data: Record<string, unknown>) => {
   // 首屏还没加载完时忽略推送：那一份由 load() 负责，
   // 提前合并会得到一个缺字段的 summary
   if (!summary.value) return
+  // 推来的永远是「今天 + 全站」那一份（见 live.go），所以只在这个视角下合并。
+  // 否则选着「近7天」或某个分组时，卡片会在两秒后被悄悄换成今天的全站数字：
+  // 两个数看上去都像真的，谁也不会去怀疑。
+  // 筛选视角靠「刷新」按钮取数 —— 要让推送按筛选走，得给每个订阅者存一份
+  // 筛选状态，那是另一件事。
+  if (range.value !== 'today' || groupFilter.value !== ALL || channelFilter.value !== ALL) return
   summary.value = { ...summary.value, ...(data as object) } as Summary
 })
 
-onMounted(load)
+// 顺序不能反：先把分组 / 渠道列表拿到、把存下来的筛选值校验过，再去取统计。
+// 反过来的话会先用旧值查一遍、再用校验后的值查一遍，
+// 中间那一帧的数字（以及可能的「筛选框显示 A、数字是全部」）都是错的。
+onMounted(async () => {
+  await loadFilters()
+  await load()
+})
 </script>
 
 <template>
   <div class="dashboard">
-    <!-- 工具栏：时间范围 + 刷新（对齐参考站 dashboard-toolbar） -->
+    <!-- 工具栏：时间范围 + 分组 / 渠道筛选 + 刷新（对齐参考站 dashboard-toolbar） -->
     <PageToolbar label="时间范围">
       <!-- 用 a-radio-group 而不是手写 <button>：
            这里原来写的是 class="pill-btn"，但那个类在项目里从未定义过，
            于是按钮一直是浏览器默认样式（灰底、深色描边、字号偏小），
            和其余部分完全不像一套东西。
            换成 Ant Design 的组件还能自动跟随明暗主题与设计令牌。 -->
-      <a-radio-group v-model:value="range" button-style="solid" @change="load">
+      <a-radio-group v-model:value="range" button-style="solid" @change="onRangeChange">
         <a-radio-button v-for="r in ranges" :key="r.key" :value="r.key">{{ r.label }}</a-radio-button>
       </a-radio-group>
+      <!-- 分组 / 渠道紧跟在时间范围右边：它们回答的是同一类问题
+           （「下面这些数字算的是哪一部分」），放在一起才读得成一句话 -->
+      <a-select
+        v-model:value="groupFilter"
+        :options="groupOptions"
+        style="width: 150px"
+        @change="onGroupChange"
+      />
+      <a-select
+        v-model:value="channelFilter"
+        :options="channelOptions"
+        style="width: 200px"
+        @change="onChannelChange"
+      />
       <template #right>
         <a-button :loading="loading" @click="load"><ReloadOutlined /> 刷新</a-button>
       </template>

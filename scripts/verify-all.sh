@@ -56,7 +56,7 @@ echo
 
 # python 用例：统一以 ALL_PASS 作为通过标志
 for s in test-group-update.py test-key-whitelist.py test-delete-semantics.py \
-         test-accept-encoding.py test-log-filters.py test-csrf.py; do
+         test-accept-encoding.py test-log-filters.py test-stats-filters.py test-csrf.py; do
   echo "########## $s ##########"
   out=$(python3 "scripts/$s" 2>&1)
   echo "$out" | tail -1

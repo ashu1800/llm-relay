@@ -138,7 +138,9 @@ func (s *Server) liveStatsLoop(ctx context.Context) {
 		}
 		start, end, _ := resolveRange("today")
 		qctx, cancel := context.WithTimeout(ctx, liveQueryTimeout)
-		data, err := s.summarySnapshotCtx(qctx, start, end)
+		// 零值筛选 = 全站：推送的视角固定是「今天 + 未筛选」，
+		// 前端只在同样视角下才合并它（见 DashboardView 的 onLive）
+		data, err := s.summarySnapshotCtx(qctx, start, end, statsFilter{})
 		cancel()
 		if err != nil {
 			continue
@@ -238,9 +240,10 @@ func (s *Server) liveSocket(c *gin.Context) {
 		}()
 
 		// 连上先补一份当前快照：不然要等到下一次变化才有东西显示，
-		// 而「打开页面后数字是空的」看起来就像坏了
+		// 而「打开页面后数字是空的」看起来就像坏了。
+		// 与 liveStatsLoop 同一口径：今天 + 全站（零值筛选）
 		start, end, _ := resolveRange("today")
-		if data, err := s.summarySnapshot(start, end); err == nil {
+		if data, err := s.summarySnapshot(start, end, statsFilter{}); err == nil {
 			_ = websocket.Message.Send(ws, string(mustJSON(liveMessage{Type: "stats", Data: data})))
 		}
 

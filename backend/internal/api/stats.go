@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"net/http"
 	"sort"
@@ -89,6 +90,77 @@ func localTZ() string {
 	return name
 }
 
+// statsFilter 是看板的筛选条件：按分组 / 按渠道，0 表示不筛选。
+//
+// 两个条件都落在 request_logs 自带的列上（channel_id / group_id 建表时就有索引），
+// 所以筛选只是加一个 WHERE：不需要改表，也**不去 join channels** —— join 会把
+// 「渠道后来换了分组」算到历史账上，而日志里的归属是当时那一刻的快照
+// （与 CostCurrency、PricingSnapshot 同一个道理）。
+type statsFilter struct {
+	GroupID   uint
+	ChannelID uint
+}
+
+// parseStatsFilter 解析 group_id / channel_id。
+//
+// 不传 = 不筛选；传了就必须是正整数，判据与请求日志的筛选一致
+// （/logs 用的是同一套）。非法值**不能**静默当成「不筛选」：那会得到一份
+// 看起来很正常、其实是全站的数字，而界面上明明选着某个分组 ——
+// 「静默变全量」比直接报错难查得多。
+func parseStatsFilter(c *gin.Context) (statsFilter, error) {
+	var f statsFilter
+	for _, p := range []struct {
+		name string
+		dst  *uint
+	}{{"group_id", &f.GroupID}, {"channel_id", &f.ChannelID}} {
+		raw := strings.TrimSpace(c.Query(p.name))
+		if raw == "" {
+			continue
+		}
+		v, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil || v == 0 {
+			return f, fmt.Errorf("参数 %s 非法: %s", p.name, raw)
+		}
+		*p.dst = uint(v)
+	}
+	return f, nil
+}
+
+// statsFilterOf 解析筛选；非法时已经把 400 写回去了，调用方看 ok 决定是否继续。
+func statsFilterOf(c *gin.Context) (statsFilter, bool) {
+	f, err := parseStatsFilter(c)
+	if err != nil {
+		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return f, false
+	}
+	return f, true
+}
+
+// where 返回可以直接拼在时间条件之后的片段与参数。
+//
+// 按需拼接，而不是写成 (? = 0 OR group_id = ?)：后者会让规划器放弃
+// group_id / channel_id 上的索引，退化成全表扫。
+func (f statsFilter) where() (string, []any) {
+	var sb strings.Builder
+	args := make([]any, 0, 2)
+	if f.GroupID > 0 {
+		sb.WriteString(" AND group_id = ?")
+		args = append(args, f.GroupID)
+	}
+	if f.ChannelID > 0 {
+		sb.WriteString(" AND channel_id = ?")
+		args = append(args, f.ChannelID)
+	}
+	return sb.String(), args
+}
+
+// json 把实际生效的筛选回显出去。
+// 接口的约定是「不传即全量」，把生效值写进响应，「参数没生效」才不会被
+// 读成「界面上那个筛选框没用」。
+func (f statsFilter) json() gin.H {
+	return gin.H{"group_id": f.GroupID, "channel_id": f.ChannelID}
+}
+
 type summaryRow struct {
 	Requests            int64   `gorm:"column:requests"`
 	Success             int64   `gorm:"column:success"`
@@ -102,30 +174,16 @@ type summaryRow struct {
 	AvgTotal            float64 `gorm:"column:avg_total"`
 }
 
-func (s *Server) statsSummary(c *gin.Context) {
-	start, end, _ := resolveRange(c.Query("range"))
-	data, err := s.summarySnapshot(start, end)
-	if err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
-		return
-	}
-	data["range"] = gin.H{
-		"key": c.Query("range"), "start": start.Format(time.RFC3339), "end": end.Format(time.RFC3339),
-	}
-	c.JSON(http.StatusOK, data)
-}
-
-// summarySnapshot 算出某个区间的汇总。抽出来是为了让实时推送复用同一套口径 ——
-// 看板上的数字与 WebSocket 推来的数字必须来自同一个查询，
-// 否则「刚刷新是 A、两秒后自己变成 B」这种不一致会让人怀疑看板本身。
-func (s *Server) summarySnapshot(start, end time.Time) (gin.H, error) {
-	return s.summarySnapshotCtx(context.Background(), start, end)
-}
-
-// summarySnapshotCtx 是带 ctx 的版本：实时推送循环要用它，
-// 这样关停与单次超时都能真的打断查询（没有 ctx 的查询只能干等）。
-func (s *Server) summarySnapshotCtx(ctx context.Context, start, end time.Time) (gin.H, error) {
-	const q = `SELECT
+// 概览的两条查询。写成常量是因为筛选条件要拼在时间条件之后
+// （见 statsFilter.where）：两条查询都得带上，少一条就会出现
+// 「请求数是筛选后的、金额却是全站的」。
+//
+// 金额那条拆成前后两段：它的 WHERE 后面还有 GROUP BY，条件必须插在
+// 两者**之间** —— 拼到整条语句末尾会变成
+// `GROUP BY cost_currency AND group_id = ?`，Postgres 报的是
+// 「AND 的参数必须是 boolean」（实测踩过）。
+const (
+	summarySQL = `SELECT
                 COUNT(*)::bigint AS requests,
                 COUNT(*) FILTER (WHERE status_code >= 200 AND status_code < 300)::bigint AS success,
                 COUNT(*) FILTER (WHERE status_code >= 400)::bigint AS errors,
@@ -138,22 +196,61 @@ func (s *Server) summarySnapshotCtx(ctx context.Context, start, end time.Time) (
                 COALESCE(AVG(total_ms) FILTER (WHERE total_ms > 0),0) AS avg_total
         FROM request_logs WHERE created_at >= ? AND created_at <= ?`
 
+	costSQLHead = `SELECT cost_currency, COALESCE(SUM(estimated_cost),0) AS cost
+                 FROM request_logs WHERE created_at >= ? AND created_at <= ?`
+	costSQLTail = ` GROUP BY cost_currency`
+)
+
+func (s *Server) statsSummary(c *gin.Context) {
+	f, ok := statsFilterOf(c)
+	if !ok {
+		return
+	}
+	start, end, _ := resolveRange(c.Query("range"))
+	data, err := s.summarySnapshotCtx(c.Request.Context(), start, end, f)
+	if err != nil {
+		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		return
+	}
+	data["range"] = gin.H{
+		"key": c.Query("range"), "start": start.Format(time.RFC3339), "end": end.Format(time.RFC3339),
+	}
+	data["filter"] = f.json()
+	c.JSON(http.StatusOK, data)
+}
+
+// summarySnapshot 算出某个区间的汇总。抽出来是为了让实时推送复用同一套口径 ——
+// 看板上的数字与 WebSocket 推来的数字必须来自同一个查询，
+// 否则「刚刷新是 A、两秒后自己变成 B」这种不一致会让人怀疑看板本身。
+//
+// 实时推送传零值筛选（今天 + 全站），与它推给前端的视角一致。
+func (s *Server) summarySnapshot(start, end time.Time, f statsFilter) (gin.H, error) {
+	return s.summarySnapshotCtx(context.Background(), start, end, f)
+}
+
+// summarySnapshotCtx 是带 ctx 的版本：实时推送循环要用它，
+// 这样关停与单次超时都能真的打断查询（没有 ctx 的查询只能干等）。
+func (s *Server) summarySnapshotCtx(ctx context.Context, start, end time.Time, f statsFilter) (gin.H, error) {
+	cond, filterArgs := f.where()
+
 	var row summaryRow
-	if err := s.deps.Store.DB().WithContext(ctx).Raw(q, start, end).Scan(&row).Error; err != nil {
+	if err := s.deps.Store.DB().WithContext(ctx).Raw(
+		summarySQL+cond, append([]any{start, end}, filterArgs...)...).Scan(&row).Error; err != nil {
 		return nil, err
 	}
 
 	// 金额按币种分开查，而不是在主查询里加 COALESCE(SUM(...) FILTER (WHERE ...))：
 	// 币种集合由数据决定，写死几种就会在将来多出一种时静默漏掉一笔钱。
 	// 单开一条查询也顺带避开了「对平均值再求平均」——AVG 没法按币种折叠。
+	//
+	// 筛选条件同样要带上：只给主查询加、忘了这条，会出现
+	// 「请求数是筛选后的、金额却是全站的」——两个数字都像是真的。
 	var costRows []struct {
 		Currency string          `gorm:"column:cost_currency"`
 		Cost     decimal.Decimal `gorm:"column:cost"`
 	}
 	if err := s.deps.Store.DB().WithContext(ctx).Raw(
-		`SELECT cost_currency, COALESCE(SUM(estimated_cost),0) AS cost
-                 FROM request_logs WHERE created_at >= ? AND created_at <= ?
-                 GROUP BY cost_currency`, start, end).Scan(&costRows).Error; err != nil {
+		costSQLHead+cond+costSQLTail, append([]any{start, end}, filterArgs...)...).Scan(&costRows).Error; err != nil {
 		return nil, err
 	}
 	costs := costsByCurrency{}
@@ -202,12 +299,17 @@ type seriesRow struct {
 }
 
 func (s *Server) statsTimeseries(c *gin.Context) {
+	f, ok := statsFilterOf(c)
+	if !ok {
+		return
+	}
 	start, end, bucket := resolveRange(c.Query("range"))
 	// 分桶粒度只允许白名单值，避免拼接进 SQL 造成注入
 	if bucket != "hour" && bucket != "day" {
 		bucket = "hour"
 	}
 
+	cond, filterArgs := f.where()
 	tz := localTZ()
 	sql := `SELECT date_trunc(?, created_at AT TIME ZONE ?) AT TIME ZONE ? AS bucket,
                 COUNT(*)::bigint AS requests,
@@ -217,11 +319,12 @@ func (s *Server) statsTimeseries(c *gin.Context) {
                 COALESCE(SUM(cached_tokens),0)::bigint AS cached_tokens,
                 cost_currency,
                 COALESCE(SUM(estimated_cost),0) AS cost
-        FROM request_logs WHERE created_at >= ? AND created_at <= ?
+        FROM request_logs WHERE created_at >= ? AND created_at <= ?` + cond + `
         GROUP BY bucket, cost_currency ORDER BY bucket`
 
 	var rows []seriesRow
-	if err := s.deps.Store.DB().Raw(sql, bucket, tz, tz, start, end).Scan(&rows).Error; err != nil {
+	if err := s.deps.Store.DB().Raw(sql,
+		append([]any{bucket, tz, tz, start, end}, filterArgs...)...).Scan(&rows).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
@@ -302,12 +405,17 @@ func (s *Server) groupStats(c *gin.Context, column string) {
 		writeUpstreamError(c, http.StatusBadRequest, "不支持的聚合维度", "invalid_request_error")
 		return
 	}
+	f, ok := statsFilterOf(c)
+	if !ok {
+		return
+	}
 	start, end, _ := resolveRange(c.Query("range"))
 	limit, _ := strconv.Atoi(orDefault(c.Query("limit"), "10"))
 	if limit < 1 || limit > 100 {
 		limit = 10
 	}
 
+	cond, filterArgs := f.where()
 	sql := `SELECT ` + column + ` AS name,
                 COUNT(*)::bigint AS requests,
                 COUNT(*) FILTER (WHERE status_code >= 400)::bigint AS errors,
@@ -319,11 +427,11 @@ func (s *Server) groupStats(c *gin.Context, column string) {
                 COALESCE(SUM(estimated_cost),0) AS cost,
                 COALESCE(SUM(total_ms) FILTER (WHERE total_ms > 0),0)::bigint AS ms_sum,
                 COUNT(*) FILTER (WHERE total_ms > 0)::bigint AS ms_n
-        FROM request_logs WHERE created_at >= ? AND created_at <= ? AND ` + column + ` <> ''
+        FROM request_logs WHERE created_at >= ? AND created_at <= ?` + cond + ` AND ` + column + ` <> ''
         GROUP BY ` + column + `, cost_currency`
 
 	var rows []groupRow
-	if err := s.deps.Store.DB().Raw(sql, start, end).Scan(&rows).Error; err != nil {
+	if err := s.deps.Store.DB().Raw(sql, append([]any{start, end}, filterArgs...)...).Scan(&rows).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
@@ -399,6 +507,10 @@ type heatRow struct {
 // statsHeatmap 返回近 N 天按「日期 x 小时」分布的热力数据。
 // 日期与小时按容器本地时区切分，否则跨时区看会整体错位。
 func (s *Server) statsHeatmap(c *gin.Context) {
+	f, ok := statsFilterOf(c)
+	if !ok {
+		return
+	}
 	days, _ := strconv.Atoi(orDefault(c.Query("days"), "30"))
 	if days < 1 || days > 180 {
 		days = 30
@@ -408,18 +520,24 @@ func (s *Server) statsHeatmap(c *gin.Context) {
 	// 悬浮提示要显示消费与 Token（与参考站的提示一致），所以一并聚合。
 	// COALESCE 是必需的：某个小时里只要有一行 estimated_cost 为 NULL，
 	// SUM 整体就会是 NULL，扫进 decimal 会直接报错。
-	const q = `SELECT to_char(created_at AT TIME ZONE ?, 'YYYY-MM-DD') AS day,
+	//
+	// 筛选同样生效：热力图的时间轴是固定的近 N 天（不跟时间范围走），
+	// 但「看哪条渠道」这个条件没有理由不生效 —— 否则同一屏上
+	// 卡片按渠道筛过、热力图还是全站，两个数字对不上。
+	cond, filterArgs := f.where()
+	q := `SELECT to_char(created_at AT TIME ZONE ?, 'YYYY-MM-DD') AS day,
                 EXTRACT(HOUR FROM created_at AT TIME ZONE ?)::int AS hour,
                 cost_currency,
                 COUNT(*)::bigint AS requests,
                 COALESCE(SUM(estimated_cost), 0) AS cost,
                 COALESCE(SUM(total_tokens), 0)::bigint AS tokens
-        FROM request_logs WHERE created_at >= ?
+        FROM request_logs WHERE created_at >= ?` + cond + `
         GROUP BY day, hour, cost_currency ORDER BY day, hour`
 
 	tz := localTZ()
 	var rows []heatRow
-	if err := s.deps.Store.DB().Raw(q, tz, tz, since).Scan(&rows).Error; err != nil {
+	if err := s.deps.Store.DB().Raw(q,
+		append([]any{tz, tz, since}, filterArgs...)...).Scan(&rows).Error; err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
