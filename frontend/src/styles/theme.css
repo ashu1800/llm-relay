@@ -84,29 +84,29 @@
   --font-family-mono: 'Cascadia Mono', 'JetBrains Mono', Consolas, 'SF Mono', Menlo,
     'DejaVu Sans Mono', 'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC',
     'Noto Sans CJK SC', monospace;
-  /* 列表（表格 / 列表）专用字体：对齐参考站的请求日志列表。
-     登录后实测参考站该列表的计算样式，事实如下：
-       · 字族就是全站那一套，**没有任何列表专用覆盖**；
-       · 字号 14px、字重 400、行高 22px、行高 40px，与本站完全一致；
-       · 无 letter-spacing、无 tabular-nums。
-     它实际是两套字体在混排（canvas 量宽判定，宽度相同即为同一字体）：
-       西文与数字 -> Harding（190.29，与纯 Harding 一致）
-       中文       -> 宋体（56，与纯 SimSun 一致）
-     这里只能取到中文那一半：Harding 是 Commercial Type 为《Nature》定制的
-     商业字体，参考站自托管的 TTF 无权分发。去掉它之后西文也会落到宋体。 */
-  /* 前面的衬线族负责西文与数字，后面的宋体负责中文 —— 与参考站同样的分工。
-     宋体自带宽度的西文字形（形如打字机体），不先用衬线挡一下，西文也会被它接管，
-     数字列就会和参考站差很远。
-     选 Book Antiqua 是量出来的，不是凭感觉：在参考站上（Harding 真实可用）
-     用 canvas 量同一串 "2026-09-12 13:05:50"（14px）：
+  /* 列表（表格 / 列表）专用字体：**只覆盖西文与数字，不碰中文**。
+     中文必须一路落到 --font-family-base，也就是左侧菜单那种字（Windows 上
+     是微软雅黑）——「表格里的中文和菜单里的中文不是一种字体」是肉眼一眼
+     就能看出来的不一致。
+
+     西文这一半是量出来的，不是凭感觉：对齐参考站的请求日志列表时，在参考站上
+     （其自托管的 Harding 真实可用）用 canvas 量同一串
+     "2026-09-12 13:05:50"（14px）：
        Harding 128.11 | Book Antiqua 129.42 | Georgia 130.83 | SimSun 133
        Times New Roman 118.6 | Palatino Linotype 117.82
      Book Antiqua 只差 1.31px，是可用系统字体里最接近的；Palatino 和 Times 反而
      差了 10px 以上。Georgia 也接近，但它用的是旧式数字（3/4/5/7/9 下沉），
-     表格里数字会上下跳动，不能放在前面兜底。 */
+     表格里数字会上下跳动，不能放在前面兜底。
+     Harding 是 Commercial Type 为《Nature》定制的商业字体，无权随本项目分发，
+     所以西文只能用最接近的系统衬线顶上。
+
+     这里原来还在宋体那一档写了 'STSong', SimSun, 'Songti SC', 宋体：
+     那是照搬参考站的分工（它西文 Harding、中文宋体）。但宋体是为印刷设计的
+     点阵时代字体，14px 的界面尺寸下笔画细且发虚，和菜单的雅黑并排就是两种
+     字体，所以中文这一档整段去掉，交回 base。
+     注意这几个西文衬线族都不含中文字形，中文不会在这里被拦住。 */
   --font-family-list: 'Book Antiqua', Georgia, 'Palatino Linotype', 'Times New Roman',
-    'STSong', SimSun, 'Songti SC', 宋体, 'Hiragino Sans GB', STHeiti,
-    'WenQuanYi Micro Hei', var(--font-family-base);
+    var(--font-family-base);
 
   --font-size-base: 16px;
   --font-size-panel: 14px;
@@ -217,7 +217,9 @@ a:hover { opacity: 0.85; }
   white-space: nowrap;
 }
 
-/* 表格与列表统一用列表字体（变量定义见文件顶部） */
+/* 表格与列表统一用列表字体（变量定义见文件顶部）。
+   这个字族只接管西文与数字，中文会继续落到 --font-family-base，
+   与左侧菜单保持一致。 */
 .ant-table-thead > tr > th,
 .ant-table-tbody > tr > td,
 .ant-list {

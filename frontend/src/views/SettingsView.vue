@@ -305,7 +305,11 @@ onMounted(load)
 .count-value { font-size: 20px; font-weight: 600; color: var(--color-primary); }
 .count-label { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
 .span-line { margin-top: 12px; font-size: 12px; color: var(--color-text-secondary); }
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* 等宽片段用全站那一套等宽字族，而不是就地写死一串：
+   写死的 ui-monospace/monospace 没有中文回退，正文里「[已隐藏]」这种带中文的
+   片段会落到浏览器给 monospace 配的中文字体（Windows 上又是宋体），
+   于是又出现一种和左侧菜单不一致的中文字。变量里已经补好了中文回退。 */
+.mono { font-family: var(--font-family-mono); }
 .dim { color: var(--color-text-secondary); font-size: 12px; }
 .db-line { margin-top: 12px; display: flex; align-items: center; gap: 8px; }
 .note-panel .note { font-size: 13px; line-height: 1.9; color: var(--color-text-secondary); }
