@@ -6,7 +6,7 @@ import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import GroupTag from '@/components/GroupTag.vue'
 import { groupStyle } from '@/utils/groupStyle'
-import type { ChannelGroup } from '@/api/types'
+import { STRATEGIES, type ChannelGroup } from '@/api/types'
 
 // 常用色板：分组颜色是给「一眼分辨哪个分组」用的，
 // 给几个对比度够、色相拉得开的预设，比让人从取色器里随便挑更实用。
@@ -15,13 +15,9 @@ const COLOR_PRESETS = [
   '#fa541c', '#eb2f96', '#722ed1', '#8c8c8c'
 ]
 
-// 路由策略选项：value 与后端 model.Strategy* 常量一致，label 同时用于下拉与表格展示
-const STRATEGY_OPTIONS = [
-  { value: 'weighted', label: '加权随机' },
-  { value: 'round_robin', label: '轮询' },
-  { value: 'least_latency', label: '最低延迟' },
-  { value: 'failover', label: '故障转移' }
-]
+// 路由策略选项统一取自 api/types（原来这里自己抄了一份，两处 label 已经不一致）。
+// 后端也会把不认识的策略值收敛到 failover，所以过渡期的老数据不会显示出空白。
+const STRATEGY_OPTIONS = STRATEGIES
 
 const loading = ref(false)
 const rows = ref<ChannelGroup[]>([])
@@ -34,7 +30,7 @@ const saving = ref(false)
 const form = reactive({
   name: '',
   remark: '',
-  strategy: 'weighted',
+  strategy: 'failover',
   is_default: false,
   enabled: true,
   color: '',
@@ -94,7 +90,7 @@ function openCreate() {
   Object.assign(form, {
     name: '',
     remark: '',
-    strategy: 'weighted',
+    strategy: 'failover',
     is_default: false,
     enabled: true,
     color: '',
@@ -109,7 +105,7 @@ function openEdit(row: ChannelGroup) {
   Object.assign(form, {
     name: row.name,
     remark: row.remark || '',
-    strategy: row.strategy || 'weighted',
+    strategy: row.strategy || 'failover',
     is_default: !!row.is_default,
     enabled: !!row.enabled,
     color: row.color || '',

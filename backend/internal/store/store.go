@@ -69,6 +69,15 @@ func (s *Store) Migrate() error {
 	if err := s.migrateLegacySchema(); err != nil {
 		return err
 	}
+	// 权重回填必须排在 AutoMigrate **之前**：这一版给 (group_id, weight) 加了
+	// 唯一索引，而老数据里同分组重名次的渠道是存在的（同一分组下多条渠道
+	// 都还是默认的 weight=1），先建索引会直接失败、应用起不来。
+	if err := s.normalizeChannelWeights(); err != nil {
+		return err
+	}
+	if err := s.normalizeGroupStrategies(); err != nil {
+		return err
+	}
 	if err := s.db.AutoMigrate(
 		&model.ChannelGroup{},
 		&model.Channel{},
@@ -256,11 +265,89 @@ func (s *Store) migrateLegacySchema() error {
 	return nil
 }
 
+// normalizeChannelWeights 把每个分组内的渠道权重重排成 1..N 连续序号。
+//
+// 背景：weight 原来是「加权随机」的抽签份额，同一分组下多条渠道都是默认值 1
+// 是常态（现有数据里就有）。现在 weight 是组内优先级序号，必须连续唯一，
+// 否则故障转移顺序没有定义。
+//
+// 排序键 (weight ASC, enabled DESC, id ASC)：
+//   - weight 优先，尽量保留用户原本表达的先后意图
+//   - 同权重时**启用的排前面** —— 停用的渠道不参与路由，让在用的渠道占链头
+//     更符合预期（只按 id 排的话，一条早就停用的老渠道会占住第一位）
+//
+// 只更新与目标值不同的行：这个函数每次启动都会跑，无条件写一遍会把全部渠道的
+// updated_at 都刷新掉，用户看到「所有渠道刚刚都被改过」。
+func (s *Store) normalizeChannelWeights() error {
+	if !s.hasTable("channels") {
+		return nil
+	}
+	var rows []struct {
+		ID      uint
+		GroupID uint
+		Weight  int
+	}
+	if err := s.db.Raw("SELECT id, group_id, weight FROM channels ORDER BY group_id, weight, enabled DESC, id").
+		Scan(&rows).Error; err != nil {
+		return fmt.Errorf("读取渠道权重失败: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+
+	next := map[uint]int{} // 分组 ID -> 下一个序号
+	fixed := 0
+	for _, r := range rows {
+		next[r.GroupID]++
+		want := next[r.GroupID]
+		if r.Weight == want {
+			continue
+		}
+		// 唯一索引已存在时这里会中途撞车（把 1 改成 2，而 2 还没让位），
+		// 所以逐行改成负数先全部让开，最后统一翻正 —— 负数不会与任何正序号冲突
+		if err := s.db.Exec("UPDATE channels SET weight = ? WHERE id = ?", -want, r.ID).Error; err != nil {
+			return fmt.Errorf("重排渠道权重失败（id=%d）: %w", r.ID, err)
+		}
+		fixed++
+	}
+	if fixed > 0 {
+		if err := s.db.Exec("UPDATE channels SET weight = -weight WHERE weight < 0").Error; err != nil {
+			return fmt.Errorf("渠道权重翻正失败: %w", err)
+		}
+		slog.Info("渠道权重已重排为组内优先级序号", "调整条数", fixed)
+	}
+	return nil
+}
+
+// normalizeGroupStrategies 把已下线的路由策略收敛到 failover。
+//
+// 「加权随机」（weighted）随 weight 改语义一起下线：它把权重当抽签份额，
+// 权重越大越容易被抽中，与「越小越优先」正好相反。留着这个值的话，
+// 分组表单的下拉里没有它、界面显示空白，而路由又会走一条已废弃的分支。
+//
+// 不认识的取值也一并收敛：与其让一个拼错的值静默落到某个默认分支，
+// 不如落到一个语义明确的策略上。
+func (s *Store) normalizeGroupStrategies() error {
+	if !s.hasTable("channel_groups") {
+		return nil
+	}
+	res := s.db.Exec(`UPDATE channel_groups SET strategy = ?
+		WHERE COALESCE(strategy, '') NOT IN (?, ?, ?)`,
+		model.StrategyFailover, model.StrategyRoundRobin, model.StrategyLeastLatency, model.StrategyFailover)
+	if res.Error != nil {
+		return fmt.Errorf("迁移分组路由策略失败: %w", res.Error)
+	}
+	if res.RowsAffected > 0 {
+		slog.Info("分组路由策略已从「加权随机」迁移为「顺序故障转移」", "分组数", res.RowsAffected)
+	}
+	return nil
+}
+
 // Seed 写入首次启动所需的基线数据，可重复执行。
 func (s *Store) Seed() error {
 	group := model.ChannelGroup{}
 	if err := s.db.Where(model.ChannelGroup{Name: "默认分组"}).
-		Attrs(model.ChannelGroup{Strategy: model.StrategyWeighted, IsDefault: true, Enabled: true}).
+		Attrs(model.ChannelGroup{Strategy: model.StrategyFailover, IsDefault: true, Enabled: true}).
 		FirstOrCreate(&group).Error; err != nil {
 		return fmt.Errorf("初始化默认分组失败: %w", err)
 	}

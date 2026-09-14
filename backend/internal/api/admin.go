@@ -65,6 +65,9 @@ func registerChannelRoutes(g *gin.RouterGroup, s *Server) {
 	// 往渠道发一句 "hi" 看通不通。与真实转发走同一套代码，
 	// 所以它验证的是「中继实际会发出去的那个请求」，不是另拼一个
 	r.POST("/:id/test", s.testChannel)
+	// 整组重排优先级（拖动列表后提交）。放在 /:id 之前：gin 的路由树里
+	// 静态段与参数段不冲突，但把固定路径写在前面更好读
+	r.PUT("/order", s.reorderChannels)
 	// 图标：空 body 表示去上游抓一个，带 icon 表示设置成自定义值
 	r.POST("/:id/icon", s.channelIcon)
 }
@@ -105,7 +108,10 @@ type channelPayload struct {
 	// 与数据列的默认值保持一致（见 model.Channel.Currency）
 	Currency string `json:"currency"`
 	APIKey   string `json:"api_key"`
-	Weight   int    `json:"weight"`
+	// 这里刻意没有 weight：权重是**组内优先级序号**，由渠道在分组里的位置决定，
+	// 不再由客户端指定。新建的排到末尾；调整顺序走 PUT /channels/order。
+	// 旧脚本仍在 body 里带 weight —— Go 会忽略不认识的字段，所以不会解析失败，
+	// 只是那个值不再生效。
 	// ProxyID 走哪个出站代理；0 = 直连。
 	//
 	// 必须是指针：0 既是「直连」也是 uint 的零值，用值类型就分不出
@@ -285,9 +291,6 @@ func (s *Server) createChannel(c *gin.Context) {
 		// 默认值一致，否则同一个渠道经界面创建和经脚本创建会是两种币种
 		currency = model.CurrencyUSD
 	}
-	if p.Weight <= 0 {
-		p.Weight = 1
-	}
 	if p.GroupID == 0 {
 		p.GroupID = defaultGroupID(s)
 	}
@@ -331,7 +334,7 @@ func (s *Server) createChannel(c *gin.Context) {
 		Protocol: p.Protocol, BaseURL: strings.TrimRight(strings.TrimSpace(p.BaseURL), "/"),
 		Currency:  currency,
 		APIKeyEnc: enc, APIKeyHint: secure.MaskKey(p.APIKey),
-		Weight: p.Weight, Enabled: enabled, MonitorType: orDefault(p.Monitor, "none"),
+		Enabled: enabled, MonitorType: orDefault(p.Monitor, "none"),
 		Slots: p.Slots, ExtraConfig: p.ExtraConf, CustomMap: p.CustomMap,
 		// 建渠道时就把代理带上：漏了它的话，界面上选了代理、保存也成功，
 		// 但库里还是 0（直连）—— 表现为「配了代理却不走代理」（实测踩过）
@@ -339,7 +342,16 @@ func (s *Server) createChannel(c *gin.Context) {
 		Icon:         strings.TrimSpace(derefString(p.Icon)),
 		HealthStatus: "unknown",
 	}
-	if err := s.deps.Store.DB().Create(&ch).Error; err != nil {
+	// 新渠道排在分组末尾，返回的 JSON 里也要带上它实际拿到的优先级，
+	// 否则界面拿到的是 0，与库里不一致
+	if err := s.deps.Store.DB().Transaction(func(tx *gorm.DB) error {
+		w, err := appendChannelToGroup(tx, ch.GroupID)
+		if err != nil {
+			return err
+		}
+		ch.Weight = w
+		return tx.Create(&ch).Error
+	}); err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
@@ -386,12 +398,9 @@ func (s *Server) updateChannel(c *gin.Context) {
 		// 不会因为这次改动被重新解释（也**不会**自动换算已有的价格）
 		updates["currency"] = currency
 	}
-	if p.GroupID != 0 {
-		updates["group_id"] = p.GroupID
-	}
-	if p.Weight > 0 {
-		updates["weight"] = p.Weight
-	}
+	// 换分组不在这里写：它要连带算出新分组末尾的序号，且必须与 group_id
+	// 在同一条 UPDATE 里落库（见下面事务里的说明），所以单独处理
+	groupChange := uint(p.GroupID)
 	if p.ProxyID != nil {
 		if err := checkProxyExists(s, *p.ProxyID); err != nil {
 			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
@@ -424,8 +433,8 @@ func (s *Server) updateChannel(c *gin.Context) {
 		updates["api_key_enc"] = enc
 		updates["api_key_hint"] = secure.MaskKey(p.APIKey)
 	}
-	// 只改白名单（改完模型点保存）也是合法请求，所以不能只看 updates 是否为空
-	if len(updates) == 0 && p.Models == nil {
+	// 只改白名单（改完模型点保存）、只换分组都是合法请求，所以不能只看 updates 是否为空
+	if len(updates) == 0 && groupChange == 0 && p.Models == nil {
 		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
 		return
 	}
@@ -446,7 +455,34 @@ func (s *Server) updateChannel(c *gin.Context) {
 	// 渠道字段与白名单放同一个事务：白名单是整表替换，
 	// 中途失败留下「渠道改了、白名单没改」会让人以为保存没生效
 	err := s.deps.Store.DB().Transaction(func(tx *gorm.DB) error {
-		if len(updates) > 0 {
+		// 换分组要动两边的序号，所以先把原分组记下来
+		var before model.Channel
+		if err := tx.Select("id", "group_id").First(&before, id).Error; err != nil {
+			return err
+		}
+
+		if groupChange != 0 && groupChange != before.GroupID {
+			// 新分组末尾的序号，必须在**这条还没进去**的时候算：
+			// 先换组再算的话，它自己带过来的旧序号会被当成组内最大值，
+			// 新序号白白多跳一格，新分组里就留下一个空洞（实测踩过：
+			// 目标组只有序号 1 的一条，本该补到 2，结果补成了 3）
+			w, err := appendChannelToGroup(tx, groupChange)
+			if err != nil {
+				return err
+			}
+			// 换组与赋序号必须在同一条 UPDATE 里：分两步会短暂出现
+			// 「已经在新分组、却还带着旧序号」的中间状态，那个旧序号
+			// 可能正好撞上新分组里已有的序号，被唯一索引当场拒绝
+			updates["group_id"] = groupChange
+			updates["weight"] = w
+			if err := applyUpdates(tx, &model.Channel{}, id, updates); err != nil {
+				return err
+			}
+			// 最后给原分组补位（它空出了一格）
+			if err := renumberGroupChannels(tx, before.GroupID); err != nil {
+				return err
+			}
+		} else if len(updates) > 0 {
 			if err := applyUpdates(tx, &model.Channel{}, id, updates); err != nil {
 				return err
 			}
@@ -461,6 +497,7 @@ func (s *Server) updateChannel(c *gin.Context) {
 				return gorm.ErrRecordNotFound
 			}
 		}
+
 		if p.Models != nil {
 			return replaceChannelModels(tx, id, whitelist)
 		}
@@ -559,12 +596,62 @@ func (s *Server) deleteChannel(c *gin.Context) {
 		if err := tx.Where("channel_id = ?", id).Delete(&model.ChannelModel{}).Error; err != nil {
 			return err
 		}
-		return tx.Delete(&model.Channel{}, id).Error
+		if err := tx.Delete(&model.Channel{}, id).Error; err != nil {
+			return err
+		}
+		// 删掉一条就把同组后面的序号补齐：留空洞的话，故障转移链上会多出
+		// 一个「不存在的优先级」，而序号本身也不再能表示「第几个被尝试」
+		return renumberGroupChannels(tx, ch.GroupID)
 	}); err != nil {
 		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"id": id, "deleted": true})
+}
+
+// reorderChannels 按给定的顺序重排某个分组内渠道的优先级。
+//
+// 整组全量提交（而不是「把某条移到第 N 位」）：拖拽得到的本来就是一份完整顺序，
+// 全量提交是幂等的 —— 重复提交同一份顺序不会产生新变化，也不需要前端算差值。
+// 代价是必须与库里的成员完全对上，对不上就报错让前端刷新（见 orderValidationError）。
+func (s *Server) reorderChannels(c *gin.Context) {
+	var p struct {
+		GroupID uint   `json:"group_id"`
+		IDs     []uint `json:"ids"`
+	}
+	if err := c.ShouldBindJSON(&p); err != nil {
+		writeUpstreamError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
+		return
+	}
+	if p.GroupID == 0 {
+		writeUpstreamError(c, http.StatusBadRequest, "group_id 必填", "invalid_request_error")
+		return
+	}
+
+	db := s.deps.Store.DB()
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		var groupChannels []model.Channel
+		if err := tx.Select("id").Where("group_id = ?", p.GroupID).Find(&groupChannels).Error; err != nil {
+			return err
+		}
+		if verr := orderValidationError(groupChannels, p.IDs); verr != nil {
+			// 校验放在事务里：读成员与写序号之间不能有别的写入插进来，
+			// 否则「校验时是全量、写的时候已经不是了」
+			return orderInvalidError{msg: verr.Error()}
+		}
+		return applyChannelOrder(tx, p.GroupID, p.IDs)
+	}); err != nil {
+		// 成员对不上是用户输入问题（多半是界面上的列表过期了），
+		// 与数据库故障要分开回，否则前端只会看到一句 500
+		var invalid orderInvalidError
+		if errors.As(err, &invalid) {
+			writeUpstreamError(c, http.StatusBadRequest, invalid.Error(), "invalid_request_error")
+			return
+		}
+		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"group_id": p.GroupID, "ordered": len(p.IDs)})
 }
 
 func (s *Server) listChannelModels(c *gin.Context) {
@@ -827,10 +914,7 @@ func (s *Server) createGroup(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, "name 必填", "invalid_request_error")
 		return
 	}
-	strategy := p.Strategy
-	if strategy == "" {
-		strategy = model.StrategyWeighted
-	}
+	strategy := normalizeStrategy(p.Strategy)
 	enabled := true
 	if p.Enabled != nil {
 		enabled = *p.Enabled
@@ -908,7 +992,7 @@ func (s *Server) updateGroup(c *gin.Context) {
 		updates["name"] = name
 	}
 	if p.Strategy != nil {
-		updates["strategy"] = *p.Strategy
+		updates["strategy"] = normalizeStrategy(*p.Strategy)
 	}
 	if p.Remark != nil {
 		updates["remark"] = *p.Remark

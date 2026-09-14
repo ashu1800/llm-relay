@@ -12,6 +12,15 @@ BASE="http://127.0.0.1:8888"
 API="$BASE/api/admin"
 P() { docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "$1"; }
 
+# 每次运行用独立临时目录，退出时清掉。
+#
+# 原来写死 /tmp/wl.json 这类固定路径，踩过两次：其一是历史上以 root 跑过之后
+# 留下同名文件，普通用户再跑时 curl -o 根本写不进去（权限拒绝又不报错），
+# 断言于是读到上一次运行的旧内容，报出「实际: {"id":347,...}」这种看着
+# 完全不相干的失败；其二是并发跑两份就互相覆盖。用 mktemp 一次解决。
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
 ok=0; bad=0
 # chk <说明> <期望> <实际>
 chk() {
@@ -86,26 +95,30 @@ print('  按对外名排序:', [i['public_name'] for i in items])
 
 echo
 echo "=== 4. 非法白名单必须当场被拒 ==="
-code=$(curl -s -o /tmp/wl.json -w '%{http_code}' -X POST "$API/channels" -H 'Content-Type: application/json' \
+code=$(curl -s -o $TMP/wl.json -w '%{http_code}' -X POST "$API/channels" -H 'Content-Type: application/json' \
   -d "{\"name\":\"wl-dup\",\"group_id\":$GID,\"base_url\":\"http://127.0.0.1:9\",\"models\":[{\"public_name\":\"x\"},{\"public_name\":\"x\"}]}")
 chk "重复对外名 -> 400" "400" "$code"
-chkcontains "报错说明是重复" "$(cat /tmp/wl.json)" "重复"
-code=$(curl -s -o /tmp/wl.json -w '%{http_code}' -X POST "$API/channels" -H 'Content-Type: application/json' \
+chkcontains "报错说明是重复" "$(cat $TMP/wl.json)" "重复"
+code=$(curl -s -o $TMP/wl.json -w '%{http_code}' -X POST "$API/channels" -H 'Content-Type: application/json' \
   -d "{\"name\":\"wl-empty-name\",\"group_id\":$GID,\"base_url\":\"http://127.0.0.1:9\",\"models\":[{\"public_name\":\"  \"}]}")
 chk "空对外名 -> 400" "400" "$code"
-code=$(curl -s -o /tmp/wl.json -w '%{http_code}' -X PUT "$API/channels/999999/models" -H 'Content-Type: application/json' \
+code=$(curl -s -o $TMP/wl.json -w '%{http_code}' -X PUT "$API/channels/999999/models" -H 'Content-Type: application/json' \
   -d '{"items":[{"public_name":"ghost"}]}')
 chk "给不存在的渠道写白名单 -> 404" "404" "$code"
 
 echo
 echo "=== 5. 改渠道时白名单是整表替换，不传则不动 ==="
 curl -s -X PUT "$API/channels/$CID" -H 'Content-Type: application/json' \
-  -d '{"models":[{"public_name":"wl-probe-d"}]}' -o /tmp/wl.json
+  -d '{"models":[{"public_name":"wl-probe-d"}]}' -o $TMP/wl.json
 chk "整表替换后条数" "1" "$(P "SELECT count(*) FROM channel_models WHERE channel_id=$CID")"
 chk "替换后只剩新条目" "wl-probe-d" "$(P "SELECT public_name FROM channel_models WHERE channel_id=$CID")"
-curl -s -X PUT "$API/channels/$CID" -H 'Content-Type: application/json' -d '{"weight":7}' -o /tmp/wl.json
+# weight 现在由「渠道在分组内的位置」决定（组内优先级序号，见 README 的说明），
+# 客户端传它应当被忽略。这里顺便把这个语义钉住：旧脚本仍会带 weight，
+# 要是哪天它又能被客户端改掉，组内序号就不再唯一、故障转移顺序也没有定义了
+BEFORE_W=$(P "SELECT weight FROM channels WHERE id=$CID")
+curl -s -X PUT "$API/channels/$CID" -H 'Content-Type: application/json' -d '{"weight":7}' -o $TMP/wl.json
 chk "PUT 不带 models 时白名单不动" "wl-probe-d" "$(P "SELECT public_name FROM channel_models WHERE channel_id=$CID")"
-chk "渠道字段确实改了" "7" "$(P "SELECT weight FROM channels WHERE id=$CID")"
+chk "客户端传的 weight 被忽略" "$BEFORE_W" "$(P "SELECT weight FROM channels WHERE id=$CID")"
 # 还原成 3 条，供后面的路由用例使用
 curl -s -X PUT "$API/channels/$CID/models" -H 'Content-Type: application/json' \
   -d '{"items":[{"public_name":"wl-probe-a"},{"public_name":"wl-probe-b","upstream_name":"upstream-b-real"},{"public_name":"wl-probe-c","enabled":false}]}' -o /dev/null
@@ -133,24 +146,24 @@ chk "停用条目不入列表" "0" "$(echo "$MODELS" | jqg "sum(1 for m in d['da
 
 echo
 echo "=== 7. 路由按白名单命中（探测渠道的地址打不通，报错必须来自连接而不是「没有可用渠道」）==="
-curl -s -o /tmp/wl_route.json -w '%{http_code}' -m 30 "$BASE/v1/chat/completions" \
+curl -s -o $TMP/wl_route.json -w '%{http_code}' -m 30 "$BASE/v1/chat/completions" \
   -H "Authorization: Bearer $SK" -H 'Content-Type: application/json' \
-  -d '{"model":"wl-probe-b","messages":[{"role":"user","content":"hi"}],"max_tokens":5}' > /tmp/wl_code
-chk "命中白名单 -> 502（上游连不上）" "502" "$(cat /tmp/wl_code)"
-if grep -q "没有可用的渠道" /tmp/wl_route.json; then
+  -d '{"model":"wl-probe-b","messages":[{"role":"user","content":"hi"}],"max_tokens":5}' > $TMP/wl_code
+chk "命中白名单 -> 502（上游连不上）" "502" "$(cat $TMP/wl_code)"
+if grep -q "没有可用的渠道" $TMP/wl_route.json; then
   echo "  [失败] 白名单里的模型竟然没被路由"; bad=$((bad+1))
 else
-  echo "  [通过] 请求确实被路由到了探测渠道（$(head -c 120 /tmp/wl_route.json)）"; ok=$((ok+1))
+  echo "  [通过] 请求确实被路由到了探测渠道（$(head -c 120 $TMP/wl_route.json)）"; ok=$((ok+1))
 fi
 
 echo
 echo "=== 8. 白名单外的模型：报错必须列出当前可用的模型 ==="
-curl -s -o /tmp/wl_miss.json -w '%{http_code}' -m 30 "$BASE/v1/chat/completions" \
+curl -s -o $TMP/wl_miss.json -w '%{http_code}' -m 30 "$BASE/v1/chat/completions" \
   -H "Authorization: Bearer $SK" -H 'Content-Type: application/json' \
-  -d '{"model":"wl-probe-nope","messages":[{"role":"user","content":"hi"}],"max_tokens":5}' > /tmp/wl_miss_code
-chk "白名单外的模型 -> 502" "502" "$(cat /tmp/wl_miss_code)"
-chkcontains "报错说明没有可用渠道" "$(cat /tmp/wl_miss.json)" "没有可用的渠道"
-chkcontains "报错列出可用模型 wl-probe-a" "$(cat /tmp/wl_miss.json)" "wl-probe-a"
+  -d '{"model":"wl-probe-nope","messages":[{"role":"user","content":"hi"}],"max_tokens":5}' > $TMP/wl_miss_code
+chk "白名单外的模型 -> 502" "502" "$(cat $TMP/wl_miss_code)"
+chkcontains "报错说明没有可用渠道" "$(cat $TMP/wl_miss.json)" "没有可用的渠道"
+chkcontains "报错列出可用模型 wl-probe-a" "$(cat $TMP/wl_miss.json)" "wl-probe-a"
 
 echo
 echo "=== 9. 停用渠道后它的模型不再可用 ==="

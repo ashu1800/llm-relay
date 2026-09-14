@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"math/rand"
 	"sort"
 	"strings"
 	"sync"
@@ -108,7 +107,11 @@ func (r *Router) Candidates(ctx context.Context, q CandidateQuery) ([]Candidate,
 		Where("channel_models.public_name = ?", q.PublicModel).
 		Where("channels.enabled = true").
 		// 停用的分组连同它的渠道一起退出候选，否则「停用分组」这个开关毫无作用
-		Where("channel_groups.enabled = true")
+		Where("channel_groups.enabled = true").
+		// weight 是组内优先级序号（越小越优先），按它升序取出来，
+		// 排在最前的就是首选渠道，后面的依次是故障转移链。
+		// id 只是同序号时的兜底（正常情况下组内序号唯一，用不上）
+		Order("channels.weight ASC, channels.id ASC")
 
 	if q.GroupID > 0 {
 		query = query.Where("channels.group_id = ?", q.GroupID)
@@ -172,25 +175,33 @@ func (r *Router) Candidates(ctx context.Context, q CandidateQuery) ([]Candidate,
 	return cands, nil
 }
 
-// strategyFor 取分组的路由策略，取不到则回退到加权。
+// strategyFor 取分组的路由策略，取不到则回退到顺序故障转移。
 func (r *Router) strategyFor(ctx context.Context, groupID uint) string {
 	if groupID == 0 {
 		var g model.ChannelGroup
 		if err := r.db.WithContext(ctx).Where("is_default = true").First(&g).Error; err == nil {
 			return g.Strategy
 		}
-		return model.StrategyWeighted
+		return model.StrategyFailover
 	}
 	var g model.ChannelGroup
 	if err := r.db.WithContext(ctx).First(&g, groupID).Error; err != nil {
-		return model.StrategyWeighted
+		return model.StrategyFailover
 	}
 	return g.Strategy
 }
 
 // sortCandidates 依据策略重排候选，第一个即首选渠道。
+//
+// 进到这里时候选已按 weight 升序（见 Candidates 的 Order）—— 那就是优先级序。
+// 各策略的差别只在于「谁排到最前」：
+//   - failover：不动，严格照优先级来
+//   - round_robin：从游标处起轮转
+//   - least_latency：按观测到的首包延迟重排
 func sortCandidates(cands []Candidate, strategy string, r *Router) {
-	// 可用时段内且未达并发上限的渠道优先
+	// 可用时段内且未达并发上限的渠道优先。
+	// 注意这一步会把「优先级」暂时压到次要位置：一条到点才可用的渠道，
+	// 不该因为序号靠后就被一条当前不可用的渠道挡在前面。
 	sort.SliceStable(cands, func(i, j int) bool {
 		if cands[i].Available != cands[j].Available {
 			return cands[i].Available
@@ -200,7 +211,7 @@ func sortCandidates(cands []Candidate, strategy string, r *Router) {
 
 	switch strategy {
 	case model.StrategyRoundRobin:
-		rotate(cands)
+		rotate(cands, r.nextCursor(cands))
 	case model.StrategyLeastLatency:
 		// 按最近成功响应的首包延迟（EWMA，见 ChannelState.RecordLatency）升序。
 		// 没有观测值的渠道排最后但不出局 —— 否则新渠道永远得不到第一次机会。
@@ -213,58 +224,44 @@ func sortCandidates(cands []Candidate, strategy string, r *Router) {
 		sort.SliceStable(cands, func(i, j int) bool {
 			return lat(cands[i].Channel.ID) < lat(cands[j].Channel.ID)
 		})
-	case model.StrategyFailover:
-		sort.SliceStable(cands, func(i, j int) bool { return cands[i].Channel.ID < cands[j].Channel.ID })
-	default: // weighted
-		weightedShuffle(cands)
+	default:
+		// failover（以及任何未知取值）：候选已按 weight 升序，
+		// 什么都不用做 —— 顺序本身就是故障转移顺序
 	}
 }
 
-// weightedShuffle 按权重把首选渠道抽到最前，其余保持稳定顺序作为故障转移链。
-func weightedShuffle(cands []Candidate) {
-	if len(cands) <= 1 {
-		return
+// nextCursor 取轮询起点并推进游标。
+//
+// 游标按分组记：不同分组的轮转互不干扰，各按键自己的节奏走。
+//
+// 这里曾经是坏的：rotate() 不读游标，每个请求都「把首个挪到末尾」，
+// 于是每次挑中的都是第二优先的渠道，而 rrCursor 声明了却从未被使用。
+// 轮询的语义是「依次轮着来」，起点必须逐次前进。
+func (r *Router) nextCursor(cands []Candidate) int {
+	if len(cands) == 0 {
+		return 0
 	}
-	total := 0
-	for _, c := range cands {
-		w := c.Channel.Weight
-		if w <= 0 {
-			w = 1
-		}
-		total += w
-	}
-	if total <= 0 {
-		return
-	}
-	pick := rand.Intn(total)
-	acc := 0
-	idx := 0
-	for i, c := range cands {
-		w := c.Channel.Weight
-		if w <= 0 {
-			w = 1
-		}
-		acc += w
-		if pick < acc {
-			idx = i
-			break
-		}
-	}
-	if idx > 0 {
-		chosen := cands[idx]
-		copy(cands[1:idx+1], cands[0:idx])
-		cands[0] = chosen
-	}
+	groupID := cands[0].Channel.GroupID
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	start := r.rrCursor[groupID] % len(cands)
+	r.rrCursor[groupID] = (start + 1) % len(cands)
+	return start
 }
 
-// rotate 轮询：把首个渠道挪到末尾，实现公平轮转。
-func rotate(cands []Candidate) {
-	if len(cands) <= 1 {
+// rotate 把候选整体左移 offset：offset 处的那条成为首选，其余保持相对顺序。
+func rotate(cands []Candidate, offset int) {
+	if len(cands) <= 1 || offset <= 0 {
 		return
 	}
-	first := cands[0]
-	copy(cands, cands[1:])
-	cands[len(cands)-1] = first
+	offset %= len(cands)
+	if offset == 0 {
+		return
+	}
+	rotated := make([]Candidate, 0, len(cands))
+	rotated = append(rotated, cands[offset:]...)
+	rotated = append(rotated, cands[:offset]...)
+	copy(cands, rotated)
 }
 
 // SlotAvailable 判断当前时刻是否落在渠道声明的可用时段内。

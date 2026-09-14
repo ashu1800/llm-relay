@@ -180,9 +180,14 @@ export const PROTOCOLS = [
   { value: 'custom', label: '自定义（可配置适配器）' }
 ]
 
+// 分组路由策略。全站只有这一份定义：GroupsView 以前自己抄了一份，
+// 两边的 label 已经不一致（'最低延迟' vs '延迟优先'），同一个策略两个名字。
+//
+// 「加权随机」（weighted）已下线：那时的 weight 是抽签份额，权重越大越容易被
+// 抽中；现在 weight 是渠道在分组内的优先级序号（越小越优先），
+// 抽签语义与它正好相反。老数据由后端迁移改成 failover。
 export const STRATEGIES = [
-  { value: 'weighted', label: '加权随机' },
+  { value: 'failover', label: '顺序故障转移' },
   { value: 'round_robin', label: '轮询' },
-  { value: 'least_latency', label: '延迟优先' },
-  { value: 'failover', label: '顺序故障转移' }
+  { value: 'least_latency', label: '最低延迟' }
 ]

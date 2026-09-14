@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, h, onMounted, reactive, ref } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
+import Sortable from 'sortablejs'
 import {
   PlusOutlined,
   ReloadOutlined,
@@ -9,6 +10,7 @@ import {
   LinkOutlined,
   ThunderboltOutlined,
   CloudDownloadOutlined,
+  HolderOutlined,
   WarningOutlined
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
@@ -73,9 +75,24 @@ function onGroupFilterChange(v: string) {
 
 // 筛选只作用于**显示**：rows 仍然是完整列表，右上的「共 N 个渠道」
 // 因此可以说清「筛出来几个 / 一共几个」，不必让用户怀疑是不是渠道丢了。
+// 拖拽排序也要用到完整列表（提交的是整个分组的顺序），所以不能就地过滤掉。
+//
+// 显示顺序 = 优先级顺序：组内按 weight 升序（weight 是组内优先级序号，
+// 越小越优先，也就是故障转移时第几个被尝试）。
+//
+// 排序键里带上 group_id 是为了让「全部分组」视图下同一个分组的渠道连成一块：
+// 序号是**组内**编号，只按 weight 排会让两个分组的 1、2、3 交错在一起，
+// 看不出任何一条链的顺序。id 只是同序号时的兜底。
 const visibleRows = computed(() => {
-  if (groupFilter.value === ALL_GROUPS) return rows.value
-  return rows.value.filter((r) => String(r.group_id) === groupFilter.value)
+  const list = groupFilter.value === ALL_GROUPS
+    ? rows.value
+    : rows.value.filter((r) => String(r.group_id) === groupFilter.value)
+  return [...list].sort(
+    (a, b) =>
+      a.group_id - b.group_id ||
+      (a.weight ?? 0) - (b.weight ?? 0) ||
+      a.id - b.id
+  )
 })
 
 const modalOpen = ref(false)
@@ -95,7 +112,6 @@ const form = reactive({
   currency: 'CNY',
   api_key: '',
   group_id: 0,
-  weight: 1,
   enabled: true,
   // 出站代理：0 = 直连。模型条目上还能单独覆盖（见白名单里的「代理」列）
   proxy_id: 0,
@@ -162,7 +178,6 @@ function openCreate() {
     currency: 'CNY',
     api_key: '',
     group_id: groups.value.find((x) => x.is_default)?.id ?? groups.value[0]?.id ?? 0,
-    weight: 1,
     proxy_id: 0,
     icon: '',
     max_concurrency: 10,
@@ -182,7 +197,6 @@ async function openEdit(row: ChannelRow) {
     currency: row.currency || 'USD',
     api_key: '',
     group_id: row.group_id,
-    weight: row.weight,
     enabled: row.enabled,
     proxy_id: row.proxy_id || 0,
     icon: row.icon || '',
@@ -270,7 +284,6 @@ async function save() {
       // 币种总是跟着提交：漏了它，改一次渠道就会把币种打回默认值
       currency: form.currency,
       group_id: form.group_id,
-      weight: form.weight,
       enabled: form.enabled,
       proxy_id: form.proxy_id || 0,
       // 总是带上：空字符串的语义是「清空图标，回到默认」，
@@ -522,7 +535,140 @@ function protocolLabel(value: string) {
   return PROTOCOLS.find((p) => p.value === value)?.label ?? value
 }
 
-onMounted(load)
+// ---- 拖动调整优先级 ----
+//
+// 列表顺序就是故障转移顺序，所以拖动一行等于改它的优先级序号。
+// 序号由后端统一重排（整组全量提交），前端只负责算出「新的顺序是什么」。
+const tableWrap = ref<HTMLElement | null>(null)
+let sortable: Sortable | null = null
+
+// 读当前 DOM 里的行顺序，取渠道 id。
+//
+// 以 data-row-key（antd 写在 tr 上的渠道 id）为准，**不**用 sortablejs 给的
+// oldIndex/newIndex：那两个下标是按 DOM 子元素个数数的，而 antd 会在 tbody 里
+// 多渲染一个 .ant-table-measure-row（列宽测量用，没有 data-row-key），
+// 于是下标整体偏一位 —— 按下标去查列表会查到隔壁那条，
+// 跨组判断和提交的顺序都会错。实测确认过这个测量行的存在。
+function tbodyEl(): HTMLElement | null {
+  return tableWrap.value?.querySelector('.ant-table-tbody') ?? null
+}
+
+function domOrderedIds(): number[] {
+  const tbody = tbodyEl()
+  if (!tbody) return []
+  return [...tbody.querySelectorAll('tr[data-row-key]')]
+    .map((tr) => Number(tr.getAttribute('data-row-key')))
+    .filter((n) => Number.isFinite(n) && n > 0)
+}
+
+// 拖动开始时的行元素顺序，仅用于「跨组拖动」时把 DOM 摆回去。
+let preDragRows: HTMLElement[] = []
+
+function onDragStart() {
+  const tbody = tbodyEl()
+  preDragRows = tbody
+    ? Array.from(tbody.querySelectorAll<HTMLElement>('tr[data-row-key]'))
+    : []
+}
+
+// 把行按拖动前的顺序摆回 DOM。
+//
+// 不能靠「把 rows 换成新数组」来触发回弹：数据顺序和拖动前**完全一样**，
+// Vue 的 diff 会认为没有变化、一个 DOM 节点都不动，而 sortablejs 已经把行
+// 挪走了 —— 结果是后端没改（对），页面上却停在一个错误的顺序上（实测踩过：
+// 跨组拖动后页面显示 33,358,359，而后端仍是 359,33）。所以这里直接把
+// 节点搬回去，让 DOM 与数据重新一致。
+function restoreDomOrder() {
+  const tbody = tbodyEl()
+  if (!tbody || !preDragRows.length) return
+  // 数据行要插在测量行之后：以它为锚点逐条插入，插入顺序即拖动前的顺序
+  const measure = tbody.querySelector('tr.ant-table-measure-row')
+  let anchor: Node | null = measure ? measure.nextSibling : tbody.firstChild
+  for (const tr of preDragRows) {
+    tbody.insertBefore(tr, anchor)
+    anchor = tr.nextSibling
+  }
+}
+
+// 某个分组的渠道在新顺序里是否连成一块。
+//
+// 用「连不连续」判断有没有跨组拖动，而不是「落点邻居是不是同组」：
+// 后者会误杀「把本组第一条拖到本组末尾」—— 那种情况下它的下一个邻居
+// 正是邻组的第一条，但这次拖动完全合法。
+function isContiguousBlock(order: number[], gid: number): boolean {
+  const idxs: number[] = []
+  order.forEach((id, i) => {
+    if (rows.value.find((r) => r.id === id)?.group_id === gid) idxs.push(i)
+  })
+  if (idxs.length <= 1) return true
+  return idxs[idxs.length - 1] - idxs[0] === idxs.length - 1
+}
+
+// 提交新的组内顺序。传整个分组的 id 列表：接口是整组全量提交的，
+// 幂等且不需要前端算差值。
+async function submitOrder(groupID: number, orderedIds: number[]) {
+  try {
+    await api.put('/channels/order', { group_id: groupID, ids: orderedIds })
+    message.success('顺序已更新')
+  } catch (e: any) {
+    message.error(e.message)
+  } finally {
+    // 无论成败都重新拉一次：成功要拿到后端重排后的真实序号，
+    // 失败要把界面上那份已经和服务端不一致的顺序纠正回来 ——
+    // 停在错误的顺序上比报错更糟，用户会以为改成功了
+    await load()
+  }
+}
+
+function onDragEnd(evt: { item?: HTMLElement }) {
+  const movedId = Number(evt.item?.getAttribute('data-row-key'))
+  if (!movedId) return
+  const moved = rows.value.find((r) => r.id === movedId)
+  if (!moved) return
+
+  const order = domOrderedIds()
+  if (order.length < 2) return
+
+  if (!isContiguousBlock(order, moved.group_id)) {
+    message.warning('只能在同一分组内调整顺序')
+    // 跨组拖动：后端一点不动，页面也要回到原样
+    restoreDomOrder()
+    return
+  }
+
+  const group = (id: number) => rows.value.find((r) => r.id === id)?.group_id
+  const orderedIds = order.filter((id) => group(id) === moved.group_id)
+
+  // 乐观更新：先把本地序号改掉，界面立刻反映新顺序；submitOrder 会再拉一次校准
+  orderedIds.forEach((id, i) => {
+    const row = rows.value.find((r) => r.id === id)
+    if (row) row.weight = i + 1
+  })
+  void submitOrder(moved.group_id, orderedIds)
+}
+
+onMounted(async () => {
+  await load()
+  // 绑在 tbody 上，不是外层容器：sortablejs 移动的是行本身。
+  // 初始化放在 load() 之后，此时行已经渲染出来
+  const tbody = tableWrap.value?.querySelector('.ant-table-tbody')
+  if (tbody) {
+    sortable = Sortable.create(tbody as HTMLElement, {
+      // 只认手柄：整行可拖会让「点测试/编辑」变成一次误拖
+      handle: '.drag-handle',
+      animation: 150,
+      ghostClass: 'row-ghost',
+      chosenClass: 'row-chosen',
+      onStart: onDragStart,
+      onEnd: onDragEnd
+    })
+  }
+})
+
+onBeforeUnmount(() => {
+  sortable?.destroy()
+  sortable = null
+})
 </script>
 
 <template>
@@ -555,22 +701,25 @@ onMounted(load)
         title="渠道列表加载失败"
         @retry="load"
       >
+      <!-- 表格外层：sortablejs 需要拿到 tbody 元素（见 onMounted），
+           而 a-table 自身不提供这个 ref -->
+      <div ref="tableWrap">
       <!-- scroll.x 必须不小于各列宽度之和：声明偏小时，固定在右侧的
            「操作」列会盖住左边最后一列，表现为表头被截断、内容被压住。
-           1241 = 各列宽度之和（名称 170 + 模型 200 + 上游协议 125 + 地址 174
-           + 分组 110 + 权重 58 + 币种 86 + 启用 78 + 操作 240）。
-           操作列 292 -> 240：原来有 5 个动作，停用/启用已挪到「启用」列的开关上。
-           改完实测（scripts/measure-tables.mjs，1440 视口）：容器 1182、表格 1241，
-           溢出 59px，靠横向滚动 —— 与密钥信息(48px)、请求日志(100px)一致，
-           不是这一页独有的问题。改动前是「各列之和 1293 > scroll.x 1211」，
-           正是上面警告的那种状态；现在两者相等，固定列不会再盖住最后一列 -->
+           反过来偏大也不行 —— antd 会把多出来的宽度摊到各列上，
+           于是「声明值」和实际渲染宽度对不上，量出来的数就没法用来核对。
+           1227 = 各列宽度之和（顺序 44 + 名称 170 + 模型 200 + 上游协议 125
+           + 地址 174 + 分组 110 + 币种 86 + 启用 78 + 操作 240）。
+           「权重」列已去掉（顺序由列表本身表达，不再显示数字），
+           换成 44px 的拖拽手柄列；操作列 292 -> 240 是更早那次改动。
+           改完实测（scripts/measure-tables.mjs，1440 视口）：容器 1182、表格 1227 -->
       <a-table
         :data-source="visibleRows"
         :loading="loading"
         :pagination="false"
         row-key="id"
         size="small"
-        :scroll="{ x: 1241 }"
+        :scroll="{ x: 1227 }"
       >
         <template #emptyText>
           <a-empty
@@ -579,6 +728,16 @@ onMounted(load)
               : '这个分组下还没有渠道，可以切换分组筛选看看'"
           />
         </template>
+        <!-- 拖拽手柄列。这一列没有数字：顺序本身就是优先级，
+             也就是故障转移时第几个被尝试 —— 数字是多余的，
+             而且要让人工维护的序号和显示的数字始终一致，本身就容易出错 -->
+        <a-table-column title="顺序" :width="44">
+          <template #default>
+            <span class="drag-handle" title="拖动调整优先级（越靠上越优先）">
+              <HolderOutlined />
+            </span>
+          </template>
+        </a-table-column>
         <a-table-column title="名称" :width="170">
           <template #default="{ record }">
             <div class="chan-title">
@@ -623,8 +782,6 @@ onMounted(load)
             />
           </template>
         </a-table-column>
-        <a-table-column title="权重" data-index="weight" :width="58" />
-
         <a-table-column title="币种" :width="86">
           <template #default="{ record }">
             <!-- 单价的单位就挂在这条渠道上：只看到「0.15」看不出是 ¥ 还是 $ -->
@@ -671,6 +828,7 @@ onMounted(load)
           </template>
         </a-table-column>
       </a-table>
+      </div>
       </DataState>
     </section>
 
@@ -753,13 +911,16 @@ onMounted(load)
 
         <a-row :gutter="8">
           <a-col :span="12">
-            <a-form-item label="路由权重">
-              <a-input-number v-model:value="form.weight" :min="1" style="width: 100%" />
+            <a-form-item label="启用">
+              <a-switch v-model:checked="form.enabled" />
+              <div class="field-hint">停用的渠道不参与路由。</div>
             </a-form-item>
           </a-col>
           <a-col :span="12">
-            <a-form-item label="启用">
-              <a-switch v-model:checked="form.enabled" />
+            <a-form-item label="优先级">
+              <div class="field-hint" style="margin-top: 0">
+                {{ editing ? '在列表里拖动这一行即可调整，越靠上越优先。' : '新渠道会排在所属分组的最后。' }}
+              </div>
             </a-form-item>
           </a-col>
         </a-row>
@@ -822,4 +983,19 @@ onMounted(load)
 .enable-cell { display: inline-flex; align-items: center; gap: 6px; }
 /* 异常提示用橙色，与「未定价」那类待办同色系；只在探测失败时出现 */
 .health-warn { color: var(--color-orange); font-size: 13px; }
+/* 拖拽手柄：平时低调，悬停才明显 —— 它是个辅助操作，
+   不该和「测试/编辑」那些动作抢注意力。grab 光标是唯一的可拖拽提示 */
+.drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  color: var(--color-text-secondary);
+  cursor: grab;
+}
+.drag-handle:hover { color: var(--color-primary); }
+.drag-handle:active { cursor: grabbing; }
+/* 拖动中的行：半透明让下面的落点看得见（sortablejs 的 ghostClass） */
+.row-ghost { opacity: 0.4; background: color-mix(in oklab, var(--color-primary) 10%, transparent); }
+.row-chosen .drag-handle { color: var(--color-primary); }
 </style>

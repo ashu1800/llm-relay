@@ -17,12 +17,21 @@ const (
 )
 
 // 分组路由策略。
+//
+// 曾经还有一个 StrategyWeighted（"weighted"，加权随机）：那时 weight 是抽签
+// 份额，权重越大越容易被抽中。现在 weight 改为**组内优先级序号**（1..N 连续
+// 唯一，越小越优先，见 Channel.Weight），抽签语义与「越靠前越优先」正好相反，
+// 已经去掉。老库里 strategy='weighted' 的行由迁移改成 failover。
 const (
-	StrategyWeighted     = "weighted"
 	StrategyRoundRobin   = "round_robin"
 	StrategyLeastLatency = "least_latency"
 	StrategyFailover     = "failover"
 )
+
+// LegacyStrategyWeighted 是已废弃的策略值，只用于识别老数据。
+// 迁移会把它改成 failover；normalizeStrategy 也会把任何不认识的值收敛到
+// failover —— 否则库里留着一个前端下拉里没有的值，分组表单会显示空白。
+const LegacyStrategyWeighted = "weighted"
 
 // 报文留存策略。
 const (
@@ -68,12 +77,24 @@ type ChannelGroup struct {
 type Channel struct {
 	ID         uint   `gorm:"primaryKey" json:"id"`
 	Name       string `gorm:"size:128;not null" json:"name"`
-	GroupID    uint   `gorm:"index;not null;default:1" json:"group_id"`
+	GroupID    uint   `gorm:"index;not null;default:1;uniqueIndex:idx_group_weight,priority:1" json:"group_id"`
 	Protocol   string `gorm:"size:32;not null;default:openai-chat" json:"protocol"`
 	BaseURL    string `gorm:"size:512;not null" json:"base_url"`
 	APIKeyEnc  string `gorm:"size:2048" json:"-"`
 	APIKeyHint string `gorm:"size:32" json:"api_key_hint"`
-	Weight     int    `gorm:"not null;default:1" json:"weight"`
+	// Weight 是**组内优先级序号**：1..N 连续且唯一，值越小越优先。
+	//
+	// 它不再是「加权随机」的抽签份额（那个策略已下线），而是故障转移顺序：
+	// 转发时每轮取候选链首个（见 relay.Service.Relay），候选按本列升序排列，
+	// 于是 weight=1 先试、失败换 weight=2，依此类推。
+	//
+	// 由此产生两条不变量，不要绕过它们直接写这一列：
+	//   - 同一分组内 weight 唯一且连续 —— 由 idx_group_weight 这个唯一索引
+	//     在数据库层兜底（AutoMigrate 创建，回填见 store.normalizeChannelWeights）
+	//   - 增删渠道、换分组之后要重排，别留空洞。统一走
+	//     api.renumberGroupChannels / api.applyChannelOrder，它们在事务里
+	//     先整体错位再赋 1..N，避免唯一索引在中途瞬时冲突
+	Weight int `gorm:"not null;default:1;uniqueIndex:idx_group_weight,priority:2" json:"weight"`
 	// Currency 是这家上游给用户开账单用的币种（见 model.NormalizeCurrency）。
 	// 价格、日志金额、看板金额都按它计量 —— 同一个模型名在人民币渠道与
 	// 美元渠道上本来就是两笔不同的钱，不能合成一个数。

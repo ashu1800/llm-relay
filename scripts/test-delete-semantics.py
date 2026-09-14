@@ -90,10 +90,22 @@ else:
 
 print()
 print("=== 4. 删渠道要一并清掉模型白名单，且不能留下悬挂 ===")
+# 分组 id 必须现取：写死 1 曾经能过，但分组可以被删掉重建（备份恢复、
+# 分组用例都会重排 id）。写死的话这条请求会因外键失败返回 500，
+# 报出来的是 KeyError: 'id' —— 完全指错方向的错误
+# （同样的坑在 test-foreign-keys.sh 里已经踩过一次）
+_, groups = call("GET", "/groups")
+items = groups.get("items", groups if isinstance(groups, list) else [])
+default_gid = next((g["id"] for g in items if g.get("is_default")), None) or (items[0]["id"] if items else None)
+if default_gid is None:
+    print("没有可用的分组，跳过第 4 节")
+    print()
+    print("通过 %d 项，失败 %d 项" % (ok, bad))
+    raise SystemExit(0 if bad == 0 else 1)
 _, ch = call("POST", "/channels", {
     "name": "delete-semantics-chan", "protocol": "openai-chat",
     "base_url": "http://slow-upstream:9999/v1", "api_key": "k",
-    "group_id": 1, "weight": 1,
+    "group_id": default_gid,
 })
 cid = ch["id"]
 call("POST", "/channels/%d/models" % cid, {"public_name": "delete-semantics-model"})

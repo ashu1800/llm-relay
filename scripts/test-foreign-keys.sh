@@ -45,9 +45,14 @@ echo "=== 5. 删渠道时绑定级联清除（用临时渠道，不动真实数�
 # 报出来的是「syntax error at end of input」这种完全指错方向的错误 ——
 # 因为插入失败后 TMPCH 是空的，后面的 SQL 就成了 WHERE channel_id=
 GID_FOR_PROBE=$(P "SELECT id FROM channel_groups ORDER BY id LIMIT 1")
+# 权重必须现取：weight 是**组内优先级序号**，同一分组内唯一（有唯一索引兜底）。
+# 写死 1 的话，只要那个分组里已经有一条序号 1 的渠道，这条 INSERT 就会被
+# 唯一索引拒绝 —— 然后 TMPCH 为空、后面的 SQL 变成 WHERE channel_id=，
+# 报出来的是上面注释里那种指错方向的错误
+NEXT_W=$(P "SELECT COALESCE(MAX(weight), 0) + 1 FROM channels WHERE group_id = $GID_FOR_PROBE")
 # 不依赖 RETURNING：psql 的命令标签会和结果混在一起，取起来容易出错。
 # 插进去再按名字查回来，简单且确定。
-P "INSERT INTO channels (name, group_id, protocol, base_url, api_key_enc, weight, enabled, created_at, updated_at) VALUES ('fk-cascade-probe', $GID_FOR_PROBE, 'openai-chat', 'http://x', '', 1, false, now(), now())" >/dev/null
+P "INSERT INTO channels (name, group_id, protocol, base_url, api_key_enc, weight, enabled, created_at, updated_at) VALUES ('fk-cascade-probe', $GID_FOR_PROBE, 'openai-chat', 'http://x', '', $NEXT_W, false, now(), now())" >/dev/null
 TMPCH=$(P "SELECT id FROM channels WHERE name = 'fk-cascade-probe'")
 P "INSERT INTO channel_models (channel_id, public_name, upstream_name, enabled, created_at, updated_at) VALUES ($TMPCH, 'fk-probe', 'fk-probe', true, now(), now())" >/dev/null
 BEFORE=$(P "SELECT count(*) FROM channel_models WHERE channel_id=$TMPCH")

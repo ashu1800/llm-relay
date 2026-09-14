@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
+	"gorm.io/gorm"
 
 	"llm-relay/internal/model"
 )
@@ -113,7 +114,11 @@ func (s *Server) exportConfig(c *gin.Context) {
 		{
 			"渠道", func() error {
 				var rows []model.Channel
-				if err := db.Order("id").Find(&rows).Error; err != nil {
+				// 按 (分组, 优先级序号) 导出：weight 是组内的故障转移顺序，
+				// 导入时按文件顺序依次追加就能还原同一套顺序。
+				// 只按 id 排会让备份→恢复把优先级顺序打乱（顺序是拿拖拽调出来的，
+				// 丢了没法从 id 推回去）
+				if err := db.Order("group_id, weight, id").Find(&rows).Error; err != nil {
 					return err
 				}
 				for _, ch := range rows {
@@ -205,6 +210,10 @@ func (s *Server) importConfig(c *gin.Context) {
 			continue
 		}
 		gr.ID = 0
+		// 策略也要收敛：备份可能是「加权随机」还在的时候导出的，直接落库会
+		// 让分组表单显示空白（下拉里已经没有这一项了）。启动时的迁移虽然也
+		// 会收拾它，但那要等到下次重启，中间这段时间界面上是坏的
+		gr.Strategy = normalizeStrategy(gr.Strategy)
 		if err := db.Create(&gr).Error; err != nil {
 			report.Warnings = append(report.Warnings, "分组 "+gr.Name+" 导入失败: "+err.Error())
 			continue
@@ -282,7 +291,19 @@ func (s *Server) importConfig(c *gin.Context) {
 					"渠道 "+ch.Name+" 的出站代理在本机不存在，已改为直连")
 			}
 		}
-		if err := db.Create(&ch).Error; err != nil {
+		// 权重不能照抄文件里的值：它是组内优先级序号，且库上有
+		// (group_id, weight) 唯一索引。备份是逐条 Create 的，文件里若有多条
+		// 同序号（老备份一定有，那时同分组同权重是常态），第二条就会撞索引、
+		// 整条渠道导入失败。改为逐条排到目标分组末尾 —— 导出时已按
+		// (group_id, weight) 排序，所以文件顺序天然还原出原来的优先级顺序。
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			w, err := appendChannelToGroup(tx, ch.GroupID)
+			if err != nil {
+				return err
+			}
+			ch.Weight = w
+			return tx.Create(&ch).Error
+		}); err != nil {
 			report.Warnings = append(report.Warnings, "渠道 "+ch.Name+" 导入失败: "+err.Error())
 			continue
 		}
