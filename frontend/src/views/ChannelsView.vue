@@ -22,6 +22,7 @@ import ChannelIcon from '@/components/ChannelIcon.vue'
 import { PROTOCOLS, type Channel, type ChannelGroup, type ChannelBinding } from '@/api/types'
 import { symbolOf } from '@/utils/money'
 import { emptyPrice, pickPrice } from '@/components/ModelPricingEditor.vue'
+import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
 
 // 记账币种：新增渠道默认人民币 —— 现在接的上游都按人民币开账单。
 // 数据列的默认值是美元（加列之前的历史行本就是美元口径），两者不一致是刻意的：
@@ -41,6 +42,42 @@ type ChannelRow = Channel & {
 const loading = ref(false)
 const rows = ref<ChannelRow[]>([])
 const groups = ref<ChannelGroup[]>([])
+
+// ---- 按分组筛选 ----
+//
+// 值是**字符串**而不是数字：'all' 要能与分组 id 共处一个字段，
+// 而 '' 又和「未选择」的语义纠缠不清。统一成字符串后，落到 localStorage 里
+// 也天然是原样存取，不需要在读写两头来回转换。
+const GROUP_FILTER_KEY = 'channels-group-filter'
+const ALL_GROUPS = 'all'
+
+// 初值先给 'all'，等分组表拉回来后再用持久化的值覆盖（见 load）：
+// 此刻还不知道有哪些分组，没法校验存下来的 id 是否仍然合法
+const groupFilter = ref<string>(ALL_GROUPS)
+
+const groupFilterOptions = computed(() => [
+  { value: ALL_GROUPS, label: '全部分组' },
+  ...groups.value.map((g) => ({ value: String(g.id), label: g.name }))
+])
+
+// 分组可能被删除，而存下来的筛选值还指着它。这时的表现会是「列表永远是空的」，
+// 从界面上完全看不出原因 —— 所以在分组表到达后做一次校验，不合法就退回「全部」。
+function applyStoredGroupFilter() {
+  const allowed = [ALL_GROUPS, ...groups.value.map((g) => String(g.id))]
+  groupFilter.value = readStoredChoice(GROUP_FILTER_KEY, allowed, ALL_GROUPS)
+}
+
+function onGroupFilterChange(v: string) {
+  groupFilter.value = v
+  writeStoredChoice(GROUP_FILTER_KEY, v)
+}
+
+// 筛选只作用于**显示**：rows 仍然是完整列表，右上的「共 N 个渠道」
+// 因此可以说清「筛出来几个 / 一共几个」，不必让用户怀疑是不是渠道丢了。
+const visibleRows = computed(() => {
+  if (groupFilter.value === ALL_GROUPS) return rows.value
+  return rows.value.filter((r) => String(r.group_id) === groupFilter.value)
+})
 
 const modalOpen = ref(false)
 const editing = ref<Channel | null>(null)
@@ -104,6 +141,8 @@ async function load() {
     rows.value = c.items || []
     groups.value = g.items || []
     proxies.value = px.items || []
+    // 分组表到手后才能校验存下来的筛选值是否还指向一个存在的分组
+    applyStoredGroupFilter()
     if (!form.group_id && groups.value.length) {
       form.group_id = groups.value.find((x) => x.is_default)?.id ?? groups.value[0].id
     }
@@ -455,16 +494,27 @@ onMounted(load)
     <section class="panel manage-panel">
       <div class="manage-toolbar">
         <div class="toolbar-left">
+          <!-- 分组筛选放在「新建渠道」左边：它描述的是「下面这张表显示什么」，
+               与新建动作无关，但比新建更常用（渠道一多就是常态视角） -->
+          <a-select
+            v-model:value="groupFilter"
+            :options="groupFilterOptions"
+            style="width: 170px"
+            @change="onGroupFilterChange"
+          />
           <a-button type="primary" @click="openCreate"><PlusOutlined /> 新建渠道</a-button>
           <a-button :loading="loading" @click="load"><ReloadOutlined /> 刷新</a-button>
         </div>
         <div class="toolbar-spacer" />
-        <span class="toolbar-hint">共 {{ rows.length }} 个渠道</span>
+        <span class="toolbar-hint">
+          共 {{ rows.length }} 个渠道<template v-if="groupFilter !== ALL_GROUPS">
+            ，当前显示 {{ visibleRows.length }} 个</template>
+        </span>
       </div>
 
       <DataState
         :error="loadError"
-        :has-data="rows.length > 0"
+        :has-data="visibleRows.length > 0"
         :loading="loading"
         title="渠道列表加载失败"
         @retry="load"
@@ -474,7 +524,7 @@ onMounted(load)
            1230 = 各列宽度之和（名称列 150 -> 170 是为了放下「经 xxx」那行代理信息，
            操作列 190 -> 230 是为了放下「测试」），实测容器宽 1182（scripts/measure-tables.mjs） -->
       <a-table
-        :data-source="rows"
+        :data-source="visibleRows"
         :loading="loading"
         :pagination="false"
         row-key="id"
@@ -482,7 +532,11 @@ onMounted(load)
         :scroll="{ x: 1211 }"
       >
         <template #emptyText>
-          <a-empty description="还没有渠道，点「新建渠道」添加第一个" />
+          <a-empty
+            :description="groupFilter === ALL_GROUPS
+              ? '还没有渠道，点「新建渠道」添加第一个'
+              : '这个分组下还没有渠道，可以切换分组筛选看看'"
+          />
         </template>
         <a-table-column title="名称" :width="170">
           <template #default="{ record }">
