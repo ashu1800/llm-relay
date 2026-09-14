@@ -3,18 +3,35 @@ package api
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
 
 	"llm-relay/internal/model"
+	"llm-relay/internal/relay"
 )
+
+// totalTokensOf 是 interface{} 形态的 relay.UsageTotal，供聚合行使用。
+//
+// 聚合结果是 int64，而 relay.UsageTotal 收 int（TokenUsage 的字段类型），
+// 这里做一层转换，公式本身仍然只有 relay 包那一处定义。
+func totalTokensOf(prompt, completion, cached, cacheCreation int64) int64 {
+	return int64(relay.UsageTotal(int(prompt), int(completion), int(cached), int(cacheCreation)))
+}
+
+// cacheHitRateOf 同上，是 relay.CacheHitRateOf 的 int64 版本。
+func cacheHitRateOf(prompt, cached, cacheCreation int64) float64 {
+	return relay.CacheHitRateOf(int(prompt), int(cached), int(cacheCreation))
+}
 
 // round2 保留两位小数，用于毫秒等展示型数值。
 // 比例类字段一律返回原始浮点，格式化交给前端，避免各接口精度不一致。
@@ -81,13 +98,81 @@ func resolveRange(key string) (time.Time, time.Time, string) {
 	}
 }
 
-// localTZ 返回可用于 PostgreSQL AT TIME ZONE 的时区名。
-func localTZ() string {
-	name := time.Now().Location().String()
-	if name == "Local" || name == "" {
-		return "UTC"
+// statsZoneName 返回可用于 PostgreSQL AT TIME ZONE 的时区名。
+//
+// 为什么不能直接拿 time.Now().Location().String()：Go 在 **TZ 未设置** 时
+// 会加载 /etc/localtime，但把名字硬写成 "Local"（见标准库 zoneinfo_unix.go
+// 的 initLocal）。原来的实现在这种情况下静默返回 "UTC"，于是分桶整体偏 8 小时
+// （北京时间 00:00-08:00 的请求被算进前一天）。裸机部署脚本没有写 TZ，
+// 必然命中这条路径；容器编排里设了 TZ，所以只有裸机用户会看到这个偏差。
+//
+// 解析顺序：TZ 环境变量 -> Go 已解析出的具名时区 -> /etc/timezone
+// （Debian/Ubuntu）-> /etc/localtime 符号链接。全都拿不到时返回空串，
+// 由 statsZoneExpr 退化成固定偏移，并且只告警一次 —— 宁可口径明确，
+// 也不要悄悄换一个时区。
+func statsZoneName() string {
+	if tz := strings.TrimSpace(os.Getenv("TZ")); tz != "" {
+		if loc, err := time.LoadLocation(tz); err == nil {
+			return loc.String()
+		}
 	}
-	return name
+	if name := time.Now().Location().String(); name != "Local" && name != "" {
+		return name
+	}
+	// Debian/Ubuntu 把时区名单独放在 /etc/timezone
+	if b, err := os.ReadFile("/etc/timezone"); err == nil {
+		if name := strings.TrimSpace(string(b)); name != "" {
+			if loc, err := time.LoadLocation(name); err == nil {
+				return loc.String()
+			}
+		}
+	}
+	// /etc/localtime 通常是指向 /usr/share/zoneinfo/<Area>/<City> 的符号链接
+	if dst, err := os.Readlink("/etc/localtime"); err == nil {
+		if i := strings.Index(dst, "zoneinfo/"); i >= 0 {
+			if loc, err := time.LoadLocation(dst[i+len("zoneinfo/"):]); err == nil {
+				return loc.String()
+			}
+		}
+	}
+	return ""
+}
+
+var (
+	statsZoneOnce sync.Once
+	// statsZoneExpr 是 SQL 里 AT TIME ZONE 后面那段，可能是 "?" 也可能是 "?::interval"
+	statsZoneExpr string
+	// statsZoneArg 是对应的参数值，SQL 里会出现两次
+	statsZoneArg any
+)
+
+// statsZone 解析一次时区并缓存。返回值直接拼进 SQL 的 AT TIME ZONE 之后，
+// 参数按 statsZoneArg 传入（每条 SQL 用两次）。
+func statsZone() (string, any) {
+	statsZoneOnce.Do(func() {
+		if name := statsZoneName(); name != "" {
+			statsZoneExpr, statsZoneArg = "?", name
+			return
+		}
+		// 退化路径：按当前 UTC 偏移做固定偏移。这对没有夏令时的时区
+		// （如 Asia/Shanghai）完全等价，对有夏令时的时区在切换日附近会有偏差，
+		// 所以必须告警而不是静默采用。
+		_, offset := time.Now().Zone()
+		slog.Warn("无法确定服务器时区名，统计分桶将按固定 UTC 偏移计算；" +
+			"如需精确分桶请设置 TZ 环境变量（例如 TZ=Asia/Shanghai）")
+		// PostgreSQL 的 AT TIME ZONE 接受 interval；用秒数避免符号歧义
+		// （POSIX 风格 "UTC+8" 的含义与 ISO 8601 相反，不采用）
+		statsZoneExpr, statsZoneArg = "?::interval", fmt.Sprintf("%d seconds", offset)
+	})
+	return statsZoneExpr, statsZoneArg
+}
+
+// localTZ 保留给需要「时区名」而非 SQL 片段的调用方。
+func localTZ() string {
+	if name := statsZoneName(); name != "" {
+		return name
+	}
+	return "UTC"
 }
 
 // statsFilter 是看板的筛选条件：按分组 / 按渠道，0 表示不筛选。
@@ -209,7 +294,7 @@ func (s *Server) statsSummary(c *gin.Context) {
 	start, end, _ := resolveRange(c.Query("range"))
 	data, err := s.summarySnapshotCtx(c.Request.Context(), start, end, f)
 	if err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 	data["range"] = gin.H{
@@ -262,12 +347,9 @@ func (s *Server) summarySnapshotCtx(ctx context.Context, start, end time.Time, f
 	if row.Requests > 0 {
 		successRate = float64(row.Success) / float64(row.Requests)
 	}
-	// 命中率分母为全部输入（未命中 + 命中 + 缓存写入），与日志页口径保持一致
-	cacheDenom := row.PromptTokens + row.CachedTokens + row.CacheCreationTokens
-	hitRate := 0.0
-	if cacheDenom > 0 {
-		hitRate = float64(row.CachedTokens) / float64(cacheDenom)
-	}
+	// 命中率分母为全部输入（未命中 + 命中 + 缓存写入），与日志页口径保持一致。
+	// 公式与 relay 包同源，避免两处各写一遍后漂移。
+	hitRate := cacheHitRateOf(row.PromptTokens, row.CachedTokens, row.CacheCreationTokens)
 
 	return gin.H{
 		"requests":              row.Requests,
@@ -279,7 +361,7 @@ func (s *Server) summarySnapshotCtx(ctx context.Context, start, end time.Time, f
 		"cached_tokens":         row.CachedTokens,
 		"cache_creation_tokens": row.CacheCreationTokens,
 		"reasoning_tokens":      row.ReasoningTokens,
-		"total_tokens":          row.PromptTokens + row.CompletionTokens + row.CachedTokens,
+		"total_tokens":          totalTokensOf(row.PromptTokens, row.CompletionTokens, row.CachedTokens, row.CacheCreationTokens),
 		"cache_hit_rate":        hitRate,
 		"costs":                 costs.json(),
 		"avg_first_byte_ms":     row.AvgFirstByte,
@@ -310,8 +392,8 @@ func (s *Server) statsTimeseries(c *gin.Context) {
 	}
 
 	cond, filterArgs := f.where()
-	tz := localTZ()
-	sql := `SELECT date_trunc(?, created_at AT TIME ZONE ?) AT TIME ZONE ? AS bucket,
+	zoneExpr, zoneArg := statsZone()
+	sql := `SELECT date_trunc(?, created_at AT TIME ZONE ` + zoneExpr + `) AT TIME ZONE ` + zoneExpr + ` AS bucket,
                 COUNT(*)::bigint AS requests,
                 COUNT(*) FILTER (WHERE status_code >= 400)::bigint AS errors,
                 COALESCE(SUM(prompt_tokens),0)::bigint AS prompt_tokens,
@@ -324,8 +406,8 @@ func (s *Server) statsTimeseries(c *gin.Context) {
 
 	var rows []seriesRow
 	if err := s.deps.Store.DB().Raw(sql,
-		append([]any{bucket, tz, tz, start, end}, filterArgs...)...).Scan(&rows).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		append([]any{bucket, zoneArg, zoneArg, start, end}, filterArgs...)...).Scan(&rows).Error; err != nil {
+		writeInternalError(c, err)
 		return
 	}
 
@@ -432,7 +514,7 @@ func (s *Server) groupStats(c *gin.Context, column string) {
 
 	var rows []groupRow
 	if err := s.deps.Store.DB().Raw(sql, append([]any{start, end}, filterArgs...)...).Scan(&rows).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		writeInternalError(c, err)
 		return
 	}
 
@@ -525,20 +607,22 @@ func (s *Server) statsHeatmap(c *gin.Context) {
 	// 但「看哪条渠道」这个条件没有理由不生效 —— 否则同一屏上
 	// 卡片按渠道筛过、热力图还是全站，两个数字对不上。
 	cond, filterArgs := f.where()
-	q := `SELECT to_char(created_at AT TIME ZONE ?, 'YYYY-MM-DD') AS day,
-                EXTRACT(HOUR FROM created_at AT TIME ZONE ?)::int AS hour,
+	zoneExpr, zoneArg := statsZone()
+	q := `SELECT to_char(created_at AT TIME ZONE ` + zoneExpr + `, 'YYYY-MM-DD') AS day,
+                EXTRACT(HOUR FROM created_at AT TIME ZONE ` + zoneExpr + `)::int AS hour,
                 cost_currency,
                 COUNT(*)::bigint AS requests,
                 COALESCE(SUM(estimated_cost), 0) AS cost,
                 COALESCE(SUM(total_tokens), 0)::bigint AS tokens
-        FROM request_logs WHERE created_at >= ?` + cond + `
+        FROM request_logs WHERE created_at >= ? AND created_at <= ?` + cond + `
         GROUP BY day, hour, cost_currency ORDER BY day, hour`
 
-	tz := localTZ()
+	// 上界与其它聚合保持一致：少了它，热力图会把「未来时间戳」的行也算进来
+	// （导入的历史数据或时钟偏斜都可能是这种行），而卡片上又看不到它们。
 	var rows []heatRow
 	if err := s.deps.Store.DB().Raw(q,
-		append([]any{tz, tz, since}, filterArgs...)...).Scan(&rows).Error; err != nil {
-		writeUpstreamError(c, http.StatusInternalServerError, err.Error(), "internal_error")
+		append([]any{zoneArg, zoneArg, since, time.Now()}, filterArgs...)...).Scan(&rows).Error; err != nil {
+		writeInternalError(c, err)
 		return
 	}
 
@@ -575,5 +659,5 @@ func (s *Server) statsHeatmap(c *gin.Context) {
 			"tokens": a.tokens,
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"days": days, "timezone": tz, "items": items})
+	c.JSON(http.StatusOK, gin.H{"days": days, "timezone": localTZ(), "items": items})
 }

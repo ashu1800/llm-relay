@@ -25,14 +25,38 @@ type Usage struct {
 
 // BillableTokens 返回本次请求应计入配额的 token 总数（分组 TPM 记账用）。
 //
+// UsageTotal 是「总 token」的唯一公式：四项之和。
+//
+// 全项目只有这一处定义。此前同样的概念在六处各写了一遍且互不一致
+// （有的漏 cache_creation、有的漏 cached、有的漏 reasoning），
+// 结果是总览卡、日志页、热力图、排行榜、导出 CSV 的口径都对不上，
+// 而且改动时很容易只改其中一两处。新增代码请一律调用它。
+func UsageTotal(prompt, completion, cached, cacheCreation int) int {
+	return prompt + completion + cached + cacheCreation
+}
+
+// CacheHitRateOf 是缓存命中率的唯一公式。
+//
+// 分母是「全部输入」＝未命中 + 命中 + 缓存写入。前端 LogsView 与
+// DashboardView 用的是同一口径，改这里要同步改前端。
+func CacheHitRateOf(prompt, cached, cacheCreation int) float64 {
+	denom := UsageTotal(prompt, 0, cached, cacheCreation)
+	if denom <= 0 {
+		return 0
+	}
+	return float64(cached) / float64(denom)
+}
+
+// BillableTokens 返回计入 TPM 配额的量。
+//
 // 口径与落库的 total_tokens 一致：上游明确给了总数就用它，
-// 否则按「非缓存输入 + 输出（+ 缓存）」累加。单独抽出来是为了让
-// 「TPM 记的是哪个数」只有一处定义，改口径时不会漏。
+// 否则按四项之和累加。单独抽出来是为了让「TPM 记的是哪个数」
+// 只有一处定义，改口径时不会漏。
 func (u Usage) BillableTokens() int {
 	if u.TotalTokens > 0 {
 		return u.TotalTokens
 	}
-	total := u.PromptTokens + u.CompletionTokens + u.CachedTokens + u.CacheCreationTokens
+	total := UsageTotal(u.PromptTokens, u.CompletionTokens, u.CachedTokens, u.CacheCreationTokens)
 	if total == 0 {
 		// 有些上游只报 reasoning_tokens，至少别把它漏掉
 		total = u.ReasoningTokens
@@ -40,13 +64,11 @@ func (u Usage) BillableTokens() int {
 	return total
 }
 
-// CacheHitRate 返回缓存命中率，分母为总输入 token。
+// CacheHitRate 返回缓存命中率，分母为全部输入 token。
+//
+// 与 CacheHitRateOf 同源，保留方法形式是为了让调用方读起来更自然。
 func (u Usage) CacheHitRate() float64 {
-	denom := u.PromptTokens + u.CachedTokens
-	if denom <= 0 {
-		return 0
-	}
-	return float64(u.CachedTokens) / float64(denom)
+	return CacheHitRateOf(u.PromptTokens, u.CachedTokens, u.CacheCreationTokens)
 }
 
 // NormalizeUsage 从任意上游的 usage 对象归一化。
@@ -114,8 +136,22 @@ func NormalizeUsage(raw map[string]any) Usage {
 		u.PromptTokens = miss
 	}
 
-	if u.TotalTokens == 0 {
-		u.TotalTokens = u.PromptTokens + u.CompletionTokens + u.CachedTokens + u.CacheCreationTokens
+	// ---- 总量 ----
+	//
+	// 必须在上面所有调整**做完之后**才算。归一化会把「子集型」缓存字段换算成
+	// 并列语义（:106-110 的扣减、:113-115 的 DeepSeek miss 覆盖），总量只有在这
+	// 之后才反映真实的四项之和。原来的写法在调整之前就取好了值，于是
+	// Anthropic 原生并列报文 {input:100, output:50, cache_read:1000, cache_creation:200}
+	// 被记成 150（正确是 1350）；而末尾那句「总量为 0 时兜底」永远轮不到。
+	//
+	// 上游总量更大时采用上游值：Gemini 原生的 thoughtsTokenCount 是**独立于**
+	// candidatesTokenCount 的（不同于 OpenAI 的 reasoning_tokens 已含在
+	// completion_tokens 里），此时总量确实大于四项之和，上游值才是对的。
+	sum := u.PromptTokens + u.CompletionTokens + u.CachedTokens + u.CacheCreationTokens
+	if upstream := firstNonZero(getInt(raw, "total_tokens"), getInt(raw, "totalTokenCount")); upstream > sum {
+		u.TotalTokens = upstream
+	} else {
+		u.TotalTokens = sum
 	}
 	return u
 }
@@ -176,7 +212,7 @@ func EstimateUsage(promptChars, completionChars int) Usage {
 		CompletionTokens: toTokens(completionChars),
 		Estimated:        true,
 	}
-	u.TotalTokens = u.PromptTokens + u.CompletionTokens
+	u.TotalTokens = UsageTotal(u.PromptTokens, u.CompletionTokens, 0, 0)
 	return u
 }
 

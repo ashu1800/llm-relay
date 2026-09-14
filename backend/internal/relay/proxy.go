@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"llm-relay/internal/model"
+	"llm-relay/internal/relay/convert"
 )
 
 // Prepared 是发往上游的请求描述。
@@ -193,11 +194,13 @@ func ExtractStream(raw []byte) bool {
 // UsageTee 在透传字节流的同时旁路解析 SSE，抓取上游返回的 usage。
 // 它只观察、不改写，因此对流式转发的延迟没有影响。
 type UsageTee struct {
-	buf     []byte
-	usage   Usage
-	gotAny  bool
-	total   int
-	onUsage func(Usage)
+	// splitter 复用 convert 包的行切分器：同样的逻辑此前在这里和 convert
+	// 各写了一份，内存上限的修复很容易只落到其中一处。
+	splitter convert.LineSplitter
+	usage    Usage
+	gotAny   bool
+	total    int
+	onUsage  func(Usage)
 }
 
 // Bytes 返回已透传的字节数，供缺少 usage 时兜底估算输出长度。
@@ -214,30 +217,13 @@ func (t *UsageTee) Usage() (Usage, bool) { return t.usage, t.gotAny }
 // Write 记录透传的字节并解析其中的完整行。
 func (t *UsageTee) Write(p []byte) (int, error) {
 	t.total += len(p)
-	t.buf = append(t.buf, p...)
-	for {
-		idx := bytes.IndexByte(t.buf, '\n')
-		if idx < 0 {
-			break
-		}
-		t.handleLine(t.buf[:idx])
-		t.buf = t.buf[idx+1:]
-	}
-	// 已消费前缀长期占用底层数组时做一次紧凑拷贝，避免内存持续增长
-	if len(t.buf) == 0 {
-		t.buf = nil
-	} else if cap(t.buf) > 4096 && cap(t.buf) > 4*len(t.buf) {
-		t.buf = append([]byte(nil), t.buf...)
-	}
+	t.splitter.Feed(p, t.handleLine)
 	return len(p), nil
 }
 
 // Flush 处理最后一行没有换行符的残留数据。
 func (t *UsageTee) Flush() {
-	if len(t.buf) > 0 {
-		t.handleLine(t.buf)
-		t.buf = nil
-	}
+	t.splitter.Flush(t.handleLine)
 }
 
 func (t *UsageTee) handleLine(line []byte) {
@@ -306,7 +292,7 @@ func (t *UsageTee) mergeUsage(u Usage) {
 		t.usage.TotalTokens = u.TotalTokens
 	}
 	if t.usage.TotalTokens == 0 {
-		t.usage.TotalTokens = t.usage.PromptTokens + t.usage.CompletionTokens + t.usage.CachedTokens
+		t.usage.TotalTokens = UsageTotal(t.usage.PromptTokens, t.usage.CompletionTokens, t.usage.CachedTokens, t.usage.CacheCreationTokens)
 	}
 	t.gotAny = true
 }
