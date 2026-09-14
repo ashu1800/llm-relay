@@ -20,7 +20,6 @@ import { computed, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { PlusOutlined, DeleteOutlined, SnippetsOutlined, DollarOutlined } from '@ant-design/icons-vue'
 import ModelPricingEditor, { emptyPrice, hasPrice, priceSummary } from './ModelPricingEditor.vue'
-import { symbolOf } from '@/utils/money'
 
 // 这是纯展示型编辑器：数据的保存方式由父组件决定 ——
 // 建/改渠道时随渠道一起提交，抽屉里则单独整表提交。
@@ -86,6 +85,14 @@ const proxyOptions = computed(() => [
   ...(props.proxies || []).map((p) => ({ value: p.id, label: p.name + (p.enabled ? '' : '（已停用）') }))
 ])
 
+// 价格胶囊的悬停说明：胶囊本身宽度有限（列宽固定），带时段规则的摘要
+// 会被省略号截掉，完整内容在这里给出，同时说清点下去会发生什么
+function priceTip(row: WhitelistRow) {
+  return hasPrice(row)
+    ? '单价 ' + priceSummary(row, props.currency) + '（每百万词元）· 点击修改'
+    : '还没配价：这条模型的调用会被记成 0 元 · 点击配价'
+}
+
 function toggleRow(index: number, value: boolean) {
   const next = props.items.map((row, i) => (i === index ? { ...row, enabled: value } : row))
   update(next)
@@ -130,51 +137,78 @@ function applyBulk() {
 </script>
 
 <template>
-  <div class="wl-editor">
+  <div class="wl-editor" :class="{ 'has-proxy': !!proxies }">
+    <!-- 表头标签只写短名：完整解释在 title 与父级的说明里。
+         原来写成「对外模型名（客户端请求用）」，在 190px 的列里会折成两行，
+         而折行位置随列宽变化，看起来像串行 -->
     <div v-if="items.length" class="wl-head">
-      <span class="wl-col-name">对外模型名（客户端请求用）</span>
-      <span class="wl-col-up">模型映射（转发时替换成）</span>
-      <span v-if="proxies" class="wl-col-proxy">代理</span>
-      <span class="wl-col-price">{{ currency ? symbolOf(currency) + " " : "" }}定价</span>
-      <span class="wl-col-on">启用</span>
-      <span class="wl-col-op"></span>
+      <span title="客户端请求时用的名字。写错这里是最常见的 502 原因。">对外模型名</span>
+      <span title="转发给上游时替换成的名字；留空表示与对外名相同。">上游模型名</span>
+      <span v-if="proxies" title="这一个模型单独走哪个出口；默认跟随渠道。">代理</span>
+      <span title="单价（每百万词元）；点右边的胶囊可改。">定价</span>
+      <span class="wl-center">启用</span>
+      <span></span>
     </div>
     <div v-for="(row, index) in items" :key="index" class="wl-row">
       <a-input
-        class="wl-col-name"
+        size="small"
         :value="row.public_name"
         placeholder="deepseek-chat"
+        :aria-label="`第 ${index + 1} 行的对外模型名`"
         @update:value="(v: string) => setField(index, 'public_name', v)"
       />
       <a-input
-        class="wl-col-up"
+        size="small"
         :value="row.upstream_name"
         :placeholder="row.public_name || '同上'"
+        :aria-label="`第 ${index + 1} 行的上游模型名，留空表示与对外名相同`"
         @update:value="(v: string) => setField(index, 'upstream_name', v)"
       />
       <a-select
         v-if="proxies"
-        class="wl-col-proxy"
         size="small"
         :value="row.proxy_id || 0"
         :options="proxyOptions"
+        :aria-label="`第 ${index + 1} 行使用的代理`"
         @change="(v: any) => setProxy(index, Number(v) || 0)"
       />
-      <span class="wl-col-price">
+      <span class="wl-price">
         <!-- 定价做成弹窗而不是行内输入：四个单价 + 倍率 + 时段规则塞进一行
              会把这张表挤到没法看，而配价是低频动作 -->
-        <a-tooltip :title="hasPrice(row) ? '点击修改这条模型的价格' : '这条模型还没配价，调用会被记成 0 元'">
-          <span class="price-pill" :class="{ unset: !hasPrice(row) }" @click="openPrice(index)">
+        <a-tooltip :title="priceTip(row)">
+          <!-- 用 button 而不是 span：它能被 Tab 聚焦、回车触发，
+               图标动作只靠鼠标点击对键盘用户等于不存在 -->
+          <button
+            type="button"
+            class="price-pill"
+            :class="{ unset: !hasPrice(row) }"
+            @click="openPrice(index)"
+          >
             <DollarOutlined />
-            {{ priceSummary(row, currency) }}
-          </span>
+            <span class="price-text">{{ priceSummary(row, currency) }}</span>
+          </button>
         </a-tooltip>
       </span>
-      <span class="wl-col-on">
-        <a-switch :checked="row.enabled" size="small" @change="(v: any) => toggleRow(index, !!v)" />
+      <span class="wl-center">
+        <a-tooltip :title="row.enabled ? '停用后这条模型不再被路由' : '启用后这条模型才会被路由'">
+          <a-switch
+            :checked="row.enabled"
+            size="small"
+            :aria-label="`第 ${index + 1} 行是否启用`"
+            @change="(v: any) => toggleRow(index, !!v)"
+          />
+        </a-tooltip>
       </span>
-      <span class="wl-col-op">
-        <a class="danger-link" title="删除这一条" @click="removeRow(index)"><DeleteOutlined /></a>
+      <span class="wl-center">
+        <button
+          type="button"
+          class="wl-del"
+          :aria-label="`删除第 ${index + 1} 行${row.public_name ? ' ' + row.public_name : ''}`"
+          title="删除这一条"
+          @click="removeRow(index)"
+        >
+          <DeleteOutlined />
+        </button>
       </span>
     </div>
     <div v-if="!items.length" class="wl-empty">
@@ -183,6 +217,9 @@ function applyBulk() {
     <div class="wl-actions">
       <a-button size="small" @click="addRow"><PlusOutlined /> 添加一行</a-button>
       <a-button size="small" @click="bulkOpen = true"><SnippetsOutlined /> 批量粘贴</a-button>
+      <!-- 条数常驻显示：批量粘贴会一次加几十条，只靠一闪而过的提示
+           没法确认到底进来了几条 -->
+      <span v-if="items.length" class="wl-count">共 {{ items.length }} 条</span>
     </div>
 
     <ModelPricingEditor
@@ -208,23 +245,84 @@ function applyBulk() {
 </template>
 
 <style scoped>
-.wl-editor { display: flex; flex-direction: column; gap: 6px; }
-.wl-head { display: flex; gap: 6px; font-size: 12px; color: var(--color-text-secondary); }
-.wl-row { display: flex; gap: 6px; align-items: center; }
-.wl-col-name { flex: 1 1 34%; }
-.wl-col-up { flex: 1 1 34%; }
-.wl-col-proxy { flex: 0 0 128px; }
-.wl-col-price { flex: 0 0 168px; }
-.wl-col-on { flex: 0 0 44px; text-align: center; }
-/* 价格胶囊：与密钥胶囊同一套视觉语言 —— 一眼能看出「这条配过价没有」 */
+/* 列宽模板只写在这里一处，表头与数据行共用同一份。
+   原来两边各自用 flex 定义列宽：表头是文字、数据行是输入框，两者的
+   内容最小宽度不同，于是同一「列」在两行里宽度不一样 —— 实测「启用」
+   表头和下面的开关错开了 100 多像素，看起来像串了行。
+   用 minmax(0, 1fr) 而不是 1fr：默认的 min-width:auto 会让内容把列撑开，
+   窄容器里就会溢出。 */
+.wl-editor {
+  --wl-cols: minmax(0, 1fr) minmax(0, 1fr) 124px 42px 26px;
+  --wl-gap: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.wl-editor.has-proxy {
+  --wl-cols: minmax(0, 1fr) minmax(0, 1fr) 104px 124px 42px 26px;
+}
+
+.wl-head,
+.wl-row {
+  display: grid;
+  grid-template-columns: var(--wl-cols);
+  gap: var(--wl-gap);
+  align-items: center;
+  /* 左右内边距必须两边都写、且数值一致：列位置由内容盒起点决定，
+     只给其中一边加就会差这几个像素，两边的列又对不齐。
+     用负外边距去补更糟 —— 行会比容器宽 8px，实测编辑器
+     scrollWidth 比 clientWidth 大 8px，窄容器里就是一条横向滚动条 */
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
+.wl-head {
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.wl-row {
+  /* 上下 3px：24px 的控件 + 6px 行距，一屏能看下十几二十行 */
+  padding-top: 3px;
+  padding-bottom: 3px;
+  border-radius: var(--radius-control);
+  transition: background 0.15s var(--ease-expo);
+}
+.wl-row + .wl-row {
+  /* 行间分隔线用 inset 阴影而不是 border：border 会把行撑高 1px，
+     几十行下来行高就不齐了 */
+  box-shadow: inset 0 1px 0 var(--color-border);
+}
+.wl-row:hover {
+  background: color-mix(in oklab, var(--color-text-secondary) 8%, transparent);
+}
+/* 悬停时把分隔线让开，免得底色上还压着一条灰线 */
+.wl-row:hover,
+.wl-row:hover + .wl-row {
+  box-shadow: none;
+}
+
+.wl-center { display: flex; justify-content: center; }
+
+/* 价格胶囊：与密钥胶囊同一套视觉语言 —— 一眼能看出「这条配过价没有」。
+   高度对齐 --size-control-height，和同一行的输入框、下拉、开关齐平
+   （原来是默认高度的输入框配 small 下拉，一行里两种高度） */
 .price-pill {
-  display: inline-flex; align-items: center; gap: 4px;
-  max-width: 100%; padding: 1px 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  height: var(--size-control-height);
+  padding: 0 8px;
+  border: none;
   border-radius: var(--radius-control);
   background: color-mix(in oklab, var(--color-primary) 13%, transparent);
   color: var(--color-primary);
-  font-family: var(--font-family-mono); font-size: 12px; line-height: 20px;
-  cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-family: var(--font-family-mono);
+  font-size: 12px;
+  cursor: pointer;
 }
 .price-pill:hover { background: color-mix(in oklab, var(--color-primary) 22%, transparent); }
 /* 未定价用灰底而不是主题色：提示语是「这里缺东西」，不是「这里能点」 */
@@ -232,16 +330,43 @@ function applyBulk() {
   background: color-mix(in oklab, var(--color-text-secondary) 12%, transparent);
   color: var(--color-text-secondary);
 }
-.wl-col-op { flex: 0 0 24px; text-align: center; }
-.wl-head .wl-col-on, .wl-head .wl-col-op { font-size: 12px; }
+.price-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 删除：图标按钮要有自己的点击区域（原来是一个 14px 的图标，紧贴着开关）。
+   保持红色 —— 全站「删除」都是红的，这里不另立一套 */
+.wl-del {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--size-control-height);
+  height: var(--size-control-height);
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--color-red);
+  cursor: pointer;
+  transition: background 0.15s var(--ease-expo);
+}
+.wl-del:hover { background: color-mix(in oklab, var(--color-red) 14%, transparent); }
+
+/* 键盘走到这里要看得见焦点：胶囊与删除都是图标动作，没有焦点环
+   等于键盘用户不知道自己停在哪儿 */
+.price-pill:focus-visible,
+.wl-del:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
 .wl-empty {
-  padding: 10px 12px;
+  padding: 12px;
   border: 1px dashed var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   color: var(--color-text-secondary);
   font-size: 13px;
+  line-height: 1.6;
 }
-.wl-actions { display: flex; gap: 8px; margin-top: 2px; }
-.danger-link { color: var(--color-red); }
+.wl-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+/* 条数靠右：操作按钮在左、计数在右，视线不用来回跳 */
+.wl-count { margin-left: auto; font-size: 12px; color: var(--color-text-secondary); }
 .field-hint { font-size: 12px; color: var(--color-text-secondary); }
 </style>

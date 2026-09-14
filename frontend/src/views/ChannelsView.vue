@@ -988,21 +988,31 @@ onBeforeUnmount(() => {
       </a-form>
     </a-modal>
 
-    <a-drawer v-model:open="bindOpen" :title="'模型白名单 · ' + (bindChannel?.name ?? '')" width="620">
-      <a-space direction="vertical" style="width: 100%" :size="12">
-        <a-card size="small" title="这条渠道能跑哪些模型">
-          <a-space direction="vertical" style="width: 100%">
-            <a-alert
-              type="info"
-              show-icon
-              message="对外名是客户端请求时用的名字；上游名是转发给上游时替换成的名字。客户端写错名字是最常见的 502 原因。"
-            />
-            <ModelWhitelistEditor v-model:items="bindItems" :proxies="proxies" :currency="bindChannel?.currency" />
-            <a-button type="primary" block :loading="bindSaving" @click="saveBindings">保存白名单</a-button>
-          </a-space>
-        </a-card>
+    <!-- 抽屉宽度 760：白名单一行有六个格子，620 时两个模型名输入框只剩
+         90 多像素，模型名和占位符都被截成「deepsee」「deeps...」。
+         用 min(...) 而不是写死：窄窗口下不至于把抽屉顶出屏幕 -->
+    <a-drawer
+      v-model:open="bindOpen"
+      :title="'模型白名单 · ' + (bindChannel?.name ?? '')"
+      :width="'min(760px, 94vw)'"
+    >
+      <!-- 这里原来套了一层 a-card + 「这条渠道能跑哪些模型」的标题：
+          抽屉标题已经说了这是哪条渠道的白名单，卡片只是多一层边框和一句重复的话 -->
+      <div class="bind-intro">
+        只有写在这里的模型才会被路由到这条渠道。<b>对外名</b>是客户端请求时用的名字，
+        <b>上游名</b>是转发时替换成的名字（留空即同名）。写错对外名是最常见的 502 原因。
+      </div>
+      <ModelWhitelistEditor v-model:items="bindItems" :proxies="proxies" :currency="bindChannel?.currency" />
 
-      </a-space>
+      <!-- 保存放到抽屉底部：原来是一个通栏大按钮杵在内容中间，
+           既像块砖又把「添加一行」和它挤在一起 -->
+      <template #footer>
+        <div class="bind-footer">
+          <span class="bind-hint">改动要点「保存白名单」才会写回渠道</span>
+          <a-button @click="bindOpen = false">取消</a-button>
+          <a-button type="primary" :loading="bindSaving" @click="saveBindings">保存白名单</a-button>
+        </div>
+      </template>
     </a-drawer>
   </div>
 </template>
@@ -1021,6 +1031,22 @@ onBeforeUnmount(() => {
 .toolbar-spacer { flex: 1; }
 .toolbar-hint { color: var(--color-text-secondary); font-size: 13px; }
 .field-hint { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
+/* 白名单抽屉的说明块：用左侧一道主色竖线代替整块告警底色。
+   这句话是「怎么填」的说明，不是需要警惕的异常状态；用 a-alert 会得到
+   一整块主题色底 + 图标，在抽屉里比它要说明的表格还抢眼 */
+.bind-intro {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border-left: 3px solid color-mix(in oklab, var(--color-primary) 60%, transparent);
+  border-radius: 0 var(--radius-control) var(--radius-control) 0;
+  background: color-mix(in oklab, var(--color-primary) 7%, transparent);
+  font-size: 12px;
+  line-height: 1.8;
+}
+.bind-intro b { color: var(--color-primary); font-weight: 600; }
+/* 抽屉底部：提示靠左、按钮靠右 */
+.bind-footer { display: flex; align-items: center; gap: 8px; }
+.bind-hint { margin-right: auto; font-size: 12px; color: var(--color-text-secondary); }
 .unassigned { color: var(--color-text-secondary); }
 .chan-title { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
 .icon-row { display: flex; align-items: center; gap: 8px; }
