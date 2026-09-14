@@ -20,19 +20,88 @@ type Prepared struct {
 }
 
 // BuildUpstreamURL 拼接上游地址。
-// 兼容两种 BaseURL 写法：带 /v1 后缀（https://host/v1）与不带（https://host）。
+//
+// 老的实现只认「base 以 /v1 结尾」和「base 以 /v1beta 结尾」两种写法，
+// 其余一律 base + path。这在 base 已经自带版本段、但版本号不是 /v1 时会拼错：
+// 智谱 GLM Coding Plan 的 OpenAI 协议 base 是
+// https://open.bigmodel.cn/api/coding/paas/v4，拼出来是 /v4/v1/chat/completions，
+// 上游直接 404（实测响应体里 path 字段就是这么回显的）。
+//
+// 判据改成「base 的最后一段本身就是版本段」：v1 / v1beta / v4 / paas/v4 都算。
+// 这样只要 base 带了版本，就不再重复插入路径里的版本段；
+// base 不带版本（https://api.openai.com、https://api.anthropic.com）时，
+// 仍然由 path 提供版本段 —— 两条路都保持原来的正确结果。
 func BuildUpstreamURL(baseURL, path string) string {
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if base == "" {
 		return path
 	}
-	if strings.HasSuffix(base, "/v1") && strings.HasPrefix(path, "/v1/") {
-		return base + strings.TrimPrefix(path, "/v1")
-	}
-	if strings.HasSuffix(base, "/v1beta") && strings.HasPrefix(path, "/v1beta/") {
-		return base + strings.TrimPrefix(path, "/v1beta")
+	if seg := lastPathSegment(base); isVersionSegment(seg) {
+		return base + stripVersionPrefix(path)
 	}
 	return base + path
+}
+
+// lastPathSegment 取 URL 路径的最后一段。
+// 用字符串切分而不是 net/url：这里只需要「最后一段长什么样」，
+// 而 url.Parse 对没写 scheme 的配置（用户填 example.com/v1 这种）会解析失败。
+func lastPathSegment(u string) string {
+	if i := strings.IndexAny(u, "?#"); i >= 0 {
+		u = u[:i]
+	}
+	if i := strings.LastIndex(u, "/"); i >= 0 {
+		return u[i+1:]
+	}
+	return ""
+}
+
+// isVersionSegment 判断某一段是不是版本段（v1 / v1beta / v2 / v4 …）。
+// 只认「v + 数字 + 可选字母后缀」，避免把 /api、/openai 这类普通段误判成版本。
+func isVersionSegment(seg string) bool {
+	if len(seg) < 2 || (seg[0] != 'v' && seg[0] != 'V') {
+		return false
+	}
+	i := 1
+	for i < len(seg) && seg[i] >= '0' && seg[i] <= '9' {
+		i++
+	}
+	if i == 1 {
+		return false // 必须至少有一位数字：v、version 都不算
+	}
+	for ; i < len(seg); i++ {
+		c := seg[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
+// stripVersionPrefix 去掉 path 开头的版本段（/v1/… 或 /v1beta/…）。
+//
+// 只在这一段**确实是版本段**时才去掉，不能简单地剪掉前两段：
+// Gemini 的路径是 /v1beta/models/gemini-2.0:generateContent，
+// 剪错会把 models/... 一起削掉。
+func stripVersionPrefix(path string) string {
+	if !strings.HasPrefix(path, "/") {
+		return path
+	}
+	rest := path[1:]
+	seg := rest
+	if i := strings.IndexAny(rest, "/?"); i >= 0 {
+		seg = rest[:i]
+	}
+	if !isVersionSegment(seg) {
+		return path
+	}
+	trimmed := rest[len(seg):]
+	if trimmed == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(trimmed, "/") && !strings.HasPrefix(trimmed, "?") {
+		trimmed = "/" + trimmed
+	}
+	return trimmed
 }
 
 // ApplyAuth 按协议写入鉴权头。
