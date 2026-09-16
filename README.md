@@ -121,8 +121,39 @@ sudo bash deploy/install.sh
 3. **自动探测** Docker Hub 连通性：直连通 -> 跳过；否则 socks5 可用就用 **privoxy** 转成 http
    给 Docker daemon（daemon **不原生支持 socks5**，必须转换）；再不行退回 http 代理
 4. 部署源码到 `/opt/llm-relay`，生成带随机数据库密码的 `.env`
-5. `docker compose up -d --build`
-6. 注册 `llm-relay.service` 实现开机自启，并等待健康检查通过
+5. 备份数据库，`docker compose build` 构建新镜像
+6. **切换前预检**：新镜像先在 `127.0.0.1:8899` 配一个临时数据库跑起来，
+   `/readyz` 通过才切；不通过就保留旧版本继续服务（不会把线上切成挂的）
+7. 注册 `llm-relay.service`（`Type=oneshot` + `docker compose up -d`）并重启服务，
+   等待 `/healthz` 与 `/readyz` 通过，最后打印**本次切换的实际中断时长**
+   （`/healthz` 每 100ms 探一次）与数据库容器是否被重启过
+
+### 重新部署时的中断
+
+重新部署（换镜像）只需要重建 app 容器，数据库容器全程不动。实测（1440 行数据量的本机）：
+
+| 场景 | 改造前 | 现在 |
+|---|---|---|
+| 换镜像（app 容器重建） | 6.7 s，且数据库被停掉重建 | **1.5 s**，数据库容器 ID 与启动时刻都不变 |
+| 镜像没变化的重复部署 | 6.7 s | **0 次失败探测**（100 ms 粒度） |
+
+剩下的 1.5 秒是 app 自己「停 + 起」的时间（Go 进程启动、连库、跑迁移）；
+要连这 1.5 秒也消掉，得同时跑两个实例再由反向代理切换，单端口部署做不到。
+
+脚本每次都会打印真实值与数据库容器是否被重启过。做到这一点的四件事：
+
+- **不重启 Docker daemon**：只有 daemon 不可用或刚写过代理配置时才重启它
+  （`systemctl restart docker` 会把所有容器一起停掉再拉起，白白中断十几秒）
+- **单元用 `up -d` 而不是前台 `up`**：systemd 停单元时会给前台 `up` 发 SIGTERM，
+  而它是按**整个项目**善后的 —— 连数据库容器一起停掉重建（实测一次中断 6.7 秒）
+- **切换用 `docker compose up -d --no-deps app`**：只重建 app 这一个服务，
+  不经过 systemd 的停止阶段，数据库连重启都不会有
+- **`ExecStop` 只 `stop app`**：手工 `systemctl restart` 时也不会 `down` 整个项目，
+  并且脚本会在切换前确认这条定义真的生效了（systemd 用旧定义时最隐蔽）
+
+> `systemctl status llm-relay` 的 active 含义是「这个单元启动过」，
+> 真实状态看 `curl -s localhost:8888/readyz` 或 `cd /opt/llm-relay/deploy && docker compose ps`。
+> `systemctl stop llm-relay` 只停中转服务本身，要连数据库一起停用 `docker compose down`。
 
 部署完成后访问 `http://localhost:8888`（Windows 浏览器直接可开，WSL2 localhost 转发）。
 

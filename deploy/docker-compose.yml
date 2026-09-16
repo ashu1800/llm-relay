@@ -54,6 +54,10 @@ services:
     image: llm-relay:local
     container_name: llm-relay
     restart: unless-stopped
+    # 停机宽限期：默认 10 秒，而这里的 app 是 Go 写的、收到 SIGTERM 立刻退出，
+    # 正常情况 1 秒内就停完了。留 5 秒是给「正在处理的请求」收尾，
+    # 同时把最坏情况（进程卡住）从 10 秒压到 5 秒 —— 每次重新部署都要停一次它。
+    stop_grace_period: 5s
     depends_on:
       postgres:
         condition: service_healthy
