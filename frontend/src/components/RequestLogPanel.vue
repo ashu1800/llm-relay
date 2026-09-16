@@ -365,32 +365,40 @@ function openDetail(row: RequestLog) {
   detailOpen.value = true
 }
 
-// 耗时分级：5 秒内绿色、6-15 秒橙黄、15 秒以上红色。
+// 耗时分级（2026-09-16 站主重定阈值，两行各用一套）：
+//   首字：≤10s 绿、10-30s 橙、>30s 红
+//   耗时：≤20s 绿、20-60s 橙、>60s 红
+// 首字更严，因为它才是「用户感觉卡不卡」的那一下；总耗时把上游生成的时间也算进去，
+// 长回答本来就要几十秒，用同一把尺子会把正常请求染红。
 //
-// 分档按「用户体感」定：5 秒内是正常对话该有的速度，
-// 5-15 秒已经明显在等，超过 15 秒基本可以判定这次调用有问题（上游慢或重试）。
-// 边界取 <=5000 / <=15000 而不是 5000~6000 之间留缝隙：
-// 中间的毫秒必须落进某一档，否则会出现「不着色」的空档。
+// 边界取 <=10000 / <=30000 这种「闭区间、下一档从 10001 起」的写法，
+// 不在两档之间留缝：中间的毫秒必须落进某一档，否则会出现「不着色」的空档。
 //
 // fmtMs 对 0 与空值都返回 '-'，那种情况不着色，避免把「没有数据」显示成「很快」。
-function latencyClass(ms: number | null | undefined) {
+function latencyClass(ms: number | null | undefined, kind: 'first' | 'total' = 'total') {
   if (!ms) return 'lat-none'
-  if (ms <= 5000) return 'lat-fast'
-  if (ms <= 15000) return 'lat-mid'
+  const [fast, mid] = kind === 'first' ? [10000, 30000] : [20000, 60000]
+  if (ms <= fast) return 'lat-fast'
+  if (ms <= mid) return 'lat-mid'
   return 'lat-slow'
 }
 
 /** 悬停说明这一档的判据：颜色本身不该是唯一的信息来源 */
-function latencyTitle(ms: number | null | undefined) {
+function latencyTitle(ms: number | null | undefined, kind: 'first' | 'total' = 'total') {
   if (!ms) return '没有记录到耗时'
-  if (ms <= 5000) return '5 秒内'
-  if (ms <= 15000) return '5-15 秒'
-  return '超过 15 秒'
+  if (kind === 'first') {
+    if (ms <= 10000) return '10 秒内'
+    if (ms <= 30000) return '10-30 秒'
+    return '超过 30 秒'
+  }
+  if (ms <= 20000) return '20 秒内'
+  if (ms <= 60000) return '20-60 秒'
+  return '超过 60 秒'
 }
 
 /** 「任务耗时」列里两行数值的悬停说明：先说这行是哪个数，再说这一档的判据 */
-function durTitle(name: string, ms: number | null | undefined) {
-  return name + '：' + latencyTitle(ms)
+function durTitle(name: string, ms: number | null | undefined, kind: 'first' | 'total' = 'total') {
+  return name + '：' + latencyTitle(ms, kind)
 }
 
 function statusColor(code: number) {
@@ -466,6 +474,11 @@ function fmtTimeAt(t: string) {
   return wall + ' (UTC' + (offMin < 0 ? '-' : '+') + pad2(Math.floor(abs / 60)) + ':' + pad2(abs % 60) + ')'
 }
 
+/* 耗时文本。秒**一律补齐两位小数**（8.70s / 14.00s，而不是 8.7s / 14.0s）：
+   列表是竖着扫的，位数一致时小数点在同一列上，扫一列数字不用重新找基准。
+   不足 1 秒仍按毫秒显示（170ms）—— 抖成「0.17s」不如毫秒直观，
+   而且库里最小的耗时是 2ms，两位小数会把它抹成「0.00s」，
+   等于把「很快」显示成「没有耗时」。 */
 function fmtMs(v: number) {
   if (!v) return '-'
   return v >= 1000 ? (v / 1000).toFixed(2) + 's' : v + 'ms'
@@ -736,25 +749,35 @@ onMounted(() => {
         <!-- 首字与总耗时合并成一列：它们回答的是同一个问题「这次调用等了多久」。
              分成两列时，扫列表要在两处之间来回看才能拼出一次调用的耗时，
              而这两列加起来 200px 换来的信息量只有两个数。
-             单元格里按截图的样子竖排两行（左侧一条绿色竖条 + 首字 / 总耗时），
-             数值仍按耗时分级着色，悬停会说明这一行是什么、以及这一档的判据。 -->
+             单元格里按截图的样式竖排两行（左侧竖条 + 首字 / 耗时）：竖条**断成两段**，
+             上段跟首字、下段跟耗时，各自按自己那一行的档位上色 ——
+             一整条单色只能表达「这次调用慢」，断成两段才看得出是首字慢还是生成慢。
+             标签只留两个字（截图就是这样）：`总耗时` 三个字在 36px 的标签轨里
+             会把数值列推远，而这一格的宽度是按最窄列倒推出来的，一寸都不富余。
+             数值按同一档位着色，悬停说明这一行是什么、以及这一档的判据。 -->
         <a-table-column title="任务耗时" :width="120">
           <template #default="{ record }">
             <div class="dur">
+              <!-- 一条竖条、两段。两段各挂自己那一行的档位类，
+                   段色由 .dur-bar i 的 currentColor 继承而来 -->
+              <span class="dur-bar">
+                <i :class="latencyClass(record.first_byte_ms, 'first')" />
+                <i :class="latencyClass(record.total_ms, 'total')" />
+              </span>
               <div class="dur-line">
                 <span class="dur-label">首字</span>
                 <span
                   class="dur-value"
-                  :class="latencyClass(record.first_byte_ms)"
-                  :title="durTitle('首字', record.first_byte_ms)"
+                  :class="latencyClass(record.first_byte_ms, 'first')"
+                  :title="durTitle('首字', record.first_byte_ms, 'first')"
                 >{{ fmtMs(record.first_byte_ms) }}</span>
               </div>
               <div class="dur-line">
-                <span class="dur-label">总耗时</span>
+                <span class="dur-label">耗时</span>
                 <span
                   class="dur-value"
-                  :class="latencyClass(record.total_ms)"
-                  :title="durTitle('总耗时', record.total_ms)"
+                  :class="latencyClass(record.total_ms, 'total')"
+                  :title="durTitle('耗时', record.total_ms, 'total')"
                 >{{ fmtMs(record.total_ms) }}</span>
               </div>
             </div>
@@ -920,14 +943,17 @@ onMounted(() => {
 .tk-out { color: var(--token-output); }
 .tk-cache { color: var(--token-cache); }
 
-/* 耗时分级 */
+/* 耗时分级：文字色。竖条（.dur-bar）的段色继承同一个 currentColor，
+   所以文字与竖条永远不会对不上 */
 .lat-fast { color: var(--latency-fast); }
 .lat-mid { color: var(--latency-mid); }
 .lat-slow { color: var(--latency-slow); font-weight: 500; }
 .lat-none { color: var(--color-text-secondary); }
 
-/* 「任务耗时」列：两行数值共用左侧一条绿色竖条。
-   竖条是装饰（信息全在文字里），所以用填充色 --color-green；
+/* 「任务耗时」列：两行数值共用左侧一条竖条。
+   竖条**不再固定是绿色**，按截图断成两段：上段跟「首字」、下段跟「耗时」，
+   段色各自继承该行数值的 currentColor。一整条单色只能表达「这次调用慢」，
+   断成两段才看得出是首字慢还是生成慢。
    数值是正文，走上面那一组 --text-* 分级色（对比度依据见 theme.css）。
 
    字体比正文小一档、行高压到 15px：两行合计 30px，只比一行正文（22px）高一点。
@@ -942,23 +968,22 @@ onMounted(() => {
 
    **第二列必须是固定宽度，不能是 auto**：auto 轨道跟着数值长短伸缩
    （实测 45.7px「-」→ 87.05px「466.50s」），整块宽度随之变化，而它又是居中的
-   —— 于是每行的绿色竖条落在不同的 x 上（实测 50 行里有 1029.42 / 1033.02 /
+   —— 于是每行的竖条落在不同的 x 上（实测 50 行里有 1029.42 / 1033.02 /
    1036.63 三个位置，左右漂 7.2px）。站主的原话是「强迫症受不了」。
    定宽之后整块宽度恒定，竖条每行都在同一条竖直线上，整体依旧是居中的。
 
-   88px 是按「列最窄时的可用宽度」倒推的：窗口窄到出现横向滚动时，这一列回到
-   声明的 120px，减去左右各 8px 内边距只剩 104px —— 整块 = 4px 竖条 + 6px 间隔
-   + 文本轨道，所以文本轨道最多 94px。取 88px 而不是顶格的 94px，是为了让它
-   覆盖库里真实最长值 466.50s（数值宽 45.05px，标签 36 + 组内 gap 6 + 45.05
-   = 87.05px，需要 88px 才放得下）之后再留 6px，避免任何窗口下都卡在临界。
+   94px 是按「列最窄时的可用宽度」倒推的：窗口窄到出现横向滚动时，这一列回到
+   声明的 120px，减去左右各 8px 内边距只剩 104px —— 整块 = 3px 竖条 + 6px 间隔
+   + 文本轨道，所以文本轨道最多 95px。取 94px 留 1px 余量，装得下库里真实最长值
+   466.50s（标签 36 + 组内 gap 6 + 数值 45.05 = 87.05px）。
    真出现四位秒数（1234.57s，需 94.25px）时轨道按 minmax 让开几像素，
    超出单元格的部分按原来的约定溢出，不改变行高（见 .dur-line 的说明）。 */
 .dur {
   display: grid;
   justify-content: center;
-  /* 4px 竖条 + 6px 间隔 + ≥88px 文本轨道：正常数据下整块恒定 98px，
+  /* 3px 竖条 + 6px 间隔 + ≥94px 文本轨道：正常数据下整块恒定 103px，
      最窄窗口（可用 104px）里也不会顶破单元格 */
-  grid-template-columns: 4px minmax(88px, auto);
+  grid-template-columns: 3px minmax(94px, auto);
   column-gap: 6px;
   align-items: center;
   margin: -4px 0;
@@ -966,14 +991,24 @@ onMounted(() => {
   line-height: 15px;
   font-variant-numeric: tabular-nums;
 }
-/* 竖条跨两行，高度由内容决定：写死高度会在字号或行高变化时对不上 */
-.dur::before {
-  content: '';
+/* 竖条本身也是一个两行的 grid，两段各占一行 —— 分段因此天然与两行文字齐平，
+   不用写死像素高度（字号或行高改了，两段跟着走）。
+   overflow: hidden 把两段的直角裁成整条的圆角：截图里两端是圆角、
+   中间交界处是直角（实测交界行满宽 6/6，顶端才收窄成 2/6），
+   所以圆角只能加在整条上，不能加在每一段上。 */
+.dur-bar {
   grid-column: 1;
   grid-row: 1 / span 2;
+  display: grid;
+  grid-template-rows: 1fr 1fr;
   align-self: stretch;
+  overflow: hidden;
   border-radius: 2px;
-  background: var(--color-green);
+}
+/* 两段各自继承自己那一行的 currentColor：段色与数值色永远同源，
+   不会出现「文字橙、竖条绿」这种对不上的情况 */
+.dur-bar i {
+  background: currentColor;
 }
 .dur-line {
   grid-column: 2;
@@ -985,7 +1020,9 @@ onMounted(() => {
      也不改变行高。实测库里最大值是 466.50s，离列宽还差得远。 */
   white-space: nowrap;
 }
-/* 标签固定宽度：两行的数值因此从同一个位置起排，扫一列数时不会左右跳 */
+/* 标签固定宽度：两行的数值因此从同一个位置起排，扫一列数时不会左右跳。
+   两行都只用两个字（截图就是这样）：三个字的「总耗时」会把数值列推远，
+   而这一格的宽度是按最窄列倒推的，一寸都不富余 */
 .dur-label {
   flex: none;
   width: 36px;

@@ -226,8 +226,8 @@ console.log('=== 多排数值的列左缘对齐契约 ===')
   check('任务耗时那格是块级 grid + 居中', /display:\s*grid/.test(dur) && /justify-content:\s*center/.test(dur))
   check(
     '任务耗时的轨道宽度是定值（不是 auto）',
-    /grid-template-columns:\s*4px\s+minmax\(\s*\d+px\s*,\s*auto\s*\)/.test(dur),
-    'auto 轨道会跟着数值长短伸缩，绿竖条每行落在不同 x 上',
+    /grid-template-columns:\s*\d+px\s+minmax\(\s*\d+px\s*,\s*auto\s*\)/.test(dur),
+    'auto 轨道会跟着数值长短伸缩，竖条每行落在不同 x 上',
   )
   check('词元那格是块级 grid + 居中', /display:\s*grid/.test(tk) && /justify-content:\s*center/.test(tk))
   check(
@@ -237,10 +237,60 @@ console.log('=== 多排数值的列左缘对齐契约 ===')
   )
   // 定值必须装得进「列最窄时」的可用宽度：窗口出现横向滚动时列回到声明宽度，
   // 任务耗时 120-16=104px、词元 150-16=134px。词元第一版取 136px 就在这里溢出了。
+  const durBar = Number((dur.match(/grid-template-columns:\s*(\d+)px/) || [])[1])
   const durPx = Number((dur.match(/minmax\(\s*(\d+)px/) || [])[1])
   const tkPx = Number((tk.match(/minmax\(\s*(\d+)px/) || [])[1])
-  check('任务耗时定宽装得进最窄列（4+6+定值 ≤ 104）', durPx > 0 && 4 + 6 + durPx <= 104, `定值 ${durPx}px → 整块 ${4 + 6 + durPx}px，上限 104px`)
+  check(
+    '任务耗时定宽装得进最窄列（竖条 + 间隔 + 定值 ≤ 104）',
+    durPx > 0 && durBar > 0 && durBar + 6 + durPx <= 104,
+    `竖条 ${durBar}px + 间隔 6px + 定值 ${durPx}px = ${durBar + 6 + durPx}px，上限 104px`,
+  )
   check('词元定宽装得进最窄列（定值 ≤ 134）', tkPx > 0 && tkPx <= 134, `定值 ${tkPx}px，上限 134px`)
+
+  // 竖条断成两段、段色跟数值同源：
+  //   1) 段色必须用 currentColor 继承，不能写死某个颜色变量 ——
+  //      写死就回到「一整条单色」，看不出慢在首字还是慢在生成；
+  //   2) 圆角只能在整条上，两段各自加圆角会让交界处收窄（截图里是直角）；
+  //   3) 两段必须分别取首字/耗时的档位，不能都取同一个数。
+  const bar = block('.dur-bar {')
+  const seg = block('.dur-bar i {')
+  check('竖条是两行的 grid（两段各占一行）', /display:\s*grid/.test(bar) && /grid-template-rows:\s*1fr\s+1fr/.test(bar))
+  check(
+    '竖条两段的颜色继承 currentColor',
+    /background:\s*currentColor/.test(seg),
+    '写死颜色会让整条只有一个颜色，看不出是哪一段慢',
+  )
+  check(
+    '竖条圆角只加在整条上（两段各自加会在交界处收窄）',
+    /border-radius/.test(bar) && !/border-radius/.test(seg),
+  )
+  const segs = panel.match(/<i\s+:class="latencyClass\(record\.\w+,\s*'(first|total)'\)"\s*\/>/g) || []
+  check(
+    '竖条两段分别取「首字」「耗时」的档位',
+    segs.length === 2 && /'first'/.test(segs[0]) && /'total'/.test(segs[1]),
+    `实际取到 ${segs.length} 段：${segs.join(' ')}`,
+  )
+  // 两根竖条必须各自跟着自己那一行：首字用 first 档、耗时用 total 档，
+  // 两行都传 'total'（或都不传）会让首字用上宽松的那把尺子
+  check(
+    '首字那一行两处都按 first 档（文字与竖条同档）',
+    (panel.match(/latencyClass\(record\.first_byte_ms,\s*'first'\)/g) || []).length === 2,
+  )
+  check(
+    '耗时那一行两处都按 total 档',
+    (panel.match(/latencyClass\(record\.total_ms,\s*'total'\)/g) || []).length === 2,
+  )
+
+  // 阈值是站主定的，写在函数里而不是散在模板各处的三元表达式里
+  const lat = panel.slice(panel.indexOf('function latencyClass'), panel.indexOf('function statusColor'))
+  check('首字档位是 10s / 30s', /first'\s*\?\s*\[10000,\s*30000\]/.test(lat))
+  check('耗时档位是 20s / 60s', /\[20000,\s*60000\]/.test(lat))
+  // 两位小数：秒一律 toFixed(2)，站主明确要求「保留两位并且补齐两位」
+  check(
+    '耗时秒值补齐两位小数',
+    /\(v \/ 1000\)\.toFixed\(2\)/.test(panel),
+    '位数不齐时小数点不在同一列上，扫一列数字要重新找基准',
+  )
 }
 
 console.log('')
