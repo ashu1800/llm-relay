@@ -1,4 +1,23 @@
 /* LLM Relay 主题令牌 —— 全部数值实测自参考站 llm.ohub.vip */
+
+/* 列表字体 Harding：参考站自己的正文西文字体，本项目按站主要求原样随包分发。
+   文件取自参考站自托管的资源（/assets/Harding-*.ttf，sha256 3F005EFB…），
+   放在 public/fonts/ 下原样发布。
+   URL 必须写成根绝对路径：这份 CSS 打包后位于 /assets/index-*.css，
+   相对路径会解析到 /assets/fonts/… 去，字体取不到（表现是静默退回系统衬线）。
+
+   这是一份**商业授权字体**（不是开源字体），随本项目一起对外分发前
+   需要自行确认授权范围；本项目内部自用（就是它现在这个用途）不受影响。
+
+   参考站只声明了一个 @font-face、不写 font-weight：粗体由浏览器合成。
+   这里保持一致 —— 多声明几档就会变成「某些字重走了真字重、某些是合成的」，
+   同一列里粗细会不匀。 */
+@font-face {
+  font-family: 'Harding';
+  src: url('/fonts/Harding-Regular.ttf') format('truetype');
+  font-display: swap;
+}
+
 :root {
   /* ---- 颜色 ---- */
   /* 主色只用于**填充、边框、图标**（非文本，WCAG 阈值 3:1）。
@@ -129,24 +148,32 @@
      是微软雅黑）——「表格里的中文和菜单里的中文不是一种字体」是肉眼一眼
      就能看出来的不一致。
 
-     西文这一半是量出来的，不是凭感觉：对齐参考站的请求日志列表时，在参考站上
-     （其自托管的 Harding 真实可用）用 canvas 量同一串
-     "2026-09-12 13:05:50"（14px）：
-       Harding 128.11 | Book Antiqua 129.42 | Georgia 130.83 | SimSun 133
-       Times New Roman 118.6 | Palatino Linotype 117.82
-     Book Antiqua 只差 1.31px，是可用系统字体里最接近的；Palatino 和 Times 反而
-     差了 10px 以上。Georgia 也接近，但它用的是旧式数字（3/4/5/7/9 下沉），
-     表格里数字会上下跳动，不能放在前面兜底。
-     Harding 是 Commercial Type 为《Nature》定制的商业字体，无权随本项目分发，
-     所以西文只能用最接近的系统衬线顶上。
+     西文这一半现在直接用 Harding（@font-face 见文件顶部）。
+
+     这一段记的是「拿不到 Harding 时用什么顶上」的实测依据，也是回退链的顺序来源。
+     在参考站页面上（Harding 与各系统字体同时在手）用 canvas 量同一串文字（14px），
+     括号内是相对 Harding 的偏差：
+       "2026-09-14 09:57:52"  Harding 129 | Book Antiqua +0.4 | Cambria -0.7
+                              Georgia +2.4 | Palatino Linotype -11.2 | Times -10.4
+       "441/473/227456"       Harding 99.67 | Book Antiqua +4.5 | Cambria +7.1
+                              Georgia +3.9 | Palatino -6.7 | Times -7.9
+     综合几串（日期 / 词元 / 耗时 / 模型名 / 百分比 / 金额）的平均偏差：
+       Georgia 2.30 < Cambria 3.05 < Book Antiqua 3.12 < Palatino 5.47 < Times 7.45
+     Georgia 字宽最接近却**不能放在第一位**：它用的是旧式数字（3/4/5/7/9 下沉），
+     一列数字会上下跳动；Book Antiqua 是 Windows+Office 才带的字体，裸系统上没有
+     （本机就没有，于是整条链落到 Georgia —— 这次把 Harding 打包进来就是为了不再
+     受这个影响）。回退顺序按「字宽接近 + 有 lining 数字 + 系统自带概率」排：
+     Cambria（Windows 自带、偏差 3.05、lining）打头，Book Antiqua、
+     Palatino Linotype 随后，Georgia 退到最后只当兜底。
 
      这里原来还在宋体那一档写了 'STSong', SimSun, 'Songti SC', 宋体：
      那是照搬参考站的分工（它西文 Harding、中文宋体）。但宋体是为印刷设计的
      点阵时代字体，14px 的界面尺寸下笔画细且发虚，和菜单的雅黑并排就是两种
      字体，所以中文这一档整段去掉，交回 base。
-     注意这几个西文衬线族都不含中文字形，中文不会在这里被拦住。 */
-  --font-family-list: 'Book Antiqua', Georgia, 'Palatino Linotype', 'Times New Roman',
-    var(--font-family-base);
+     注意：Harding 与这几个西文衬线族都不含中文字形，中文不会在这里被拦住，
+     会一路落到链尾的 --font-family-base，也就是左侧菜单那种字。 */
+  --font-family-list: 'Harding', Cambria, 'Book Antiqua', 'Palatino Linotype', Georgia,
+    'Times New Roman', var(--font-family-base);
 
   --font-size-base: 16px;
   --font-size-panel: 14px;
@@ -165,6 +192,20 @@
   --scrollbar-thumb: #dcdcdc;
   --scrollbar-track: transparent;
   --scrollbar-width: 0.5rem;
+
+  /* ---- 自定义光标 ----
+     箭头与手型是本项目自己的品牌元素（参考站用的是系统光标），
+     图形在 public/cursor-arrow.svg 与 public/cursor-hand.svg。
+
+     URL 必须写成根绝对路径：这两个文件不带哈希、原样发布在站点根目录，
+     而这份 CSS 打包后位于 /assets/index-*.css，相对路径会解析到
+     /assets/ 下面去，两个光标都取不到图（表现是静默退回系统光标）。
+
+     url 后面那两个数是热区（相对图形左上角），刻意不在左上角：
+     箭头取 path 的箭尖 2 2，手型取食指指尖 9 2。改 SVG 里的图形时
+     这两个数要一起改，否则点击落点会与看到的尖差开一截。 */
+  --cursor-arrow: url('/cursor-arrow.svg') 2 2, auto;
+  --cursor-hand: url('/cursor-hand.svg') 9 2, pointer;
 }
 
 /* 深色主题：实测自参考站 theme.js 的 dark 配置 */
@@ -302,12 +343,19 @@ a:hover { opacity: 0.85; }
   white-space: nowrap;
 }
 
-/* 表格与列表统一用列表字体（变量定义见文件顶部）。
+/* 表格、列表与标签统一用列表字体（变量定义见文件顶部）。
    这个字族只接管西文与数字，中文会继续落到 --font-family-base，
-   与左侧菜单保持一致。 */
+   与左侧菜单保持一致。
+
+   .ant-tag 必须显式列上：antd 自己给 .ant-tag 写了
+   font-family: var(--font-family-base)，会把从单元格继承下来的字体顶掉 ——
+   表现是同一行里只有标签里的数字不是列表字体（请求日志「状态」列的 200
+   就是这样落回 Segoe UI 的）。标签里装的多半是数据（状态码、模型名、密钥名），
+   和表格正文是同一种文字，不该有两种字体。 */
 .ant-table-thead > tr > th,
 .ant-table-tbody > tr > td,
-.ant-list {
+.ant-list,
+.ant-tag {
   font-family: var(--font-family-list);
 }
 
@@ -324,6 +372,135 @@ a:hover { opacity: 0.85; }
 
 .ant-btn-primary {
   box-shadow: none;
+}
+
+/* ---- 自定义光标 ----
+   默认箭头挂在 html 而不是 #app：cursor 是可继承属性，而 antd 的弹窗、
+   抽屉、下拉都渲染成 body 下的 portal，挂在 #app 上会漏掉它们。
+
+   代价要写明白：cursor 一旦是图片，auto 的语义就失效了 —— 浏览器不再
+   按元素类型自动给光标（链接给手型、文本给 I 型），所有元素只会继承这
+   张箭头图。所以下面两组是把这个语义显式补回来，不是冗余声明。
+
+   顺带一个可见变化：正文文字从 I 型变成箭头。这一条与 ChannelsView 里
+   .last-used 早就想要的效果一致（它特意写 default 就是为了别让表格里
+   出现 I 型），现在只是全站统一了。 */
+html { cursor: var(--cursor-arrow); }
+
+/* antd 给表单标签写死了 default（标签带 for 属性，浏览器默认会给手型，
+   它反过来压成箭头）。那条写死的声明会绕过上面的自定义箭头 ——
+   悬停在弹窗里任何一个字段名上都会掉回系统光标，所以要拉回来。
+   单选/复选那几个 wrapper 本身也是 label，由下面的手型组覆盖。 */
+label { cursor: var(--cursor-arrow) !important; }
+
+/* rc-virtual-list 的假滚动条：下拉列表为了做虚拟滚动自己画了一条。
+   它给滑块写死 cursor: pointer —— 一个滚动条却摆出「可点」的手势，
+   而真实滚动条由浏览器绘制（::-webkit-scrollbar 不吃 cursor），
+   显示的本来就是系统箭头。这里让假的与真的一致，顺手去掉那个错手势。 */
+.rc-virtual-list-scrollbar-thumb { cursor: var(--cursor-arrow) !important; }
+
+/* 手型。这份清单不是猜的：用 scripts/audit-cursors.mjs 把七个路由（含弹窗、
+   抽屉、下拉）里每个元素的计算 cursor 统计了一遍，下面每一条都对应审计中
+   确实算出 pointer 的那些 class。antd 升级后若新增
+   交互组件漏在这里，表现是那一处退回系统手型 —— 不报错、不失败，
+   只能靠重跑那份审计发现（光标不进截图，肉眼核对看不见）。
+
+   为什么必须 !important：antd 用 CSS-in-JS 在运行时把样式插到 <head> 末尾，
+   同权重下后写的赢（与本文件上面 text-align 那条同因）。
+   也正因为用了 !important，每一条都要自带 :not(:disabled) 或
+   :not(....-disabled)：否则会把 antd 的 cursor: not-allowed 一起压掉，
+   禁用按钮与禁用的数字微调箭头上会冒出可点的手型。 */
+a[href],
+area[href],
+summary,
+button:not(:disabled),
+select:not(:disabled),
+input[type='checkbox'],
+input[type='radio'],
+input[type='range'],
+input[type='color'],
+input[type='file'],
+input[type='submit'],
+input[type='reset'],
+input[type='button'],
+input[type='image'],
+[role='link'],
+[role='tab'],
+[role='menuitem'],
+[role='option'],
+[role='switch'],
+/* 这里刻意没有 [role='button']。antd 的数字微调箭头就是两个
+   <span role="button">，而禁用的那一侧只挂 .ant-input-number-handler-*-disabled、
+   没有 disabled 属性 —— 被 [role='button'] 圈进来就再也没法用它排除，
+   实测表现是禁用箭头上出现手型。它们由下面那两条显式选择器负责。 */
+.ant-btn:not(:disabled):not(.ant-btn-disabled),
+.ant-switch:not(:disabled),
+.ant-radio-wrapper,
+.ant-radio-button-wrapper,
+.ant-checkbox-wrapper,
+.ant-select-single:not(.ant-select-disabled) .ant-select-selector,
+.ant-select:not(.ant-select-disabled) .ant-select-arrow,
+.ant-select-single:not(.ant-select-disabled) .ant-select-selection-item,
+/* 外层的 .ant-select 自己也算 pointer（antd 给它的），只圈 selector 会在
+   选择框的边角上留下一圈系统手型。多选那种同样排除，理由见下面一条。 */
+.ant-select-single:not(.ant-select-disabled),
+/* 单选的搜索框是 type=search，却被透明拉宽盖在选项文字上（实测 91px 宽、
+   pointer-events 仍是 auto），所以它该是手型而不是 I 型。
+   多选（ant-select-multiple）相反：那里能直接打字筛选，antd 给它的是
+   I 型，所以这里刻意只圈 ant-select-single。 */
+.ant-select-single:not(.ant-select-disabled) .ant-select-selection-search-input,
+/* 下拉里的选项与「清除」按钮：审计时下拉没展开/要悬停才出现，
+   按同一类交互补上，不留在系统手型上。 */
+.ant-select-item,
+.ant-select-item-option,
+.ant-select-clear,
+/* 分页。页码是不带 href 的 <a rel="nofollow">（probe 实测），
+   所以 a[href] 那条盖不住它，要单独指到 .ant-pagination-item 里的 a。
+   item-link 必须带 :not(:disabled)：上一页在禁用时是 <button disabled>
+   且仍是 .ant-pagination-item-link，漏了这个守卫就会在禁用按钮上给出手型。 */
+.ant-pagination-item,
+.ant-pagination-item a,
+.ant-pagination-item-link:not(:disabled),
+.ant-pagination-prev:not(.ant-pagination-disabled),
+.ant-pagination-next:not(.ant-pagination-disabled),
+.ant-pagination-jump-prev,
+.ant-pagination-jump-next,
+.ant-modal-close,
+.ant-drawer-close,
+.ant-input-password-icon,
+.ant-input-clear-icon,
+.ant-input-number-handler-up:not(.ant-input-number-handler-up-disabled),
+.ant-input-number-handler-down:not(.ant-input-number-handler-down-disabled) {
+  cursor: var(--cursor-hand) !important;
+}
+
+/* 文本 I 型：同样是 auto 语义失效后要补回来的那一半。
+   input 的类型逐个列出来而不是写 :not()，是为了让「哪些算文本类」
+   一眼可见 —— 漏掉某个类型时，那个输入框会变成箭头。 */
+
+/* 多选下拉不是「点一下展开」的控件，它本身就是个能打字的输入区：
+   antd 给它的 selector 就是 I 型，却在根节点上留了一条通用的 pointer，
+   于是边框附近会冒出系统手型。这里让根节点与内部保持一致。
+   （它内部那个搜索框 antd 给的是 auto，也就是 I 型，保持不动。） */
+.ant-select-multiple:not(.ant-select-disabled),
+input[type='text'],
+input[type='search'],
+input[type='password'],
+input[type='number'],
+input[type='email'],
+input[type='url'],
+input[type='tel'],
+input[type='date'],
+input[type='time'],
+input[type='datetime-local'],
+input[type='month'],
+input[type='week'],
+input:not([type]),
+textarea,
+pre,
+code,
+[contenteditable]:not([contenteditable='false']) {
+  cursor: text;
 }
 
 /* 尊重系统的「减弱动态效果」设置。

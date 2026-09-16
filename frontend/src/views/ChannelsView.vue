@@ -1216,11 +1216,12 @@ onBeforeUnmount(() => {
   vertical-align: bottom;
 }
 /* 最近调用用等宽数字：这一列是时间量，比例字体下「分钟前」三个字的宽度
-   会随数字变化，一列里参差不齐；tabular-nums 让它们对齐成一条竖线 */
+   会随数字变化，一列里参差不齐；tabular-nums 让它们对齐成一条竖线。
+   这里原来还有一条 cursor: default，用来避免这一格出现文本 I 型；
+   现在全站默认光标本身就是一张箭头图，继承下来就是箭头，不需要再声明。 */
 .last-used {
   color: var(--color-text);
   font-variant-numeric: tabular-nums;
-  cursor: default;
 }
 /* 「无记录」比正常时间弱一档：它是个空状态，不该和真时间抢同样的分量 */
 .last-used.none { color: var(--color-text-secondary); }

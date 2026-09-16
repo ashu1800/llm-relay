@@ -205,7 +205,9 @@ onUnmounted(() => {
   height: var(--size-menu-item-height);
   padding: 0 4px;
   margin-bottom: var(--gap);
-  cursor: pointer;
+  /* 自定义手型：全站默认已经是一张箭头图，浏览器不再按「这是可点的」
+     自动给手型，凡是可点的地方都要自己声明（令牌见 styles/theme.css） */
+  cursor: var(--cursor-hand);
   user-select: none;
 }
 
@@ -249,7 +251,7 @@ onUnmounted(() => {
   background: transparent;
   color: var(--color-icon);
   font-size: 15px;
-  cursor: pointer;
+  cursor: var(--cursor-hand);
   transition: background 0.2s var(--ease-expo);
 }
 
@@ -332,7 +334,7 @@ onUnmounted(() => {
   font-size: var(--font-size-menu);
   line-height: 16.56px;
   text-align: left;
-  cursor: pointer;
+  cursor: var(--cursor-hand);
   transition: background 0.2s var(--ease-expo), color 0.2s var(--ease-expo);
 }
 

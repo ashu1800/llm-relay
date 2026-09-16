@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- 站点专属默认光标：经典箭头轮廓，填充用站点主色 #c87864。
+
+       三个硬性约束，改这个文件前先看一眼：
+       1. width / height 必须显式写着。Chrome 拿不到固有尺寸时不会渲染光标，
+          也不报错，表现只是「改了样式没效果」。
+       2. 图形不超过 32x32。Firefox 67 起对自定义光标的上限就是 32x32
+          （见 MDN 上 cursor 的兼容性注记），超了会被直接丢弃。
+       3. 注释里不能出现连续两个减号，所以这里不能写那个 CSS 变量名。
+          写了会让整个 SVG 解析失败，浏览器把源码当文本显示 ——
+          与 public/favicon.svg 记的是同一个坑，第一版就踩了一次。
+
+       颜色只能写字面量：这个文件是当作图片加载的，没有 CSS 级联，
+       样式表里的变量在这里不存在。也就是说 #c87864 在这里必然有第二份，
+       frontend/scripts/check-contracts.mjs 里有一条检查盯着两处一致。 -->
+  <path
+    d="M2 2 L2 20 L6.6 15.6 L9.6 22 L12.4 20.7 L9.5 14.4 L15.6 14 Z"
+    fill="#c87864"
+    stroke="#ffffff"
+    stroke-width="1.5"
+    stroke-linejoin="round" />
+</svg>

@@ -249,9 +249,25 @@ rm -rf backend/internal/web/dist && cp -r frontend/dist backend/internal/web/dis
 
 核心规格：主色 `#c87864`、底色 `#f8f5ee`、卡片圆角 8px + `0 0 8px rgba(0,0,0,.1)` 阴影、
 侧边栏 224px、菜单项 32px 胶囊、栅格 gap 8px、衬线字体族。
+
+列表与表格里的**西文与数字**用的是参考站那份 Harding，随包分发在
+`frontend/public/fonts/Harding-Regular.ttf`（中文不受影响，仍走系统雅黑 ——
+Harding 不含中文字形，会一路回退到 `--font-family-base`）。
+两个容易踩的点记在 `frontend/src/styles/theme.css` 的字体段：字体 URL 必须写成
+根绝对路径（打包后 CSS 在 `/assets/` 下，相对路径取不到图），
+以及 antd 会给 `.ant-tag` 硬写 `font-family`、把继承来的列表字体顶掉，
+标签要单独覆盖一次。**Harding 是商业授权字体**（参考站自托管的那份），
+本项目内部自用不受影响，但对外分发前需要自行确认授权范围。
 布局是**应用外壳**：高度锁在视口里、只有内容区滚，品牌与主题切换都在侧栏
 （参考站那条 64px 顶栏装的是公告条与顶部导航，我们这边只剩品牌一个元素，
 留着就是一行空白，所以去掉了 —— 参考站自身的尺寸仍记录在 `docs/ui-spec.md`）。
+
+鼠标光标是本项目自己的品牌元素（参考站没有）：默认箭头与交互手型用
+`frontend/public/cursor-arrow.svg` 与 `cursor-hand.svg`（主色填充 + 白描边，
+两种主题下都过 3:1），输入框 I 型、拖拽、禁用、帮助保留系统光标。
+要改光标形状或补齐 antd 升级后新增的交互组件，看 `frontend/src/styles/theme.css`
+的「自定义光标」段 —— 那里记着清单的来源、为什么必须 `!important`、
+以及 `npm run check` 里盯住哪几条。
 
 ## 开发进度
 
@@ -290,6 +306,17 @@ rm -rf backend/internal/web/dist && cp -r frontend/dist backend/internal/web/dis
 `test-delete-semantics.py`、`test-accept-encoding.py`、`test-log-filters.py`、
 `test-csrf.py`），覆盖分组更新、密钥白名单、删除语义、压缩协商、
 日志筛选与同源校验。
+
+`scripts/audit-cursors.mjs` 是前端的光标审计（需要先起一个带调试端口的 Chrome，
+用法见文件顶部）：把七个路由连同弹窗、抽屉、下拉里每个元素的**计算光标**统计
+一遍，确认没有一处退回系统光标。它存在的理由很具体 —— **CSS 的 cursor 不进截图**，
+少写一个选择器、antd 升级换了 class 名、光标图片 404，表现都只是那一处悄悄变回
+系统箭头，不报错也不失败：
+
+```bash
+node scripts/audit-cursors.mjs http://127.0.0.1:5173   # 开发态
+node scripts/audit-cursors.mjs                          # 默认打 127.0.0.1:8888
+```
 
 `scripts/verify-all.sh` 会按顺序跑完上面这些可离线执行的用例并汇总，
 最后打印 `ALL_PASS`；日常改完代码跑它一次就够。

@@ -270,7 +270,7 @@ function submit() {
 .day-chip {
   width: 22px; height: 22px; line-height: 22px; text-align: center;
   border: 1px solid var(--color-border); border-radius: 4px;
-  font-size: 12px; cursor: pointer; color: var(--color-text-secondary);
+  font-size: 12px; cursor: var(--cursor-hand); color: var(--color-text-secondary);
 }
 /* 选中态如实心按钮：用 --solid-primary-* 这一对，而不是
    `background: var(--color-primary); color: #fff`。

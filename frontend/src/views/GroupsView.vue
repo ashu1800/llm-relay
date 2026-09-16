@@ -355,7 +355,7 @@ onMounted(load)
   border: 1px solid var(--color-border);
   border-radius: var(--radius-control);
   background: none;
-  cursor: pointer;
+  cursor: var(--cursor-hand);
 }
 .swatches { display: inline-flex; gap: 4px; vertical-align: middle; margin-left: 2px; }
 .swatch {
@@ -364,7 +364,7 @@ onMounted(load)
   padding: 0;
   border: 1px solid var(--color-border);
   border-radius: 3px;
-  cursor: pointer;
+  cursor: var(--cursor-hand);
 }
 .swatch:hover { transform: scale(1.15); }
 

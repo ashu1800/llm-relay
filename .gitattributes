@@ -51,3 +51,7 @@ go.sum text eol=lf
 *.gz binary
 *.sqlite binary
 *.exe binary
+
+# 字体是二进制：不写这行会被 text=auto 当文本处理（检出时改换行、比对失真）
+*.ttf binary
+*.otf binary

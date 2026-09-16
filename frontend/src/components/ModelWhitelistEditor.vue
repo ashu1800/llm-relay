@@ -323,7 +323,7 @@ function applyBulk() {
   color: var(--text-primary-ink);
   font-family: var(--font-family-mono);
   font-size: 12px;
-  cursor: pointer;
+  cursor: var(--cursor-hand);
 }
 .price-pill:hover { background: color-mix(in oklab, var(--color-primary) 22%, transparent); }
 /* 未定价用灰底而不是主题色：提示语是「这里缺东西」，不是「这里能点」 */
@@ -348,7 +348,7 @@ function applyBulk() {
      --color-red（3.90:1）—— 图标本身适用 3:1，但它同时承担了
      「这是删除」的语义，深色主题下 3.38:1 也不够看清 */
   color: var(--text-red);
-  cursor: pointer;
+  cursor: var(--cursor-hand);
   transition: background 0.15s var(--ease-expo);
 }
 .wl-del:hover { background: color-mix(in oklab, var(--color-red) 14%, transparent); }

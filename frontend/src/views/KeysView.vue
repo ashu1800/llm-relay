@@ -531,7 +531,7 @@ onMounted(() => {
   background: var(--color-bg);
   font-size: 12px;
   line-height: 20px;
-  cursor: pointer;
+  cursor: var(--cursor-hand);
   transition: border-color 0.2s ease;
 }
 .baseurl-pill:hover { border-color: var(--color-primary); }
@@ -562,7 +562,7 @@ onMounted(() => {
   font-family: var(--font-family-mono);
   font-size: 12px;
   line-height: 18px;
-  cursor: pointer;
+  cursor: var(--cursor-hand);
   transition: background 0.2s ease;
 }
 .key-pill:hover { background: color-mix(in oklab, var(--color-primary) 22%, transparent); }
