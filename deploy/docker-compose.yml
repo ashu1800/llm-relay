@@ -54,10 +54,17 @@ services:
     image: llm-relay:local
     container_name: llm-relay
     restart: unless-stopped
-    # 停机宽限期：默认 10 秒，而这里的 app 是 Go 写的、收到 SIGTERM 立刻退出，
-    # 正常情况 1 秒内就停完了。留 5 秒是给「正在处理的请求」收尾，
-    # 同时把最坏情况（进程卡住）从 10 秒压到 5 秒 —— 每次重新部署都要停一次它。
-    stop_grace_period: 5s
+    # 停机宽限期。这个值必须**大于**进程自己的退出预算，否则容器会被 SIGKILL，
+    # 那时连「已退出」那行日志和队列里最后几条请求日志都留不下来。
+    # 进程侧预算是（见 backend/cmd/server/main.go 顶部的常量）：
+    #   等在途请求收尾 3s + 等日志队列写完 1.5s + 关预连接 0.5s ≈ 5s
+    # 原来这里写 5s，注释里的假设是「Go 收到 SIGTERM 立刻退出，正常 1 秒内停完」——
+    # 那个假设是错的，实测过一次中断 6511ms（.shots/measure-swap.sh）：
+    # Go 的 Shutdown 对「连上了但还没发请求头」的连接有 5 秒特判（issue 22682），
+    # 浏览器预连接正是这种，于是每次都停满 5 秒再被 SIGKILL。
+    # 现在进程侧会主动关掉那批连接，正常应在 2 秒内退干净；留 8 秒是给
+    #「恰好有长回答在途」的兜底 —— 那种情况本来就该让它把话说完。
+    stop_grace_period: 8s
     depends_on:
       postgres:
         condition: service_healthy

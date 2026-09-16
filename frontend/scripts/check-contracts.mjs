@@ -293,6 +293,69 @@ console.log('=== 多排数值的列左缘对齐契约 ===')
   )
 }
 
+// 列表与工具栏筛选解耦（2026-09-16 站主要求）。
+//
+// 为什么值得钉住：合并进看板时这两者本来是共用一套条件的（同一个工具栏同时喂
+// 卡片与列表，理由是「卡片按 A 算、列表按 B 查」看不出来）。站主后来说
+// 「请求日志列表不再使用筛选条件显示了，默认显示所有最新的请求」——
+// 因为列表的用处是盯着最新发生了什么，筛过之后反而看不到刚进来的调用。
+// 这是个**反向**的约定（原来是「必须共用」，现在是「不许共用」），
+// 最容易在下次改工具栏时被顺手加回来，所以两边都钉：组件不许再声明这四个 prop、
+// 看板不许再传，查询串里也不许再出现它们。
+console.log('')
+console.log('=== 请求日志列表不吃筛选条件 ===')
+{
+  const panelPath = join(SRC, 'components/RequestLogPanel.vue')
+  const panel = readFileSync(panelPath, 'utf8')
+  const dash = readFileSync(join(SRC, 'views/DashboardView.vue'), 'utf8')
+  const panelProps = declaredProps(panelPath)
+
+  const filterProps = ['range', 'groupId', 'channelId', 'model']
+  const declared = filterProps.filter((p) => panelProps.has(p))
+  check(
+    '面板不再声明筛选类 props（时间范围 / 分组 / 渠道 / 模型）',
+    declared.length === 0,
+    `又加回来了: ${declared.join(', ')} —— 列表会重新跟着工具栏走`,
+  )
+  const referenced = filterProps.filter((p) => new RegExp(`props\\.${p}\\b`).test(panel))
+  check('面板里没有残留的 props.<筛选> 引用', referenced.length === 0, referenced.join(', '))
+
+  // 查询串只该有分页与两个排障深链。用参数名而不是「有没有 if」来判：
+  // 少传一个 range 但改成别的方式塞进去（比如拼在 URL 上）同样要拦住。
+  const bpStart = panel.indexOf('function buildParams')
+  const bp = panel.slice(bpStart, panel.indexOf('\n}', bpStart))
+  const sent = [...bp.matchAll(/params\.set\(\s*'([\w-]+)'/g)].map((m) => m[1]).sort()
+  check(
+    '查询串只剩分页与两个排障深链',
+    sent.join(',') === 'page,page_size,status_class,trace_id',
+    `实际发出: ${sent.join(', ')}`,
+  )
+
+  // 反过来也要钉：两个深链必须留着 —— 「点日志行看整条链路」与「只看失败」
+  // 的入口靠它，删掉的话排障深链会静默失效（页面上看不出来）
+  check(
+    '两个排障深链仍然进查询串（trace_id / status_class）',
+    /params\.set\('trace_id'/.test(bp) && /params\.set\('status_class'/.test(bp),
+  )
+
+  // 看板那边也不许再传：组件不声明时传下去只会被当成透传属性，
+  // 既不报错也不生效，是最难发现的一种「改了没反应」
+  const tagStart = dash.indexOf('<RequestLogPanel')
+  const tag = dash.slice(tagStart, dash.indexOf('/>', tagStart))
+  const passed = filterProps.filter((p) =>
+    new RegExp(`:${p.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase())}=`).test(tag),
+  )
+  check('看板不再把这四个条件传给列表', passed.length === 0, `仍在传: ${passed.join(', ')}`)
+
+  // 解耦之后界面必须自报作用范围：四个筛选框就在列表正上方，
+  // 不写一句「筛选只作用于上方卡片」，任何人都会以为列表也被筛过了
+  check(
+    '工具栏写明筛选只作用于卡片',
+    /筛选只作用于上方卡片/.test(dash),
+    '筛选框紧挨着列表，不说明的话界面就是在骗人',
+  )
+}
+
 console.log('')
 if (failed > 0) {
   console.log(`${failed} 项未通过`)

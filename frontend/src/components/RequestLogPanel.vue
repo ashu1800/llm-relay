@@ -1,10 +1,17 @@
 <script setup lang="ts">
 // 请求日志面板 —— 2026-09-16 从 views/LogsView.vue 整块搬迁而来（该页面与数据看板合并）。
 //
-// 为什么是组件而不是继续当页面：并进看板之后，上面的概览卡与这里的列表必须共用
-// 同一套筛选条件（时间范围 / 分组 / 渠道 / 模型）。那些条件由看板持有、以 props
-// 传进来 —— 筛选状态只有一处，才不会出现「卡片按 A 算、列表按 B 查」这种
-// 从界面上完全看不出来的偏差。这个组件只负责「按给定条件把列表画出来」。
+// 为什么是组件而不是继续当页面：并进看板之后外壳（内边距、工具栏、卡片排）留在
+// 看板那边，这里只输出「表格 + 分页 + 详情抽屉」这一块。
+//
+// 列表**不吃**工具栏的筛选条件（2026-09-16 站主要求）：它恒定显示全部最新请求，
+// 不按时间范围 / 分组 / 渠道 / 模型取数。并进看板时这两者本来共用一套条件，
+// 但列表的用处是「盯着最新发生了什么」，筛过之后反而看不到刚进来的请求 ——
+// 而刚进来的请求恰恰是最该被看到的那几条。筛选留给上面的概览卡：
+// 「这一部分用了多少」才是那些条件真正要回答的问题。
+//
+// 仍能约束列表的只有两个排障深链：?trace_id=… 与 ?status_class=error（「仅失败」）。
+// 它们由详情抽屉或外链带进来，是明确的排障动作，不是日常筛选视角。
 //
 // 页面外壳（内边距、工具栏、卡片排、分页以上的留白）都在看板那边；
 // 这里输出的是一个面板：表格 + 分页，外加详情抽屉。
@@ -26,14 +33,8 @@ import { symbolOf } from '@/utils/money'
 import type { Channel, ChannelGroup, Paged, RequestLog } from '@/api/types'
 
 const props = defineProps<{
-  /** 时间范围：today | 3d | 7d | 30d（后端与统计接口共用同一段代码换算成窗口） */
-  range: string
-  /** 'all' 或分组 id 的字符串形式（'all' 是本项目「全部」的哨兵值，与看板同一套） */
-  groupId: string
-  channelId: string
-  /** 'all' 或模型名 */
-  model: string
-  /** 从 URL 带进来的排障深链（?trace_id=… / ?status_class=error），可在工具栏上关掉 */
+  /** 从 URL 带进来的排障深链（?trace_id=… / ?status_class=error），可在工具栏上关掉。
+   *  这是列表仅有的两个条件 —— 时间范围 / 分组 / 渠道 / 模型不再传给列表。 */
   traceId: string
   statusClass: string
   /** 低频配置：标签配色与渠道图标取自它们，由看板取一次传下来 */
@@ -199,13 +200,8 @@ function rowClassName(record: RequestLog) {
   return freshIds.value.has(record.id) ? 'is-new' : ''
 }
 
-// 'all' 是这个项目里「全部」的哨兵值（渠道页与看板同一套）。
-// 不用 0：后端的约定是「不传参数＝不筛选」，而界面上的「全部分组」与
-// 「分组 id=0」是两件事，混用迟早出错
-const ALL = 'all'
-
-// 分页是本面板自己的状态：它与筛选条件不是一回事 —— 改筛选要回第一页
-// （见 search），而翻页不该惊动看板上方那些卡片
+// 分页是本面板自己的状态：翻页不该惊动看板上方那些卡片
+// （改深链条件要回第一页，见 search）
 const page = ref(1)
 const pageSize = ref(50)
 
@@ -248,41 +244,35 @@ function channelIconOf(id: number) {
 
 // buildParams 拼列表的查询串。
 //
-// 时间范围传 range（四档关键字）而不是自己换算成的绝对时刻：后端拿它去调
-// 与统计接口同一个 resolveRange，卡片与列表因此必然落在同一个窗口里。
-// 原来这里按浏览器本地零点算 since，与看板的「今天」是两套算法，
-// 跨时区访问时会出现「卡片说 200 次、列表 180 条」这种没人能解释的偏差。
+// 只有分页与那两个排障深链：时间范围 / 分组 / 渠道 / 模型一律不带 ——
+// 列表恒定取全量最新（理由见文件头）。
+// 这里原来还要传 range（四档关键字，后端拿它调与统计接口同一个 resolveRange，
+// 以保证卡片与列表落在同一个窗口里）。列表不再跟着卡片走之后，
+// 那段「两套算法会跨时区对不上」的顾虑也就一起消失了。
 function buildParams(): URLSearchParams {
   const params = new URLSearchParams()
   params.set('page', String(page.value))
   params.set('page_size', String(pageSize.value))
-  // 三个下拉：'all' 就是不传（后端「不传参数＝不筛选」）
-  if (props.groupId !== ALL) params.set('group_id', props.groupId)
-  if (props.channelId !== ALL) params.set('channel_id', props.channelId)
-  if (props.model !== ALL) params.set('model', props.model)
   // URL 带来的额外条件（深链过来的 trace / 状态）也要进查询串
   if (props.traceId) params.set('trace_id', props.traceId)
   if (props.statusClass) params.set('status_class', props.statusClass)
-  if (props.range) params.set('range', props.range)
   return params
 }
 
 // 这里原来还有四组东西：三个下拉的候选（分组 / 渠道 / 模型）、筛选条件的持久化、
 // 从 URL 恢复额外条件、以及四个 @change 处理函数。它们全部搬去了
-// views/DashboardView.vue —— 那边的工具栏是这一页唯一的筛选入口，
-// 筛选状态由它持有，改完通过 props 传下来（见下方 watch）。
-// 留在这里就会出现两份状态：一份决定卡片怎么算，一份决定列表怎么查。
+// views/DashboardView.vue —— 那边的工具栏现在只服务概览卡，列表不再吃它
+// （原来两边共用一套条件，留在这里就会出现两份状态）。
 
-// 筛选条件变了就重新查，并且回到第一页。
+// 深链条件变了就重新查，并且回到第一页。
 //
 // 回第一页是必须的：第 5 页的偏移量落在新条件的集合上可能已经越界，
-// 表现出来是「改完筛选列表空着」，而数据其实是有的。
-// watch 的是 props 本身，所以无论是谁改的（工具栏下拉、详情里的「只看这条链路」、
-// 还是一个带 query 参数的链接）都会重新取数，不需要各处都记得手写一次 load()。
-watch(
-  () => [props.range, props.groupId, props.channelId, props.model, props.traceId, props.statusClass],
-  () => search()
-)
+// 表现出来是「改完条件列表空着」，而数据其实是有的。
+// watch 的是 props 本身，所以无论是谁改的（详情里的「只看这条链路」、
+// 工具栏上关掉那个小标签、还是一个带 query 参数的链接）都会重新取数，
+// 不需要各处都记得手写一次 load()。
+// 只盯这两个：工具栏那四个筛选已经不传进来了，它们不再影响列表。
+watch(() => [props.traceId, props.statusClass], () => search())
 
 // 详情里的「只看这条链路」：原来工具栏上有个 trace_id 输入框，
 // 但 trace_id 是从日志详情里才看得到的东西 —— 入口放在看得见它的地方更顺手。
@@ -298,18 +288,19 @@ function onlyThisTrace() {
 const loadError = ref('')
 
 /**
- * 取当前筛选条件下的第一页。
+ * 取最新一页（第一页就是最新的那批）。
  *
  * silent 用于实时推送触发的重取：不显示加载态（否则表格每隔一两秒就变暗一次）、
  * 失败不弹提示也不清空列表 —— 一次网络抖动不该把用户正在看的日志抹掉。
  *
  * 请求序号（loadSeq）只让**最后一次**请求的结果落地。这不是防御性代码，
- * 是实测出来的：筛选从「deepseek（5562 条）」切到「glm（0 条）」时，两个查询
+ * 是实测出来的：从前筛选从「deepseek（5562 条）」切到「glm（0 条）」时，两个查询
  * 会并发在途，大的那个更慢，返回时把新结果盖掉 —— 界面成了「卡片 0、列表 5562」，
  * 而且它会一直错到下一次操作。有了序号，谁先谁后都不影响最终显示。
+ * （列表不再吃筛选之后这种并发少了一路，但翻页与深链切换仍会并发。）
  *
  * silent 这一路还会做一件事：比对重取前后多出来的是哪几行，交给 markFresh 扫光。
- * 有筛选时新日志符不符合条件只有服务端知道（这里不重复实现筛选语义），
+ * 带深链时新日志符不符合条件只有服务端知道（这里不重复实现筛选语义），
  * 所以只能整批重取；「哪几行是新的」用 id 差集算，不靠位置猜。
  */
 let loadSeq = 0
@@ -357,6 +348,16 @@ function search() {
 // 用 defineExpose 而不是再加一个 refreshToken prop：这里就是「叫它重取一次」，
 // 传一个计数器反而让人以为它是个状态。
 defineExpose({ reload: () => load() })
+
+// 空列表的文案分两种：带深链时是被那两个条件滤空的（要告诉用户怎么退回去），
+// 不带条件时就是真的一条日志都没有。原来只有前一种，因为列表总在筛选之下；
+// 现在「全量最新」是默认视角，一进来就空着的情况必须说清是「还没有调用」，
+// 否则看起来像坏了。
+const emptyText = computed(() =>
+  props.traceId || props.statusClass
+    ? '当前排障条件下没有日志：关掉工具栏上的「链路」或「仅失败」标签即可回到全部最新请求'
+    : '还没有请求日志；发起一次调用后，这里会实时出现记录',
+)
 
 // 详情直接用列表行数据：列表接口返回的字段已经完整，
 // 报文相关展示移除后，也不必再为它请求 /logs/:id。
@@ -559,10 +560,11 @@ const pagination = computed(() => ({
 // 实时插入：服务端每秒查一次新日志（id 增量），有就推过来。
 //
 // 分三种情况：
-// 1. 没有任何筛选且在第一页 —— 直接插到第一行（保留滚动动画，不重绘整页）；
-// 2. 有筛选（分组/渠道/模型，或 trace / 仅失败深链）且在第一页 —— 隔一小段
-//    安静地重取一次当前查询。新日志符不符合筛选只有服务端知道，客户端不重复
-//    实现一遍筛选语义（以后加一个筛选条件就会漏一处，而且错得很安静）；
+// 1. 没有深链条件且在第一页 —— 直接插到第一行（保留滚动动画，不重绘整页）。
+//    列表不带筛选之后这是常态路径：推到什么就插什么，连「符不符合条件」都不用问；
+// 2. 带 trace / 仅失败深链且在第一页 —— 隔一小段安静地重取一次当前查询。
+//    新日志符不符合条件只有服务端知道，客户端不重复实现一遍筛选语义
+//    （以后加一个条件就会漏一处，而且错得很安静）；
 // 3. 翻了页 —— 什么都不做：重取会让用户正在看的第二页变成另外一批行。
 const liveReloadDelay = 1500
 let liveTimer: number | null = null
@@ -596,18 +598,12 @@ onUnmounted(() => {
 onLive('logs', (items: RequestLog[]) => {
   if (!Array.isArray(items) || !items.length) return
   if (page.value !== 1) return
-  const filtered =
-    props.groupId !== ALL ||
-    props.channelId !== ALL ||
-    props.model !== ALL ||
-    !!props.traceId ||
-    !!props.statusClass
+  const filtered = !!props.traceId || !!props.statusClass
   if (filtered) {
     scheduleSilentReload()
     return
   }
-  // 新日志的时间一定落在当前时间范围里（今天/近3天/近7天/近30天都含「现在」），
-  // 所以这里不必再按时间过滤一次
+  // 列表不带时间范围，新日志必然属于「全部最新」，直接插即可
   const fresh = items.filter((it) => !rows.value.some((r) => r.id === it.id))
   if (!fresh.length) return
   rows.value = [...fresh.reverse(), ...rows.value].slice(0, pageSize.value)
@@ -617,7 +613,7 @@ onLive('logs', (items: RequestLog[]) => {
 })
 
 onMounted(() => {
-  // 分组 / 渠道的候选与渠道图标由看板取好传下来，这里只负责按条件取列表。
+  // 分组表与渠道图标由看板取好传下来，这里只负责取列表。
   // 首次挂载不经过 watch（它只在 props 变化时触发），所以这一次必须显式取。
   load()
 })
@@ -667,7 +663,7 @@ onMounted(() => {
           :scroll="{ x: 1036, y: TABLE_BODY_Y }"
         >
         <template #emptyText>
-          <a-empty description="当前筛选条件下没有日志，可放宽筛选条件：把时间范围改成「近 7 天」，或把分组 / 渠道 / 模型改回「全部」" />
+          <a-empty :description="emptyText" />
         </template>
         <a-table-column title="请求时间" :width="155" fixed="left">
           <template #default="{ record }">{{ fmtTime(record.created_at) }}</template>
@@ -680,16 +676,16 @@ onMounted(() => {
             <!-- 模型、密钥两处用的是同一个组件与同一个颜色：
                  它们描述的是「这次请求属于哪个分组」，颜色因此必须一致。
                  原来还有第三个「分组」列，后来删掉了：它写的就是这两个
-                 胶囊颜色所指的那件事，却占着 110px；分组名在详情抽屉里，
-                 要按分组看整批请求，工具栏上的分组筛选比这一列好用 -->
+                 胶囊颜色所指的那件事，却占着 110px；分组名在详情抽屉里。
+                 （当初还有一条理由「按分组看整批请求时，工具栏的分组筛选更好用」，
+                 它随列表不再吃筛选而失效 —— 现在列表只回答「最新发生了什么」。） -->
             <GroupTag :name="record.model_requested" v-bind="tagColorOf(record.group_id)" />
           </template>
         </a-table-column>
-        <!-- 渠道列是随「按渠道筛选」一起加的：筛了渠道却在列表里看不出
-             每行走的是哪条渠道，这个筛选等于只生效一半。
-             名称前带渠道图标（与渠道页那张表同一个组件、同一套规则）：
-             排障时要一眼认出「这条走的是哪条渠道」，而一屏里的渠道名
-             往往只差几个字。
+        <!-- 渠道列当初是随「按渠道筛选」一起加的，那个筛选现在不再作用于列表；
+             这一列留着是因为它本身就回答「这条走的是哪条渠道」——
+             排障时正是要看这个，而且一屏里的渠道名往往只差几个字。
+             名称前带渠道图标（与渠道页那张表同一个组件、同一套规则）。
              失败请求没走到渠道（channel_id=0）、渠道事后被删都会是空值，显示 — -->
         <a-table-column title="渠道" :width="130" ellipsis>
           <template #default="{ record }">

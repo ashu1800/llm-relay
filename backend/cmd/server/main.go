@@ -6,9 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,6 +24,18 @@ import (
 	"llm-relay/internal/relay"
 	"llm-relay/internal/secure"
 	"llm-relay/internal/store"
+)
+
+// 退出预算。三个数加起来必须小于 deploy/docker-compose.yml 里的
+// stop_grace_period（5 秒），否则容器会被 SIGKILL —— 那时连日志都来不及落库，
+// 比多停机几秒更糟。改这几个值时要和那个配置一起看。
+const (
+	// 等在途请求收尾的上限
+	shutdownHTTPTimeout = 3 * time.Second
+	// 等日志队列写完的上限（见 relay.LogWriter.Close）
+	shutdownFlushTimeout = 1500 * time.Millisecond
+	// 给「请求头还没收完」的连接留的时间，见下面的 connState 说明
+	shutdownHeaderGrace = 500 * time.Millisecond
 )
 
 func main() {
@@ -110,7 +124,9 @@ func run() error {
 	gate := relay.NewConcurrencyGate(cfg.Relay.MaxConcurrency)
 	rateLimiter := relay.NewRateLimiter()
 	logs := relay.NewLogWriter(st.DB(), 2048, logger)
-	defer logs.Close()
+	// 注意这里**没有** defer logs.Close()：关闭要等队列写完，而 defer 是在
+	// run() 返回时才跑，那时已经过了优雅关闭的预算。收尾统一放在下面
+	// logs.CloseAndFlush(...)，给它一个明确的上限。
 
 	// ---- 定价 ----
 	// 单价一律手工录入：外部价格表（LiteLLM / 官网）里的模型命名与本站
@@ -142,10 +158,37 @@ func run() error {
 	})
 	srv.Register(engine)
 
+	// connState 记录「已连接但请求头还没收完」的连接，退出时用来避免白等 5 秒。
+	//
+	// 为什么需要它：Go 的 http.Server.Shutdown 会等所有非空闲连接结束，而它对
+	// StateNew（连上了、请求头还没读完）的连接有一条特判（golang/go#22682）：
+	// 只有连接存在超过 **5 秒**才把它当作空闲关掉。浏览器的预连接（preconnect）
+	// 恰好就是这种连接 —— TCP 握手完成、一个字节都没发。于是每次重新部署，
+	// Shutdown 都被它拖满 5 秒，而 compose 里 stop_grace_period 正好也是 5 秒：
+	// 进程刚要退就被 SIGKILL，「已退出」那行日志都打不出来。
+	//
+	// 实测（.shots/exp-shutdown.sh，五种连接各测一次）：
+	//   空闲          → 容器退出 1565ms
+	//   新建连接(1s)  → 5414ms   ← 就是这条
+	//   同样的连接但存在 8s → 522ms（过了那 5 秒特判，Go 直接关掉它）
+	//   WebSocket     → 741ms（握手后连接被 hijack，Shutdown 本来就不等它）
+	// 注意最后一条：锅不在实时推送的长连接上，虽然它是最像嫌疑犯的那个。
+	conns := &newConnTracker{conns: make(map[net.Conn]struct{})}
+
 	httpSrv := &http.Server{
 		Addr:              cfg.Server.Addr(),
 		Handler:           engine,
 		ReadHeaderTimeout: 20 * time.Second,
+		ConnState: func(c net.Conn, st http.ConnState) {
+			switch st {
+			case http.StateNew:
+				conns.track(c)
+			default:
+				// Active（请求已进处理器）/ Idle（等下一个请求）/
+				// Hijacked（WebSocket）/ Closed 都不再是「占着不放的新连接」
+				conns.untrack(c)
+			}
+		},
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -177,13 +220,102 @@ func run() error {
 		logger.Info("收到退出信号，开始优雅关闭")
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// 先叫醒那些「连上了但一个字节都没发」的连接，再 Shutdown。
+	//
+	// Shutdown 内部会关掉所有空闲连接，但它对 StateNew 的连接有 5 秒特判
+	// （见上面 connState 的说明），所以这里不等它：给这些连接一个很短的窗口，
+	// 让「马上要发请求」的客户端把请求头写完（读完请求头的连接会变成 Active，
+	// Shutdown 就会正常等它），然后把仍然一声不吭的全部主动关掉 ——
+	// 浏览器预连接属于后者，本来就没有请求要发，关掉不会有任何损失。
+	//
+	// 这个 grace 之所以短到 500ms：它每一毫秒都直接算进部署的停机时间里，
+	// 而真实的请求不会「连上之后先愣半秒」——那半秒本来就是网络往返的一部分，
+	// 由客户端发起请求时才开始计时。宁可少等，也不要每次部署都白停半秒。
+	//
+	// 没有任何这种连接时**一秒都不等**：这是常态（本机 curl、脚本调用都不会
+	// 留下预连接），不该为一种少见情况让每次部署都白停半秒。
+	//
+	// 清理要一直做到 Shutdown 返回，不能只做一次：检查的这一刻没有预连接，
+	// 不代表 Shutdown 期间不会有 —— 浏览器完全可能正好在部署那一瞬新开一条，
+	// 而那种情况恰恰就是原来的 bug（白等 5 秒）。所以先按需等一个 grace，
+	// 之后每隔一小段再扫一遍，直到 Shutdown 结束。
+	shutdownDone := make(chan struct{})
+	go func() {
+		if conns.count() > 0 {
+			time.Sleep(shutdownHeaderGrace)
+			if n := conns.closeAll(); n > 0 {
+				logger.Info("关闭尚未发出请求的连接", "count", n)
+			}
+		}
+		for {
+			select {
+			case <-shutdownDone:
+				return
+			case <-time.After(200 * time.Millisecond):
+				conns.closeAll()
+			}
+		}
+	}()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownHTTPTimeout)
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("优雅关闭失败: %w", err)
+		// 超时也要往下走：日志队列里还有没落库的记录，直接 return 会连它一起丢。
+		// （原样返回 err 会让 run() 走 os.Exit(1)，defer 里的收尾不会执行。）
+		logger.Warn("优雅关闭未在预算内完成，继续收尾", "err", err)
 	}
+	close(shutdownDone)
+
+	// 把日志队列里还没落库的记录写完再退。这个 defer 原本注册在 logs 创建处，
+	// 而它只 close 通道、不等写完 —— 进程一退出，队列里剩下的请求日志就没了。
+	// 队列上限 2048，必须在宽限期内做完，所以给它一个明确的上限。
+	logs.CloseAndFlush(shutdownFlushTimeout, logger)
+
 	logger.Info("已退出")
 	return nil
+}
+
+// newConnTracker 记录「已连接但请求头还没收完」的连接。
+//
+// 这批连接是 Shutdown 里唯一会白等 5 秒的东西（见 main 里 connState 的说明），
+// 所以单独盯住它们、退出时主动关掉。
+type newConnTracker struct {
+	mu    sync.Mutex
+	conns map[net.Conn]struct{}
+}
+
+func (t *newConnTracker) track(c net.Conn) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.conns[c] = struct{}{}
+}
+
+func (t *newConnTracker) untrack(c net.Conn) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.conns, c)
+}
+
+// count 返回当前仍在等待请求头的连接数。
+func (t *newConnTracker) count() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.conns)
+}
+
+// closeAll 关掉所有仍在等待请求头的连接，返回关掉的数量。
+func (t *newConnTracker) closeAll() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := 0
+	for c := range t.conns {
+		// 关闭失败无需处理：连接可能刚好在关它之前自己断了，
+		// 那种情况下它已经从 ConnState 里被 untrack 掉，目的已经达到
+		_ = c.Close()
+		delete(t.conns, c)
+		n++
+	}
+	return n
 }
 
 func newLogger(cfg config.LogConfig) *slog.Logger {
