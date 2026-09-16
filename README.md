@@ -59,6 +59,12 @@
   没筛选时直接把新行插到第一行；**筛过之后（或看板选了别的时间范围）则借这个
   推送信号安静地重取一次当前视角** —— 新日志符不符合筛选只有服务端知道，
   客户端不去重复实现一遍筛选语义
+- **新日志扫光**：新行插进来时，沿这一行的下分割线从左扫过一道彩虹（约 2 秒，
+  见 `docs/ui-spec.md` 第 11 条）。只有实时推送带来的新行会闪：刷新页面、改筛选、
+  翻页、点「刷新」都不闪，系统开了「减弱动态效果」时也不闪。
+  亮带画在表格外面的独立一层里，**不往表格里加任何元素** —— 往 `tr` 里放伪元素
+  会让 Chrome 在 `table-layout: fixed` 下不再分配多余宽度，整表塌回声明宽度、
+  右侧空出一条（只在窗口比表格宽时出现，2026-09-16 修）
 - **限流与并发**：密钥级每分钟配额、渠道并发上限、全局在途闸门；上游 429 按
   `Retry-After` 自动冷却并切走，不再把已限流的上游打得更惨
 - **报文留存**：`all` / `errors` / `none` 三档，按体积截断，凭据类请求头自动脱敏
@@ -156,6 +162,31 @@ sudo bash deploy/install.sh
 > `systemctl stop llm-relay` 只停中转服务本身，要连数据库一起停用 `docker compose down`。
 
 部署完成后访问 `http://localhost:8888`（Windows 浏览器直接可开，WSL2 localhost 转发）。
+本次实测的中断时间是 **865 ms**（又一次部署，与上表同一套机制）。
+
+#### 部署成功了，但浏览器打不开
+
+先分清是谁的问题，一步就能判定：
+
+```bash
+wsl -u root -- curl -I http://127.0.0.1:8888/healthz   # WSL 里返回 200 ⇒ 服务本身没问题
+```
+
+200 的话，断的是 **Windows↔WSL 的 localhost 转发**（`wslrelay.exe`）：它会把 TCP
+连接接住，一个字节都不转发，浏览器表现为一直转圈、curl 报 timeout 却「连得上」。
+2026-09-16 实测踩到一次：部署时 WSL 内新建/替换了监听端口（预检用的 8899 与重建后的
+app），转发还指着旧的 —— 同一个 VM 里**连没被动过的 5432 也一起不通**，所以它跟应用
+无关，别在这里查日志。
+
+在 Windows 上执行：
+
+```powershell
+wsl --shutdown
+```
+
+容器与 `llm-relay.service` 都是开机自启（`systemctl is-enabled` 均为 enabled），
+WSL 下次被访问时会自己把整套拉起来（实测约 30 秒后 `healthz` 恢复，
+数据库数据在 docker volume 里，不受影响）。`deploy/install.sh` 收尾也会打印这条提示。
 
 ### 环境变量
 
@@ -256,6 +287,16 @@ npm install --registry=https://registry.npmmirror.com
 npm run dev          # 开发服务器 :5173，/api 代理到 :8888
 npm run build        # 产物输出到 dist/
 ```
+
+开发态代理有两处**必须显式配**的地方（都在 `vite.config.ts` 里，附原因注释），
+少任何一个的表现都是「页面能看，但实时不更新」：
+
+- `ws: true`：不声明的话 Vite 不把 WebSocket 升级交给代理，`/api/admin/live` 永远连不上；
+- `headers: { Origin: 'http://127.0.0.1:8888' }`：后端有同源校验
+  （`sameOriginOnly` 比 Origin 与 Host），而 `changeOrigin` 只改 Host ——
+  浏览器发来的 Origin 仍是 5173，于是**带 Origin 的请求**（WebSocket 握手、
+  所有写操作）一律 403。同源 GET 不带 Origin，所以「读」一直是好的，
+  很容易被误判成后端的问题。
 
 构建后同步产物到后端嵌入目录：
 

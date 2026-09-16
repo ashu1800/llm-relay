@@ -589,6 +589,16 @@ esac
 echo " 安装目录   : $INSTALL_DIR"
 echo " 端口       : $PORT"
 echo
+# 部署本身成功、但浏览器打不开时，先看这一条：服务在 WSL 里是好的，
+# 断的是 Windows↔WSL 的 localhost 转发（wslrelay.exe 会接受连接却不转发数据，
+# 表现为浏览器一直转圈）。实测触发点是这次部署新建/替换了 WSL 内的监听端口
+# （预检的 8899 与重建后的 app），同一个 VM 里连没被动过的端口也会一起不通。
+if [[ -n "$WSL_IP" ]]; then
+  echo " 打不开？   : 若浏览器访问 http://localhost:$PORT 一直转圈，先在 WSL 里自测"
+  echo "              curl -I http://127.0.0.1:$PORT/healthz（返回 200 就说明服务没问题），"
+  echo "              然后在 Windows 上执行 wsl --shutdown —— 容器与服务都是开机自启，会自己回来。"
+  echo
+fi
 echo " 常用命令:"
 echo "   systemctl status llm-relay"
 echo "   systemctl restart llm-relay"

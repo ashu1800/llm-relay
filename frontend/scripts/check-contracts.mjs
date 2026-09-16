@@ -180,6 +180,36 @@ if (primaryMatch) {
 }
 
 console.log('')
+console.log('=== 新日志扫光契约 ===')
+{
+  // 这条效果只在「实时推送插进来一行」时触发：绑定被删掉、类名被改名、
+  // 关键帧被删，都不会报错也不会失败，只是那一行不再有动静 —— 没人会收到通知。
+  // 所以静态盯住这几件事。
+  const panel = readFileSync(join(SRC, 'components/RequestLogPanel.vue'), 'utf8')
+  check('请求日志表格绑定了 row-class-name', /<a-table[\s\S]*?:row-class-name="rowClassName"/.test(panel))
+  check('行 class 里带 is-new', /['"]is-new['"]/.test(panel))
+  check('样式里定义了 @keyframes row-sweep', /@keyframes\s+row-sweep\b/.test(panel))
+  check('扫光是表格外那一层里的 .log-sweep', /class="log-table"/.test(panel) && /\.log-sweep\s*\{/.test(panel))
+  check(
+    '扫光带的位置由 JS 量出来（top/left/width 都绑上了）',
+    /:style="\{[^}]*b\.top[^}]*b\.left[^}]*b\.width/.test(panel),
+  )
+  // 回归闸：第一版把扫光画在 tr 的 ::after 上，结果在宽窗口下整张表的列宽会塌回
+  // 声明宽度、右侧空出一条（tr 里出现非单元格子元素后，Chrome 不再按 fixed 布局
+  // 分配多余宽度）。这个坑很容易「顺手」再踩一次 —— 比如为了少写几行 JS 又把
+  // 伪元素挂回 tr —— 所以这里直接禁掉那种写法。
+  check(
+    '没有把样式挂回 tr.is-new（否则列宽会塌、右侧空一条）',
+    !/:deep\(\.ant-table-tbody\s*>\s*tr\.is-new\)/.test(panel) && !/tr\.is-new\s*::after/.test(panel),
+    '往 tr 里加伪元素会让 table-layout: fixed 不再分配多余宽度，整表塌回声明宽度',
+  )
+  // 动 background-position 而不是元素 transform：后者会撑大容器的可滚动溢出区
+  const sweep = panel.slice(panel.indexOf('@keyframes row-sweep'))
+  check('扫光动的是 background-position-x', /background-position-x:\s*-50%/.test(panel) && /background-position-x:\s*150%/.test(sweep.slice(0, 200)))
+  check('扫光那一层裁掉溢出，亮带不会撑出滚动条', /\.log-table\s*\{[\s\S]{0,120}?overflow:\s*hidden/.test(panel))
+}
+
+console.log('')
 if (failed > 0) {
   console.log(`${failed} 项未通过`)
   process.exit(1)

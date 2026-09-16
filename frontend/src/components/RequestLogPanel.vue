@@ -14,7 +14,7 @@
 // 导出按钮一并撤掉（接口 /logs/export 仍在，脚本与后端测试照旧用它，
 // 只是界面上不再开这个口子）。面板本身（背景 / 边框 / 圆角 / 内边距）
 // 仍用 PanelCard，不传 title 时它不会渲染标题栏。
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
@@ -78,6 +78,126 @@ const rows = ref<RequestLog[]>([])
 const total = ref(0)
 const detailOpen = ref(false)
 const current = ref<RequestLog | null>(null)
+
+// ---- 新日志的扫光（那条彩虹只为「刚插进来的行」而闪）----
+//
+// 存的是「正在做入场动画的行 id」，命中就给这一行加 is-new（一个纯标记的类，
+// 不带任何样式，见文件末尾为什么不能给它挂样式）。
+// 用 Set 而不是给行数据加字段：行数据来自接口，往里塞 UI 字段会跟着进详情抽屉、
+// 进导出、进任何复制它的地方；id 集合只活在这一次动画里。
+const freshIds = ref(new Set<number>())
+
+// 2s 动画 + 0.4s 余量。到点把 id 与那条亮带一起撤掉。
+const FRESH_MS = 2400
+const freshTimers: number[] = []
+
+/**
+ * 正在飞的亮带。
+ *
+ * 为什么是「独立的一层」而不是画在 tr 的 ::after 上（第一版就是那么写的，
+ * 在 1440 视口下一切正常，直到有人在更宽的窗口里看见右侧空出一片）：
+ * tr 里一旦出现非单元格子元素（::after 就是一个），Chrome 在
+ * `table-layout: fixed` 下就不再把它多出来的宽度分给各列 —— 整张表会从
+ * 「铺满容器」的宽度塌回声明宽度（实测 1600 视口：每格 200/200/167/… →
+ * 155/155/130/…，行右边界 1575 → 1277），而表头是另一张表、照旧铺满，
+ * 于是右边空出一条，直到动画结束才恢复。隔离验证过：去掉伪元素、只留
+ * position: relative，列宽全程正常；只把 position 改成 static、留着伪元素，
+ * 照样塌 —— 起因就是那个伪元素。挂到单元格上也不行：固定列是 sticky，
+ * 它里面的绝对定位伪元素会被放到行外（实测盒子 x 148→1482，而行是 241→1575）。
+ *
+ * 所以改成在表格外面套一层自己控制的容器，量出新行的位置再放一条绝对定位的
+ * 亮带：表格内部 DOM 一个字节都不动，列宽、固定列、滚动都不受影响。
+ */
+const beams = ref<{ key: number; top: number; left: number; width: number }[]>([])
+const tableWrap = ref<HTMLElement | null>(null)
+
+/** 亮带厚度：分割线是单元格的 1px 下边框（separate 布局下算在行高内），盖住它再往上压 2px */
+const BEAM_H = 3
+
+/** 按 id 找回那一行，重新量位置。滚动或改窗口大小后要再调一次 */
+function repositionBeams() {
+  const wrap = tableWrap.value
+  if (!wrap) return
+  const base = wrap.getBoundingClientRect()
+  beams.value = beams.value.map((b) => {
+    const tr = wrap.querySelector(`tr[data-row-key="${b.key}"]`)
+    if (!tr) return b
+    const r = tr.getBoundingClientRect()
+    return { ...b, top: r.bottom - base.top - BEAM_H, left: r.left - base.left, width: r.width }
+  })
+}
+
+// 亮带飞行的那 2 秒里，用户可能滚动列表（新行被顶上去）或改窗口大小：
+// 位置得跟着重算，否则亮带会停在旧位置 —— 扫光只有两秒，但「停错地方」比不闪更糟。
+// scroll 用 capture：滚动事件不冒泡，而真正滚的是表格内部的 .ant-table-body。
+let beamWatchAttached = false
+function attachBeamWatch() {
+  if (beamWatchAttached) return
+  beamWatchAttached = true
+  window.addEventListener('scroll', repositionBeams, true)
+  window.addEventListener('resize', repositionBeams)
+}
+function detachBeamWatch() {
+  if (!beamWatchAttached) return
+  beamWatchAttached = false
+  window.removeEventListener('scroll', repositionBeams, true)
+  window.removeEventListener('resize', repositionBeams)
+}
+watch(
+  beams,
+  (v) => {
+    if (v.length) attachBeamWatch()
+    else detachBeamWatch()
+  },
+  { deep: true },
+)
+
+/**
+ * 标记这些行「刚新增」，让它们扫一次光。
+ *
+ * 只有实时推送触发的两种更新会调它（见 onLive 与 load 的 silent 分支）：
+ * 筛选变化、翻页、点刷新、重试都是用户主动重取，整屏都在换，闪一排彩虹没有信息量；
+ * 而「凭空多出来一行」才需要提示，否则用户根本不会注意到列表变了。
+ *
+ * loadedOnce 是一道必须在的闸：首屏那次列表请求还没回来时，实时推送可能先到了，
+ * 那一帧里的行会「先被当成新增」（此时 rows 还是空的，无从比对），接着首屏响应
+ * 又把这些行整批画出来 —— 结果是刚打开/刚刷新页面就扫一次。实测在刷新页面的
+ * 4.5 秒窗口里抓到了这一下：那期间恰好有一条真实请求入库。语义上也说得通
+ * （它确实是新日志），但表现为「刷新就闪」，与「只有新来的才闪」这条约定不符，
+ * 所以首屏落地之前一律不标。
+ */
+let loadedOnce = false
+
+function markFresh(ids: number[]) {
+  if (!loadedOnce) return
+  const fresh = ids.filter((id) => !freshIds.value.has(id))
+  if (!fresh.length) return
+  for (const id of fresh) freshIds.value.add(id)
+  // 亮带要等这一行渲染出来才量得到位置
+  nextTick(() => {
+    const wrap = tableWrap.value
+    if (!wrap) return
+    const base = wrap.getBoundingClientRect()
+    for (const id of fresh) {
+      const tr = wrap.querySelector(`tr[data-row-key="${id}"]`)
+      if (!tr) continue
+      const r = tr.getBoundingClientRect()
+      beams.value.push({ key: id, top: r.bottom - base.top - BEAM_H, left: r.left - base.left, width: r.width })
+    }
+  })
+  freshTimers.push(
+    window.setTimeout(() => {
+      const gone = new Set(fresh)
+      for (const id of fresh) freshIds.value.delete(id)
+      beams.value = beams.value.filter((b) => !gone.has(b.key))
+    }, FRESH_MS),
+  )
+}
+
+/** 行的 class 由「是否刚新增」决定；antd 在它自己的渲染里调用它，读到的依赖归它 */
+function rowClassName(record: RequestLog) {
+  return freshIds.value.has(record.id) ? 'is-new' : ''
+}
 
 // 'all' 是这个项目里「全部」的哨兵值（渠道页与看板同一套）。
 // 不用 0：后端的约定是「不传参数＝不筛选」，而界面上的「全部分组」与
@@ -187,6 +307,10 @@ const loadError = ref('')
  * 是实测出来的：筛选从「deepseek（5562 条）」切到「glm（0 条）」时，两个查询
  * 会并发在途，大的那个更慢，返回时把新结果盖掉 —— 界面成了「卡片 0、列表 5562」，
  * 而且它会一直错到下一次操作。有了序号，谁先谁后都不影响最终显示。
+ *
+ * silent 这一路还会做一件事：比对重取前后多出来的是哪几行，交给 markFresh 扫光。
+ * 有筛选时新日志符不符合条件只有服务端知道（这里不重复实现筛选语义），
+ * 所以只能整批重取；「哪几行是新的」用 id 差集算，不靠位置猜。
  */
 let loadSeq = 0
 
@@ -195,12 +319,25 @@ async function load(opts: { silent?: boolean } = {}) {
   const seq = ++loadSeq
   if (!silent) loading.value = true
   if (!silent) loadError.value = ''
+  // 用户主动重取会把整屏内容换掉：这时候还没飞完的亮带下面已经不是原来那一行了，
+  // 得赶紧收掉（否则它会停在某个「碰巧在这个位置」的行上闪完剩下的时间）。
+  // silent 那条路不能清：那正是要标出新行的路径。
+  if (!silent) {
+    freshIds.value.clear()
+    beams.value = []
+  }
+  // silent 是实时推送独有的路径（scheduleSilentReload 是唯一调用点），
+  // 所以「多出来的行」必然是刚入库的那几条，不会是筛选切换带来的整屏替换
+  const before = silent ? new Set(rows.value.map((r) => r.id)) : null
   try {
     const res = await api.get<Paged<RequestLog>>('/logs?' + buildParams().toString())
     // 已经有更新的请求发出去了：这次的结果（以及它的错误、它的 loading）都作废
     if (seq !== loadSeq) return
     rows.value = res.items || []
     total.value = res.total || 0
+    // 首屏落地：从这一刻起，实时推送标出来的行才真的是「新来的」
+    if (!silent) loadedOnce = true
+    if (before) markFresh(rows.value.filter((r) => !before.has(r.id)).map((r) => r.id))
   } catch (e: any) {
     if (silent || seq !== loadSeq) return
     loadError.value = e.message || '加载失败'
@@ -435,6 +572,12 @@ function scheduleSilentReload() {
 
 onUnmounted(() => {
   if (liveTimer !== null) window.clearTimeout(liveTimer)
+  // 扫光的定时器也要清：它们回调里会写 freshIds，卸载后再写是在动一个
+  // 已经不在屏幕上的组件的状态
+  for (const t of freshTimers) window.clearTimeout(t)
+  freshTimers.length = 0
+  beams.value = []
+  detachBeamWatch()
 })
 
 onLive('logs', (items: RequestLog[]) => {
@@ -456,6 +599,8 @@ onLive('logs', (items: RequestLog[]) => {
   if (!fresh.length) return
   rows.value = [...fresh.reverse(), ...rows.value].slice(0, pageSize.value)
   total.value += fresh.length
+  // 刚插到最上面的这几行扫一次光（用户正在看第一页，新行就在眼前）
+  markFresh(fresh.map((r) => r.id))
 })
 
 onMounted(() => {
@@ -489,14 +634,25 @@ onMounted(() => {
            下排「▣ 479.23K 99.86%」107px，加 16px 内边距 = 140，取 150 留余量。
            改动列宽时这张表的总宽要一起看，scripts/check-table-widths.mjs
            会盯着声明值与各列宽度之和是否一致 -->
-      <a-table
-        :data-source="rows"
-        :loading="loading"
-        :pagination="pagination"
-        row-key="id"
-        size="small"
-        :scroll="{ x: 1036, y: TABLE_BODY_Y }"
-      >
+      <!-- 外面这层只为扫光存在：亮带是这一层里的绝对定位元素，表格内部
+           一个字节都不动（原因见脚本里 beams 的注释 —— 往 tr 里加伪元素会让
+           列宽塌回声明宽度）。overflow: hidden 是兜底：亮带永远不该撑出滚动条。 -->
+      <div ref="tableWrap" class="log-table">
+        <span
+          v-for="b in beams"
+          :key="b.key"
+          class="log-sweep"
+          :style="{ top: b.top + 'px', left: b.left + 'px', width: b.width + 'px' }"
+        />
+        <a-table
+          :data-source="rows"
+          :loading="loading"
+          :pagination="pagination"
+          :row-class-name="rowClassName"
+          row-key="id"
+          size="small"
+          :scroll="{ x: 1036, y: TABLE_BODY_Y }"
+        >
         <template #emptyText>
           <a-empty description="当前筛选条件下没有日志，可放宽筛选条件：把时间范围改成「近 7 天」，或把分组 / 渠道 / 模型改回「全部」" />
         </template>
@@ -628,7 +784,8 @@ onMounted(() => {
             <a-button type="link" size="small" @click="openDetail(record)">详情</a-button>
           </template>
         </a-table-column>
-      </a-table>
+        </a-table>
+      </div>
     </DataState>
 
     <a-drawer v-model:open="detailOpen" title="调用详情" width="720">
@@ -834,5 +991,83 @@ onMounted(() => {
   border-radius: var(--radius-control);
   /* 错误详情是正文，用 --text-red（白底 5.44:1）而不是 --color-red（3.90:1） */
   color: var(--text-red);
+}
+
+/* ---- 新日志的扫光：沿这一行的底边从左扫过一道彩虹 ----
+   （与下一行之间的那条分割线上，约 2 秒后从右端消失）
+
+   亮带是 .log-table 里的一条绝对定位元素，位置由 JS 量出来（见脚本里 beams 的注释）。
+   为什么不画在 tr 的 ::after 上（第一版的做法，也是踩过的坑）：
+
+   1. **tr 里不能出现非单元格子元素**。一旦有（::after 就算一个），Chrome 在
+      `table-layout: fixed` 下就不再把它多出来的宽度分给各列 —— 整张表会从
+      「铺满容器」塌回声明宽度，而表头是另一张表、照旧铺满，于是右侧空出一条。
+      实测（1600 视口）：每格 200/200/167/193/155/116/82/129/93 → 155/155/130/…
+      行右边界 1575 → 1277，整整持续到动画结束才恢复。
+      隔离验证过：去掉伪元素、只留 position: relative，列宽全程正常；
+      只把 position 改成 static、留着伪元素，照样塌 —— 起因就是那个伪元素。
+      所以 is-new 这个类**不带任何样式**，只是「这一行正在做入场动画」的标记。
+
+   2. 挂到单元格上同样不行：固定列（请求时间 / 操作）是 position: sticky，
+      它里面的绝对定位伪元素会落到意想不到的位置（实测 left:0 的盒子跑到行的
+      右边界之外：盒 x 1575→2909；换成右对齐的写法又落在 148→1482，行是 241→1575）。
+
+   3. 动的是 background-position-x，不是元素的 transform —— 盒子始终等于整行，
+      超出容器的部分由这一层的 overflow: hidden 裁掉，不会撑出滚动条（第一版
+      在 .ant-table-body 里动背景位移时，实测动画全程 scrollWidth === clientWidth）。
+
+   4. 这一层是 position: relative + overflow: hidden，但**不会**影响固定列的吸附：
+      那些 sticky 单元格最近的滚动祖先是 .ant-table-body（它自己有 overflow: auto），
+      比这一层更近。
+
+   彩虹是一次**有意的用色例外**：项目其余部分严格走陶土主色系，而这里的效果
+   是站主指定的「彩虹色」。色相取 antd 色板，两端 alpha 0 —— 进出都是渐隐，
+   不是一块硬边色块滑过去。减弱动态效果的处理不用在这里重复写：
+   theme.css 末尾那条 prefers-reduced-motion 会把所有 animation-duration
+   压到 0.01ms，本动画随之变成瞬时（终态在 150%，本来就不可见）。 */
+.log-table {
+  position: relative;
+  overflow: hidden;
+}
+
+.log-sweep {
+  position: absolute;
+  /* 3px：分割线本身是单元格的 1px 下边框（border-collapse 为 separate 时它算在
+     行高内），亮带盖住它再往上压 2px，看起来才是一道光扫过去而不是一条细线 */
+  height: 3px;
+  /* 压过固定列的 sticky 单元格（它们是 position: sticky + 不透明底、z-index: 2） */
+  z-index: 3;
+  pointer-events: none;
+  background-image: linear-gradient(
+    90deg,
+    rgba(255, 77, 79, 0) 0%,
+    rgba(255, 77, 79, 0.95) 12%,
+    #ffa940 28%,
+    #ffec3d 42%,
+    #52c41a 56%,
+    #36cfc9 68%,
+    #2f54eb 82%,
+    rgba(114, 46, 209, 0.95) 92%,
+    rgba(114, 46, 209, 0) 100%
+  );
+  background-repeat: no-repeat;
+  /* 带子占整行的 30%：位移的百分比是相对 (行宽 - 带宽) 算的，
+     所以 -50% / 150% 对应左缘落在 -35% / 105% 处 —— 两端都在行外，
+     起手看不见、收尾也在行外消失 */
+  background-size: 30% 100%;
+  background-position-x: -50%;
+  /* 匀速，并且**不要**换成 --ease-expo：那个曲线 0.3 秒就走完了全程，
+     剩下的时间停在右端不动，观感是「闪一下」而不是「扫过 2 秒」。
+     这里的时长本身就是需求（约 2s），不是「快点响应」那类过渡。 */
+  animation: row-sweep 2s linear forwards;
+}
+
+@keyframes row-sweep {
+  from {
+    background-position-x: -50%;
+  }
+  to {
+    background-position-x: 150%;
+  }
 }
 </style>
