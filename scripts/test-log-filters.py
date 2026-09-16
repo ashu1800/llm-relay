@@ -247,6 +247,34 @@ _, some = call("GET", "/logs?since=" + urllib.parse.quote(past))
 chk("since 设为一小时前：有记录", some.get("total", 0) > 0, "共 %s 条" % some.get("total"))
 
 print()
+print("=== range 四档（与统计接口共用 resolveRange：卡片和列表必须是同一个窗口）===")
+# 这四个值由前端筛选栏直接传过来。断言的重点不是「数字对不对」（那取决于库里有什么），
+# 而是「四档各自合法、窗口是嵌套的、非法值不静默」——
+# 静默退回「今天」是最坏的情况：界面上选着近 7 天，看到的却是今天的数。
+counts = {}
+for k in ["today", "3d", "7d", "30d"]:
+    code, body = call("GET", "/logs?range=" + k)
+    counts[k] = body.get("total", -1)
+    chk("range=%s 可用" % k, code == 200 and body.get("total", -1) >= 0,
+        "共 %s 条" % body.get("total"))
+chk("窗口是嵌套的：今天 <= 近3天 <= 近7天 <= 近30天",
+    counts["today"] <= counts["3d"] <= counts["7d"] <= counts["30d"],
+    "%s <= %s <= %s <= %s" % (counts["today"], counts["3d"], counts["7d"], counts["30d"]))
+# 与统计接口对同一档：卡片与列表的条数必须一致（差值是两次请求之间新落库的日志）
+code, summ = call("GET", "/stats/summary?range=" + "7d")
+if isinstance(summ, dict) and "requests" in summ:
+    diff = abs(int(summ["requests"]) - counts["7d"])
+    chk("近7天：统计接口的请求数与日志条数一致（同窗口）", diff <= 5,
+        "统计 %s vs 日志 %s（差 %d）" % (summ["requests"], counts["7d"], diff))
+else:
+    chk("统计接口可用（用于核对同窗口）", False, "返回 %r" % (summ,))
+for badval in ["1h", "all", "yesterday", "7"]:
+    code, _ = call("GET", "/logs?range=" + badval)
+    chk("range=%s 非法：应 400 而不是静默当今天" % badval, code == 400, "实际 %s" % code)
+code, _ = call("GET", "/logs?range=today&since=" + urllib.parse.quote(past))
+chk("range 与 since 同时给：应 400（两个口径叠加没人看得出哪个生效）", code == 400, "实际 %s" % code)
+
+print()
 print("=== 导出必须是全量，不是当前页 ===")
 # 先自己造出超过一页的记录：这条断言（导出条数 > 单页条数）原本依赖
 # 「库里已经攒了很多日志」，于是清一次历史数据它就会失败 ——

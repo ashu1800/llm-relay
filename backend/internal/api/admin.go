@@ -1364,14 +1364,38 @@ func (s *Server) logFilters(c *gin.Context) (*gorm.DB, bool) {
 		}
 		q = q.Where("api_key_id = ?", v)
 	}
-	if since := c.Query("since"); since != "" {
+	// 时间范围：range 是「看板那四档」（today/3d/7d/30d），由 resolveRange
+	// 与统计接口**共用同一段代码**换算 —— 请求日志并入看板之后，上面卡片的数字
+	// 与下面列表的行必须落在同一个窗口里，各算各的迟早会出现
+	// 「卡片说今天 200 次，列表只有 180 条」这种没人能解释的偏差。
+	//
+	// 也支持 since/until 绝对时刻（排障脚本与「从某个时刻往后」的用法）。
+	// 两者**不允许同时出现**：叠加时没人看得出哪个生效，宁可报错。
+	rng := strings.TrimSpace(c.Query("range"))
+	since := c.Query("since")
+	until := c.Query("until")
+	if rng != "" && (since != "" || until != "") {
+		return bad("range", rng+"（不能与 since/until 同时使用）")
+	}
+	switch rng {
+	case "":
+		// 不筛时间
+	case "today", "3d", "7d", "30d":
+		start, end, _ := resolveRange(rng)
+		q = q.Where("created_at >= ? AND created_at <= ?", start, end)
+	default:
+		// 不静默退回「今天」：界面上选着「近 7 天」而结果其实是今天，
+		// 会让人得出错误结论（与统计接口「非法值不静默」同一条约定）
+		return bad("range", rng)
+	}
+	if since != "" {
 		t, err := time.Parse(time.RFC3339, since)
 		if err != nil {
 			return bad("since", since)
 		}
 		q = q.Where("created_at >= ?", t)
 	}
-	if until := c.Query("until"); until != "" {
+	if until != "" {
 		t, err := time.Parse(time.RFC3339, until)
 		if err != nil {
 			return bad("until", until)
@@ -1449,8 +1473,10 @@ func (s *Server) exportLogs(c *gin.Context) {
 	// 加 BOM，Excel 才会按 UTF-8 识别。
 	// 这里必须写转义序列：直接嵌入 BOM 字符会让 Go 源码在词法分析阶段就报错
 	b.WriteString("\ufeff")
-	// 表头文案与界面保持一致（首字耗时 / 总共耗时）：
-	// 同一个数在页面叫一个名字、导出来又叫另一个名字，对不上账时最难查
+	// 表头文案与界面保持一致（界面「任务耗时」列里的两行：首字 / 总耗时）：
+	// 同一个数在页面叫一个名字、导出来又叫另一个名字，对不上账时最难查。
+	// CSV 是平铺的两列，挂不住「任务耗时」这一层列头，
+	// 所以把被合并掉的「耗时」二字补回列名，并带上单位（毫秒）。
 	// 费用拆成「金额 + 币种」两列：金额离开币种就没意义，
 	// 而现在同一份导出里可能同时有人民币和美元的账
 	b.WriteString("请求时间,模型,状态,密钥,渠道,输入Token,输出Token,缓存命中,缓存写入,推理Token,首字耗时(ms),总共耗时(ms),费用,币种,trace_id\n")

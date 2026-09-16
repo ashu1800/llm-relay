@@ -9,7 +9,7 @@
 // 深浅主题各自的明度，都只有浏览器算得准；拿 CSS 源码推是推不出结论的。
 import fs from 'node:fs'
 
-const URL_LOG = 'http://127.0.0.1:8888/console/logs'
+const URL_LOG = 'http://127.0.0.1:8888/console/dashboard'
 const OUT_DIR = '.shots'
 const THEMES = ['light', 'dark']
 

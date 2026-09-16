@@ -14,10 +14,11 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
     // 阈值定在 900 kB 是实测结论，不是拿来消警告的：
-    // 两个大 chunk 是 echarts（565 kB）与 antd 按需注册后的剩余部分（870 kB），
-    // 都属于「第三方库、不随业务代码变化、可长期缓存」。业务代码最大的
+    // 现在最大的 chunk 是 antd 按需注册后的剩余部分（约 870 kB），
+    // 属于「第三方库、不随业务代码变化、可长期缓存」。业务代码最大的
     // ChannelsView 只有 71 kB。入口 chunk 已从全量注册时的 1541 kB 降到 12 kB。
-    // 真要再降就得对 echarts 做按需引入（只引用的图表类型）或异步加载看板。
+    // （2026-09-16：看板的四张图表与热力图移除后，echarts 这个 565 kB 的
+    //   chunk 连同依赖一起删掉了 —— 阈值与分包表都跟着它一起收窄。）
     chunkSizeWarningLimit: 900,
     // 入口 chunk 实测约 1.5 MB（minify 后），其中绝大部分是 antd 全量注册。
     // 这里把第三方库拆成独立的 vendor chunk：它们不随业务代码变化，
@@ -26,8 +27,7 @@ export default defineConfig({
       output: {
         manualChunks: {
           vue: ['vue', 'vue-router', 'pinia'],
-          antd: ['ant-design-vue'],
-          echarts: ['echarts']
+          antd: ['ant-design-vue']
         }
       }
     }

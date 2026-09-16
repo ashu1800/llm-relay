@@ -17,6 +17,7 @@ import os
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 BASE = "http://127.0.0.1:8888"
@@ -183,7 +184,7 @@ chk("分组 G1 的请求数", 3, s1["requests"])
 chk("分组 G2 的请求数", 2, s2["requests"])
 chk("G1 只出现 CNY 金额", ["CNY"], sorted(s1["costs"].keys()))
 chk("G2 只出现 USD 金额", ["USD"], sorted(s2["costs"].keys()))
-chk("回显生效的筛选", {"group_id": gid1, "channel_id": 0}, s1.get("filter"))
+chk("回显生效的筛选", {"group_id": gid1, "channel_id": 0, "model": ""}, s1.get("filter"))
 # 两个分组各自的数量必须真的小于全站：否则「筛选没生效」和「筛选生效」看起来一样
 chk("全站请求数大于任一分组", True, allsum["requests"] > max(s1["requests"], s2["requests"]))
 # 金额与请求数必须来自同一个范围：只给主查询加筛选时，这里会出现
@@ -212,6 +213,35 @@ chk("group_id=abc 的状态码", 400, code)
 chk("错误信息点名参数", True, "group_id" in json.dumps(body, ensure_ascii=False))
 chk("group_id=0 也拒绝（0 会让人以为等于「全部」）", 400, stats("summary", range="today", group_id=0)[0])
 chk("channel_id=-1 也拒绝", 400, stats("summary", range="today", channel_id=-1)[0])
+
+print()
+print("=== 5b. 按模型收窄（请求日志并入看板后新增：列表与卡片必须同一口径）===")
+# 两个模型各自挂在自己的渠道上，所以按模型筛出来的数就是上面那两个确定的数
+sm1 = wait_requests(3, model=M1)
+sm2 = wait_requests(2, model=M2)
+chk("M1 的请求数", 3, sm1["requests"])
+chk("M2 的请求数", 2, sm2["requests"])
+chk("回显生效的模型", M1, sm1.get("filter", {}).get("model"))
+chk("M1 只有 CNY 金额", ["CNY"], sorted(sm1["costs"].keys()))
+chk("M2 只有 USD 金额", ["USD"], sorted(sm2["costs"].keys()))
+# 「不存在的模型」要用一个本次运行才有的名字：写死的字面值会被兄弟用例
+# （test-log-filters.py 里就有 no-such-model-filter）真的写进库里，
+# 于是「不存在」变成了「存在两条」，断言随机失败 —— 实测踩过。
+ghost = "no-such-model-%d" % int(time.time())
+chk("不存在的模型 = 0", 0, stats("summary", range="today", model=ghost)[1]["requests"])
+# 与日志列接口对齐：同一筛选下卡片与列表必须落在同一个窗口、同一批行
+code, logs = call("GET", "/logs?range=today&model=" + urllib.parse.quote(M1) + "&page_size=1")
+chk("日志接口按同一模型筛选的条数", 3, logs.get("total"))
+code, logs3 = call("GET", "/logs?range=3d&model=" + urllib.parse.quote(M1) + "&page_size=1")
+chk("换成近3天窗口不缩小（日志条数 >= 今天）", True, logs3.get("total", 0) >= logs.get("total", 0))
+# 模型与分组/渠道是 AND：M1 属于 G1/C1，套上别的分组就该是 0
+chk("M1 + 分组 G2（不属于它）= 0", 0, stats("summary", range="today", model=M1, group_id=gid2)[1]["requests"])
+# 空串与纯空格都等于「不筛选」：拿同一时刻的两次调用比，不能用上面那份旧快照 ——
+# 这台机器上还跑着真实调用，两次快照之间会多出几条
+_, noModel = stats("summary", range="today")
+_, blankModel = stats("summary", range="today", model="   ")
+chk("空串模型＝不筛选（与不传等价，允许两次调用之间新增的流量）", True,
+    abs(blankModel["requests"] - noModel["requests"]) <= 2)
 
 print()
 print("=== 6. 其余统计接口同样吃筛选 ===")

@@ -52,7 +52,10 @@ export function primaryCurrency(costs?: Record<string, string> | null): string {
   return currencyKeys(costs)[0] ?? ''
 }
 
-/** 把 costs 渲染成一行「¥12.34 / $5.67」；没有金额时返回空串 */
+/** 把 costs 渲染成一行「¥12.34 / $5.67」；没有金额时返回空串。
+ *  目前无人调用（原来只有看板的热力图提示用），保留是因为它是 costs 的
+ *  「一次性展示」入口：卡片只用主币种 + 提示里列其余币种（见 DashboardView），
+ *  两处合起来才是完整语义，删掉这个函数并不能减少多少东西。 */
 export function costsText(costs?: Record<string, string> | null, sep = ' / '): string {
   const map = costs ?? {}
   return currencyKeys(map)

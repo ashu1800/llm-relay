@@ -143,6 +143,42 @@ for (const tok of ['--color-red', '--color-orange', '--color-green', '--color-bl
   check(`深色主题覆盖了 ${tok}`, darkBlock.includes(tok + ':'))
 }
 
+// 光标 SVG 里的品牌色是 --color-primary 的第二份定义。
+//
+// 光标是当作图片加载的，没有 CSS 级联，SVG 里写不了 var(--color-primary)，
+// 只能把色值抄一遍。这与 theme.ts 里记的「双份定义会漂移」是同一类坑：
+// 改主色时漏掉光标，界面不会报错、也不会失败，只是光标停在旧主色上，
+// 肉眼在两种颜色之间很难发现。所以在这里盯住。
+console.log('')
+console.log('=== 光标资源 ===')
+const primaryMatch = theme.match(/--color-primary:\s*(#[0-9a-fA-F]{3,8})/)
+check('theme.css 里能读到 --color-primary', !!primaryMatch)
+if (primaryMatch) {
+  const primary = primaryMatch[1].toLowerCase()
+  const publicDir = join(SRC, '..', 'public')
+  for (const f of ['cursor-arrow.svg', 'cursor-hand.svg']) {
+    const svg = readFileSync(join(publicDir, f), 'utf8')
+    check(
+      `${f} 的填充色与 --color-primary 一致`,
+      svg.toLowerCase().includes(primary),
+      `SVG 里没找到 ${primary}，把 fill 同步成主色`
+    )
+    // 光标图必须自带固有尺寸：Chrome 拿不到 width/height 时不会渲染光标，
+    // 也不报错，表现只是「样式改了但没效果」
+    check(`${f} 带固有尺寸`, /<svg[^>]*\bwidth="\d+"[^>]*\bheight="\d+"/.test(svg.replace(/\s+/g, ' ')))
+    // Firefox 67 起自定义光标上限 32x32，超了会被整个丢弃
+    const wh = svg.match(/<svg[^>]*\bwidth="(\d+)"[^>]*\bheight="(\d+)"/)
+    check(`${f} 不超过 32x32（Firefox 上限）`, !!wh && +wh[1] <= 32 && +wh[2] <= 32, wh ? `实测 ${wh[1]}x${wh[2]}` : '读不到尺寸')
+    // XML 注释里出现连续两个减号会让整个 SVG 解析失败（favicon 踩过这个坑）
+    const comments = svg.match(/<!--[\s\S]*?-->/g) || []
+    check(`${f} 注释里没有连续减号`, !comments.some((c) => c.slice(4, -3).includes('--')))
+  }
+  // CSS 里的热区必须与图形对得上：写错的表现是「点下去的位置和看到的尖差开」
+  for (const tok of ['--cursor-arrow', '--cursor-hand']) {
+    check(`theme.css 定义了 ${tok} 且带热区坐标`, new RegExp(tok + ":\\s*url\\('[^']+'\\)\\s+\\d+\\s+\\d+,").test(theme))
+  }
+}
+
 console.log('')
 if (failed > 0) {
   console.log(`${failed} 项未通过`)

@@ -1,6 +1,6 @@
 // CDP 截图工具：为指定 URL 新建标签页并截图，不影响已有标签
 // 用法: node scripts/screenshot.mjs <url> <输出png> [宽] [高] [截图前执行的JS] [执行后再等待毫秒]
-// 例: node scripts/screenshot.mjs http://127.0.0.1:8888/console/logs a.png 1440 900 "document.querySelector('.ant-table-row a').click()" 2500
+// 例: node scripts/screenshot.mjs http://127.0.0.1:8888/console/dashboard a.png 1440 900 "document.querySelector('.ant-table-row a').click()" 2500
 import { writeFileSync, mkdirSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import http from 'node:http'

@@ -1,4 +1,15 @@
 <script setup lang="ts">
+// 数据看板 —— 2026-09-16 起「请求日志」整页并入这里：
+// 上面是筛选栏与四张概览卡，下面是请求日志列表，两者共用同一套筛选条件。
+//
+// 为什么并成一页：这两块回答的本来就是同一个问题（「这段时间跑得怎么样」），
+// 分在两页时最常做的动作是「在日志页看到异常 → 切到看板看总量 → 再切回去查明细」，
+// 而两边的筛选条件还各记各的（logs-* 与 dashboard-* 两套 localStorage 键），
+// 切回来常常已经不是你刚才那个视角了。现在筛选只有一处。
+//
+// 热力图与四张图表（消耗趋势 / 消耗分布 / 模型调用分析 / 模型消耗占比）已移除：
+// 概览卡与日志列表已经覆盖了「多少 / 多少钱 / 多快 / 哪些失败」这几个问题，
+// 图表属于「再往下研究」的需求，等真有人用再看要不要以别的方式补回。
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   ApiOutlined,
@@ -7,17 +18,16 @@ import {
   CheckCircleOutlined,
   ReloadOutlined
 } from '@ant-design/icons-vue'
+import { useRoute } from 'vue-router'
 import { api } from '@/api/client'
 import PageToolbar from '@/components/PageToolbar.vue'
-import PanelCard from '@/components/PanelCard.vue'
 import StatCard from '@/components/StatCard.vue'
 import AnimatedNumber from '@/components/AnimatedNumber.vue'
+import DataState from '@/components/DataState.vue'
+import RequestLogPanel from '@/components/RequestLogPanel.vue'
 import { onLive } from '@/composables/useLive'
 // 金额一律走 utils/money.ts：符号与小数位数只此一份（见那里的说明）
-import { costsText, currencyKeys, moneyText, primaryCurrency, symbolOf } from '@/utils/money'
-import EChart from '@/components/EChart.vue'
-import { useChartTheme } from '@/utils/chartTheme'
-import DataState from '@/components/DataState.vue'
+import { currencyKeys, moneyText, primaryCurrency, symbolOf } from '@/utils/money'
 import type { Channel, ChannelGroup } from '@/api/types'
 import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
 import { channelOption } from '@/utils/channelOption'
@@ -44,46 +54,17 @@ type Summary = {
   avg_first_byte_ms: number
   avg_total_ms: number
 }
-type SeriesPoint = {
-  ts: string
-  requests: number
-  errors: number
-  prompt_tokens: number
-  completion_tokens: number
-  cached_tokens: number
-  costs: Record<string, string>
-}
-type GroupItem = {
-  name: string
-  requests: number
-  errors: number
-  tokens: number
-  costs: Record<string, string>
-  avg_ms: number
-}
-type HeatItem = { day: string; hour: number; requests: number; costs: Record<string, string>; tokens: number }
-
 const summary = ref<Summary | null>(null)
-const series = ref<SeriesPoint[]>([])
-const byModel = ref<GroupItem[]>([])
-const byChannel = ref<GroupItem[]>([])
-const heat = ref<HeatItem[]>([])
 const loading = ref(false)
-// 这一页没有表格，但「加载失败」同样不能只留一条转瞬即逝的消息：
-// 失败后卡片会显示成 0，被读成「这段时间没有流量」
+// 「加载失败」不能只留一条转瞬即逝的消息：失败后卡片会显示成 0，
+// 被读成「这段时间没有流量」。列表那边有自己的错误态（面板内部），
+// 所以这里只管卡片这一排 —— 两个数据源可以各自失败，互不连坐。
 const loadError = ref('')
 
-// 「是否已有统计数据」：任一数据源拿到过内容就算有。
-// 用它区分首次加载失败（整块换成错误说明）与刷新失败（保留图表只提示）
-const hasStats = computed(
-  () =>
-    summary.value !== null ||
-    series.value.length > 0 ||
-    byModel.value.length > 0 ||
-    heat.value.length > 0
-)
-// 趋势图分桶粒度，由后端按时间范围决定（今天/近3天按小时，更长的按天）
-const seriesBucket = ref('hour')
+// 「是否已有统计数据」。用它区分首次加载失败（整排换成错误说明）
+// 与刷新失败（保留数字只提示）。
+// 现在只剩 summary 一个数据源了：图表与热力图已移除，别的接口不再请求。
+const hasStats = computed(() => summary.value !== null)
 
 const ranges = [
   { key: 'today', label: '今天' },
@@ -91,14 +72,19 @@ const ranges = [
   { key: '7d', label: '近7天' },
   { key: '30d', label: '近30天' }
 ]
-// ---- 筛选条件（时间范围 / 分组 / 渠道）全部持久化 ----
+// ---- 筛选条件（时间范围 / 分组 / 渠道 / 模型）全部持久化 ----
 //
 // 为什么要持久化：「只看某个分组」是常态视角，每次打开页面、或从别的页面
 // 切回来都要重选一遍，是纯粹的重复劳动。与渠道列表页的筛选同一套做法
 // （见 utils/persistedChoice.ts）。
+//
+// 这四个条件是**整页**的：上面的卡片与下面的列表都按它们取数。
+// 合并之前列表页自己记了一套 logs-* 键、看板记了一套 dashboard-*：
+// 同一页面上出现两套视角，是这次合并要消灭的东西之一。
 const RANGE_KEY = 'dashboard-range'
 const GROUP_KEY = 'dashboard-group'
 const CHANNEL_KEY = 'dashboard-channel'
+const MODEL_KEY = 'dashboard-model'
 
 // 哨兵值用 'all' 而不是 0：后端的约定是「不传参数＝不筛选」，
 // 而界面上的「全部分组」与「分组 id=0」是两件事，混用迟早出错
@@ -107,6 +93,18 @@ const ALL = 'all'
 const range = ref('today')
 const groupFilter = ref<string>(ALL)
 const channelFilter = ref<string>(ALL)
+const modelFilter = ref<string>(ALL)
+// 排障深链带来的两个临时条件（?trace_id=… / ?status_class=error）。
+// 它们不持久化：下次打开还被它们筛着，会看到一张恒为 0 条的列表，
+// 而且不记得自己什么时候套上的。
+const traceId = ref('')
+const statusClass = ref('')
+// 只在进入页面时读一次（见 applyUrlFilters）：筛选状态不进地址栏，
+// 免得用户以为地址栏能当书签用、却越用越乱
+const route = useRoute()
+
+// 列表面板的句柄：工具栏的「刷新」要连它一起刷（一页一个刷新按钮）
+const logPanel = ref<{ reload: () => void } | null>(null)
 // 筛选下拉的候选：来自管理接口，不是统计接口 —— 统计接口只回有流量的渠道，
 // 而「筛一条今天还没被用过的渠道」是合理需求（结果就是 0）
 const filterGroups = ref<ChannelGroup[]>([])
@@ -118,7 +116,7 @@ const groupOptions = computed(() => [
 ])
 
 // 渠道选项：图标 + 名字，分组名只在「全部分组」时才补上
-// （见 utils/channelOption.ts，请求日志页用的是同一个函数）
+// （见 utils/channelOption.ts，请求日志面板用的是同一个组件）
 const visibleChannels = computed(() =>
   groupFilter.value === ALL
     ? filterChannels.value
@@ -130,16 +128,60 @@ const channelOptions = computed(() => [
   ...visibleChannels.value.map((c) => channelOption(c, filterGroups.value, groupFilter.value === ALL))
 ])
 
+// 模型候选取渠道白名单（/channels 的 models）：它是系统当前认识的模型全集。
+// 不从「这段时间有流量的模型」取 —— 那样下拉会随流量变动，
+// 昨天用过的模型今天就选不出来了。
+//
+// 这个条件以前只在日志页有，现在卡片也吃它（后端 /stats 支持 model）：
+// 同一个筛选栏下，上面的数字与下面的行必须说的是同一批请求。
+const visibleModels = computed(() => {
+  const src =
+    channelFilter.value === ALL
+      ? visibleChannels.value
+      : visibleChannels.value.filter((c) => String(c.id) === channelFilter.value)
+  return [...new Set(src.flatMap((c) => c.models || []))].sort()
+})
+
+const modelOptions = computed(() => [
+  { value: ALL, label: '全部模型' },
+  ...visibleModels.value.map((m) => ({ value: m, label: m }))
+])
+
+// syncFilters 把下级筛选夹回合法值：换了分组，原来选的渠道可能已不属于它；
+// 换了分组或渠道，原来选的模型可能已不在候选里。
+// 不夹的话查询条件会停在一个空集合上（列表恒为 0 条、卡片全是 0），
+// 而界面上看不出原因。顺序固定：先渠道后模型，因为后者的候选由前者收窄。
+function syncFilters() {
+  if (
+    channelFilter.value !== ALL &&
+    !visibleChannels.value.some((c) => String(c.id) === channelFilter.value)
+  ) {
+    channelFilter.value = ALL
+  }
+  if (modelFilter.value !== ALL && !visibleModels.value.includes(modelFilter.value)) {
+    modelFilter.value = ALL
+  }
+}
+
 function persistFilters() {
   writeStoredChoice(RANGE_KEY, range.value)
   writeStoredChoice(GROUP_KEY, groupFilter.value)
   writeStoredChoice(CHANNEL_KEY, channelFilter.value)
+  writeStoredChoice(MODEL_KEY, modelFilter.value)
 }
 
-// 存下来的筛选值可能指向已经删掉的分组 / 渠道。那种状态的表现是
-// 「所有数字都是 0」，从界面上完全看不出原因 —— 所以列表到手后校验一次，
-// 不合法就退回「全部」（与渠道列表页的 applyStoredGroupFilter 同一套做法）。
+// 存下来的筛选值可能指向已经删掉的分组 / 渠道 / 模型。那种状态的表现是
+// 「所有数字都是 0」或「列表恒为 0 条」，从界面上完全看不出原因 ——
+// 所以列表到手后校验一次，不合法就退回「全部」（与渠道列表页的
+// applyStoredGroupFilter 同一套做法）。
+//
+// 从 URL 带着 trace_id / status_class 进来的那一次**不恢复**本地筛选：
+// 那种链接是要发给别人、或以后自己再打开的，同一个链接应该在哪台机器上、
+// 隔多久打开都显示同一批记录。若再与收件人自己记着的渠道筛选相交，
+// 链接会显示成一张空表 —— 看起来像日志丢了，而且两个人看到的还不一样。
+// 这里只是「这一次不套用」，不写回存储：用户并没有改自己的视角。
 function applyStoredFilters() {
+  if (traceId.value || statusClass.value) return
   range.value = readStoredChoice(RANGE_KEY, ranges.map((r) => r.key), 'today')
   groupFilter.value = readStoredChoice(
     GROUP_KEY,
@@ -153,6 +195,7 @@ function applyStoredFilters() {
     [ALL, ...visibleChannels.value.map((c) => String(c.id))],
     ALL
   )
+  modelFilter.value = readStoredChoice(MODEL_KEY, [ALL, ...visibleModels.value], ALL)
   persistFilters()
 }
 
@@ -171,84 +214,97 @@ async function loadFilters() {
   applyStoredFilters()
 }
 
+// applyUrlFilters 只在进入页面时读一次 URL：筛选状态不进地址栏，
+// 免得用户以为地址栏能当书签用、却越用越乱（工具栏那几个筛选记在本地，
+// 见上面的 dashboard-* 键 —— 「下次打开还是这个视角」与「地址栏当书签」是两件事）。
+// 用法上它是排障深链：?trace_id=… 看一条链路、?status_class=error 只看失败。
+function applyUrlFilters() {
+  const tid = String(route.query.trace_id || '').trim()
+  if (tid) traceId.value = tid
+  const sc = String(route.query.status_class || '').trim()
+  if (sc === 'error' || sc === 'success') statusClass.value = sc
+}
+
 // 注意：a-radio-group 的 change 给的是**事件对象**，不是值（a-select 给的是值，
 // 两者不一样）。所以这里不接收参数、也不赋值 —— v-model 已经更新过 range。
 // 之前写成 onRangeChange(v) { range.value = v }，range 就变成了一个事件对象：
 // 查询串成了 ?range=[object Object]，后端认不出、退回「今天」，
 // 存储里也写进 "[object Object]" —— 界面上筛选项看着是选中的，数据却是今天的。
+//
+// 这四个处理函数只重取**统计**（卡片）；列表跟着 props 自己重取（面板里的 watch）。
+// 这里**不能**顺手调 logPanel.reload()：子组件的 props 要等父组件重渲染之后才更新，
+// 而事件处理函数是同步跑的 —— 那一刻面板读到的还是旧筛选，于是会多发一次旧条件的
+// 查询。实测过：旧查询（deepseek 的 5562 条）比新查询（glm 的 0 条）慢，回来时
+// 把新结果盖掉了，界面表现为「卡片 0、列表 5562」。
+// 只有一个「刷新」按钮例外：那时没有任何 props 在变，调它才是安全的（见 reloadAll）。
+function reloadStats() {
+  load()
+}
+
 function onRangeChange() {
   persistFilters()
-  load()
+  reloadStats()
 }
 
 function onGroupChange(v: string) {
   groupFilter.value = v
-  // 换分组后原来选的渠道可能不属于新分组，那组组合查出来永远是 0
-  if (!channelOptions.value.some((o) => o.value === channelFilter.value)) {
-    channelFilter.value = ALL
-  }
+  syncFilters()
   persistFilters()
-  load()
+  reloadStats()
 }
 
 function onChannelChange(v: string) {
   channelFilter.value = v
+  syncFilters()
   persistFilters()
-  load()
+  reloadStats()
 }
 
-// 只有筛选条件、不含时间范围：热力图的时间轴是固定的近 7 天，不吃 range。
-// 分组 / 渠道不选时不带参数（后端把「不传」当作不筛选）
-function filterSuffix() {
-  let s = ''
+// 三个下拉都用 @change + v-model：a-select 的 change 传的是**值**
+// （a-radio-group 传的是事件对象，上面踩过），这里仍显式赋值一次 ——
+// 不依赖 v-model 与 change 的先后顺序。
+function onModelChange(v: string) {
+  modelFilter.value = v
+  syncFilters()
+  persistFilters()
+  reloadStats()
+}
+
+// 工具栏上那两个临时标签的关闭动作：清掉之后立即重取，
+// 让「关掉筛选」与「列表已经变回全量」发生在同一帧里
+function clearExtra(key: 'trace' | 'status') {
+  if (key === 'trace') traceId.value = ''
+  else statusClass.value = ''
+}
+
+// 一页只有一个「刷新」：卡片与列表一起刷。
+// 拆成两个按钮的话，用户永远要猜「哪个按钮刷的是哪块」。
+//
+// 这里可以安全地直接叫面板重取（与上面四个处理函数不同）：
+// 点刷新时没有任何筛选在变，不存在「面板拿着旧 props 发查询」的问题。
+function reloadAll() {
+  load()
+  logPanel.value?.reload()
+}
+
+// 分组 / 渠道 / 模型不选时不带参数（后端把「不传」当作不筛选）
+function statsQuery() {
+  let s = '?range=' + range.value
   if (groupFilter.value !== ALL) s += '&group_id=' + groupFilter.value
   if (channelFilter.value !== ALL) s += '&channel_id=' + channelFilter.value
+  if (modelFilter.value !== ALL) s += '&model=' + encodeURIComponent(modelFilter.value)
   return s
 }
 
-function statsQuery() {
-  return '?range=' + range.value + filterSuffix()
-}
 
-
-// 与 theme.css 的语义色保持一致，保证图表和界面同色系。
-// 图表配色跟着主题走：option 里不再写死颜色（详见 utils/chartTheme.ts）
-const ct = useChartTheme()
-
-// 色板已抽进 useChartTheme()，这里只留一个取值入口。
-// 原来这里是一份写死的 8 色数组，暗色主题下会用到 #6b7280（对 #303030 仅 2.73:1）
-// 与 #f59e0b（对白卡片仅 2.15:1）—— 前者在深色底上几乎看不见。
-// 统一走 ct.value.palette：那里的值来自 --color-*，暗色已被整体换成提亮版。
-function paletteColor(i: number) {
-  const p = ct.value.palette
-  return p[i % p.length]
-}
-
+// 卡片上的数字统一走千分位（与参考站一致）。
+// 图表相关的那些取值入口（色板、分桶时间格式、日期键）随图表一起删掉了。
 function n(v: number | undefined) {
   return (v ?? 0).toLocaleString('zh-CN')
 }
 
-
-function fmtBucket(ts: string, bucket: string) {
-  const d = new Date(ts)
-  const mm = String(d.getMonth() + 1).padStart(2, '0')
-  const dd = String(d.getDate()).padStart(2, '0')
-  if (bucket === 'day') return mm + '-' + dd
-  return dd + ' ' + String(d.getHours()).padStart(2, '0') + ':00'
-}
-
-function dayKey(d: Date) {
-  return (
-    d.getFullYear() +
-    '-' +
-    String(d.getMonth() + 1).padStart(2, '0') +
-    '-' +
-    String(d.getDate()).padStart(2, '0')
-  )
-}
-
 /**
- * 取当前时间范围与筛选下的全部统计。
+ * 取当前时间范围与筛选下的概览统计。
  *
  * silent 用于实时推送触发的重取：不显示加载态（否则每两秒闪一次骨架），
  * 失败也不把页面上的数字换掉 —— 宁可显示旧数字，也不能显示错的。
@@ -258,22 +314,10 @@ async function load(opts: { silent?: boolean } = {}) {
   if (!silent) loading.value = true
   if (!silent) loadError.value = ''
   try {
-    const q = statsQuery()
-    // 「服务状态」卡片移除后，healthz 与 system/info 已无人读取，
-    // 一并去掉：它们挂在 Promise.all 里，任何一个失败都会让整个看板报错
-    const [s, ts, m, ch, hm] = await Promise.all([
-      api.get<Summary>('/stats/summary' + q),
-      api.get<{ bucket: string; items: SeriesPoint[] }>('/stats/timeseries' + q),
-      api.get<{ items: GroupItem[] }>('/stats/models' + q + '&limit=8'),
-      api.get<{ items: GroupItem[] }>('/stats/channels' + q + '&limit=8'),
-      api.get<{ items: HeatItem[] }>('/stats/heatmap?days=' + HEAT_DAYS + filterSuffix())
-    ])
-    summary.value = s
-    series.value = ts.items || []
-    seriesBucket.value = ts.bucket || 'hour'
-    byModel.value = m.items || []
-    byChannel.value = ch.items || []
-    heat.value = hm.items || []
+    // 只剩概览这一个请求了：图表与热力图移除后，timeseries / models /
+    // channels / heatmap 四个接口不再由前端调用（后端保留，见 docs/ui-spec.md 第九节）。
+    // 这也让卡片刷新变快 —— 原来一次刷新要打五个接口，任何一个慢都会拖住整排数字。
+    summary.value = await api.get<Summary>('/stats/summary' + statsQuery())
   } catch (e: any) {
     if (silent) return
     loadError.value = e.message || '加载失败'
@@ -282,124 +326,6 @@ async function load(opts: { silent?: boolean } = {}) {
   }
 }
 
-// ---- 趋势：消费金额（左轴）+ 请求数（右轴），两条平滑曲线 ----
-// 对齐参考站：两条都是带圆点标记的平滑曲线（原来请求数画的是柱状），
-// 图例居中在顶部、左右轴各带名称（金额 / 请求），只保留横向虚线网格，
-// 金额在左、请求在右。配色取自参考站的 --color-orange / --color-blue。
-// 趋势里出现过的币种：整段区间取并集，而不是只看某一条点 ——
-// 只看当前点的话，图例会随着数据来回闪。
-const trendCurrencies = computed(() => {
-  const seen: Record<string, string> = {}
-  for (const p of series.value) for (const c of Object.keys(p.costs ?? {})) seen[c] = ''
-  return currencyKeys(seen)
-})
-const trendLegend = computed(() => trendCurrencies.value.map((c) => '消费 ' + symbolOf(c)).concat(['请求数']))
-
-const trendOption = computed(() => {
-  const labels = series.value.map((p) => fmtBucket(p.ts, seriesBucket.value))
-  // 线色从主题取，不写死：#f59e0b 在白卡片上只有 2.15:1，
-  // #06b6d4 在深色底上偏暗，两套主题都需要各自的提亮/加深版。
-  const p = ct.value.palette
-  // 第一条沿用消费色（看板上「钱」一直是橙的），其余按色板顺延
-  const TREND_COLORS = [p[4], p[1], p[2], p[3]]
-  const REQ = p[2]
-  // 圆点是空心的：填充用卡片底色、描边用线色。
-  // 填充色不能写死 #fff —— 暗色卡片是 #303030，白点会变成刺眼实心圆。
-  const pointFill = ct.value.pointFill
-  const lineSeries = (name: string, color: string, data: number[]) => ({
-    name,
-    type: 'line',
-    smooth: true,
-    symbol: 'circle',
-    symbolSize: 7,
-    lineStyle: { width: 2, color },
-    itemStyle: { color: pointFill, borderColor: color, borderWidth: 2 },
-    data
-  })
-  const axisName = { color: ct.value.secondary, fontSize: 11 }
-  return {
-    tooltip: { trigger: 'axis' },
-    legend: { data: trendLegend.value, top: 0, left: 'center', textStyle: { color: ct.value.text } },
-    grid: { left: 54, right: 56, top: 46, bottom: 28 },
-    xAxis: {
-      type: 'category',
-      data: labels,
-      // 曲线要从左边缘起笔，不能像柱状图那样两侧留白
-      boundaryGap: false,
-      axisLine: { lineStyle: { color: ct.value.border } },
-      axisTick: { show: false },
-      axisLabel: { color: ct.value.secondary, fontSize: 11 }
-    },
-    yAxis: [
-      {
-        type: 'value',
-        // 筛选把币种钉死时把符号写进轴名：这时左轴上的数只可能是那一种钱
-        name: scopeCurrency.value ? '金额（' + symbolOf(scopeCurrency.value) + '）' : '金额',
-        nameTextStyle: axisName,
-        splitLine: { lineStyle: { color: ct.value.split, type: 'dashed' } },
-        axisLine: { show: false },
-        axisLabel: { color: ct.value.secondary, fontSize: 11 }
-      },
-      {
-        type: 'value',
-        name: '请求',
-        nameTextStyle: axisName,
-        splitLine: { show: false },
-        axisLine: { show: false },
-        axisLabel: { color: ct.value.secondary, fontSize: 11 }
-      }
-    ],
-    series: [
-      // 每个币种单独一条线，名称里带符号。刻意**不**给第二个币种开第二根 Y 轴：
-      // 两根轴会让「谁更高」变成由画法决定，而不是由数据决定；
-      // 同一条轴上至少各自的趋势读得对。
-      ...trendCurrencies.value.map((c, i) =>
-        lineSeries(
-          '消费 ' + symbolOf(c),
-          TREND_COLORS[i % TREND_COLORS.length],
-          series.value.map((p) => Number(p.costs?.[c] ?? 0))
-        )
-      ),
-      { ...lineSeries('请求数', REQ, series.value.map((p) => p.requests)), yAxisIndex: 1 }
-    ]
-  }
-})
-
-// ---- 消耗分布：输入未命中 / 缓存命中 / 输出 ----
-// 词元构成的配色：用主色的深浅阶。
-//
-// 不复用 PALETTE —— 模型图的颜色表示「身份」（这是哪个模型），
-// 这里的颜色表示「构成」（同一批词元分成哪几部分），两套语义共用调色板，
-// 会让同一屏上出现「同一个颜色指两件事」：改之前 #c87864 既是
-// 「输入（未命中）」又是「deepseek-v4-flash」。
-// 深浅阶还顺带表达了输入 -> 缓存 -> 输出的先后关系。
-//
-// 颜色随类别一起定义，**不能按数组下标取色**：
-// 下面会滤掉为 0 的类别，按下标取色的话滤掉一个后面就全部错位
-// （模型饼图正是踩了这个坑：gpt-5.6-sol 在两图里显示成两种颜色）。
-//
-// 名称、颜色、取值三样写在同一项里，是为了让它们不可能对不上：
-// 早先的写法把颜色放在一张按名称索引的表里，靠字符串在另一处再匹配一次，
-// 改了一处的名字而忘了另一处就会静默退回默认色，不会有任何报错。
-//
-// 色值来自 ct（CSS 变量）：原来写死的 #e0a090 / #f2d3c9 对白卡片分别只有
-// 2.19:1 与 1.41:1，几乎看不见；而且与 LogsView 里同一组概念
-// （.tk-in/.tk-out/.tk-cache）用的 --token-* 是两套色 —— 同一件事两种颜色。
-// 现在两边都从 --text-terracotta / --text-green / --text-purple 取，暗色自动换档。
-const TOKEN_PARTS = computed<
-  { name: string; color: string; pick: (s: Summary | null) => number }[]
->(() => [
-  { name: '输入（未命中）', color: ct.value.tokenInput, pick: (s) => s?.prompt_tokens ?? 0 },
-  { name: '缓存命中', color: ct.value.tokenCache, pick: (s) => s?.cached_tokens ?? 0 },
-  { name: '输出', color: ct.value.tokenOutput, pick: (s) => s?.completion_tokens ?? 0 }
-])
-
-// 实时推送的数值：金额与成功率不是整数，滚动组件用 format 预设走不同的格式化。
-// 用 computed 而不是直接传字符串：滚动需要的是**数字**，
-// 传 "12.3%" 过去它没法补间
-// 金额：主币种给大数字，其余币种并排写在提示里。
-// 之所以不做「合计」：SUM 只在同一币种内成立，把人民币和美元加起来会得到一个
-// 既不是人民币也不是美元的数，而且账面上看不出任何异常。
 const costCurrencies = computed(() => currencyKeys(summary.value?.costs))
 // 筛选范围把币种钉死时就用它，否则按原来的规则（CNY 优先，其余进提示）。
 //
@@ -432,243 +358,6 @@ const costHint = computed(() => {
   return '另有 ' + text
 })
 const rateValue = computed(() => (summary.value ? summary.value.success_rate * 100 : null))
-
-const compositionOption = computed(() => {
-  const s = summary.value
-  // 颜色随类别带过来，不靠名字再查一遍 —— 查表那一步在名字改字时会静默退回默认色
-  const data = TOKEN_PARTS.value.map((p) => ({ name: p.name, value: p.pick(s), color: p.color }))
-    .filter((x) => x.value > 0)
-    .map((x) => ({ name: x.name, value: x.value, itemStyle: { color: x.color } }))
-  return {
-    tooltip: { trigger: 'item', valueFormatter: (v: number) => n(v) + ' 词元' },
-    legend: { bottom: 0, icon: 'circle', textStyle: { fontSize: 12, color: ct.value.text } },
-    series: [
-      {
-        type: 'pie',
-        radius: ['48%', '70%'],
-        center: ['50%', '44%'],
-        avoidLabelOverlap: true,
-        label: { formatter: '{d}%', fontSize: 12 },
-        data
-      }
-    ]
-  }
-})
-
-// ---- 模型调用分析：横向柱状 ----
-// 模型配色：按 byModel 的原始顺序统一分配，条形图与饼图共用同一份。
-//
-// 两张图必须共用，否则同一个模型会显示成两种颜色：
-// 饼图会先滤掉零消耗的模型，如果它自己按色板下标取色，
-// 只要滤掉一个，它后面所有模型的颜色就整体错位了。
-const modelColors = computed(() => {
-  const m = new Map<string, string>()
-  byModel.value.forEach((x, i) => m.set(x.name, paletteColor(i)))
-  return m
-})
-
-// ---- 模型调用分析：横向条形，按请求数降序 ----
-// 两处针对性优化：
-//  1. 标签宽度原先交给 containLabel 让 echarts 自己算，窄窗口下算不下时它会
-//     把文字直接切在字母中间（截图里出现过 no-such-model- / slow-concurrency-t）。
-//     改为固定宽度 + truncate，宁可显示省略号也不要半个字母；
-//     112px 足够放下最长的模型名（实测 slow-concurrency-test 在 11px 下 114px，
-//     差 2px 时出省略号，比硬切可读）。
-//  2. 数据是极端长尾（179 对 2~18），只显示计数的话除首项外都读不出量级，
-//     所以在数值后补一个占比。
-const modelBarOption = computed(() => {
-  const items = [...byModel.value].reverse()
-  const total = items.reduce((a, b) => a + b.requests, 0)
-  return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    grid: { left: 142, right: 78, top: 8, bottom: 8 },
-    xAxis: {
-      type: 'value',
-      splitLine: { lineStyle: { color: ct.value.split, type: 'dashed' } },
-      axisLine: { show: false },
-      axisTick: { show: false },
-      axisLabel: { color: ct.value.secondary, fontSize: 11 }
-    },
-    yAxis: {
-      type: 'category',
-      data: items.map((x) => x.name),
-      axisLine: { show: false },
-      axisTick: { show: false },
-      axisLabel: { color: ct.value.text, fontSize: 11, width: 132, overflow: 'truncate' }
-    },
-    series: [
-      {
-        type: 'bar',
-        barMaxWidth: 16,
-        itemStyle: { borderRadius: [0, 4, 4, 0] },
-        label: {
-          show: true,
-          position: 'right',
-          color: ct.value.secondary,
-          fontSize: 11,
-          formatter: (p: any) =>
-            p.value + (total > 0 ? ' · ' + ((p.value / total) * 100).toFixed(1) + '%' : '')
-        },
-        // 每个模型一个颜色：既能一眼区分，也便于和右侧饼图里的同名模型对上号
-        data: items.map((x) => ({
-          value: x.requests,
-          itemStyle: { color: modelColors.value.get(x.name) || paletteColor(0) }
-        }))
-      }
-    ]
-  }
-})
-
-// ---- 模型消耗占比：按费用 ----
-// 占比必须限定在一种币种内：跨币种的「占比」分母是两种钱的和，没有意义。
-// 只有一种币种时切换器整个不显示，页面与以前完全一样。
-const pieCurrencies = computed(() => {
-  const seen: Record<string, string> = {}
-  for (const x of byModel.value) for (const c of Object.keys(x.costs ?? {})) seen[c] = ''
-  return currencyKeys(seen)
-})
-const pieCurrency = ref('')
-watch(
-  [pieCurrencies, scopeCurrency],
-  ([list, scoped]) => {
-    // 筛选范围钉死了币种就跟着它走：筛到美元渠道而饼图还在算人民币占比，
-    // 会得到一张全是 0 的图
-    if (scoped && list.includes(scoped)) {
-      pieCurrency.value = scoped
-      return
-    }
-    // 选中的币种消失了（换时间范围 / 换筛选）就回到第一个，不留一个空图
-    if (!list.includes(pieCurrency.value)) pieCurrency.value = list[0] ?? ''
-  },
-  { immediate: true }
-)
-const pieCur = computed(() => pieCurrency.value || pieCurrencies.value[0] || '')
-
-const modelPieOption = computed(() => {
-  const data = byModel.value
-    .map((x) => ({
-      name: x.name,
-      value: Number(x.costs?.[pieCur.value] ?? 0),
-      itemStyle: { color: modelColors.value.get(x.name) || paletteColor(0) }
-    }))
-    .filter((x) => x.value > 0)
-  return {
-    color: ct.value.palette,
-    tooltip: { trigger: 'item', valueFormatter: (v: number) => moneyText(v, pieCur.value) },
-    legend: { type: 'scroll', bottom: 0, icon: 'circle', textStyle: { fontSize: 12, color: ct.value.text } },
-    series: [
-      {
-        type: 'pie',
-        radius: '66%',
-        center: ['50%', '44%'],
-        minShowLabelAngle: 1,
-        label: { formatter: '{b} {d}%', fontSize: 11, color: ct.value.text },
-        labelLine: { length: 8, length2: 8 },
-        data: data.length ? data : [{ name: '暂无数据', value: 0 }]
-      }
-    ]
-  }
-})
-
-// ---- 热力图：近 30 天 x 24 小时 ----
-// 热力图：24 小时 × 近 14 天，一格一个 div。
-//
-// 参考站就是这么做的（docs/layout-dashboard.json 里的 heatmap-body /
-// heatmap-cells / heatmap-cell 实测项，display:grid、格子 15x13、圆角 3.2px）。
-// 我们原来用 echarts 画 30 天 × 24 小时，有两个问题：
-//   1. 面板只有 272px 高，30 行摊下来每行 7px，格子被压成又扁又长的条
-//   2. 类目轴每隔 4 天才标一个日期，**最上面那行（今天）恰好轮不到标签**，
-//      于是最上方的色带被读成落在前一天 —— 看起来就像坐标轴弄反了
-// 改成网格后每行都能标出来，格子的宽高比也和参考站一致。
-const HEAT_DAYS = 7
-
-// 从最早到最晚排列：参考站的行标签自上而下是旧 → 新，也就是今天在最下面
-const heatDays = computed(() => {
-  const out: { key: string; label: string }[] = []
-  for (let i = HEAT_DAYS - 1; i >= 0; i--) {
-    const d = new Date()
-    d.setDate(d.getDate() - i)
-    const k = dayKey(d)
-    out.push({ key: k, label: k.slice(5) })
-  }
-  return out
-})
-
-const heatMax = computed(() => heat.value.reduce((a, b) => Math.max(a, b.requests), 0))
-
-// 按请求数分 5 档：0 档是中性底色，其余逐级加深主色（与参考站的 level-0..4 一致）
-function heatLevel(n: number, max: number) {
-  if (!n || n <= 0) return 0
-  if (max <= 1) return 4
-  const r = n / max
-  if (r <= 0.25) return 1
-  if (r <= 0.5) return 2
-  if (r <= 0.75) return 3
-  return 4
-}
-
-const heatGrid = computed(() => {
-  const byKey = new Map<string, HeatItem>()
-  for (const it of heat.value) byKey.set(it.day + '#' + it.hour, it)
-  const max = heatMax.value
-  return heatDays.value.map((d) => ({
-    key: d.key,
-    label: d.label,
-    cells: Array.from({ length: 24 }, (_, h) => {
-      const it = byKey.get(d.key + '#' + h)
-      const req = it?.requests ?? 0
-      return { hour: h, requests: req, level: heatLevel(req, max) }
-    })
-  }))
-})
-
-// 悬浮提示：移到格子上时显示那一小时的明细（时间 / 请求数 / 消费 / 词元），
-// 与参考站一致。用「整块网格共用一个提示框 + 事件委托」，而不是给 168 个格子
-// 各挂一个气泡 —— 格子自带 data-key，提示框按被指格子的位置定位。
-const heatTip = ref({
-  show: false, x: 0, y: 0, day: '', hour: 0, requests: 0, costs: {} as Record<string, string>, tokens: 0
-})
-// 一格里可能有两种币种的账（同一小时里既有人民币渠道又有美元渠道），
-// 提示框逐币种列出来，不合成一个数
-const heatTipCosts = computed(() => costsText(heatTip.value.costs))
-
-const heatLookup = computed(() => {
-  const m = new Map<string, HeatItem>()
-  for (const it of heat.value) m.set(it.day + '#' + it.hour, it)
-  return m
-})
-
-function onHeatOver(e: MouseEvent) {
-  const el = (e.target as HTMLElement)?.closest('.heatmap-cell') as HTMLElement | null
-  const host = el?.closest('.heatmap') as HTMLElement | null
-  if (!el || !host) return
-  const key = el.dataset.key
-  if (!key) return
-  const [day, hour] = key.split('#')
-  const it = heatLookup.value.get(key)
-  const cr = el.getBoundingClientRect()
-  const hr = host.getBoundingClientRect()
-  heatTip.value = {
-    show: true,
-    x: cr.left - hr.left + cr.width / 2,
-    y: cr.top - hr.top,
-    day,
-    hour: Number(hour),
-    requests: it?.requests ?? 0,
-    costs: it?.costs ?? {},
-    tokens: it?.tokens ?? 0
-  }
-}
-
-function hideHeatTip() {
-  heatTip.value.show = false
-}
-
-const heatTotal = computed(() => heat.value.reduce((a, b) => a + b.requests, 0))
-
-// 时间范围改由 a-radio-group 的 v-model 直接更新，
-// 它的 change 只在取值真的变化时触发，所以这里不需要再判一次重
-
 
 // 实时数值：服务端每两秒比一次今日汇总，变了才推。
 //
@@ -706,7 +395,15 @@ onLive('stats', (data: Record<string, unknown>) => {
   // 首屏还没加载完时忽略推送：那一份由 load() 负责，
   // 提前合并会得到一个缺字段的 summary
   if (!summary.value) return
-  if (range.value !== 'today' || groupFilter.value !== ALL || channelFilter.value !== ALL) {
+  // 推送来的那份是「今天 + 全站」，只有当前正好是这个视角才能直接合并。
+  // 模型筛选也算别的视角：不判它的话，筛着某个模型时收到的全站数字
+  // 会把卡片顶掉（比不刷新更糟 —— 它看起来像是刷新了）
+  if (
+    range.value !== 'today' ||
+    groupFilter.value !== ALL ||
+    channelFilter.value !== ALL ||
+    modelFilter.value !== ALL
+  ) {
     scheduleSilentReload()
     return
   }
@@ -716,7 +413,14 @@ onLive('stats', (data: Record<string, unknown>) => {
 // 顺序不能反：先把分组 / 渠道列表拿到、把存下来的筛选值校验过，再去取统计。
 // 反过来的话会先用旧值查一遍、再用校验后的值查一遍，
 // 中间那一帧的数字（以及可能的「筛选框显示 A、数字是全部」）都是错的。
+//
+// URL 里的额外条件要更早生效：applyStoredFilters 靠它判断「这次是带条件的链接」
+// （见那里的说明，顺序反了就判不出来）。
+//
+// 列表本身由 RequestLogPanel 在挂载时自己取：两个数据源各取各的，
+// 一个慢或一个失败都不会拖住另一个。
 onMounted(async () => {
+  applyUrlFilters()
   await loadFilters()
   await load()
 })
@@ -724,7 +428,9 @@ onMounted(async () => {
 
 <template>
   <div class="dashboard">
-    <!-- 工具栏：时间范围 + 分组 / 渠道筛选 + 刷新（对齐参考站 dashboard-toolbar） -->
+    <!-- 工具栏：整页唯一的筛选入口 —— 时间范围 + 分组 / 渠道 / 模型 + 刷新。
+         上面的卡片与下面的日志列表都按这四个条件取数（合并前是两页两套，
+         现在改一处，两边的口径必然一致）。 -->
     <PageToolbar label="时间范围">
       <!-- 用 a-radio-group 而不是手写 <button>：
            这里原来写的是 class="pill-btn"，但那个类在项目里从未定义过，
@@ -734,7 +440,7 @@ onMounted(async () => {
       <a-radio-group v-model:value="range" button-style="solid" @change="onRangeChange">
         <a-radio-button v-for="r in ranges" :key="r.key" :value="r.key">{{ r.label }}</a-radio-button>
       </a-radio-group>
-      <!-- 分组 / 渠道紧跟在时间范围右边：它们回答的是同一类问题
+      <!-- 分组 / 渠道 / 模型紧跟在时间范围右边：它们回答的是同一类问题
            （「下面这些数字算的是哪一部分」），放在一起才读得成一句话 -->
       <a-select
         v-model:value="groupFilter"
@@ -743,7 +449,7 @@ onMounted(async () => {
         @change="onGroupChange"
       />
       <!-- 240px = 最长的一条「图标 + 渠道名 · 分组名」量出来的，
-           与请求日志页同一个宽度；给窄了会把分组名截掉 -->
+           与请求日志列表同一个宽度；给窄了会把分组名截掉 -->
       <a-select
         v-model:value="channelFilter"
         :options="channelOptions"
@@ -755,8 +461,22 @@ onMounted(async () => {
         <template #option="opt"><ChannelOption :option="opt" /></template>
         <template #optionLabel="opt"><ChannelOption :option="opt" /></template>
       </a-select>
+      <!-- 模型候选按渠道白名单收窄（见 visibleModels） -->
+      <a-select
+        v-model:value="modelFilter"
+        :options="modelOptions"
+        style="width: 180px"
+        @change="onModelChange"
+      />
+      <!-- 排障深链带来的两个临时条件：只从 URL 或日志详情里进来，平时不占地方 -->
+      <a-tag v-if="traceId" closable :title="traceId" @close="clearExtra('trace')">
+        链路 {{ traceId.slice(0, 8) }}…
+      </a-tag>
+      <a-tag v-if="statusClass" closable @close="clearExtra('status')">
+        {{ statusClass === 'error' ? '仅失败' : '仅成功' }}
+      </a-tag>
       <template #right>
-        <a-button :loading="loading" @click="load()"><ReloadOutlined /> 刷新</a-button>
+        <a-button :loading="loading" @click="reloadAll()"><ReloadOutlined /> 刷新</a-button>
       </template>
     </PageToolbar>
 
@@ -768,287 +488,96 @@ onMounted(async () => {
       hint="看板数据来自后端统计接口，请确认后端服务是否正常，然后重试。"
       @retry="load()"
     >
-    <!-- 概览四卡 -->
-    <section class="overview-row">
-      <div class="summary-grid">
-        <StatCard label="请求数量" :value="n(summary?.requests)" tone="purple" :hint="'失败 ' + n(summary?.errors) + ' 次'">
-          <template #value>
-            <AnimatedNumber :value="summary?.requests ?? null" />
-          </template>
-          <template #icon><ApiOutlined /></template>
-        </StatCard>
-        <!-- 大数字是主币种，其余币种写在提示里。不同币种不能相加，
-             所以这张卡永远不会出现「合计」 -->
-        <StatCard
-          label="消耗金额"
-          :value="moneyText(summary?.costs?.[costCur], costCur)"
-          tone="orange"
-          :hint="costHint"
-        >
-          <template #value>
-            <AnimatedNumber :value="costValue" format="money" :currency="costCur" />
-          </template>
-          <template #icon><DollarOutlined /></template>
-        </StatCard>
-        <StatCard label="词元数量" :value="n(summary?.total_tokens)" tone="blue" :hint="'命中率 ' + ((summary?.cache_hit_rate ?? 0) * 100).toFixed(1) + '%'">
-          <template #value>
-            <AnimatedNumber :value="summary?.total_tokens ?? null" />
-          </template>
-          <template #icon><ThunderboltOutlined /></template>
-        </StatCard>
-        <StatCard
-          label="成功率"
-          :value="summary ? (summary.success_rate * 100).toFixed(1) + '%' : '--'"
-          tone="green"
-          :hint="'平均首字耗时 ' + Math.round(summary?.avg_first_byte_ms ?? 0) + 'ms'"
-        >
-          <template #value>
-            <AnimatedNumber :value="rateValue" format="percent" />
-          </template>
-          <template #icon><CheckCircleOutlined /></template>
-        </StatCard>
-      </div>
-
-      <PanelCard title="请求热力图">
-        <template #extra>
-          <span class="panel-note">{{ n(heatTotal) }} 次请求</span>
-        </template>
-        <div class="heatmap" @mouseover="onHeatOver" @mouseleave="hideHeatTip">
-          <div class="heatmap-corner" />
-          <div class="heatmap-col-labels">
-            <!-- 每 3 小时标一个，与参考站一致 -->
-            <span v-for="h in 24" :key="h" class="heatmap-col-label">
-              {{ (h - 1) % 3 === 0 ? h - 1 : '' }}
-            </span>
-          </div>
-          <div class="heatmap-row-labels">
-            <span v-for="d in heatGrid" :key="d.key" class="heatmap-row-label">{{ d.label }}</span>
-          </div>
-          <div class="heatmap-cells">
-            <template v-for="d in heatGrid" :key="d.key">
-              <div
-                v-for="c in d.cells"
-                :key="d.key + '-' + c.hour"
-                class="heatmap-cell"
-                :class="'heatmap-cell-level-' + c.level"
-                :data-key="d.key + '#' + c.hour"
-              />
-            </template>
-          </div>
-          <div
-            v-if="heatTip.show"
-            class="heat-tip"
-            :style="{ left: heatTip.x + 'px', top: heatTip.y + 'px' }"
-          >
-            <div class="heat-tip-time">{{ heatTip.day }} {{ heatTip.hour }}:00</div>
-            <div>{{ heatTip.requests }} 次请求</div>
-            <div v-if="heatTipCosts">消费 {{ heatTipCosts }}</div>
-            <div>词元 {{ n(heatTip.tokens) }}</div>
-          </div>
-        </div>
-      </PanelCard>
-    </section>
-
-    <!-- 图表区 -->
-    <section class="chart-grid">
-      <PanelCard title="消耗趋势">
-        <EChart :option="trendOption" height="260px" />
-      </PanelCard>
-      <PanelCard title="消耗分布">
-        <EChart :option="compositionOption" height="260px" />
-      </PanelCard>
-      <PanelCard title="模型调用分析">
-        <EChart :option="modelBarOption" height="260px" />
-      </PanelCard>
-      <PanelCard title="模型消耗占比">
-        <template #extra>
-          <!-- 占比不能跨币种相加，所以这里限定一种币种；只有一种时不显示 -->
-          <a-radio-group v-if="pieCurrencies.length > 1" v-model:value="pieCurrency" size="small">
-            <a-radio-button v-for="c in pieCurrencies" :key="c" :value="c">{{ symbolOf(c) }} {{ c }}</a-radio-button>
-          </a-radio-group>
-          <span v-else class="panel-note">{{ pieCur ? symbolOf(pieCur) + ' ' + pieCur : '' }}</span>
-        </template>
-        <EChart :option="modelPieOption" height="260px" />
-      </PanelCard>
+    <!-- 概览四卡：一排四张（原来在左半边排成 2x2，右边的位置留给热力图；
+         热力图与图表区移除后，四张卡占满整行，信息密度与参考站一致） -->
+    <section class="summary-grid">
+      <StatCard label="请求数量" :value="n(summary?.requests)" tone="purple" :hint="'失败 ' + n(summary?.errors) + ' 次'">
+      <template #value>
+        <AnimatedNumber :value="summary?.requests ?? null" />
+      </template>
+      <template #icon><ApiOutlined /></template>
+    </StatCard>
+    <!-- 大数字是主币种，其余币种写在提示里。不同币种不能相加，
+         所以这张卡永远不会出现「合计」 -->
+    <StatCard
+      label="消耗金额"
+      :value="moneyText(summary?.costs?.[costCur], costCur)"
+      tone="orange"
+      :hint="costHint"
+    >
+      <template #value>
+        <AnimatedNumber :value="costValue" format="money" :currency="costCur" />
+      </template>
+      <template #icon><DollarOutlined /></template>
+    </StatCard>
+    <StatCard label="词元数量" :value="n(summary?.total_tokens)" tone="blue" :hint="'命中率 ' + ((summary?.cache_hit_rate ?? 0) * 100).toFixed(1) + '%'">
+      <template #value>
+        <AnimatedNumber :value="summary?.total_tokens ?? null" />
+      </template>
+      <template #icon><ThunderboltOutlined /></template>
+    </StatCard>
+    <StatCard
+      label="成功率"
+      :value="summary ? (summary.success_rate * 100).toFixed(1) + '%' : '--'"
+      tone="green"
+      :hint="'平均首字耗时 ' + Math.round(summary?.avg_first_byte_ms ?? 0) + 'ms'"
+    >
+      <template #value>
+        <AnimatedNumber :value="rateValue" format="percent" />
+      </template>
+      <template #icon><CheckCircleOutlined /></template>
+    </StatCard>
     </section>
     </DataState>
+
+    <!-- 请求日志列表：与上面同一套筛选条件（props 单向传下去，改了由看板的
+         watch 触发重取）。它自带面板外壳、表格、分页与详情抽屉（标题栏与导出
+         按钮已去掉，见组件里的说明），失败时也有自己的错误态，
+         不会把卡片那一排一起换成报错。 -->
+    <RequestLogPanel
+      ref="logPanel"
+      :range="range"
+      :group-id="groupFilter"
+      :channel-id="channelFilter"
+      :model="modelFilter"
+      :trace-id="traceId"
+      :status-class="statusClass"
+      :groups="filterGroups"
+      :channels="filterChannels"
+      @update:trace-id="traceId = $event"
+      @update:status-class="statusClass = $event"
+    />
   </div>
 </template>
 
 <style scoped>
-/* 概览区与图表区均使用 grid，gap 恒为 8px（实测） */
-.overview-row {
-  display: grid;
-  /* 两列等宽，与参考站的 summary-grid 501 + heatmap-panel 501 一致。
-     原来是 1fr + 1.35fr，热力图那块被拉宽，格子跟着变形 */
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: var(--gap);
-  margin-bottom: var(--gap);
-}
-
-/* .panel 全局带 margin-bottom: 8px，作为网格项时会把面板高度吃掉 8px，
-   底边比左侧卡片区高出一截。这里清零，并让面板成为纵向 flex，
-   好让热力图网格撑满剩余高度而不是靠写死格子高度去凑。 */
-.overview-row > :deep(.panel) {
-  margin-bottom: 0;
-  display: flex;
-  flex-direction: column;
-}
-
+/* 概览四卡：一排四张，gap 恒为 8px（实测）。
+   原来这里是 overview-row（左边 summary-grid 2x2 + 右边热力图面板）——
+   热力图与图表区移除后不再需要外层两列，四张卡直接占满整行。
+   参考站的四张卡本身也是等宽的一排，它之所以排成 2x2，
+   是因为右半边让给了热力图 —— 那是「有热力图」时的布局。 */
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: var(--gap);
-}
-
-.chart-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--gap);
   margin-bottom: var(--gap);
-}
-
-.panel-note {
-  color: var(--color-text-secondary);
-  font-size: 13px;
-}
-
-/* 热力图：一格一个 div 的网格。
-   尺寸取自参考站的实测值（docs/layout-dashboard.json 的 heatmap-* 项）：
-   区域 gap 4px 8px、格子 gap 3.2px、圆角 3.2px、标签 11.2px。
-   格子的宽高比也照参考站（15:13），避免又被压成扁条。 */
-.heatmap {
-  --heat-gap: 3.2px;
-  /* 悬浮提示按相对本容器的坐标定位 */
-  position: relative;
-  display: grid;
-  /* 左上留白角 + 小时标签；下一行是日期标签 + 格子。
-     第二行用 1fr，由面板把剩余高度分给格子 —— 这样卡片文案变化、
-     面板高度跟着变时，格子会自动适配，不会错位。 */
-  grid-template-columns: 36px 1fr;
-  grid-template-rows: 18px 1fr;
-  gap: 4px 8px;
-  flex: 1;
-  min-height: 0;
-}
-
-/* 列宽用 1fr 让 24 个小时格铺满整行 —— 参考站就是这么做的
-   （它的 cells 区 439px 正好等于 24*15 + 23*3.2）。
-   原来写死 18px 再居中，网格浮在面板中间、右侧空一大片。 */
-.heatmap-col-labels,
-.heatmap-cells {
-  display: grid;
-  grid-template-columns: repeat(24, 1fr);
-  gap: var(--heat-gap);
-}
-
-.heatmap-row-labels {
-  display: grid;
-  grid-auto-rows: 1fr;
-  gap: var(--heat-gap);
-}
-
-.heatmap-col-label {
-  font-size: 11.2px;
-  line-height: 17.6px;
-  color: var(--color-text-secondary);
-}
-
-.heatmap-row-label {
-  display: flex;
-  align-items: center;
-  font-size: 11.2px;
-  color: var(--color-text-secondary);
-}
-
-.heatmap-cell {
-  /* 高度由所属网格行决定（1fr），不再写死，
-     这样面板变高变矮时格子和日期标签始终对齐 */
-  min-height: 10px;
-  border-radius: 3.2px;
-}
-
-/* 悬浮提示：深色气泡，位置由被指格子算出（左中对齐格子上沿） */
-.heat-tip {
-  position: absolute;
-  z-index: 20;
-  pointer-events: none;
-  transform: translate(-50%, -100%);
-  margin-top: -4px;
-  padding: 7px 11px;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.85);
-  color: #fff;
-  font-size: 13px;
-  line-height: 1.55;
-  white-space: nowrap;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
-}
-
-/* 底部小三角，指向被指的格子（与参考站一致） */
-.heat-tip::after {
-  content: '';
-  position: absolute;
-  left: 50%;
-  top: 100%;
-  transform: translateX(-50%);
-  border: 5px solid transparent;
-  border-top-color: rgba(0, 0, 0, 0.85);
-}
-
-.heat-tip-time {
-  font-weight: 600;
-}
-
-/* 五档配色：0 档中性底色，1~4 逐级加深主色（对应参考站的 level-0..4）。
-   0 档用 color-mix 把文字色压到 12% 透明度 —— 这在亮色下正好约等于
-   参考站实测的 rgba(48,48,48,0.1)，暗色下又自动跟着换成浅色，
-   比写死字面值或借用 --color-border（偏深）都合适。
-
-   1~4 档全部走 color-mix，不再写死 rgba(200,120,100,…)：
-   写死的问题有两个 ——
-   ① 那个字面值是浅色主题的 --color-primary，深色主题下主色已换成 #e8a48c，
-      于是热力图成了页面上唯一不跟随主题的色块（实测深色下最亮档对卡片
-      只有 3.17:1，与周边格格不入）；
-   ② 原来的 28/52/76/100% 四档**太密**，相邻档对比度实测只有
-      1.12 / 1.32 / 1.36 / 1.37 —— 都在「几乎看不出差别」的区间，
-      热力图最主要的用途（一眼看出哪几个时段忙）等于失效。
-
-   现在的档位是 30/55/78/100%，实测相邻档对比度：
-     浅色 1.40 / 1.53 / 1.56 / 1.60（最差 1.40）
-     深色 1.60 / 1.64 / 1.50 / 1.42（最差 1.40）
-   全幅（0 档到 4 档）浅色 4.76:1、深色 4.84:1，与原来写死时的
-   2.76 / 3.17 相比，忙闲差异终于是看得见的。
-
-   取色用 --text-primary-ink 而不是 --color-primary：热力图是大色块，
-   深色相在白底上才有足够动态范围（--color-primary 白底仅 3.32:1，
-   拉不出五档）。--text-primary-ink 两套主题下都是「同色相的可读深/亮版」，
-   正好满足需要。
-   与卡片的底色 --color-fg 混合，所以不需要为暗色主题再写一份。 */
-.heatmap-cell-level-0 {
-  background: color-mix(in srgb, var(--color-text) 12%, var(--color-fg));
-}
-.heatmap-cell-level-1 {
-  background: color-mix(in srgb, var(--text-primary-ink) 30%, var(--color-fg));
-}
-.heatmap-cell-level-2 {
-  background: color-mix(in srgb, var(--text-primary-ink) 55%, var(--color-fg));
-}
-.heatmap-cell-level-3 {
-  background: color-mix(in srgb, var(--text-primary-ink) 78%, var(--color-fg));
-}
-.heatmap-cell-level-4 {
-  background: var(--text-primary-ink);
 }
 
 /* DataState 的错误提示自带左右外边距（为列表页的面板布局设计），
    这里外层已经有内边距，去掉以免出现双重缩进 */
 .dashboard :deep(.ds-alert) { margin: 0 0 var(--gap); }
 
+/* 窄屏：卡片从四列退到两列，再退到一列。
+   退档是为了不把卡片压到读不出数字，而不是为了塞下更多卡。 */
 @media (max-width: 1100px) {
-  .overview-row,
-  .chart-grid {
-    grid-template-columns: 1fr;
+  .summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 700px) {
+  .summary-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

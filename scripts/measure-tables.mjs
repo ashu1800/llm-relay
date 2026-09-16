@@ -4,7 +4,7 @@ const pages = [
   ['渠道管理', '/console/channels'],
   ['分组管理', '/console/groups'],
   ['密钥信息', '/console/keys'],
-  ['请求日志', '/console/logs'],
+  ['请求日志（看板页）', '/console/dashboard'],
   ['模型定价', '/console/pricing']
 ]
 const ver = await (await fetch('http://127.0.0.1:9222/json/version')).json()

@@ -4,7 +4,6 @@ import { useRoute, useRouter } from 'vue-router'
 import { api } from '@/api/client'
 import {
   DashboardOutlined,
-  FileTextOutlined,
   KeyOutlined,
   ApiOutlined,
   ClusterOutlined,
@@ -39,10 +38,13 @@ onMounted(async () => {
 })
 
 // 侧边栏菜单：对齐参考站 console-menu-list 的项目与顺序，
-// 剔除其面向多用户的登录/工单/订单/兑换/礼品/邮件/公告模块
+// 剔除其面向多用户的登录/工单/订单/兑换/礼品/邮件/公告模块。
+//
+// 「请求日志」不在菜单里：它已经并进数据看板（列表就在四张概览卡下面），
+// 同一个页面在菜单里出现两次只会让人以为点错了。旧地址 /console/logs
+// 仍然可用（见 router/index.ts 的跳转）。
 const menus = [
   { key: '/console/dashboard', label: '数据看板', icon: DashboardOutlined },
-  { key: '/console/logs', label: '请求日志', icon: FileTextOutlined },
   { key: '/console/keys', label: '密钥信息', icon: KeyOutlined },
   { key: '/console/channels', label: '渠道管理', icon: ApiOutlined },
   { key: '/console/groups', label: '分组管理', icon: ClusterOutlined },

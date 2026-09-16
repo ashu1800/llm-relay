@@ -175,20 +175,26 @@ func localTZ() string {
 	return "UTC"
 }
 
-// statsFilter 是看板的筛选条件：按分组 / 按渠道，0 表示不筛选。
+// statsFilter 是看板的筛选条件：按分组 / 按渠道 / 按模型，0 或空串表示不筛选。
 //
-// 两个条件都落在 request_logs 自带的列上（channel_id / group_id 建表时就有索引），
+// 三个条件都落在 request_logs 自带的列上（channel_id / group_id 建表时就有索引），
 // 所以筛选只是加一个 WHERE：不需要改表，也**不去 join channels** —— join 会把
 // 「渠道后来换了分组」算到历史账上，而日志里的归属是当时那一刻的快照
 // （与 CostCurrency、PricingSnapshot 同一个道理）。
+//
+// Model 是后来加的：请求日志并入看板之后，那一页的「模型」下拉要同时作用于
+// 卡片与列表，否则同一个页面上会出现两套口径（选了模型，卡片纹丝不动）。
+// model_requested 上没有索引，但窗口最长 30 天、且通常还带着分组/渠道条件，
+// 先不建索引 —— 真慢了再补，而不是先加一个可能永远用不上的索引。
 type statsFilter struct {
 	GroupID   uint
 	ChannelID uint
+	Model     string
 }
 
-// parseStatsFilter 解析 group_id / channel_id。
+// parseStatsFilter 解析 group_id / channel_id / model。
 //
-// 不传 = 不筛选；传了就必须是正整数，判据与请求日志的筛选一致
+// 不传 = 不筛选；传了就必须是正整数（或非空模型名），判据与请求日志的筛选一致
 // （/logs 用的是同一套）。非法值**不能**静默当成「不筛选」：那会得到一份
 // 看起来很正常、其实是全站的数字，而界面上明明选着某个分组 ——
 // 「静默变全量」比直接报错难查得多。
@@ -208,6 +214,9 @@ func parseStatsFilter(c *gin.Context) (statsFilter, error) {
 		}
 		*p.dst = uint(v)
 	}
+	// 模型名不校验格式：它是上游模型标识，各家的写法不受本项目约束
+	// （/logs 的 model 筛选也是这么处理的）。空串＝不筛选。
+	f.Model = strings.TrimSpace(c.Query("model"))
 	return f, nil
 }
 
@@ -227,7 +236,7 @@ func statsFilterOf(c *gin.Context) (statsFilter, bool) {
 // group_id / channel_id 上的索引，退化成全表扫。
 func (f statsFilter) where() (string, []any) {
 	var sb strings.Builder
-	args := make([]any, 0, 2)
+	args := make([]any, 0, 3)
 	if f.GroupID > 0 {
 		sb.WriteString(" AND group_id = ?")
 		args = append(args, f.GroupID)
@@ -236,6 +245,10 @@ func (f statsFilter) where() (string, []any) {
 		sb.WriteString(" AND channel_id = ?")
 		args = append(args, f.ChannelID)
 	}
+	if f.Model != "" {
+		sb.WriteString(" AND model_requested = ?")
+		args = append(args, f.Model)
+	}
 	return sb.String(), args
 }
 
@@ -243,7 +256,7 @@ func (f statsFilter) where() (string, []any) {
 // 接口的约定是「不传即全量」，把生效值写进响应，「参数没生效」才不会被
 // 读成「界面上那个筛选框没用」。
 func (f statsFilter) json() gin.H {
-	return gin.H{"group_id": f.GroupID, "channel_id": f.ChannelID}
+	return gin.H{"group_id": f.GroupID, "channel_id": f.ChannelID, "model": f.Model}
 }
 
 type summaryRow struct {

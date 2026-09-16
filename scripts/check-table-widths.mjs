@@ -9,15 +9,26 @@
 // 被盖住 0px。也就是说这里报出来的「偏小」在当前版本下并没有复现出可见的
 // 压盖，"固定列会压住最后一列" 那句是照搬旧版的印象，未经复现。
 // 这条检查保留的意义是「声明与实际一致」，而不是「避免可见的压盖」。
+//
+// 扫描范围：views/ 与 components/（2026-09-16 扩）。
+// 请求日志的表格随页面合并搬进了 components/RequestLogPanel.vue，
+// 只扫 views/ 的话它会**静默**从检查里消失 ——「没报错」会被读成「没问题」，
+// 而这正是这张表最需要盯着的时候（表格所在容器的宽度也一起变了）。
 import fs from 'node:fs'
 import path from 'node:path'
 
-const SRC = 'frontend/src/views'
-const files = fs.readdirSync(SRC).filter((x) => x.endsWith('.vue'))
+const DIRS = ['frontend/src/views', 'frontend/src/components']
+const files = DIRS.flatMap((d) =>
+  fs
+    .readdirSync(d)
+    .filter((x) => x.endsWith('.vue'))
+    .map((x) => path.join(d, x))
+)
 console.log('扫描 ' + files.length + ' 个文件')
 
-for (const f of files) {
-  const text = fs.readFileSync(path.join(SRC, f), 'utf8')
+for (const file of files) {
+  const text = fs.readFileSync(file, 'utf8')
+  const f = path.basename(file)
   let idx = 0
   let n = 0
   while ((idx = text.indexOf('<a-table', idx)) >= 0) {
