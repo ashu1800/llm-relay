@@ -210,6 +210,40 @@ console.log('=== 新日志扫光契约 ===')
 }
 
 console.log('')
+console.log('=== 多排数值的列左缘对齐契约 ===')
+{
+  // 「词元」「任务耗时」两格是块级 grid + justify-content: center：居中的是轨道，
+  // 轨道宽度一旦写成 auto，就会跟着数值长短伸缩，整块宽度逐行不同 —— 绿色竖条与
+  // 图标于是每行落在不同的 x 上（站主原话「强迫症受不了」）。
+  // 改回 auto 不会报错、不会崩，只会让那一列看着毛糙，所以静态盯住。
+  const panel = readFileSync(join(SRC, 'components/RequestLogPanel.vue'), 'utf8')
+  const block = (sel) => {
+    const i = panel.indexOf(sel)
+    return i < 0 ? '' : panel.slice(i, panel.indexOf('}', i))
+  }
+  const dur = block('.dur {')
+  const tk = block('.token-cell {')
+  check('任务耗时那格是块级 grid + 居中', /display:\s*grid/.test(dur) && /justify-content:\s*center/.test(dur))
+  check(
+    '任务耗时的轨道宽度是定值（不是 auto）',
+    /grid-template-columns:\s*4px\s+minmax\(\s*\d+px\s*,\s*auto\s*\)/.test(dur),
+    'auto 轨道会跟着数值长短伸缩，绿竖条每行落在不同 x 上',
+  )
+  check('词元那格是块级 grid + 居中', /display:\s*grid/.test(tk) && /justify-content:\s*center/.test(tk))
+  check(
+    '词元的轨道宽度是定值（不是 auto）',
+    /grid-template-columns:\s*minmax\(\s*\d+px\s*,\s*auto\s*\)/.test(tk),
+    'auto 轨道会跟着数值长短伸缩，内容块左缘每行落在不同 x 上',
+  )
+  // 定值必须装得进「列最窄时」的可用宽度：窗口出现横向滚动时列回到声明宽度，
+  // 任务耗时 120-16=104px、词元 150-16=134px。词元第一版取 136px 就在这里溢出了。
+  const durPx = Number((dur.match(/minmax\(\s*(\d+)px/) || [])[1])
+  const tkPx = Number((tk.match(/minmax\(\s*(\d+)px/) || [])[1])
+  check('任务耗时定宽装得进最窄列（4+6+定值 ≤ 104）', durPx > 0 && 4 + 6 + durPx <= 104, `定值 ${durPx}px → 整块 ${4 + 6 + durPx}px，上限 104px`)
+  check('词元定宽装得进最窄列（定值 ≤ 134）', tkPx > 0 && tkPx <= 134, `定值 ${tkPx}px，上限 134px`)
+}
+
+console.log('')
 if (failed > 0) {
   console.log(`${failed} 项未通过`)
   process.exit(1)
