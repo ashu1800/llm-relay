@@ -493,7 +493,6 @@ onMounted(async () => {
         {{ statusClass === 'error' ? '仅失败' : '仅成功' }}
       </a-tag>
       <template #right>
-        <span class="toolbar-scope">筛选只作用于上方卡片</span>
         <a-button :loading="loading" @click="reloadAll()"><ReloadOutlined /> 刷新</a-button>
       </template>
     </PageToolbar>
@@ -690,15 +689,6 @@ onMounted(async () => {
 .num-fmt-leave-to {
   opacity: 0;
   transform: translateY(-4px);
-}
-
-/* 工具栏右侧的作用范围提示。用次要文字色（不是警告色）：它是一个说明，
-   不是一个需要处理的异常；放右边紧贴「刷新」，读起来是工具栏的一句脚注。 */
-.toolbar-scope {
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  margin-right: 4px;
-  white-space: nowrap;
 }
 
 /* DataState 的错误提示自带左右外边距（为列表页的面板布局设计），
