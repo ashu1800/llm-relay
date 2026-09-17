@@ -30,6 +30,7 @@ import GroupTag from '@/components/GroupTag.vue'
 import ChannelIcon from '@/components/ChannelIcon.vue'
 import { onLive } from '@/composables/useLive'
 import { symbolOf } from '@/utils/money'
+import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
 import type { Channel, ChannelGroup, Paged, RequestLog } from '@/api/types'
 
 const props = defineProps<{
@@ -203,7 +204,12 @@ function rowClassName(record: RequestLog) {
 // 分页是本面板自己的状态：翻页不该惊动看板上方那些卡片
 // （改深链条件要回第一页，见 search）
 const page = ref(1)
-const pageSize = ref(50)
+// 每页条数默认 20，且记住用户的选择 —— 一页看 20 条还是 100 条是阅读
+// 习惯，每次刷新都回 20 是重复劳动。读的时候只认下面的合法选项，
+// 旧值/脏数据一律回落到默认（容错说明见 persistedChoice）。
+const PAGE_SIZE_KEY = 'log-page-size'
+const PAGE_SIZE_OPTIONS = ['20', '50', '100']
+const pageSize = ref(Number(readStoredChoice(PAGE_SIZE_KEY, PAGE_SIZE_OPTIONS, '20')))
 
 // 表体的高度上限，交给 antd 的 scroll.y。
 //
@@ -227,9 +233,10 @@ const pageSize = ref(50)
 // 万一弹性链断了，它退化成「按内容全长」—— 50 行 2062px，整页立刻出现大滚动条，
 // 一眼就能看出来。这比一个悄悄差 8px、要拿尺子量才发现的魔法数字好。
 //
-// 为什么仍然锁死而不是让它按内容长：一页 50 行、每行约 40px，放开就是 2000px，
-// 筛选栏与分页要滚很久才够得着；参考站也是这个做法（实测 .ant-table-fixed-header，
-// 表体 1074px 内部滚动、表头固定）。不锁的话整个文档都在滚，左侧菜单还会被一起带走。
+// 为什么仍然锁死而不是让它按内容长：一页几十行（20/50/100 可选）、每行约 40px，
+// 放开就是上千像素，筛选栏与分页要滚很久才够得着；参考站也是这个做法
+// （实测 .ant-table-fixed-header，表体内部滚动、表头固定）。
+// 不锁的话整个文档都在滚，左侧菜单还会被一起带走。
 const TABLE_BODY_Y = '100%'
 
 // 日志本身只存了渠道名与渠道 id，图标得回渠道表里取。
@@ -545,11 +552,13 @@ const pagination = computed(() => ({
   pageSize: pageSize.value,
   total: total.value,
   showSizeChanger: true,
-  pageSizeOptions: ['20', '50', '100'],
+  pageSizeOptions: PAGE_SIZE_OPTIONS,
   showTotal: (t: number) => '共 ' + t + ' 条',
   onChange: (p: number, ps: number) => {
     page.value = p
     pageSize.value = ps
+    // 选了新的每页条数就记住，下次打开页面直接用它
+    writeStoredChoice(PAGE_SIZE_KEY, String(ps))
     load()
   }
 }))
