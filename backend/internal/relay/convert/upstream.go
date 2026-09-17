@@ -1,6 +1,7 @@
 package convert
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -87,12 +88,19 @@ func UpstreamRequest(protocol, path string, body []byte, upstreamModel string) (
 // 解析失败时原样返回：这个函数只负责去除一个附加字段，
 // 不该因为请求体不是合法 JSON 就让整次转发失败（上游会给出更准确的错误）。
 func stripCacheControlFromJSON(body []byte) []byte {
+	// 先做子串粗筛再解析：这个字段只可能来自 Anthropic 入站，绝大多数请求
+	// 根本没有它 —— 但下面那个 containsKey 的短路在 Unmarshal **之后**，
+	// 全量解析的代价照样付了。数 MB 的长对话每个候选渠道都要再来一遍。
+	if !bytes.Contains(body, cacheControlNeedle) {
+		return body
+	}
 	var v any
 	if err := json.Unmarshal(body, &v); err != nil {
 		return body
 	}
 	if !containsKey(v, cacheControlKey) {
-		// 绝大多数请求都没有这个字段，直接返回原文避免无谓的重新序列化
+		// 子串命中但不是该键（比如正文里恰好写了 "cache_control"）：
+		// 直接返回原文避免无谓的重新序列化
 		return body
 	}
 	stripCacheControl(v)
@@ -102,6 +110,9 @@ func stripCacheControlFromJSON(body []byte) []byte {
 	}
 	return out
 }
+
+// cacheControlNeedle 是子串粗筛用的 needle（见 stripCacheControlFromJSON 注释）。
+var cacheControlNeedle = []byte(cacheControlKey)
 
 // containsKey 递归判断结构里是否存在某个键。
 func containsKey(v any, key string) bool {
@@ -128,6 +139,10 @@ func containsKey(v any, key string) bool {
 // requestIsStream 读请求体里的 stream 标记。
 // Gemini 的流式与否体现在方法名（:streamGenerateContent）上，路径必须与它一致。
 func requestIsStream(body []byte) bool {
+	// 子串粗筛：没有 "stream" 字样必然 false，免去一次全量 JSON 解析
+	if !bytes.Contains(body, streamNeedle) {
+		return false
+	}
 	var payload struct {
 		Stream bool `json:"stream"`
 	}
@@ -136,6 +151,8 @@ func requestIsStream(body []byte) bool {
 	}
 	return payload.Stream
 }
+
+var streamNeedle = []byte(`"stream"`)
 
 // UpstreamResponseBody 把非流式响应体转回 OpenAI Chat。
 // 解析失败时原样返回：宁可让客户端看到上游的原文，也不要吞掉一次成功的响应。

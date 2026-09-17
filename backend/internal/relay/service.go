@@ -255,22 +255,35 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 	// 不在循环里立即记，是为了等「多渠道共识」判定（见 recordFailures）：
 	// 单次失败看不出是渠道的问题还是请求的问题，试完才知道。
 	var failures []failRecord
-	defer func() { s.recordFailures(failures) }()
+	// 失败记账挪到后台 goroutine：这些 UPDATE（每条未豁免失败一次）原先
+	// 同步挡在 Relay 返回之前 —— 「撞 3 个渠道后第 4 个成功」的流式请求，
+	// 客户端首字节前要多等 3 次 DB 往返。记账不在关键路径上：UPDATE 是
+	// 单条原子语句（无读-改-写竞态）、熔断计数自带锁；服务关停时的竞态
+	// 最多让 goroutine 里的 UPDATE 报错进日志，无其它副作用。
+	defer func() { go s.recordFailures(failures) }()
 	maxAttempts := s.opts.MaxRetries + 1
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
 
+	// 候选查询放在重试循环**外**：重试轮内数据库的渠道数据不会变（失败
+	// 记账已异步落库，几毫秒的窗口也影响不了本次转发），每次重试重新做
+	// 三表 JOIN + 策略查询纯属浪费 —— 全渠道故障场景下一次请求要打
+	// 2(N+1) 次查询，恰好在系统最脆弱时给 DB 加压。轮内改为内存过滤
+	// （filterTried）：跳过已试过的与刚进入冷却的渠道。
+	// 附带修正轮转语义：RR 游标每个请求只前进一格 —— 原先每次重试都
+	// 推一格，带 3 次重试的请求让游标跳 4 格，轮转分布被故障转移流量扭曲。
+	allCands, err := s.router.Candidates(ctx, CandidateQuery{
+		PublicModel:   req.PublicModel,
+		GroupID:       req.GroupID,
+		AllowedGroups: req.AllowedGroups,
+	})
+	if err != nil {
+		return res, err
+	}
+
 	for attemptNo := 0; attemptNo < maxAttempts; attemptNo++ {
-		cands, err := s.router.Candidates(ctx, CandidateQuery{
-			PublicModel:   req.PublicModel,
-			GroupID:       req.GroupID,
-			AllowedGroups: req.AllowedGroups,
-			Exclude:       tried,
-		})
-		if err != nil {
-			return res, err
-		}
+		cands := s.router.filterTried(allCands, tried)
 		// 分组限额：把已达每分钟上限的分组这一轮剔掉。
 		//
 		// 必须在这里做，而不是在入口中间件里按密钥的分组白名单做：

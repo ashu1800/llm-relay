@@ -29,11 +29,9 @@ func (s *Server) listModels(c *gin.Context) {
 		Where("channel_models.enabled = true")
 
 	if key := apiKeyFromContext(c); key != nil {
-		groups, err := s.resolveGroupWhitelist(key.AllowedGroups)
-		if err != nil {
-			writeUpstreamError(c, http.StatusForbidden, err.Error(), "permission_error")
-			return
-		}
+		// 白名单解析结果由鉴权中间件随密钥一起查好（见 keyCache 注释），
+		// 这里不再逐条查库
+		groups := groupsFromContext(c)
 		if len(groups) > 0 {
 			q = q.Where("channels.group_id IN ?", groups)
 		}
@@ -157,13 +155,8 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 				"该密钥不允许调用模型 "+publicModel, "permission_error")
 			return
 		}
-		groups, err := s.resolveGroupWhitelist(key.AllowedGroups)
-		if err != nil {
-			// 白名单解析不出来就不放行：否则删掉那个分组就能绕过限制
-			p.writeError(c, http.StatusForbidden, err.Error(), "permission_error")
-			return
-		}
-		allowedGroups = groups
+		// 解析结果由鉴权中间件随密钥缓存（解析失败在那一层就已 403）
+		allowedGroups = groupsFromContext(c)
 	}
 
 	req := &relay.RelayRequest{

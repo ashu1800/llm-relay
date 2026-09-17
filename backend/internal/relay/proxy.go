@@ -141,26 +141,40 @@ func RewriteModel(raw []byte, upstreamModel string, injectStreamUsage bool) ([]b
 	if len(raw) == 0 {
 		return raw, nil
 	}
-	var payload map[string]any
-	if err := json.Unmarshal(raw, &payload); err != nil {
+	// 只做顶层浅解析（map[string]json.RawMessage）：要动的只有 model 与
+	// stream_options 两个顶层键，其余字段的原文以 RawMessage 透传。
+	// 与全量 map 往返相比有两个收益：一是不再递归解析整个报文（长对话
+	// 可达数 MB，故障转移时每个候选都要再来一遍）；二是数字不再经
+	// float64 还原 —— 超过 2^53 的整数（如超长 seed）在 map 往返里会失真。
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
 		return nil, fmt.Errorf("请求体不是合法 JSON: %w", err)
 	}
 	if upstreamModel != "" {
-		payload["model"] = upstreamModel
+		m, _ := json.Marshal(upstreamModel)
+		top["model"] = m
 	}
 	if injectStreamUsage {
-		if isStream, _ := payload["stream"].(bool); isStream {
-			opts, _ := payload["stream_options"].(map[string]any)
-			if opts == nil {
-				opts = map[string]any{}
+		var stream bool
+		if v, ok := top["stream"]; ok {
+			_ = json.Unmarshal(v, &stream)
+		}
+		if stream {
+			// 客户端已显式给过 include_usage 就不动它
+			opts := map[string]json.RawMessage{}
+			if existing, ok := top["stream_options"]; ok {
+				_ = json.Unmarshal(existing, &opts)
 			}
 			if _, exists := opts["include_usage"]; !exists {
-				opts["include_usage"] = true
+				opts["include_usage"] = json.RawMessage("true")
 			}
-			payload["stream_options"] = opts
+			merged, err := json.Marshal(opts)
+			if err == nil {
+				top["stream_options"] = merged
+			}
 		}
 	}
-	return json.Marshal(payload)
+	return json.Marshal(top)
 }
 
 // ExtractModel 读取请求体里的模型名。
@@ -203,6 +217,9 @@ type UsageTee struct {
 	onUsage  func(Usage)
 }
 
+// usageNeedle 是 handleLine 粗筛用的子串（见其注释）。
+var usageNeedle = []byte("usage")
+
 // Bytes 返回已透传的字节数，供缺少 usage 时兜底估算输出长度。
 func (t *UsageTee) Bytes() int { return t.total }
 
@@ -240,6 +257,13 @@ func (t *UsageTee) handleLine(line []byte) {
 		return
 	}
 	if payload[0] != '{' {
+		return
+	}
+	// 粗筛：三种来源的键（usage / usageMetadata / message.usage）都含 "usage"
+	// 子串。99% 的 delta 分片根本没有用量，为它们做全量 JSON 解析纯属浪费
+	// —— 每分片一次 map 分配，长流就是几百次。子串不命中直接跳过，
+	// 误报（正文里恰好写了 "usage"）只是多付一次原要付的解析，不会漏。
+	if !bytes.Contains(payload, usageNeedle) {
 		return
 	}
 	var event map[string]any

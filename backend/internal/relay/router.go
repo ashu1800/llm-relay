@@ -191,6 +191,30 @@ func (r *Router) strategyFor(ctx context.Context, groupID uint) string {
 	return g.Strategy
 }
 
+// filterTried 在已排序的候选里跳过本次已试过的与刚进入冷却的渠道，保持相对顺序。
+//
+// 重试轮内用（候选查询已挪到循环外，见 Relay）：tried 随每次失败增长；
+// 冷却状态可能被**其它并发请求**触发的熔断实时改变，所以每轮都要重新
+// 查一遍 InCooldown —— 这也是轮内过滤仍能尊重新冷却的原因。
+func (r *Router) filterTried(cands []Candidate, tried []uint) []Candidate {
+	skip := make(map[uint]bool, len(tried))
+	for _, id := range tried {
+		skip[id] = true
+	}
+	now := time.Now()
+	out := make([]Candidate, 0, len(cands))
+	for _, c := range cands {
+		if skip[c.Channel.ID] {
+			continue
+		}
+		if _, cooling := r.state.InCooldown(c.Channel.ID, now); cooling {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 // sortCandidates 依据策略重排候选，第一个即首选渠道。
 //
 // 进到这里时候选已按 weight 升序（见 Candidates 的 Order）—— 那就是优先级序。

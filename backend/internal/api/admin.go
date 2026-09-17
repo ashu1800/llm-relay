@@ -163,9 +163,33 @@ type channelPayload struct {
 // 刻意不塞进 normalizeWhitelist：那是个纯函数（有单测直接调），
 // 不该为了查库把单测也拖成数据库测试。
 func (s *Server) validateWhitelistProxies(items []model.ChannelModel) error {
+	// 去重后一次 IN 查询：逐条 COUNT 在白名单几十条时是几十次 DB 往返，
+	// 而这是每次渠道保存都要走的路径
+	ids := map[uint]bool{}
 	for _, it := range items {
-		if err := checkProxyExists(s, it.ProxyID); err != nil {
-			return fmt.Errorf("模型 %s 指定的代理有问题: %w", it.PublicName, err)
+		if it.ProxyID != 0 {
+			ids[it.ProxyID] = true
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	idList := make([]uint, 0, len(ids))
+	for id := range ids {
+		idList = append(idList, id)
+	}
+	var found []uint
+	if err := s.deps.Store.DB().Model(&model.Proxy{}).
+		Where("id IN ?", idList).Pluck("id", &found).Error; err != nil {
+		return err
+	}
+	exist := make(map[uint]bool, len(found))
+	for _, id := range found {
+		exist[id] = true
+	}
+	for _, it := range items {
+		if it.ProxyID != 0 && !exist[it.ProxyID] {
+			return fmt.Errorf("模型 %s 指定的代理 #%d 不存在", it.PublicName, it.ProxyID)
 		}
 	}
 	return nil
@@ -226,7 +250,11 @@ func replaceChannelModels(tx *gorm.DB, channelID uint, items []model.ChannelMode
 	for i := range items {
 		items[i].ID = 0
 		items[i].ChannelID = channelID
-		if err := tx.Create(&items[i]).Error; err != nil {
+	}
+	// 批量插入：整表替换常见几十条，逐条 Create 是几十次往返；
+	// Postgres 的参数上限对这里的量级（百级参数）毫无压力
+	if len(items) > 0 {
+		if err := tx.CreateInBatches(items, 100).Error; err != nil {
 			return err
 		}
 	}
@@ -1421,7 +1449,18 @@ func (s *Server) listLogs(c *gin.Context) {
 	}
 
 	var total int64
-	if err := q.Count(&total).Error; err != nil {
+	// 无时间下界时的 COUNT 兜底：request_logs 是唯一持续增长的表，日志按
+	// 保留期滚动清理（cleanup 任务），COUNT 语义上只该数保留期内的行 ——
+	// 不给下界的话每次日志页加载都是一次全表 COUNT。idx_log_created 的
+	// 首列就是 created_at，带下界后走索引。range（四档都带 start）与
+	// since 已提供下界；保留期配置为非正数（= 不清理）时保持原样。
+	countQ := q
+	if strings.TrimSpace(c.Query("range")) == "" && c.Query("since") == "" &&
+		s.deps.Config.Relay.LogRetentionDays > 0 {
+		countQ = countQ.Where("created_at >= ?",
+			time.Now().UTC().AddDate(0, 0, -s.deps.Config.Relay.LogRetentionDays))
+	}
+	if err := countQ.Count(&total).Error; err != nil {
 		writeInternalError(c, err)
 		return
 	}

@@ -56,6 +56,9 @@ func sameOriginOnly() gin.HandlerFunc {
 
 const ctxAPIKey = "llm_relay_api_key"
 
+// ctxGroups 承载密钥分组白名单的解析结果（中间件里随密钥一起查好）。
+const ctxGroups = "llm_relay_allowed_groups"
+
 // maxAdminBodyBytes 是管理接口请求体的上限。
 //
 // 原来整个项目只有转发链路设了上限（relay_handler 里的
@@ -120,7 +123,7 @@ func (s *Server) requireAPIKey() gin.HandlerFunc {
 		// 代价是「停用的密钥最多还能用 keyCacheTTL 这么久」，个人自用可接受；
 		// 新建/更新/删除密钥时会整表失效（见 invalidateKeyCache）。
 		hash := secure.HashKey(raw)
-		key, cached := s.keys.get(hash)
+		key, allowedGroups, cached := s.keys.get(hash)
 		if !cached {
 			var k model.APIKey
 			err := s.deps.Store.DB().
@@ -131,8 +134,18 @@ func (s *Server) requireAPIKey() gin.HandlerFunc {
 				c.Abort()
 				return
 			}
-			s.keys.put(hash, k)
-			key = k
+			// 分组白名单在这里一并解析并存进缓存：handler 侧每个请求都要
+			// 用它（转发路由 + /v1/models），带着白名单的密钥原先每个请求
+			// 对每个条目发一条 SELECT。解析失败（引用的分组不存在）当场
+			// 403，不缓存 —— 修好分组后立刻恢复正常。
+			groups, err := s.resolveGroupWhitelist(k.AllowedGroups)
+			if err != nil {
+				profile.writeError(c, http.StatusForbidden, err.Error(), "permission_error")
+				c.Abort()
+				return
+			}
+			s.keys.put(hash, k, groups)
+			key, allowedGroups = k, groups
 		}
 
 		// 密钥级限流：先看该密钥自己的额度，没配就用全局默认值。
@@ -154,6 +167,7 @@ func (s *Server) requireAPIKey() gin.HandlerFunc {
 		}
 
 		c.Set(ctxAPIKey, &key)
+		c.Set(ctxGroups, allowedGroups)
 		s.touchAPIKey(key.ID)
 		c.Next()
 	}
@@ -199,6 +213,13 @@ func apiKeyFromContext(c *gin.Context) *model.APIKey {
 	return nil
 }
 
+// groupsFromContext 取中间件解析好的分组白名单（随密钥缓存，见 keyCache）。
+func groupsFromContext(c *gin.Context) []uint {
+	v, _ := c.Get(ctxGroups)
+	g, _ := v.([]uint)
+	return g
+}
+
 // ============================ 密钥进程内缓存 ============================
 
 // keyCacheTTL 是密钥缓存的存活期。取「足够短，停用密钥后很快失效」与
@@ -213,22 +234,27 @@ type keyCache struct {
 
 type keyCacheEntry struct {
 	key model.APIKey
-	at  time.Time
+	// groups 是该密钥分组白名单解析出的分组 ID：转发与 /v1/models
+	// 两个热路径每个请求都要用它，逐条查库与「缓存密钥行」的动机
+	// 自相矛盾，所以随密钥一起缓存。失效点与密钥相同（TTL + 写操作
+	// 后的整表失效，分组的增删改都在调用之列）。
+	groups []uint
+	at     time.Time
 }
 
 func newKeyCache() *keyCache { return &keyCache{entries: map[string]keyCacheEntry{}} }
 
-func (c *keyCache) get(hash string) (model.APIKey, bool) {
+func (c *keyCache) get(hash string) (model.APIKey, []uint, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[hash]
 	if !ok || time.Since(e.at) > keyCacheTTL {
-		return model.APIKey{}, false
+		return model.APIKey{}, nil, false
 	}
-	return e.key, true
+	return e.key, e.groups, true
 }
 
-func (c *keyCache) put(hash string, k model.APIKey) {
+func (c *keyCache) put(hash string, k model.APIKey, groups []uint) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
@@ -238,7 +264,7 @@ func (c *keyCache) put(hash string, k model.APIKey) {
 			delete(c.entries, h)
 		}
 	}
-	c.entries[hash] = keyCacheEntry{key: k, at: now}
+	c.entries[hash] = keyCacheEntry{key: k, groups: groups, at: now}
 }
 
 // invalidate 整表失效。密钥的任何写操作后调用，宁可多查一次库也不要留旧配置。
