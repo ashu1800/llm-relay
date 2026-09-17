@@ -32,6 +32,7 @@ import ChannelIcon from '@/components/ChannelIcon.vue'
 import { onLive } from '@/composables/useLive'
 import { symbolOf } from '@/utils/money'
 import { writeClipboard } from '@/utils/clipboard'
+import { fmtTime } from '@/utils/fmtTime'
 import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
 import type { Channel, ChannelGroup, Paged, RequestLog } from '@/api/types'
 
@@ -446,26 +447,8 @@ function tokenTitle(row: RequestLog) {
   )
 }
 
-// 固定成 YYYY-MM-DD HH:mm:ss —— 与参考站日志列表一致。
-// 原来用 toLocaleString('zh-CN')，出来的是 2026/9/12 13:06:02：
-// 斜杠分隔、月日不补零，同一列里宽度还会随月份变化而抖动。
-// 手工补零而不是再用一次 toLocale*，是为了不受运行环境区域设置影响。
-function pad2(n: number) {
-  return n < 10 ? '0' + n : String(n)
-}
-function fmtTime(t: string) {
-  if (!t) return '—'
-  const d = new Date(t)
-  if (isNaN(d.getTime())) return t
-  return (
-    d.getFullYear() +
-    '-' + pad2(d.getMonth() + 1) +
-    '-' + pad2(d.getDate()) +
-    ' ' + pad2(d.getHours()) +
-    ':' + pad2(d.getMinutes()) +
-    ':' + pad2(d.getSeconds())
-  )
-}
+// 时间格式统一走 utils/fmtTime（这里原来是最完整的一份本地实现，
+// 收拢成单一出口后其余页面与日志列表的长相一致）
 
 // 计价时刻：快照里存的是 RFC3339（如 2026-09-14T09:58:08+08:00），原样摆出来是给机器看的
 // —— T 分隔、带秒级以上的偏移量，和同一行里的其他文案不是一种语气。
@@ -487,7 +470,8 @@ function fmtTimeAt(t: string) {
   // getTimezoneOffset 返回的是「UTC 减本地」，符号与 RFC3339 相反，这里取反后再比
   if (offMin === -new Date().getTimezoneOffset()) return wall
   const abs = Math.abs(offMin)
-  return wall + ' (UTC' + (offMin < 0 ? '-' : '+') + pad2(Math.floor(abs / 60)) + ':' + pad2(abs % 60) + ')'
+  const p = (n: number) => (n < 10 ? '0' + n : String(n))
+  return wall + ' (UTC' + (offMin < 0 ? '-' : '+') + p(Math.floor(abs / 60)) + ':' + p(abs % 60) + ')'
 }
 
 /* 耗时文本。秒**一律补齐两位小数**（8.70s / 14.00s，而不是 8.7s / 14.0s）：

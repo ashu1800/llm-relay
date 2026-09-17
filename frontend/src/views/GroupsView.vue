@@ -367,6 +367,26 @@ onMounted(load)
   cursor: var(--cursor-hand);
 }
 .swatch:hover { transform: scale(1.15); }
+/* 触屏把命中区撑到 44px：用透明伪元素外扩（视觉尺寸完全不变）——
+   直接加大 min-width 会让色块本身变大。28/16px 的原生命中区低于
+   WCAG 2.5.8 的 24×24，更够不着触摸标准；其它图标按钮在
+   MainLayout 的 coarse 规则里已有同款处理 */
+@media (pointer: coarse) {
+  .color-input,
+  .swatch {
+    position: relative;
+  }
+  .color-input::after {
+    content: '';
+    position: absolute;
+    inset: -10px;
+  }
+  .swatch::after {
+    content: '';
+    position: absolute;
+    inset: -14px;
+  }
+}
 
 /* 预览胶囊：与 components/GroupTag.vue 同一套变量与算法。
    这里不能直接用 GroupTag 组件 —— 它读的是「已保存的分组」，
@@ -390,6 +410,9 @@ onMounted(load)
 }
 .group-tag.is-custom { --gt-base: var(--gt-color); }
 :root[data-theme='dark'] .group-tag { --gt-l: 0.80; }
-:root[data-theme='dark'] .group-tag.is-custom { --gt-base: color-mix(in oklab, var(--gt-color) 62%, white); }
+/* 混白比例必须与 GroupTag 的 45% 一致（那边实测过十三个预设的最差对比度）：
+   这里曾经是 62%，同一自定义色在表单预览与列表里颜色不一样，
+   「预览就是最终效果」不成立 */
+:root[data-theme='dark'] .group-tag.is-custom { --gt-base: color-mix(in oklab, var(--gt-color) 45%, white); }
 </style>
 

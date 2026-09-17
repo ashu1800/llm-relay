@@ -23,6 +23,7 @@ import GroupTag from '@/components/GroupTag.vue'
 import ChannelIcon from '@/components/ChannelIcon.vue'
 import { PROTOCOLS, type Channel, type ChannelGroup, type ChannelBinding } from '@/api/types'
 import { symbolOf } from '@/utils/money'
+import { fmtTime } from '@/utils/fmtTime'
 import { emptyPrice, pickPrice } from '@/components/ModelPricingEditor.vue'
 import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
 
@@ -402,7 +403,9 @@ async function testChannel(row: ChannelRow) {
         content: h('div', [
           h('div', '模型：' + (res.model || '-') + (res.upstream_model && res.upstream_model !== res.model ? ' → ' + res.upstream_model : '')),
           h('div', res.reply ? '回复：' + res.reply : '上游返回 ' + (res.status_code || 200) + '，但没有正文（推理型模型可能把内容放在 reasoning 里）'),
-          disabledHint ? h('div', { style: 'margin-top:8px;color:#d46b08' }, disabledHint) : null
+          // 颜色走令牌（h() 渲染进 portal 的元素仍继承 :root 变量）：
+          // 写死 #d46b08 在白底上只有 3.55:1，不达 AA
+          disabledHint ? h('div', { style: 'margin-top:8px;color:var(--text-amber)' }, disabledHint) : null
         ])
       })
     } else {
@@ -439,23 +442,11 @@ function healthInfo(row: Channel): HealthInfo {
 }
 
 function fmtCheckedAt(v: string | null | undefined) {
-  if (!v) return ''
-  const d = new Date(v)
-  return isNaN(d.getTime()) ? '' : d.toLocaleString('zh-CN', { hour12: false })
+  // 悬停提示里的精确时刻，与全站统一口径（原来 toLocaleString 是斜杠分隔）
+  return v ? fmtTime(v) : ''
 }
 
-// 与 LogsView 的 fmtTime 同一口径：手工补零成 YYYY-MM-DD HH:mm:ss。
-// 不用 toLocaleString，免得同一份数据在别的区域设置下变成 09/14/2026。
-function fmtTime(v: string | null | undefined) {
-  if (!v) return '—'
-  const d = new Date(v)
-  if (isNaN(d.getTime())) return '—'
-  const p = (n: number) => (n < 10 ? '0' + n : String(n))
-  return (
-    d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
-    ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds())
-  )
-}
+// fmtTime 已收拢到 utils/fmtTime（这里曾是一份与日志页重复的本地实现）
 
 // 最近调用显示成「多久以前」而不是时刻：扫一眼列表要判断的是
 // 「这条渠道还在不在干活」，相对时间一眼就能比出哪条是活的、哪条是陈的，

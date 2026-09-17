@@ -232,13 +232,17 @@ function submit() {
         </div>
         <div v-for="(rule, i) in rules()" :key="i" class="rule-row">
           <div class="rule-days">
-            <span
+            <!-- 用原生 button 而不是 span+@click：没有 tabindex 的 span
+                 键盘永远聚焦不到（WCAG 2.1.1 A 级），键盘用户配不了时段规则 -->
+            <button
               v-for="(w, d) in WEEK"
               :key="d"
+              type="button"
               class="day-chip"
               :class="{ on: rule.days.includes(d) }"
+              :aria-pressed="rule.days.includes(d)"
               @click="toggleDay(rule, d)"
-              >{{ w }}</span
+              >{{ w }}</button
             >
           </div>
           <input v-model="rule.start" type="time" class="time-input" />
@@ -271,7 +275,9 @@ function submit() {
   width: 22px; height: 22px; line-height: 22px; text-align: center;
   border: 1px solid var(--color-border); border-radius: 4px;
   font-size: 12px; cursor: var(--cursor-hand); color: var(--color-text-secondary);
+  background: transparent; padding: 0;
 }
+.day-chip:focus-visible { outline: 2px solid var(--color-icon); outline-offset: 1px; }
 /* 选中态如实心按钮：用 --solid-primary-* 这一对，而不是
    `background: var(--color-primary); color: #fff`。
    后者是 #c87864 + 白字，只有 3.32:1，而「周一」这些字样是 12px 正文，

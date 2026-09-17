@@ -7,6 +7,7 @@ import {
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
+import { fmtTime } from '@/utils/fmtTime'
 
 const loading = ref(false)
 // 这一页加载的是「多项设置」而不是列表，没有 length 可数，
@@ -78,11 +79,6 @@ function fmtBool(v: any) {
   if (v === true) return '是'
   if (v === false) return '否'
   return v
-}
-
-function fmtTime(t: string | null | undefined) {
-  if (!t) return '—'
-  return new Date(t).toLocaleString('zh-CN', { hour12: false })
 }
 
 async function load() {
@@ -327,6 +323,14 @@ onMounted(load)
 .head-title { font-size: 16px; font-weight: 600; }
 .head-sub { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
 .count-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 12px; }
+/* 窄屏退档：7 列在 <900px 时每格只剩几十像素，四五个字的标签（「已定价模型」）
+   换行、卡高参差；对照看板四卡的两档退档 */
+@media (max-width: 900px) {
+  .count-grid { grid-template-columns: repeat(4, 1fr); }
+}
+@media (max-width: 600px) {
+  .count-grid { grid-template-columns: repeat(2, 1fr); }
+}
 .count-item { text-align: center; padding: 10px 4px; border-radius: 8px; background: var(--color-bg); }
 /* 数值是正文，用 ink 版；--color-primary 在 --color-bg 上只有 3.05:1 */
 .count-value { font-size: 20px; font-weight: 600; color: var(--text-primary-ink); }

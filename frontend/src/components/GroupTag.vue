@@ -78,7 +78,7 @@ const vars = computed(() => groupVars(style.value))
 }
 
 /* 自定义色在深底上同理：直接沿用原色的话，深蓝/深紫几乎看不见背景边界。
-   同样用 oklab 混白保持感知均匀：混白 55% 时十三个预设最差值 4.83:1。
+   同样用 oklab 混白保持感知均匀：混白 45% 时十三个预设最差值 4.83:1。
    注意方向与浅色主题相反 —— 浅色底要压暗，深色底要提亮。 */
 :root[data-theme='dark'] .group-tag.is-custom {
   --gt-base: color-mix(in oklab, var(--gt-color) 45%, white);

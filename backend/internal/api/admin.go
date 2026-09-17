@@ -37,6 +37,11 @@ func writeUpdateError(c *gin.Context, err error) {
 		writeUpstreamError(c, http.StatusNotFound, "记录不存在", "not_found_error")
 		return
 	}
+	// 唯一名冲突回 409（分组改名会撞 channel_groups 的唯一索引）
+	if isUniqueViolation(err) {
+		writeUpstreamError(c, http.StatusConflict, "名称已存在", "invalid_request_error")
+		return
+	}
 	writeInternalError(c, err)
 }
 
@@ -400,6 +405,12 @@ func (s *Server) createChannel(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
+	// 显式指定的分组同样预检：靠外键拒绝的话回的是 500，前端只能显示
+	// 「服务端处理失败」（与代理预检对称，都回 400 + 人话）
+	if err := checkGroupExists(s, p.GroupID); err != nil {
+		writeUpstreamError(c, http.StatusBadRequest, "分组有问题: "+err.Error(), "invalid_request_error")
+		return
+	}
 	// 白名单在这里就校验：等到写完渠道再报错，用户得重填一遍表单
 	var whitelist []model.ChannelModel
 	if p.Models != nil {
@@ -502,6 +513,13 @@ func (s *Server) updateChannel(c *gin.Context) {
 	// 换分组不在这里写：它要连带算出新分组末尾的序号，且必须与 group_id
 	// 在同一条 UPDATE 里落库（见下面事务里的说明），所以单独处理
 	groupChange := uint(p.GroupID)
+	// 换组预检目标分组存在：靠外键拒绝只会得到 500（与代理预检对称）
+	if groupChange != 0 {
+		if err := checkGroupExists(s, groupChange); err != nil {
+			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+			return
+		}
+	}
 	if p.ProxyID != nil {
 		if err := checkProxyExists(s, *p.ProxyID); err != nil {
 			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
@@ -915,12 +933,17 @@ func (s *Server) bindChannelModel(c *gin.Context) {
 		if err := db.Model(&binding).Updates(map[string]any{
 			"upstream_name": item.UpstreamName,
 			"enabled":       item.Enabled,
+			// proxy_id 也要写：0 表示跟随渠道，是合法值而非「没传」，
+			// 不补这行的话改绑定代理会被静默丢弃（价格不同：空载荷
+			// 等于 0，写它会清掉用户配好的价，所以那边刻意不动）
+			"proxy_id": item.ProxyID,
 		}).Error; err != nil {
 			writeInternalError(c, err)
 			return
 		}
 		binding.UpstreamName = item.UpstreamName
 		binding.Enabled = item.Enabled
+		binding.ProxyID = item.ProxyID
 		// 这里刻意不动价格：载荷里没传价格时是空字符串，按 applyPriceFields
 		// 的语义等于 0，会把用户配好的价格悄悄清掉。改价走整表提交那条路
 	}
@@ -1061,6 +1084,12 @@ func (s *Server) createGroup(c *gin.Context) {
 		return tx.Create(&gr).Error
 	})
 	if err != nil {
+		// 撞唯一名回 409 而不是 500：与代理侧同款处理，让前端能显示
+		//「名字已存在」而不是「服务端处理失败」
+		if isUniqueViolation(err) {
+			writeUpstreamError(c, http.StatusConflict, "分组名已存在", "invalid_request_error")
+			return
+		}
 		writeInternalError(c, err)
 		return
 	}
@@ -1575,11 +1604,20 @@ func (s *Server) logDetail(c *gin.Context) {
 		writeUpstreamError(c, http.StatusNotFound, "日志不存在", "not_found_error")
 		return
 	}
-	// 未留存时报文返回 null，前端据此区分「没有留存」与「留存了空内容」
+	// 未留存时报文返回 null，前端据此区分「没有留存」与「留存了空内容」。
+	// 查询失败不能也装成 null —— 那与「未留存」不可区分，排障时会被
+	// 带偏方向；只有「确实没有这一行」才算未留存。
 	var stored model.RequestPayload
 	var payload *model.RequestPayload
-	if err := s.deps.Store.DB().Where("log_id = ?", id).First(&stored).Error; err == nil {
+	err := s.deps.Store.DB().Where("log_id = ?", id).First(&stored).Error
+	switch {
+	case err == nil:
 		payload = &stored
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		// 未留存
+	default:
+		writeInternalError(c, err)
+		return
 	}
 	c.JSON(http.StatusOK, gin.H{"log": entry, "payload": payload})
 }
@@ -1600,8 +1638,23 @@ func orDefault(v, def string) string {
 // 用户可以不设、也可以删掉的（见 store.Seed），再返回 1 就可能落到一个
 // 不存在的分组上（外键拒绝，渠道建不出来），或者另一个不相干的分组上
 // （渠道静默进了错组）。取不到时由调用方决定怎么办，别在这里猜。
-func defaultGroupID(s *Server) (uint, bool) {
-	var g model.ChannelGroup
+// checkGroupExists 校验分组存在（与 checkProxyExists 同款：提前回 400，
+// 不把外键拒绝伪装成 500）。
+func checkGroupExists(s *Server, id uint) error {
+	if id == 0 {
+		return nil
+	}
+	var n int64
+	if err := s.deps.Store.DB().Model(&model.ChannelGroup{}).Where("id = ?", id).Count(&n).Error; err != nil {
+		return errors.New("校验分组失败: " + err.Error())
+	}
+	if n == 0 {
+		return errors.New("指定的分组不存在")
+	}
+	return nil
+}
+
+func defaultGroupID(s *Server) (uint, bool) {	var g model.ChannelGroup
 	if err := s.deps.Store.DB().Where("is_default = ?", true).First(&g).Error; err != nil {
 		return 0, false
 	}

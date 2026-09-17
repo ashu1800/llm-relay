@@ -211,7 +211,10 @@ func (f *Forwarder) Do(
 	// 协议转换路径更糟：正文解析失败会直接产出空回复。
 	//
 	// 不透传的代价只是「中继到客户端」这一段不压缩，而那一端通常就在本机。
-	for _, h := range []string{"Content-Type", "Accept", "User-Agent"} {
+	// Content-Type 与 User-Agent 从入站抄过来（客户端的自述对上游有意义）；
+	// Accept 刻意不透传 —— 下面会统一声明为「两种都能收」，抄过来的值
+	// 永远活不到发出去那一刻，留着只会误导人以为做了内容协商。
+	for _, h := range []string{"Content-Type", "User-Agent"} {
 		if v := inboundHeaders.Get(h); v != "" {
 			req.Header.Set(h, v)
 		}

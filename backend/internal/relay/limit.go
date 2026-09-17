@@ -133,6 +133,45 @@ func (l *RateLimiter) StartSweeper(ctx context.Context, interval time.Duration) 
 	}()
 }
 
+// Sweep 清理已过期的冷却条目。
+//
+// until 只在「该渠道再次被查询」时才被动清理，删除的渠道会留下永久条目；
+// 挂上周期回收（StartSweeper）后这些垃圾有了确定的出口。
+// latency / failStreak 刻意不清：两者没有时间戳，要判断陈旧就得给每条
+// 写入加时钟，而它们每渠道只有几十字节、渠道总量由人工配置决定，
+// 有界 —— 为了回收这点内存不值得把每次成功/失败的写入路径变重。
+func (s *ChannelState) Sweep(now time.Time) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, until := range s.until {
+		if now.After(until) {
+			delete(s.until, id)
+		}
+	}
+}
+
+// StartSweeper 周期性执行 Sweep，跟着传入 ctx 的生命周期走。
+func (s *ChannelState) StartSweeper(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 10 * time.Minute
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				s.Sweep(time.Now())
+			}
+		}
+	}()
+}
+
 // ============================ Retry-After ============================
 
 // ParseRetryAfter 解析 Retry-After 响应头。

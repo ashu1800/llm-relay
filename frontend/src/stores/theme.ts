@@ -29,6 +29,12 @@ export const useThemeStore = defineStore('theme', () => {
   function apply(next: ThemeMode) {
     document.documentElement.setAttribute('data-theme', next)
     isDark.value = next === 'dark'
+    // 浏览器外壳（地址栏/状态栏）跟着主题换色：不更新的话深色主题下
+    // 一圈米色非常突兀。meta 在 index.html 里带主色初值，这里只做跟随
+    const meta = document.querySelector('meta[name="theme-color"]')
+    if (meta) {
+      meta.setAttribute('content', next === 'dark' ? '#202020' : '#c87864')
+    }
   }
 
   function toggle() {

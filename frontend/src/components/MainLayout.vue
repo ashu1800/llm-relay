@@ -28,15 +28,6 @@ const themeStore = useThemeStore()
 // 这种事必须持续可见，所以放在界面上。
 const usingDefaultSecret = ref(false)
 
-onMounted(async () => {
-  try {
-    const info = await api.get<{ using_default_secret?: boolean }>('/system/info')
-    usingDefaultSecret.value = !!info.using_default_secret
-  } catch {
-    // 拿不到系统信息不影响正常使用，静默即可
-  }
-})
-
 // 侧边栏菜单：对齐参考站 console-menu-list 的项目与顺序，
 // 剔除其面向多用户的登录/工单/订单/兑换/礼品/邮件/公告模块。
 //
@@ -73,19 +64,23 @@ const onNarrowChange = (e: MediaQueryListEvent | MediaQueryList) => {
   collapsed.value = e.matches
 }
 
-onMounted(async () => {
+onMounted(() => {
   if (typeof window !== 'undefined' && window.matchMedia) {
     narrowMq = window.matchMedia(NARROW)
     // 首屏就按当前宽度定：窄屏进来时不该先闪一下展开态
     collapsed.value = narrowMq.matches
     narrowMq.addEventListener('change', onNarrowChange)
   }
-  try {
-    const info = await api.get<{ using_default_secret?: boolean }>('/system/info')
-    usingDefaultSecret.value = !!info.using_default_secret
-  } catch {
-    // 拿不到系统信息不影响正常使用，静默即可
-  }
+  // 系统信息与窄屏初始化合在同一个 onMounted：原来有两个，各自请求一次
+  // /system/info —— 每次进页面白打一个重复请求（窄屏适配改造时留下的）
+  api
+    .get<{ using_default_secret?: boolean }>('/system/info')
+    .then((info) => {
+      usingDefaultSecret.value = !!info.using_default_secret
+    })
+    .catch(() => {
+      // 拿不到系统信息不影响正常使用，静默即可
+    })
 })
 
 onUnmounted(() => {

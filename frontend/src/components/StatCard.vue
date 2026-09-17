@@ -67,13 +67,17 @@ const slots = useSlots()
    --tone-color 给图标用（大面积色块 + 图形，不适用文字的 4.5:1 要求），
    --tone-ink 给数值文字用 —— 它们必须是可读的正文色。
    两者分开是因为语义色本身在白底上普遍偏浅（#10b37d 只有 2.70:1），
-   而深色主题下又要往相反方向调，靠同一个变量做不到两边都达标。 */
-.tone-purple { --tone-color: var(--color-purple); --tone-bg: rgba(139, 92, 245, 0.15); --tone-ink: var(--text-purple); }
-.tone-orange { --tone-color: var(--color-orange); --tone-bg: rgba(245, 158, 11, 0.15); --tone-ink: var(--text-amber); }
-.tone-blue   { --tone-color: var(--color-blue);   --tone-bg: rgba(6, 182, 212, 0.15);  --tone-ink: var(--text-blue); }
-.tone-green  { --tone-color: var(--color-green);  --tone-bg: rgba(16, 179, 125, 0.15); --tone-ink: var(--text-green); }
-.tone-red    { --tone-color: var(--color-red);    --tone-bg: rgba(234, 67, 67, 0.15);  --tone-ink: var(--text-red); }
-.tone-gray   { --tone-color: var(--color-gray);   --tone-bg: rgba(107, 114, 128, 0.15); --tone-ink: var(--text-gray); }
+   而深色主题下又要往相反方向调，靠同一个变量做不到两边都达标。
+
+   --tone-bg 从语义色派生（而不是照抄浅色原值的 rgba 字面量）：
+   深色主题的 --color-* 已换成提亮版，照抄会让色调底不跟随，
+   看板格式切换按钮的 hover（也取 --tone-bg）在深色下反馈偏弱。 */
+.tone-purple { --tone-color: var(--color-purple); --tone-bg: color-mix(in oklab, var(--color-purple) 15%, transparent); --tone-ink: var(--text-purple); }
+.tone-orange { --tone-color: var(--color-orange); --tone-bg: color-mix(in oklab, var(--color-orange) 15%, transparent); --tone-ink: var(--text-amber); }
+.tone-blue   { --tone-color: var(--color-blue);   --tone-bg: color-mix(in oklab, var(--color-blue) 15%, transparent);   --tone-ink: var(--text-blue); }
+.tone-green  { --tone-color: var(--color-green);  --tone-bg: color-mix(in oklab, var(--color-green) 15%, transparent); --tone-ink: var(--text-green); }
+.tone-red    { --tone-color: var(--color-red);    --tone-bg: color-mix(in oklab, var(--color-red) 15%, transparent);    --tone-ink: var(--text-red); }
+.tone-gray   { --tone-color: var(--color-gray);   --tone-bg: color-mix(in oklab, var(--color-gray) 15%, transparent);   --tone-ink: var(--text-gray); }
 
 .summary-icon {
   width: 48px;

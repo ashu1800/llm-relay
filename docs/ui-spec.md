@@ -336,3 +336,29 @@ main-layout            flex, bg #f8f5ee, 全屏
       `full|compact`，默认 `full`）—— 与看板筛选同一机制，阅读习惯跟着人走；
       脏值回落 `full`，隐私模式下退化成「不记住」。
 
+
+14. 第二轮审查的低档细节打磨批次（2026-09-17，代码审查报告-第二轮.md）：
+    - 时间格式收拢为单一出口 `utils/fmtTime`（YYYY-MM-DD HH:mm:ss，空值 `—`）：
+      原来四份实现各写一套（日志页补零、密钥/设置页 toLocaleString 的斜杠长相、
+      代理页 YYYY/MM/DD），同一份数据在不同页面是不同长相；
+    - `ChannelIcon` 默认图标的 oklch 亮度档位改为全局令牌 `--ch-icon-bg-l/ink-l`
+      （色相仍由内联 `--ch-h` 随渠道名散列传入），暗色主题换暗底亮字 ——
+      内联写死 oklch(0.93…) 的样式 [data-theme='dark'] 永远覆盖不到；
+    - 全站弹窗/抽屉宽度统一 `min(NNNpx, 94vw)` 写法（九处），576-760px 视口
+      不再溢出（antd 的 Drawer 没有 max-width 保护）；
+    - `h()` 渲染进 portal 的内容也用颜色令牌（`var(--text-amber)` 等），
+      不再写死 #d46b08/#888 —— portal 元素仍继承 :root 变量；
+    - 定价弹窗的星期胶囊从 span+@click 改为原生 button + aria-pressed +
+      focus-visible 焦点环（WCAG 2.1.1 A 级：键盘用户此前配不了时段规则）；
+    - 工具栏允许换行（`flex-wrap` + row-gap）：看板工具栏声明宽合计近千像素，
+      窄屏不换行会溢出面板；
+    - `--tone-bg` 一律 `color-mix` 从语义色派生（不照抄浅色 rgba 字面值），
+      暗色主题的提亮版语义色得以传导到卡片色调底与格式切换按钮的 hover；
+    - `theme-color` meta 跟随主题切换（暗色 #202020），浏览器地址栏不再
+      在深色界面外围留一圈米色；
+    - 分组表单预览胶囊与 GroupTag 的暗色混白比例统一为 45%（原 62%，
+      同一自定义色在预览与列表里颜色不同，「预览即最终效果」不成立）；
+    - 代理页表格改 `size="small"` 与全站一致，上游错误两行截断 + title 悬停全文；
+    - 系统设置数据概览网格补 900px/600px 两档退列（7→4→2）；
+    - 取色控件与色板在 `pointer: coarse` 下用透明伪元素把命中区扩到 44px
+      （视觉尺寸不变 —— 直接加大尺寸会让色块本身变大）。

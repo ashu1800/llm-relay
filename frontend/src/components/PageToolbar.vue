@@ -15,8 +15,12 @@ defineProps<{ label?: string }>()
 <style scoped>
 .toolbar-panel {
   display: flex;
+  /* 允许换行：看板工具栏的内容（标签 + 4 档时间 + 三个下拉 + 条件标签 +
+     刷新）声明宽合计近千像素，窄屏不换行会溢出面板把内容区顶出横向滚动 */
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--gap);
+  row-gap: 6px;
   min-height: 42px;
 }
 

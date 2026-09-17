@@ -282,7 +282,10 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 		return res, err
 	}
 
-	for attemptNo := 0; attemptNo < maxAttempts; attemptNo++ {
+	// attemptNo 声明在循环外：失败收尾（循环后的兜底 return）要用它设
+	// RetryCount —— break 提前退出时也保留着「实际进行到第几轮」
+	attemptNo := 0
+	for ; attemptNo < maxAttempts; attemptNo++ {
 		cands := s.router.filterTried(allCands, tried)
 		// 分组限额：把已达每分钟上限的分组这一轮剔掉。
 		//
@@ -435,6 +438,10 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 		res.Attempt = lastAttempt
 		res.Candidate = lastCand
 	}
+	// 失败链也带上转移规模（仅成功路径设过）：候选链全灭的请求无论
+	// 实际撞了几个渠道，日志里的 RetryCount 原先都是 0 —— 故障发生时
+	// 恰恰最需要知道转移了几层
+	res.Retries = attemptNo
 	return res, lastErr
 }
 

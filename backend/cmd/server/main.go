@@ -197,8 +197,12 @@ func run() error {
 	// 推送循环跟着进程生命周期走：退出时 ctx 结束，两个 goroutine 自行收尾
 	srv.StartLive(ctx)
 
-	// 密钥限流窗口的定期回收 + 日志保留期的自动清理，都跟着进程生命周期走
+	// 密钥限流窗口的定期回收 + 日志保留期的自动清理，都跟着进程生命周期走；
+	// 渠道状态（冷却条目）与分组限流窗口同样挂上回收 —— 它们的 map
+	// 都只在被动访问时清理，删除的渠道/分组会留永久残余
 	rateLimiter.StartSweeper(ctx, 10*time.Minute)
+	state.StartSweeper(ctx, 10*time.Minute)
+	groupLimit.StartSweeper(ctx, 10*time.Minute)
 	srv.StartRetentionLoop(ctx)
 
 	errCh := make(chan error, 1)

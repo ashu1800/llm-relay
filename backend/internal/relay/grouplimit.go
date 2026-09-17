@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -42,6 +43,44 @@ func (l *GroupLimiter) window(id uint, now time.Time) *groupWindow {
 		l.buckets[id] = w
 	}
 	return w
+}
+
+// Sweep 清理过期的分钟窗口。
+//
+// window() 只在访问时替换过期窗口，从不删除分组条目 —— 删掉的分组
+// 在 map 里留永久残余。留两个分钟的余量：上一分钟的窗口偶尔还会被
+// 并发中的请求读到（Usage 展示等），不能太激进。
+func (l *GroupLimiter) Sweep(now time.Time) {
+	if l == nil {
+		return
+	}
+	cutoff := now.Add(-2 * time.Minute)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for id, w := range l.buckets {
+		if w.start.Before(cutoff) {
+			delete(l.buckets, id)
+		}
+	}
+}
+
+// StartSweeper 周期性执行 Sweep，跟着传入 ctx 的生命周期走。
+func (l *GroupLimiter) StartSweeper(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 10 * time.Minute
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				l.Sweep(time.Now())
+			}
+		}
+	}()
 }
 
 // Check 判断该分组当前是否还有额度。返回 false 时 reason 说明是哪一项超了。

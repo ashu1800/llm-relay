@@ -4,6 +4,7 @@ import { message, Modal } from 'ant-design-vue'
 import { PlusOutlined, ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
+import { fmtTime } from '@/utils/fmtTime'
 import type { Proxy, ProxyTestResult } from '@/api/types'
 
 const loading = ref(false)
@@ -206,9 +207,8 @@ function addressOf(row: Proxy) {
 
 function testedAt(row: Proxy) {
   if (!row.last_tested_at) return '-'
-  const d = new Date(row.last_tested_at)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  // 与全站统一口径（原来是 YYYY/MM/DD HH:mm，又一副长相）
+  return fmtTime(row.last_tested_at)
 }
 
 const activeCount = computed(() => rows.value.filter((r) => r.enabled).length)
@@ -243,7 +243,7 @@ onMounted(load)
         <a-table
           :data-source="rows"
           row-key="id"
-          size="middle"
+          size="small"
           :pagination="false"
           :scroll="{ x: 890 }"
         >
@@ -272,7 +272,11 @@ onMounted(load)
               <!-- 测试时间与失败原因都铺在状态下面：单看一个红标签，
                    用户不知道是「刚测的」还是「三天前的」，也不知道为什么不通 -->
               <div v-if="record.last_tested_at" class="sub-text">{{ testedAt(record) }}</div>
-              <div v-if="record.last_status === 'fail' && record.last_error" class="sub-text fail-text">
+              <div
+                v-if="record.last_status === 'fail' && record.last_error"
+                class="sub-text fail-text"
+                :title="record.last_error"
+              >
                 {{ record.last_error }}
               </div>
             </template>
@@ -384,7 +388,14 @@ onMounted(load)
    那里没有 --color-danger / --color-text-tertiary 这两个名字，
    写了不会报错，只是颜色悄悄失效、退回默认色 */
 .sub-text { color: var(--color-text-secondary); font-size: 12px; margin-top: 2px; }
-.fail-text { color: var(--text-red); }
+.fail-text {
+  color: var(--text-red);
+  /* 上游错误动辄几 KB，不截断会把整行撑得很高；完整内容放 title 悬停可见 */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
 .disabled { color: var(--color-text-secondary); cursor: not-allowed; }
 .field-hint { color: var(--color-text-secondary); font-size: 12px; margin-top: 4px; }
 .field-hint.inline { margin-left: 8px; }

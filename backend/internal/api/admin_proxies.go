@@ -207,6 +207,12 @@ func (s *Server) updateProxy(c *gin.Context) {
 	// （实测：改成错的用户名后列表还显示「正常」，而实际转发已经 401）
 	if p.Protocol != nil || p.Host != nil || p.Port != nil || p.Username != nil {
 		updates["last_status"] = "unknown"
+		// 状态相关的字段与主更新合并成**一条** UPDATE：原来分两次写，
+		// 不在一个事务里 —— 第二次失败回 500 时第一次已生效，
+		// 留下「状态 unknown 却挂着旧错误/旧延迟」的半截状态
+		updates["last_error"] = ""
+		updates["last_latency_ms"] = 0
+		updates["last_tested_at"] = nil
 	}
 	if len(updates) == 0 {
 		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
@@ -219,15 +225,6 @@ func (s *Server) updateProxy(c *gin.Context) {
 		}
 		writeInternalError(c, err)
 		return
-	}
-	// 改了连接参数就把旧状态清干净，免得界面显示的成功记录与当前配置对不上
-	if _, ok := updates["last_status"]; ok {
-		if err := db.Model(&model.Proxy{}).Where("id = ?", id).Updates(map[string]any{
-			"last_status": "unknown", "last_error": "", "last_latency_ms": 0, "last_tested_at": nil,
-		}).Error; err != nil {
-			writeInternalError(c, err)
-			return
-		}
 	}
 	s.invalidateProxyCaches(id)
 	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates)})

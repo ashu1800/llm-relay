@@ -13,6 +13,7 @@ import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import GroupTag from '@/components/GroupTag.vue'
 import { writeClipboard } from '@/utils/clipboard'
+import { fmtTime } from '@/utils/fmtTime'
 
 import type { APIKey, ChannelGroup } from '@/api/types'
 
@@ -179,7 +180,7 @@ function setLimit(row: APIKey) {
     title: '设置每分钟请求上限 · ' + row.name,
     content: () =>
       h('div', [
-        h('p', { style: 'font-size:12px;color:#888;margin-bottom:8px' }, [
+        h('p', { style: 'font-size:12px;color:var(--color-text-secondary);margin-bottom:8px' }, [
           '填 0 表示跟随全局默认，填负数表示这把密钥完全不限流（适合本地压测）。'
         ]),
         // antd 的 InputNumber 组件类型与 h() 的重载对不上（改动前就存在的报错），
@@ -305,7 +306,8 @@ function confirmDelete(row: APIKey) {
 
 function fmt(t: string | null) {
   if (!t) return '从未使用'
-  return new Date(t).toLocaleString('zh-CN')
+  // 与全站统一口径（原来 toLocaleString 出来是斜杠分隔、月日不补零）
+  return fmtTime(t)
 }
 
 onMounted(() => {
