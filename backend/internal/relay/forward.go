@@ -338,19 +338,55 @@ func extractUsageFromJSON(raw []byte) (Usage, bool) {
 }
 
 // Retryable 判断该次失败是否值得换渠道重试。
-// 4xx 中只有 408/409/429 属于可重试，其余是请求本身的问题，换渠道也没用。
+//
+// 任何非 2xx 的状态码都立即触发故障转移 —— 包括历史上被判为
+// 「请求本身的问题，换渠道也没用」的 400/401/403/404 等。
+// 原因：多渠道场景下，同一状态码在不同上游含义完全不同
+// （有的渠道用 404 表达「本渠道没有这个模型」，用 400 表达配额异常），
+// 与其在中继侧替上游猜语义，不如一律换下一个候选再试。
+// 2xx 一律视为成功（201/204 也是成功语义，不该触发转移）。
+//
+// 三个例外不在本函数处理：
+//   - 客户端主动断开（手动结束推理）导致的报错：由 Relay 检查外层
+//     ctx 是否已取消来豁免 —— 客户端已经不要这次请求了，换渠道毫无意义；
+//   - 请求内容无法转换（ErrUnsupportedContent）：由 Relay 提前返回；
+//   - 物理性的请求级错误（413/414/431，见 physicalRequestError）：
+//     请求的大小不因换渠道而变，由 Relay 短路返回。
 func (a *Attempt) Retryable() bool {
 	if a == nil {
 		return true
 	}
-	switch {
-	case a.StatusCode == 0: // 网络层失败
-		return true
-	case a.StatusCode == 408, a.StatusCode == 409, a.StatusCode == 429:
-		return true
-	case a.StatusCode >= 500:
-		return true
-	default:
-		return false
-	}
+	// 0 表示网络层失败（连接不上、握手失败等），同样换渠道再试
+	return a.StatusCode < 200 || a.StatusCode >= 300
+}
+
+// requestShapeStatus 报告状态码是否属于「请求形状类」错误：
+// 参数不合法、模型不存在、报文或头太大 —— 问题大概率出在请求本身。
+//
+// 这个集合服务于「多渠道共识」判定（见 Relay.recordFailures）：
+// 一次转发里 >=2 个渠道报了同一个此类状态码，说明是请求的问题，
+// 这些失败不再记到渠道头上，否则用户发一个超长对话就能把所有渠道
+// 打成 degraded。渠道级的 401/403/408/409/429 与全部 5xx 刻意不在
+// 集合里：两个渠道密钥都失效不代表第三个渠道也有问题。
+var requestShapeStatus = map[int]bool{
+	http.StatusBadRequest:                  true, // 400
+	http.StatusNotFound:                    true, // 404
+	http.StatusRequestEntityTooLarge:       true, // 413
+	http.StatusRequestURITooLong:           true, // 414
+	http.StatusUnprocessableEntity:         true, // 422
+	http.StatusRequestHeaderFieldsTooLarge: true, // 431
+}
+
+// physicalRequestError 报告状态码是否「物理性请求级」错误：
+// 请求体/URI/头太大。这类错误的根源（请求的物理尺寸）不随渠道变化，
+// 换渠道必然得到同样的结果，所以连共识判定都省了 —— 第一个渠道
+// 报出来就短路返回，不再消耗后面的候选。
+//
+// 与 requestShapeStatus 的分工：413/414/431 在两个集合里都在，
+// 但物理性这一档更强，直接短路；400/404/422 只参与共识豁免记账，
+// 仍然把候选试完 —— 万一后面的渠道真支持这个请求呢（例如更长的上下文）。
+func physicalRequestError(status int) bool {
+	return status == http.StatusRequestEntityTooLarge ||
+		status == http.StatusRequestURITooLong ||
+		status == http.StatusRequestHeaderFieldsTooLarge
 }

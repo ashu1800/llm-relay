@@ -204,6 +204,17 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 	defer res.ReleaseSlot()
 	if relayErr != nil {
 		totalMs := int(time.Since(started).Milliseconds())
+		// 候选链全部失败：最后一次上游应答还在 res.Attempt 里，
+		// 按它的真实状态码与错误体回给客户端，而不是一律 502 ——
+		// 所有渠道都 401 时客户端看到的应该是 401，那才是值得排查的方向。
+		// 网络层失败（拿不到状态码）不命中这里，仍走下面的 502。
+		if att := res.Attempt; att != nil && att.Stream == nil && att.StatusCode >= 400 {
+			upMsg := convert.UpstreamErrorMessage(res.Candidate.Channel.Protocol, att.Body)
+			p.writeError(c, att.StatusCode, upMsg, "upstream_error")
+			s.finalizeLog(req, res, relay.Usage{}, att.StatusCode, upMsg,
+				att.HeaderMs, totalMs, att.Body, att.Headers)
+			return
+		}
 		// 分组超限要回 429 而不是 502：502 会让客户端以为上游坏了而重试，
 		// 而这里恰恰是「你现在不该重试」。带上 Retry-After 说明等多久。
 		//

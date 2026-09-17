@@ -180,11 +180,21 @@ type ChannelState struct {
 	// latency 是各渠道最近成功响应的首包延迟（EWMA，毫秒），
 	// 供 least_latency 策略排序。只记成功：失败渠道该被冷却，而不是参与比快。
 	latency map[uint]float64
+	// failStreak 是各渠道的连续失败计数，供「温和熔断」用：
+	// 连续失败达到阈值的渠道自动冷却一段时间（见 Service.markChannelFailure），
+	// 避免「全部渠道都挂」时每个请求都把候选链完整撞一遍。
+	// 成功一次即清零。
+	failStreak map[uint]int
 }
 
 // NewChannelState 构造渠道状态表。
 func NewChannelState() *ChannelState {
-	return &ChannelState{until: map[uint]time.Time{}, inflight: map[uint]int{}, latency: map[uint]float64{}}
+	return &ChannelState{
+		until:      map[uint]time.Time{},
+		inflight:   map[uint]int{},
+		latency:    map[uint]float64{},
+		failStreak: map[uint]int{},
+	}
 }
 
 // Cooldown 把渠道摘掉一段时间。已存在的更长冷却不会被缩短。
@@ -291,6 +301,30 @@ func (s *ChannelState) Latency(id uint) float64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.latency[id]
+}
+
+// NoteFailure 把渠道的连续失败计数加一，返回加一后的连击数。
+// 调用方（markChannelFailure）用它对比熔断阈值。
+func (s *ChannelState) NoteFailure(id uint) int {
+	if s == nil || id == 0 {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failStreak[id]++
+	return s.failStreak[id]
+}
+
+// NoteSuccess 清零渠道的连续失败计数：成功一次即完全康复。
+// 刻意不在触发熔断后清零 —— 冷却到期后渠道若还在失败，
+// 一次就能再次触发冷却；只有真正成功过一次才算恢复。
+func (s *ChannelState) NoteSuccess(id uint) {
+	if s == nil || id == 0 {
+		return
+	}
+	s.mu.Lock()
+	delete(s.failStreak, id)
+	s.mu.Unlock()
 }
 
 // Inflight 返回该渠道当前占用的在途名额数。

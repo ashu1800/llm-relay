@@ -36,6 +36,14 @@ const (
 	defaultRateLimitCooldown = 30 * time.Second
 	// 上游 5xx 时的短退避，避免立刻把同一个故障实例再打一遍
 	defaultServerErrorCooldown = 5 * time.Second
+	// 上游 401/403 的退避：密钥失效或被封不会自愈，冷却期内让后续
+	// 请求直接走别的渠道，别每个请求都先撞一遍死渠道。
+	defaultAuthErrorCooldown = 30 * time.Second
+	// 温和熔断：渠道连续失败达到阈值后自动冷却。
+	// 「任何非 2xx 都转移」意味着全挂时每个请求都要把候选链完整撞一遍；
+	// 有了这道熔断，第一个请求付学费，后续请求在冷却期内直接绕开。
+	failStreakThreshold  = 3
+	autoCooldownOnStreak = 60 * time.Second
 )
 
 // Service 编排一次中转：选渠道 -> 转发 -> 失败转移。
@@ -168,7 +176,8 @@ var ErrGroupLimited = errors.New("分组已达每分钟额度")
 // 若按普通上游错误处理，会连带走两条错路 ——
 // ① 逐个渠道重试一遍（每个都必然同样失败，白白消耗上游配额）；
 // ② markChannelFailure 记上一笔失败，健康的渠道被误判成故障，
-//    重试次数够了还会被冷却摘掉。用户发一次音频，可能把好渠道打进冷却。
+//
+//	重试次数够了还会被冷却摘掉。用户发一次音频，可能把好渠道打进冷却。
 //
 // 定义在 convert 包（错误由那边产生），这里做个别名让本包调用方少一个 import。
 var ErrRequestUnsupported = convert.ErrUnsupportedContent
@@ -229,6 +238,18 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 
 	var tried []uint
 	var lastErr error
+	// lastAttempt / lastCand 暂存「最后一次拿到上游应答的失败尝试」。
+	// 候选链全部失败时把它放进结果：调用方能据此把上游真实的状态码与
+	// 错误体回给客户端，而不是一律压成 502 —— 比如所有渠道都 401 时，
+	// 客户端看到的应该是 401，那才是值得排查的方向。
+	var lastAttempt *Attempt
+	var lastCand Candidate
+
+	// failures 收集本次转发中的渠道失败，函数返回时统一记账。
+	// 不在循环里立即记，是为了等「多渠道共识」判定（见 recordFailures）：
+	// 单次失败看不出是渠道的问题还是请求的问题，试完才知道。
+	var failures []failRecord
+	defer func() { s.recordFailures(failures) }()
 	maxAttempts := s.opts.MaxRetries + 1
 	if maxAttempts < 1 {
 		maxAttempts = 1
@@ -296,6 +317,20 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 			if acquired {
 				s.state.Release(cand.Channel.ID)
 			}
+			// 客户端已断开（手动结束推理、关掉页面、请求超时取消）：
+			// 换渠道重发毫无意义 —— 收件人已经不在了，下一个渠道只会
+			// 对着空气再推理一遍。也**不**记渠道失败：渠道没有问题，
+			// 问题在客户端侧；把好渠道打进 degraded 只会让后续请求错误地避开它。
+			//
+			// 判定看外层 ctx：fwd.Do 内部自设的 bodyTimeout 到期（上游太慢）
+			// 不会取消外层 ctx，那种失败仍会正常走故障转移，不受这条豁免影响。
+			if ctx.Err() != nil {
+				res.Trail = append(res.Trail, AttemptTrail{
+					ChannelID: cand.Channel.ID, ChannelName: cand.Channel.Name,
+					Error: "客户端已断开: " + err.Error(),
+				})
+				return res, ctx.Err()
+			}
 			// 请求本身无法转换时立刻停手：换渠道结果一样，重试只是
 			// 白耗上游配额，还会把健康渠道一笔笔记成失败（见
 			// ErrRequestUnsupported 的说明）。直接返回，交给上层回 400。
@@ -309,7 +344,7 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 				ChannelID: cand.Channel.ID, ChannelName: cand.Channel.Name, Error: err.Error(),
 			})
 			lastErr = err
-			s.markChannelFailure(cand.Channel.ID, err.Error())
+			failures = append(failures, failRecord{channelID: cand.Channel.ID, msg: err.Error()})
 			continue
 		}
 
@@ -318,6 +353,19 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 			if acquired {
 				s.state.Release(cand.Channel.ID)
 			}
+			// 物理性请求级错误（413/414/431）直接短路：请求的尺寸不因
+			// 换渠道而变，后面的候选只会报同样的错、白耗配额。
+			// 不转移、不冷却、不记账 —— 渠道只是如实拒绝了过大的请求。
+			// 带着上游应答返回（error 为 nil），调用方按真实状态码回给客户端。
+			if physicalRequestError(attempt.StatusCode) {
+				res.Trail = append(res.Trail, AttemptTrail{
+					ChannelID: cand.Channel.ID, ChannelName: cand.Channel.Name,
+					StatusCode: attempt.StatusCode, Error: summarizeErrorBody(attempt.Body),
+				})
+				res.Attempt = attempt
+				res.Candidate = cand
+				return res, nil
+			}
 			s.applyCooldown(cand.Channel.ID, attempt)
 			msg := summarizeErrorBody(attempt.Body)
 			res.Trail = append(res.Trail, AttemptTrail{
@@ -325,14 +373,21 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 				StatusCode: attempt.StatusCode, Error: msg,
 			})
 			lastErr = fmt.Errorf("上游返回 %d: %s", attempt.StatusCode, msg)
-			s.markChannelFailure(cand.Channel.ID, msg)
+			// 是否「请求形状类」状态码先记下，等试完候选做共识判定；
+			// 渠道级的（401/403/429/5xx）没有共识豁免一说
+			failures = append(failures, failRecord{
+				channelID: cand.Channel.ID, msg: msg,
+				status: attempt.StatusCode, shape: requestShapeStatus[attempt.StatusCode],
+			})
 			if attempt.Stream != nil {
 				_ = attempt.Stream.Close()
 			}
+			lastAttempt, lastCand = attempt, cand
 			continue
 		}
 
-		// 成功或不可重试的业务错误，直接回给客户端。
+		// 走到这里说明上游返回了 2xx：成功，直接回给客户端。
+		// （任何非 2xx 都在上面 Retryable 分支里转走了；413/414/431 在那里被短路。）
 		//
 		// 名额**不在这里释放**：流式响应此刻只拿到了响应头，正文还在从上游读，
 		// 调用方转发结束后会调 res.ReleaseSlot()。
@@ -353,6 +408,13 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 
 	if lastErr == nil {
 		lastErr = ErrNoChannel
+	}
+	// 候选链全部失败（或撞上分组额度提前收场）：带上最后一次上游应答，
+	// 让调用方回真实状态码。此时 Stream 已关闭、名额已归还，
+	// ReleaseSlot 对空回调是幂等的，失败路径不会重复归还。
+	if lastAttempt != nil {
+		res.Attempt = lastAttempt
+		res.Candidate = lastCand
 	}
 	return res, lastErr
 }
@@ -380,6 +442,10 @@ func (s *Service) applyCooldown(channelID uint, attempt *Attempt) {
 		}
 	case attempt.StatusCode == http.StatusBadGateway || attempt.StatusCode == http.StatusGatewayTimeout:
 		wait = defaultServerErrorCooldown // 5xx 短暂退避，换渠道重试
+	case attempt.StatusCode == http.StatusUnauthorized || attempt.StatusCode == http.StatusForbidden:
+		// 密钥失效/被封属于渠道级故障：请求重发多少次结果都一样，
+		// 冷却一段时间让流量自动绕开，等运维换密钥后再自然恢复
+		wait = defaultAuthErrorCooldown
 	default:
 		return
 	}
@@ -388,7 +454,58 @@ func (s *Service) applyCooldown(channelID uint, attempt *Attempt) {
 		"channel_id", channelID, "status", attempt.StatusCode, "cooldown", wait.String())
 }
 
+// failRecord 是一次失败尝试的记账材料。
+type failRecord struct {
+	channelID uint
+	msg       string
+	status    int // 0 表示网络层错误
+	// shape 标记这次失败是否「请求形状类」状态码（见 requestShapeStatus），
+	// 供共识判定决定要不要豁免记账。
+	shape bool
+}
+
+// exemptedByConsensus 判定每条失败记录是否被「多渠道共识」豁免记账：
+// 一次转发里有 >=2 个渠道报了**同一个**请求形状类状态码（比如都 400），
+// 说明问题出在请求本身 —— 渠道是无辜的，不该被记成 degraded。
+//
+// 这是中继特有的信号：单个渠道报 400 分不清是渠道的问题还是请求的问题，
+// 但跨渠道的相同 4xx 是强证据。渠道级错误（401/403/429/5xx/网络失败，
+// 即 shape=false 的记录）永远不豁免 —— 两个渠道密钥都坏不代表第三个也坏。
+func exemptedByConsensus(failures []failRecord) []bool {
+	shapeCount := map[int]int{}
+	for _, f := range failures {
+		if f.shape {
+			shapeCount[f.status]++
+		}
+	}
+	out := make([]bool, len(failures))
+	for i, f := range failures {
+		out[i] = f.shape && shapeCount[f.status] >= 2
+	}
+	return out
+}
+
+// recordFailures 在一次转发结束后统一记账（Relay 用 defer 调用）。
+// 共识豁免之外的失败逐条落库并喂给熔断计数。
+func (s *Service) recordFailures(failures []failRecord) {
+	if len(failures) == 0 {
+		return
+	}
+	exempt := exemptedByConsensus(failures)
+	for i, f := range failures {
+		if exempt[i] {
+			s.logger.Info("共识判定为请求级错误，不记渠道失败",
+				"channel_id", f.channelID, "status", f.status)
+			continue
+		}
+		s.markChannelFailure(f.channelID, f.msg)
+	}
+}
+
 // markChannelFailure 记录渠道异常，供后台展示与后续调度参考。
+// 同时驱动温和熔断：连续失败达到阈值的渠道自动冷却 ——
+// 「任何非 2xx 都转移」意味着全挂时每个请求都要把候选链完整撞一遍，
+// 有了这道熔断，第一个请求付学费，后续请求在冷却期内直接绕开。
 func (s *Service) markChannelFailure(channelID uint, msg string) {
 	if len(msg) > 500 {
 		msg = msg[:500]
@@ -402,10 +519,23 @@ func (s *Service) markChannelFailure(channelID uint, msg string) {
 	if err != nil {
 		s.logger.Warn("更新渠道健康状态失败", "channel_id", channelID, "err", err)
 	}
+	// 连击数达到阈值就冷却。冷却到期后渠道若还在失败，一次就能再次
+	// 触发；只有成功过一次（NoteSuccess 清零）才算真正恢复 ——
+	// 所以不会出现「冷却刚好过期，失败一次又被摘掉」导致永远没机会
+	// 自愈的死循环：到期后的第一次尝试就是机会。
+	if s.state != nil && s.state.NoteFailure(channelID) >= failStreakThreshold {
+		s.state.Cooldown(channelID, autoCooldownOnStreak)
+		s.logger.Warn("渠道连续失败，自动冷却",
+			"channel_id", channelID, "streak", failStreakThreshold, "cooldown", autoCooldownOnStreak.String())
+	}
 }
 
 // markChannelSuccess 恢复渠道健康状态。
 func (s *Service) markChannelSuccess(channelID uint) {
+	// 连续失败计数清零：成功一次即完全康复（熔断解除的前提）
+	if s.state != nil {
+		s.state.NoteSuccess(channelID)
+	}
 	err := s.db.Model(&model.Channel{}).
 		Where("id = ? AND health_status <> ?", channelID, "healthy").
 		Updates(map[string]any{"health_status": "healthy", "last_error": ""}).Error

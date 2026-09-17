@@ -144,6 +144,40 @@ func TestChannelStateCooldownNotShortened(t *testing.T) {
 	}
 }
 
+// 温和熔断的计数行为：NoteFailure 累加连击、NoteSuccess 一次清零。
+// 触发冷却的阈值判断在 Service.markChannelFailure 里，这里只钉住计数本身。
+func TestChannelStateFailStreak(t *testing.T) {
+	cs := NewChannelState()
+	if got := cs.NoteFailure(1); got != 1 {
+		t.Fatalf("首次失败连击应为 1，实际 %d", got)
+	}
+	if got := cs.NoteFailure(1); got != 2 {
+		t.Fatalf("连续失败连击应为 2，实际 %d", got)
+	}
+	// 成功一次即完全康复
+	cs.NoteSuccess(1)
+	if got := cs.NoteFailure(1); got != 1 {
+		t.Fatalf("成功后连击应重新从 1 计，实际 %d", got)
+	}
+	// 渠道之间互不影响
+	cs.NoteFailure(2)
+	if got := cs.NoteFailure(1); got != 2 {
+		t.Fatalf("其他渠道的失败不应影响本渠道连击，实际 %d", got)
+	}
+}
+
+// 手动恢复冷却不应顺手清掉连击计数 —— 两者语义不同：
+// 冷却到期/清除只是「给一次机会」，连击记录着它最近的健康状况。
+func TestChannelStateClearCooldownKeepsStreak(t *testing.T) {
+	cs := NewChannelState()
+	cs.NoteFailure(1)
+	cs.NoteFailure(1)
+	cs.ClearCooldown(1)
+	if got := cs.NoteFailure(1); got != 3 {
+		t.Fatalf("清除冷却后连击应继续累加，实际 %d", got)
+	}
+}
+
 func TestChannelStateConcurrency(t *testing.T) {
 	cs := NewChannelState()
 	if !cs.Acquire(1, 2) || !cs.Acquire(1, 2) {
