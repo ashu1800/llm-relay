@@ -128,6 +128,15 @@ llm-relay/
 
 ## 一键部署（WSL2 / Ubuntu 24.04）
 
+> **改了前端（或后端）之后，必须重新部署才会在 8888 上生效。**
+> 前端产物不是单独挂载的目录，而是被 `deploy/Dockerfile` 烘进 Go 二进制
+> （stage 1 构建 `dist` → stage 2 `COPY --from=frontend-build /src/dist`），
+> 所以「源码改了」「dev 服务器 5173 上看着好了」都不等于线上好了。
+> 2026-09-17 踩过一次：在 5173 上验证通过就交了活，站主开 8888 看到的是旧构建，
+> 回了「问题并没有得到修复」。判定办法是读**浏览器里实际生效的样式**
+> （`.shots/probe-toolbar-css.mjs` 会把命中规则的原文和 computed style 打出来），
+> 而不是读源码 —— 源码确实改了，这骗不过任何人，但骗得过自己。
+
 ```bash
 cd llm-relay
 # 方式一：WSL 免密直用 root（推荐，本机已验证）
