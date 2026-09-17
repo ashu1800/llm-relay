@@ -424,6 +424,10 @@ type GeminiStreamTranslator struct {
 	// emitted 记录已经写出的调用下标，避免收尾时重复发。
 	emitted    map[int]bool
 	finishSent bool
+	// stopReason 暂存上游最后一帧的 finish_reason：收尾分片要按它映射，
+	// 不能硬编码 STOP —— 撞 max_tokens 时客户端要靠 MAX_TOKENS 才知道
+	// 回复被截断了
+	stopReason string
 }
 
 // pendingToolCall 是一个正在累积的工具调用。
@@ -481,6 +485,9 @@ func (t *GeminiStreamTranslator) handleChunk(payload []byte) error {
 	choice := asMap(choices[0])
 	if choice == nil {
 		return nil
+	}
+	if fr := asString(choice["finish_reason"]); fr != "" {
+		t.stopReason = fr
 	}
 
 	var parts []any
@@ -617,8 +624,10 @@ func (t *GeminiStreamTranslator) Close() error {
 
 	return writeGeminiSSE(t.w, map[string]any{
 		"candidates": []any{map[string]any{
-			"content":      map[string]any{"role": "model", "parts": []any{}},
-			"finishReason": "STOP",
+			"content": map[string]any{"role": "model", "parts": []any{}},
+			// finish_reason 透传（与非流式同一映射）：length -> MAX_TOKENS、
+			// content_filter -> SAFETY；原来一律 STOP，截断被呈现成完整结束
+			"finishReason": geminiFinishReason(t.stopReason),
 			"index":        0,
 		}},
 		"modelVersion":  t.model,

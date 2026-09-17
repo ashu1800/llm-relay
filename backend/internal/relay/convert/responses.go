@@ -21,6 +21,13 @@ func ResponsesRequestToOpenAIChat(body []byte) ([]byte, error) {
 	}
 
 	out := map[string]any{}
+	// previous_response_id 是 Responses 的**服务端会话延续**：客户端只发增量
+	// input，历史在 OpenAI 那边。中继是无状态转发，这个引用转发过去也指向
+	// 别人家的存储；而白名单不抄它，又会静默丢掉上下文 —— 模型"失忆"、
+	// 答案接不上，且无任何报错，极难排查。所以明确拒绝并说明替代做法。
+	if asString(src["previous_response_id"]) != "" {
+		return nil, errUnsupportedContent("Responses 协议的 previous_response_id 依赖服务端会话状态，中继不支持转发；请在客户端关闭 store（用全量 input 发送完整对话）")
+	}
 	if v, ok := src["model"]; ok {
 		out["model"] = v
 	}

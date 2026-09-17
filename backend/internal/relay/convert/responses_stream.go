@@ -41,6 +41,9 @@ type ResponsesStreamTranslator struct {
 
 	usage     map[string]any
 	completed bool
+	// stopReason 暂存上游最后一帧的 finish_reason：收尾要按它区分
+	// completed / incomplete —— 恒报 completed 会把截断伪装成完整回复
+	stopReason string
 }
 
 // NewResponsesTranslator 按是否流式返回对应的改写器。
@@ -94,6 +97,11 @@ func (t *ResponsesStreamTranslator) handleChunk(payload []byte) error {
 	choice := asMap(choices[0])
 	if choice == nil {
 		return nil
+	}
+	// finish_reason 在 choice 层而不在 delta 层，收尾分片的 delta 常为空 ——
+	// 必须在 delta 检查之前捕获，否则永远读不到
+	if fr := asString(choice["finish_reason"]); fr != "" {
+		t.stopReason = fr
 	}
 	delta := asMap(choice["delta"])
 	if delta == nil {
@@ -383,14 +391,25 @@ func (t *ResponsesStreamTranslator) Close() error {
 	if output == nil {
 		output = []any{}
 	}
+	resp := map[string]any{
+		"id": t.respID, "object": "response", "created_at": t.created,
+		"status": "completed", "model": t.model,
+		"output":      output,
+		"output_text": collectOutputText(output),
+		"usage":       usageToResponses(t.usage),
+	}
+	// finish_reason 透传：截断要说自己是截断。Responses 协议的表达是
+	// status: "incomplete" + incomplete_details.reason —— 恒报 completed
+	// 会让客户端以为回复是完整的（非流式方向早就映射了，流式漏了）。
+	switch t.stopReason {
+	case "length":
+		resp["status"] = "incomplete"
+		resp["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
+	case "content_filter":
+		resp["status"] = "incomplete"
+		resp["incomplete_details"] = map[string]any{"reason": "content_filter"}
+	}
 	return writeSSE(t.w, "response.completed", map[string]any{
-		"type": "response.completed",
-		"response": map[string]any{
-			"id": t.respID, "object": "response", "created_at": t.created,
-			"status": "completed", "model": t.model,
-			"output":      output,
-			"output_text": collectOutputText(output),
-			"usage":       usageToResponses(t.usage),
-		},
+		"type": "response.completed", "response": resp,
 	})
 }

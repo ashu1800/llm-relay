@@ -55,6 +55,16 @@ func OpenAIChatToAnthropicRequest(body []byte) ([]byte, error) {
 			out[k] = v
 		}
 	}
+	// 入站是 Anthropic 时暂存的特有参数（thinking/top_k/metadata/service_tier）
+	// 在这里恢复：链路 Anthropic→Anthropic 上它们不该静默丢失 ——
+	// 扩展思考开没开直接改变模型行为与计费口径
+	if extra := takeAnthropicParams(src); extra != nil {
+		for _, k := range []string{"thinking", "top_k", "metadata", "service_tier"} {
+			if v, ok := extra[k]; ok {
+				out[k] = v
+			}
+		}
+	}
 	if v, ok := src["stop"]; ok {
 		out["stop_sequences"] = openAIStopList(v)
 	}

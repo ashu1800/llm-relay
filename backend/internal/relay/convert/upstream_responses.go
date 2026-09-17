@@ -68,7 +68,10 @@ func OpenAIChatToResponsesRequest(body []byte) ([]byte, error) {
 		}
 	}
 
-	instructions, input := openAIMessagesToResponses(src["messages"])
+	instructions, input, err := openAIMessagesToResponses(src["messages"])
+	if err != nil {
+		return nil, err
+	}
 	if instructions != "" {
 		out["instructions"] = instructions
 	}
@@ -154,7 +157,7 @@ func openAIToolChoiceToResponses(v any) any {
 //   - role=tool 的消息要变成 function_call_output 事件，且 call_id 必须与
 //     之前 function_call 的 call_id 一致
 //   - assistant 的 tool_calls 要拆成独立的 function_call 事件
-func openAIMessagesToResponses(v any) (string, []any) {
+func openAIMessagesToResponses(v any) (string, []any, error) {
 	list, _ := v.([]any)
 	var systemParts []string
 	input := make([]any, 0, len(list))
@@ -185,7 +188,10 @@ func openAIMessagesToResponses(v any) (string, []any) {
 			role = "user"
 		}
 		// 正文可能为空（纯工具调用的 assistant 消息），此时不产生 message 事件
-		content := openAIContentToResponses(m["content"])
+		content, err := openAIContentToResponses(m["content"])
+		if err != nil {
+			return "", nil, err
+		}
 		hasContent := false
 		if s, ok := content.(string); ok {
 			hasContent = strings.TrimSpace(s) != ""
@@ -225,15 +231,19 @@ func openAIMessagesToResponses(v any) (string, []any) {
 			}
 		}
 	}
-	return strings.Join(systemParts, "\n\n"), input
+	return strings.Join(systemParts, "\n\n"), input, nil
 }
 
 // openAIContentToResponses 把 Chat 的内容转成 Responses 的内容块。
 // 纯文本用字符串（上游两种都收，字符串最省事），含图片时用块数组。
-func openAIContentToResponses(v any) any {
+//
+// 不认识的内容块宁可显式拒绝也不静默丢弃（与 Anthropic/Gemini 出站同一策略）：
+// Responses 协议的输入块只有 input_text / input_image，通用语的 input_audio、
+// file 在这里没有对应物 —— 明确报 400 比让模型"无视"后按剩余文本作答好得多。
+func openAIContentToResponses(v any) (any, error) {
 	switch c := v.(type) {
 	case string:
-		return c
+		return c, nil
 	case []any:
 		var parts []any
 		allText := true
@@ -251,6 +261,8 @@ func openAIContentToResponses(v any) any {
 					parts = append(parts, map[string]any{"type": "input_image", "image_url": url})
 					allText = false
 				}
+			default:
+				return nil, errUnsupportedContent("内容块类型 " + asString(part["type"]) + " 无法转换为 Responses 协议")
 			}
 		}
 		if allText && len(parts) > 0 {
@@ -258,11 +270,11 @@ func openAIContentToResponses(v any) any {
 			for _, p := range parts {
 				sb.WriteString(asString(asMap(p)["text"]))
 			}
-			return sb.String()
+			return sb.String(), nil
 		}
-		return parts
+		return parts, nil
 	default:
-		return ""
+		return "", nil
 	}
 }
 

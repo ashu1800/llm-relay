@@ -32,7 +32,10 @@ func OpenAIChatToGeminiRequest(body []byte) ([]byte, error) {
 	}
 
 	out := map[string]any{}
-	contents, system := openAIMessagesToGemini(src["messages"])
+	contents, system, err := openAIMessagesToGemini(src["messages"])
+	if err != nil {
+		return nil, err
+	}
 	if system != "" {
 		out["systemInstruction"] = map[string]any{"parts": []any{map[string]any{"text": system}}}
 	}
@@ -87,7 +90,7 @@ func OpenAIChatToGeminiRequest(body []byte) ([]byte, error) {
 //   - 与 Anthropic 一样要求 user / model 严格交替，连续同角色必须合并：
 //     OpenAI 侧「assistant 先输出 tool_calls，再补一条文本」、
 //     「user 连发两条」都很常见，直接发过去会被上游 400 拒绝。
-func openAIMessagesToGemini(v any) ([]any, string) {
+func openAIMessagesToGemini(v any) ([]any, string, error) {
 	list, _ := v.([]any)
 	var systemParts []string
 	contents := make([]any, 0, len(list))
@@ -137,7 +140,10 @@ func openAIMessagesToGemini(v any) ([]any, string) {
 			continue
 		}
 
-		parts := openAIContentToGeminiParts(m["content"])
+		parts, err := openAIContentToGeminiParts(m["content"])
+		if err != nil {
+			return nil, "", err
+		}
 		if calls, ok := m["tool_calls"].([]any); ok {
 			for _, c := range calls {
 				call := asMap(c)
@@ -161,7 +167,7 @@ func openAIMessagesToGemini(v any) ([]any, string) {
 		}
 		appendTurn(grole, parts)
 	}
-	return contents, strings.Join(systemParts, "\n\n")
+	return contents, strings.Join(systemParts, "\n\n"), nil
 }
 
 // parseToolResult 把工具结果的文本包成 Gemini 要求的对象。
@@ -180,13 +186,17 @@ func parseToolResult(v any) map[string]any {
 }
 
 // openAIContentToGeminiParts 转换消息内容为 Gemini 的 parts。
-func openAIContentToGeminiParts(v any) []any {
+//
+// 不认识的内容块宁可显式拒绝也不静默丢弃 —— 用户发了音频/文件、
+// 模型"无视"后按剩余文本作答，用户会以为是提示词问题，正是
+// Anthropic 出站注释里描述过的那类排查黑洞。
+func openAIContentToGeminiParts(v any) ([]any, error) {
 	switch c := v.(type) {
 	case string:
 		if c == "" {
-			return nil
+			return nil, nil
 		}
-		return []any{map[string]any{"text": c}}
+		return []any{map[string]any{"text": c}}, nil
 	case []any:
 		out := make([]any, 0, len(c))
 		for _, item := range c {
@@ -201,12 +211,36 @@ func openAIContentToGeminiParts(v any) []any {
 				if blk := openAIImageToGemini(asMap(part["image_url"])); blk != nil {
 					out = append(out, blk)
 				}
+			case "input_audio":
+				// Gemini 原生支持音频 inlineData，通用语的 input_audio 可以转过去
+				if blk := openAIAudioToGemini(asMap(part["input_audio"])); blk != nil {
+					out = append(out, blk)
+				}
+			default:
+				return nil, errUnsupportedContent("内容块类型 " + asString(part["type"]) + " 无法转换为 Gemini 协议")
 			}
 		}
-		return out
+		return out, nil
 	default:
+		return nil, nil
+	}
+}
+
+// openAIAudioToGemini 把通用语的 input_audio 转成 Gemini 的 inlineData。
+func openAIAudioToGemini(a map[string]any) map[string]any {
+	if a == nil {
 		return nil
 	}
+	data := asString(a["data"])
+	if data == "" {
+		return nil
+	}
+	// 通用语的 format 只有 wav/mp3 两档，映射回标准 MIME
+	mime := "audio/wav"
+	if asString(a["format"]) == "mp3" {
+		mime = "audio/mpeg"
+	}
+	return map[string]any{"inlineData": map[string]any{"mimeType": mime, "data": data}}
 }
 
 // openAIImageToGemini 把 image_url 转成 Gemini 的 inlineData（data URI）或 fileData（URL）。

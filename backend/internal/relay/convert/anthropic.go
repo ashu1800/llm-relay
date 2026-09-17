@@ -43,6 +43,9 @@ func AnthropicRequestToOpenAIChat(body []byte) ([]byte, error) {
 	if v, ok := src["tool_choice"]; ok {
 		out["tool_choice"] = anthropicToolChoiceToOpenAI(v)
 	}
+	// Anthropic 特有顶层参数（thinking/top_k/metadata/service_tier）进私有字段暂存，
+	// 出站目标还是 Anthropic 时能原样恢复（见 takeAnthropicParams）
+	carryAnthropicParams(out, src)
 
 	var messages []any
 	// 用 isEmptyContent 而不是 sys != nil：没有 system 时上面返回的是空字符串，
@@ -209,6 +212,41 @@ func anthropicSystemToOpenAI(v any) any {
 // stripCacheControl 清掉，因为各家对未知字段的态度不一，严格校验的会直接 400。
 const cacheControlKey = "cache_control"
 
+// anthropicParamsKey 是通用语里承载 Anthropic 特有**顶层参数**的附加字段，
+// 与 cache_control 同一思路（见上），但装的是请求级配置而非块级断点：
+// thinking（扩展思考及其 budget_tokens）、top_k、metadata、service_tier。
+//
+// 这些参数在 OpenAI 通用语里没有对应物，白名单不抄就静默失效 ——
+// Claude 客户端开了 extended thinking，中继 Anthropic→Anthropic 链路上
+// 模型却不输出思维链，行为变化无任何信号，计费口径也跟着变。
+// 只在出站目标也是 Anthropic 时被读回（takeAnthropicParams），
+// 发给其它上游前随 stripCacheControl 一起清掉。
+const anthropicParamsKey = "anthropic_params"
+
+// carryAnthropicParams 把 Anthropic 特有顶层参数抄进通用语的私有字段。
+func carryAnthropicParams(dst, src map[string]any) {
+	if dst == nil || src == nil {
+		return
+	}
+	extra := map[string]any{}
+	for _, k := range []string{"thinking", "top_k", "metadata", "service_tier"} {
+		if v, ok := src[k]; ok {
+			extra[k] = v
+		}
+	}
+	if len(extra) > 0 {
+		dst[anthropicParamsKey] = extra
+	}
+}
+
+// takeAnthropicParams 从通用语里取出暂存的 Anthropic 特有参数（供出站 Anthropic 使用）。
+func takeAnthropicParams(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	return asMap(src[anthropicParamsKey])
+}
+
 // carryCacheControl 把源块上的 cache_control 抄到目标块上。
 func carryCacheControl(dst, src map[string]any) {
 	if dst == nil || src == nil {
@@ -227,14 +265,16 @@ func takeCacheControl(blk map[string]any) map[string]any {
 	return asMap(blk[cacheControlKey])
 }
 
-// stripCacheControl 递归移除通用语里的 cache_control 附加字段。
+// stripCacheControl 递归移除通用语里的私有附加字段（cache_control 与
+// anthropic_params）。
 //
-// 用于出站目标是「非 Anthropic」协议的场景：那些上游不认识这个字段，
+// 用于出站目标是「非 Anthropic」协议的场景：那些上游不认识这些字段，
 // 严格校验的实现会直接 400。与其赌它被忽略，不如主动清掉。
 func stripCacheControl(v any) any {
 	switch t := v.(type) {
 	case map[string]any:
 		delete(t, cacheControlKey)
+		delete(t, anthropicParamsKey)
 		for _, sub := range t {
 			stripCacheControl(sub)
 		}
