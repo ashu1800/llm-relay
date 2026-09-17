@@ -8,7 +8,15 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/components/MainLayout.vue'),
     children: [
       { path: '', redirect: '/console/dashboard' },
-      { path: 'dashboard', name: 'dashboard', component: () => import('@/views/DashboardView.vue'), meta: { title: '数据看板' } },
+      // meta.fill：这一页要「填满一屏」—— 内容区因此拿到确定的高度，
+      // 页面里那条「面板吃掉剩余高度」的弹性链才收得住，右侧容器底边才能
+      // 与左侧栏最后一行落在同一条水平线上（做法与理由见 MainLayout 的 .content-inner.is-fill）
+      {
+        path: 'dashboard',
+        name: 'dashboard',
+        component: () => import('@/views/DashboardView.vue'),
+        meta: { title: '数据看板', fill: true }
+      },
       // 请求日志已并入数据看板（2026-09-16）。旧地址保留为跳转而不是删掉：
       // 排障时发出去的链接、浏览器书签、还有几个脚本都还指着 /console/logs，
       // 直接 404（落到 catch-all）会把 query 一起丢掉 ——

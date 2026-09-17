@@ -154,7 +154,9 @@ onUnmounted(() => {
         </aside>
 
         <section class="console-content">
-          <div class="content-inner">
+          <!-- is-fill 由路由的 meta.fill 给（目前只有数据看板）：这一页要填满一屏，
+               内容区必须有确定高度，页面里那条弹性链才有「剩余多少」可分 -->
+          <div class="content-inner" :class="{ 'is-fill': route.meta.fill }">
             <a-alert
               v-if="usingDefaultSecret"
               type="warning"
@@ -399,4 +401,24 @@ onUnmounted(() => {
 }
 
 .content-inner { padding: var(--gap); }
+
+/* 「填满一屏」的页面（路由 meta.fill，目前只有数据看板）：内容区变成一个
+   **高度确定**的纵向弹性容器。
+
+   为什么非要确定高度：看板的日志列表要吃掉「视口减掉上方工具栏与卡片」剩下的
+   高度，而「剩下多少」只有在父级高度确定时才算得出来 —— 父级若是 auto，
+   flex 只能按内容分配，那块面板的高度又回到「由行数决定」，底边就跟着行数跑。
+
+   为什么只给这一页加、其余页面保持原样：其余页面按内容自然增高（比视口高的
+   如系统设置还要能整页滚），而 height: 100% 会让这类页面滚到底时少 8px 下留白 ——
+   下内边距落在固定高度的盒子里，不再计入可滚范围（实测 scrollHeight 少 8px）。
+
+   box-sizing 显式写出来：这条规则的算术（内容盒 = 视口 - 上下内边距）依赖它，
+   不要靠 antd reset.css 里那条全局声明。 */
+.content-inner.is-fill {
+  box-sizing: border-box;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
 </style>
