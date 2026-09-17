@@ -30,6 +30,8 @@ import PanelCard from '@/components/PanelCard.vue'
 import GroupTag from '@/components/GroupTag.vue'
 import ChannelIcon from '@/components/ChannelIcon.vue'
 import { onLive } from '@/composables/useLive'
+import NewLogEffect, { type FxTarget } from '@/components/NewLogEffect.vue'
+import { useLogFxStore } from '@/stores/logFx'
 import { symbolOf } from '@/utils/money'
 import { writeClipboard } from '@/utils/clipboard'
 import { fmtTime, pad2 } from '@/utils/fmtTime'
@@ -97,7 +99,7 @@ const FRESH_MS = 2400
 const freshTimers: number[] = []
 
 /**
- * 正在飞的亮带。
+ * 正在做入场动画的那些行的位置（三档动效共用这一份）。
  *
  * 为什么是「独立的一层」而不是画在 tr 的 ::after 上（第一版就是那么写的，
  * 在 1440 视口下一切正常，直到有人在更宽的窗口里看见右侧空出一片）：
@@ -110,10 +112,11 @@ const freshTimers: number[] = []
  * 照样塌 —— 起因就是那个伪元素。挂到单元格上也不行：固定列是 sticky，
  * 它里面的绝对定位伪元素会被放到行外（实测盒子 x 148→1482，而行是 241→1575）。
  *
- * 所以改成在表格外面套一层自己控制的容器，量出新行的位置再放一条绝对定位的
- * 亮带：表格内部 DOM 一个字节都不动，列宽、固定列、滚动都不受影响。
+ * 所以改成在表格外面套一层自己控制的容器，量出新行的位置再交给
+ * components/NewLogEffect.vue 去画：表格内部 DOM 一个字节都不动，
+ * 列宽、固定列、滚动都不受影响。
  */
-const beams = ref<{ key: number; top: number; left: number; width: number }[]>([])
+const fxTargets = ref<FxTarget[]>([])
 const tableWrap = ref<HTMLElement | null>(null)
 
 /** 亮带厚度：分割线是单元格的 1px 下边框（separate 布局下算在行高内），盖住它再往上压 2px */
@@ -124,7 +127,7 @@ function repositionBeams() {
   const wrap = tableWrap.value
   if (!wrap) return
   const base = wrap.getBoundingClientRect()
-  beams.value = beams.value.map((b) => {
+  fxTargets.value = fxTargets.value.map((b) => {
     const tr = wrap.querySelector(`tr[data-row-key="${b.key}"]`)
     if (!tr) return b
     const r = tr.getBoundingClientRect()
@@ -149,7 +152,7 @@ function detachBeamWatch() {
   window.removeEventListener('resize', repositionBeams)
 }
 watch(
-  beams,
+  fxTargets,
   (v) => {
     if (v.length) attachBeamWatch()
     else detachBeamWatch()
@@ -157,8 +160,18 @@ watch(
   { deep: true },
 )
 
+// ---- 新日志入场动效：档位来自系统设置，立刻生效（store 是同一个实例）----
+//
+// 三档的机制与各自踩过的坑都写在 components/NewLogEffect.vue 里，这里只管一件事：
+// 把量好的行位置传下去。
+//
+// 动效档位变了不需要重取数据，也不需要重挂表格：换的只是特效层怎么画（靠
+// .log-table 上的 data-fx，见模板）。飞行中的位置数据不清 —— 切档时那条亮带/光晕
+// 会按新档的样式接着画完，这比"切一下就全没了"更自然。
+const logFx = useLogFxStore()
+
 /**
- * 标记这些行「刚新增」，让它们扫一次光。
+ * 标记这些行「刚新增」，让它们做一次入场动画。
  *
  * 只有实时推送触发的两种更新会调它（见 onLive 与 load 的 silent 分支）：
  * 筛选变化、翻页、点刷新、重试都是用户主动重取，整屏都在换，闪一排彩虹没有信息量；
@@ -178,7 +191,8 @@ function markFresh(ids: number[]) {
   const fresh = ids.filter((id) => !freshIds.value.has(id))
   if (!fresh.length) return
   for (const id of fresh) freshIds.value.add(id)
-  // 亮带要等这一行渲染出来才量得到位置
+  // 效果层要等这一行渲染出来才量得到位置（扫光的亮带与光晕的光带用的是
+  // 同一次测量结果）
   nextTick(() => {
     const wrap = tableWrap.value
     if (!wrap) return
@@ -187,14 +201,14 @@ function markFresh(ids: number[]) {
       const tr = wrap.querySelector(`tr[data-row-key="${id}"]`)
       if (!tr) continue
       const r = tr.getBoundingClientRect()
-      beams.value.push({ key: id, top: r.bottom - base.top - BEAM_H, left: r.left - base.left, width: r.width })
+      fxTargets.value.push({ key: id, top: r.bottom - base.top - BEAM_H, left: r.left - base.left, width: r.width })
     }
   })
   freshTimers.push(
     window.setTimeout(() => {
       const gone = new Set(fresh)
       for (const id of fresh) freshIds.value.delete(id)
-      beams.value = beams.value.filter((b) => !gone.has(b.key))
+      fxTargets.value = fxTargets.value.filter((b) => !gone.has(b.key))
     }, FRESH_MS),
   )
 }
@@ -331,7 +345,7 @@ async function load(opts: { silent?: boolean } = {}) {
   // silent 那条路不能清：那正是要标出新行的路径。
   if (!silent) {
     freshIds.value.clear()
-    beams.value = []
+    fxTargets.value = []
   }
   // silent 是实时推送独有的路径（scheduleSilentReload 是唯一调用点），
   // 所以「多出来的行」必然是刚入库的那几条，不会是筛选切换带来的整屏替换
@@ -584,11 +598,11 @@ function scheduleSilentReload() {
 
 onUnmounted(() => {
   if (liveTimer !== null) window.clearTimeout(liveTimer)
-  // 扫光的定时器也要清：它们回调里会写 freshIds，卸载后再写是在动一个
-  // 已经不在屏幕上的组件的状态
+  // 入场动效的定时器也要清：它们回调里会写 freshIds，
+  // 卸载后再写是在动一个已经不在屏幕上的组件的状态
   for (const t of freshTimers) window.clearTimeout(t)
   freshTimers.length = 0
-  beams.value = []
+  fxTargets.value = []
   detachBeamWatch()
 })
 
@@ -605,7 +619,7 @@ onLive('logs', (items: RequestLog[]) => {
   if (!fresh.length) return
   rows.value = [...fresh.reverse(), ...rows.value].slice(0, pageSize.value)
   total.value += fresh.length
-  // 刚插到最上面的这几行扫一次光（用户正在看第一页，新行就在眼前）
+  // 刚插到最上面的这几行做一次入场动画（用户正在看第一页，新行就在眼前）
   markFresh(fresh.map((r) => r.id))
 })
 
@@ -641,15 +655,12 @@ onMounted(() => {
            改动列宽时这张表的总宽要一起看，scripts/check-table-widths.mjs
            会盯着声明值与各列宽度之和是否一致 -->
       <!-- 外面这层只为扫光存在：亮带是这一层里的绝对定位元素，表格内部
-           一个字节都不动（原因见脚本里 beams 的注释 —— 往 tr 里加伪元素会让
-           列宽塌回声明宽度）。overflow: hidden 是兜底：亮带永远不该撑出滚动条。 -->
-      <div ref="tableWrap" class="log-table">
-        <span
-          v-for="b in beams"
-          :key="b.key"
-          class="log-sweep"
-          :style="{ top: b.top + 'px', left: b.left + 'px', width: b.width + 'px' }"
-        />
+           一个字节都不动（原因见脚本里 fxTargets 的注释 —— 往 tr 里加伪元素会让
+           列宽塌回声明宽度）。overflow: hidden 是兜底：亮带永远不该撑出滚动条。
+           data-fx 是当前档位：动效层里那几条纯 CSS 的规则靠 .log-table[data-fx='x']
+           选中 tr.is-new 的单元格（自上滑入与光晕脉动两档），换档时不用重挂表格。 -->
+      <div ref="tableWrap" class="log-table" :data-fx="logFx.fx">
+        <NewLogEffect :mode="logFx.fx" :targets="fxTargets" />
         <a-table
           :data-source="rows"
           :loading="loading"
@@ -1057,38 +1068,24 @@ onMounted(() => {
   color: var(--text-red);
 }
 
-/* ---- 新日志的扫光：沿这一行的底边从左扫过一道彩虹 ----
-   （与下一行之间的那条分割线上，约 2 秒后从右端消失）
+/* ---- 入场动效所在的那一层 ----
+   （效果本身的样式全部搬去了 components/NewLogEffect.vue，这里只留这一层的
+   定位与弹性语义 —— 它是动效层的坐标原点，也是「表头与分页之外的剩余高度」的
+   传递起点。）
 
-   亮带是 .log-table 里的一条绝对定位元素，位置由 JS 量出来（见脚本里 beams 的注释）。
-   为什么不画在 tr 的 ::after 上（第一版的做法，也是踩过的坑）：
+   为什么效果不画在 tr 的 ::after 上（第一版的做法，也是踩过的坑），
+   以及三档各自怎么实现，见 NewLogEffect.vue 顶部那段；位置测量见脚本里
+   fxTargets 的注释。这一层要说的只有三件事：
 
-   1. **tr 里不能出现非单元格子元素**。一旦有（::after 就算一个），Chrome 在
-      `table-layout: fixed` 下就不再把它多出来的宽度分给各列 —— 整张表会从
-      「铺满容器」塌回声明宽度，而表头是另一张表、照旧铺满，于是右侧空出一条。
-      实测（1600 视口）：每格 200/200/167/193/155/116/82/129/93 → 155/155/130/…
-      行右边界 1575 → 1277，整整持续到动画结束才恢复。
-      隔离验证过：去掉伪元素、只留 position: relative，列宽全程正常；
-      只把 position 改成 static、留着伪元素，照样塌 —— 起因就是那个伪元素。
-      所以 is-new 这个类**不带任何样式**，只是「这一行正在做入场动画」的标记。
+   1. 它是 position: relative + overflow: hidden：absolute 的动效层以它为原点，
+      超出容器的部分被裁掉，不会撑出滚动条。
 
-   2. 挂到单元格上同样不行：固定列（请求时间 / 操作）是 position: sticky，
-      它里面的绝对定位伪元素会落到意想不到的位置（实测 left:0 的盒子跑到行的
-      右边界之外：盒 x 1575→2909；换成右对齐的写法又落在 148→1482，行是 241→1575）。
+   2. 它**不会**影响固定列的吸附：那些 sticky 单元格最近的滚动祖先是
+      .ant-table-body（它自己有 overflow: auto），比这一层更近。
 
-   3. 动的是 background-position-x，不是元素的 transform —— 盒子始终等于整行，
-      超出容器的部分由这一层的 overflow: hidden 裁掉，不会撑出滚动条（第一版
-      在 .ant-table-body 里动背景位移时，实测动画全程 scrollWidth === clientWidth）。
-
-   4. 这一层是 position: relative + overflow: hidden，但**不会**影响固定列的吸附：
-      那些 sticky 单元格最近的滚动祖先是 .ant-table-body（它自己有 overflow: auto），
-      比这一层更近。
-
-   彩虹是一次**有意的用色例外**：项目其余部分严格走陶土主色系，而这里的效果
-   是站主指定的「彩虹色」。色相取 antd 色板，两端 alpha 0 —— 进出都是渐隐，
-   不是一块硬边色块滑过去。减弱动态效果的处理不用在这里重复写：
-   theme.css 末尾那条 prefers-reduced-motion 会把所有 animation-duration
-   压到 0.01ms，本动画随之变成瞬时（终态在 150%，本来就不可见）。 */
+   3. is-new 这个类**不带任何样式**，只是「这一行正在做入场动画」的标记 ——
+      效果样式挂在效果层（扫光 / 光晕带）或单元格上（滑入 / 呼吸底），
+      挂回这个类就等于把伪元素塞回 tr。 */
 .log-table {
   position: relative;
   overflow: hidden;
@@ -1134,46 +1131,5 @@ onMounted(() => {
    一块空面板的最上面。DataState 在别处仍然是普通块，不受影响。 */
 .panel :deep(.ds-panel) {
   flex: 1 1 auto;
-}
-
-.log-sweep {
-  position: absolute;
-  /* 3px：分割线本身是单元格的 1px 下边框（border-collapse 为 separate 时它算在
-     行高内），亮带盖住它再往上压 2px，看起来才是一道光扫过去而不是一条细线 */
-  height: 3px;
-  /* 压过固定列的 sticky 单元格（它们是 position: sticky + 不透明底、z-index: 2） */
-  z-index: 3;
-  pointer-events: none;
-  background-image: linear-gradient(
-    90deg,
-    rgba(255, 77, 79, 0) 0%,
-    rgba(255, 77, 79, 0.95) 12%,
-    #ffa940 28%,
-    #ffec3d 42%,
-    #52c41a 56%,
-    #36cfc9 68%,
-    #2f54eb 82%,
-    rgba(114, 46, 209, 0.95) 92%,
-    rgba(114, 46, 209, 0) 100%
-  );
-  background-repeat: no-repeat;
-  /* 带子占整行的 30%：位移的百分比是相对 (行宽 - 带宽) 算的，
-     所以 -50% / 150% 对应左缘落在 -35% / 105% 处 —— 两端都在行外，
-     起手看不见、收尾也在行外消失 */
-  background-size: 30% 100%;
-  background-position-x: -50%;
-  /* 匀速，并且**不要**换成 --ease-expo：那个曲线 0.3 秒就走完了全程，
-     剩下的时间停在右端不动，观感是「闪一下」而不是「扫过 2 秒」。
-     这里的时长本身就是需求（约 2s），不是「快点响应」那类过渡。 */
-  animation: row-sweep 2s linear forwards;
-}
-
-@keyframes row-sweep {
-  from {
-    background-position-x: -50%;
-  }
-  to {
-    background-position-x: 150%;
-  }
 }
 </style>

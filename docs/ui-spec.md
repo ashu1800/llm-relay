@@ -286,6 +286,38 @@ main-layout            flex, bg #f8f5ee, 全屏
       （`prefers-reduced-motion: reduce` 下把所有 `animation-duration` 压到
       `0.01ms`）会让它变成瞬时，终态在 150%（本来就不可见），功能不受影响。
 
+11b. **入场动效改为三档可选**（2026-09-17 站主提）：第 11 条那道彩虹扫光之外，
+    再加两档，在「系统设置 → 界面动效」里选，选中即刻生效、不用刷新。
+    - 三档：`sweep` 彩虹扫光（**默认**，即第 11 条，行为一个字节没改）、
+      `slide` 自上滑入（新行的各单元格 `translateY(-8px)` + 淡入，0.45s）、
+      `glow` 光晕脉动（整行泛起一层主色底 + 行底一道光带，1.6s 呼吸两下）。
+      刻意没有「完全关闭」：系统层面的 `prefers-reduced-motion` 才是统一静音路径，
+      再多一个只对一块区域生效的开关只会让人以为"关了但还在动"。
+    - 偏好存在浏览器本地（`localStorage` 的 `llm-relay-log-fx`），与「运行参数」无关、
+      不进配置备份 —— 它是**这台机器这个浏览器**的观感偏好，不是服务端行为。
+      读不到 / 存了不认识的值一律回落默认档（容错理由见 `utils/effects.ts`）。
+    - 档位只有一个真源（`utils/effects.ts` 的 `LOG_FX_OPTIONS`），
+      设置页、面板的 `data-fx`、效果层的 CSS 选择器、设置页的迷你预览四处都对它，
+      `check-contracts.mjs` 钉住四处集合完全相等：id 写错不会报错，只会"选了没反应"。
+    - 实体在 `components/NewLogEffect.vue`，三档共用同一个位置数据（面板量好的
+      `top/left/width`），换档不重取数据、不重挂表格，只换这一层怎么画。
+    - `slide` / `glow` 那两档动的是**单元格**的 `transform` 与 `background-image`。
+      它们安全的原因与扫光的坑不冲突：那一次的问题是「`tr` 里多了一个非单元格子元素」，
+      改变了 `table-layout: fixed` 的列宽分配；而 `transform` 与 `background-image`
+      都是绘制期属性、不参与布局，也不会改变固定列（`position: sticky`）的吸附基准。
+      这条结论不是推理出来的，是 `verify-log-effects.mjs` 的 layout 模式实测的：
+      三档下**表头高 / 表体高 / 首行各格宽 / 行右边界 / 表头右边界 / 行高 / 页面横溢出 /
+      固定列位置**全部逐项相等。
+    - **踩过的坑（写法级）**：`slide` / `glow` 的选择器必须整条包进 `:global(...)`，
+      不能写成 `:global(.log-table[data-fx='slide']) :deep(tr.is-new > td)` ——
+      scoped 编译器对这种组合会**丢掉后半截**，实测编译产物只剩
+      `.log-table[data-fx="slide"]`，规则落到 `tr` 上，而 `transform` 挂在 `tr` 上
+      基本看不出效果：整档动画静默失效、不报任何错（回归脚本先发现了它）。
+      `check-contracts.mjs` 现在禁止那种写法（判定前先剥注释，
+      免得注释里的反例自己把自己判违规）。
+    - 回归脚本：`.shots/verify-log-effects.mjs`（`layout|sweep|slide|glow|reduced|all`），
+      自造探针行（`trace_id` 前缀 `logfx-probe`，跑完删掉）走真实推送链路。
+
 12. 看板「左侧栏与右侧容器底边对齐」（2026-09-17 站主反馈「主页左侧侧边栏和右侧的
     组件容器底部显示不一致，不在一条水平线上」）：
     - 现象：右侧日志面板的底边比左侧栏最后一行高 7.6px，且与视口高度无关

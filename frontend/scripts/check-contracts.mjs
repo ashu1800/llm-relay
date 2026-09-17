@@ -24,6 +24,21 @@ function check(name, cond, detail) {
   }
 }
 
+/**
+ * 去掉注释后的源码。
+ *
+ * 少数几条断言是"禁止出现某种写法"（比如禁止 `:global(A) :deep(B)`）—— 而这类坑的
+ * 说明恰恰会写在旁边的注释里，把那段写法当反例抄一遍。对整份文件做正则时，
+ * 注释里的反例就会被判成违规（实测踩过：注解自己把断言坑了）。
+ * 所以凡是否定式断言，都先过这一道。
+ */
+function stripComments(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+    .replace(/<!--[\s\S]*?-->/g, '')
+}
+
 // 同时收集 .vue 与 .ts：CSS 变量的定义有一部分在 utils/*Style.ts 里
 // （通过 :style 绑定的对象字面量），只扫 .vue 会把它们误判成「未定义」。
 function walk(dir, out = []) {
@@ -180,34 +195,121 @@ if (primaryMatch) {
 }
 
 console.log('')
-console.log('=== 新日志扫光契约 ===')
+console.log('=== 新日志入场动效契约 ===')
 {
-  // 这条效果只在「实时推送插进来一行」时触发：绑定被删掉、类名被改名、
-  // 关键帧被删，都不会报错也不会失败，只是那一行不再有动静 —— 没人会收到通知。
-  // 所以静态盯住这几件事。
+  // 这套效果只在「实时推送插进来一行」时触发：绑定被删掉、类名被改名、
+  // 关键帧被删、档位被改名，都不会报错也不会失败，只是那一行不再有动静 ——
+  // 没人会收到通知。所以静态盯住这几件事。
+  //
+  // 2026-09-17：从「一道彩虹扫光」扩成「三档可切换」，
+  // 实体（效果层）从 RequestLogPanel.vue 搬去了 components/NewLogEffect.vue，
+  // 所以下面这些检查也分了两个文件看：面板负责触发与量位置，效果层负责画。
+  //
+  // 同日站主原本还想要一档「卡通猫趴在表头上扒拉」，做到一半决定不做，
+  // 相关组件（NappingCat / useDraggableCat）已整体删除 —— 要恢复看 git 历史，
+  // 那套代码当时的契约检查也一并在历史里。
   const panel = readFileSync(join(SRC, 'components/RequestLogPanel.vue'), 'utf8')
+  const fxComp = readFileSync(join(SRC, 'components/NewLogEffect.vue'), 'utf8')
+  const preview = readFileSync(join(SRC, 'components/LogFxPreview.vue'), 'utf8')
+  const fxUtil = readFileSync(join(SRC, 'utils/effects.ts'), 'utf8')
+  const fxStore = readFileSync(join(SRC, 'stores/logFx.ts'), 'utf8')
+
   check('请求日志表格绑定了 row-class-name', /<a-table[\s\S]*?:row-class-name="rowClassName"/.test(panel))
   check('行 class 里带 is-new', /['"]is-new['"]/.test(panel))
-  check('样式里定义了 @keyframes row-sweep', /@keyframes\s+row-sweep\b/.test(panel))
-  check('扫光是表格外那一层里的 .log-sweep', /class="log-table"/.test(panel) && /\.log-sweep\s*\{/.test(panel))
+  check('样式里定义了 @keyframes row-sweep', /@keyframes\s+row-sweep\b/.test(fxComp))
+  check('扫光是表格外那一层里的 .log-sweep', /class="log-table"/.test(panel) && /\.log-sweep\s*\{/.test(fxComp))
   check(
     '扫光带的位置由 JS 量出来（top/left/width 都绑上了）',
-    /:style="\{[^}]*b\.top[^}]*b\.left[^}]*b\.width/.test(panel),
+    /:style="\{[^}]*b\.top[^}]*b\.left[^}]*b\.width/.test(fxComp) &&
+      /fxTargets\.value\.push\(\{ key: id,[^}]*top:[^}]*left:[^}]*width:/.test(panel),
+    '效果层画位置、面板量位置，两边缺一处亮带就会画在原点',
   )
   // 回归闸：第一版把扫光画在 tr 的 ::after 上，结果在宽窗口下整张表的列宽会塌回
   // 声明宽度、右侧空出一条（tr 里出现非单元格子元素后，Chrome 不再按 fixed 布局
   // 分配多余宽度）。这个坑很容易「顺手」再踩一次 —— 比如为了少写几行 JS 又把
-  // 伪元素挂回 tr —— 所以这里直接禁掉那种写法。
-  check(
-    '没有把样式挂回 tr.is-new（否则列宽会塌、右侧空一条）',
-    !/:deep\(\.ant-table-tbody\s*>\s*tr\.is-new\)/.test(panel) && !/tr\.is-new\s*::after/.test(panel),
-    '往 tr 里加伪元素会让 table-layout: fixed 不再分配多余宽度，整表塌回声明宽度',
-  )
+  // 伪元素挂回 tr —— 所以这里直接禁掉那种写法。三档都走同一层，检查覆盖新组件。
+  for (const [name, src] of [
+    ['RequestLogPanel', panel],
+    ['NewLogEffect', fxComp],
+  ]) {
+    check(
+      `${name} 没有把样式挂回 tr.is-new（否则列宽会塌、右侧空一条）`,
+      !/:deep\(\.ant-table-tbody\s*>\s*tr\.is-new\)/.test(src) &&
+        !/tr\.is-new\s*::after/.test(src) &&
+        !/tr\.is-new\s*::before/.test(src),
+      '往 tr 里加伪元素会让 table-layout: fixed 不再分配多余宽度，整表塌回声明宽度',
+    )
+  }
   // 动 background-position 而不是元素 transform：后者会撑大容器的可滚动溢出区
-  const sweep = panel.slice(panel.indexOf('@keyframes row-sweep'))
-  check('扫光动的是 background-position-x', /background-position-x:\s*-50%/.test(panel) && /background-position-x:\s*150%/.test(sweep.slice(0, 200)))
-  check('扫光那一层裁掉溢出，亮带不会撑出滚动条', /\.log-table\s*\{[\s\S]{0,120}?overflow:\s*hidden/.test(panel))
+  const sweep = fxComp.slice(fxComp.indexOf('@keyframes row-sweep'))
+  check('扫光动的是 background-position-x', /background-position-x:\s*-50%/.test(fxComp) && /background-position-x:\s*150%/.test(sweep.slice(0, 200)))
+  check('扫光那一层裁掉溢出，亮带不会撑出滚动条', /\.log-table\s*\{[\s\S]{0,220}?overflow:\s*hidden/.test(panel))
+
+  // ---- 档位一致性：真源是 utils/effects.ts 的 LOG_FX_OPTIONS ----
+  //
+  // 为什么值得钉：档位 id 是一串普通字符串，散在「注册表 / 面板的 data-fx /
+  // 效果层的 CSS 选择器 / 设置页的预览」四处。任何一处写错都**不会报错** ——
+  // 只是那一档选上去以后什么都不动，或者在设置页上是一张空白预览。
+  // 三处集合必须与真源完全相等（不是"包含"：多出来的 id 同样说明有地方漂了）。
+  const declared = [...fxUtil.matchAll(/^\s*id:\s*'([\w-]+)',/gm)].map((m) => m[1]).sort()
+  check('从 effects.ts 读到了三档 id', declared.length === 3, `实际读到 ${declared.join(', ')}`)
+
+  const dataFx = [...panel.matchAll(/:data-fx="([\w.]+)"/g)].map((m) => m[1])
+  check('面板把当前档位写到 data-fx 上', dataFx.length === 1 && dataFx[0] === 'logFx.fx', `实际: ${dataFx.join(', ')}`)
+  const selectors = [...fxComp.matchAll(/\.log-table\[data-fx='([\w-]+)'\]/g)].map((m) => m[1]).sort()
+  check(
+    '效果层里每一条 data-fx 选择器都是已声明的档位',
+    selectors.every((s) => declared.includes(s)),
+    `选择器 ${selectors.join(', ')} vs 已声明 ${declared.join(', ')}`,
+  )
+  check('设置页的档位来自 store（而不是自己抄一份）', /logFx\.options/.test(readFileSync(join(SRC, 'views/SettingsView.vue'), 'utf8')) && /LOG_FX_OPTIONS/.test(fxStore))
+  // 预览里认档位有两种写法：v-if 直接比（sweep / glow 那两档各有一块自己的图形），
+  // 以及舞台根上的 :data-fx（slide 那一档没有单独的图形，只靠它选中行）。
+  // 两种都要收进来，否则「某档预览是空白的」这条闸就漏了。
+  const previewIds = [
+    ...preview.matchAll(/fx === '([\w-]+)'/g),
+    ...preview.matchAll(/data-fx="fx"/g),
+    ...preview.matchAll(/data-fx='([\w-]+)'/g),
+    ...preview.matchAll(/\[data-fx='([\w-]+)'\]/g),
+  ]
+    .map((m) => m[1])
+    .filter(Boolean)
+    .sort()
+  check(
+    '设置页三张卡片的预览都画得出来',
+    declared.every((d) => previewIds.includes(d)),
+    `预览里出现的档位: ${[...new Set(previewIds)].join(', ')}`,
+  )
+
+  // ---- 硬约束：动效层不许吃掉表格的点击 ----
+  //
+  // 这一层铺在表格上面，只要有一处漏掉 pointer-events: none，表头或某一行就点不动了。
+  // （曾经这一层里还有一块能吃事件的"猫道"，猫删掉之后整层彻底不参与命中测试，
+  // 所以现在只钉这一条 —— 它是这一层唯一可能咬人的地方。）
+  check('效果层根节点不吃事件', /\.fx-layer\s*\{[\s\S]{0,160}?pointer-events:\s*none/.test(fxComp))
+
+  // ---- 行内动画的选择器写法 ----
+  //
+  // `:global(A) :deep(B)` 这种组合会被 scoped 编译器**丢掉后半截**：实测编译产物
+  // 只剩 `.log-table[data-fx="slide"]`，规则落到 tr 上 —— 而 transform /
+  // background-image 挂在 tr 上基本看不出效果，两档动画静默失效、不报任何错。
+  // 正确写法是把整条选择器包进 :global(...)。这条闸钉的就是那个写法。
+  //
+  // 只看真正生效的那部分（去掉注释）：这段坑的说明本身就写在旁边的注释里，
+  // 连注释一起正则会把示例也判成违规（第一版就是这样误报的）。
+  const fxCode = stripComments(fxComp)
+  check(
+    '行内动画的选择器整条包在 :global(...) 里（:global + :deep 组合会丢后半截）',
+    !/:global\([^)]*\)\s*:deep\(/.test(fxCode),
+    ':global(A) :deep(B) 编译后只剩 A，规则会落到 tr 而不是 td 上',
+  )
+  check(
+    '滑入 / 光晕两档的选择器都落到 tr.is-new > td 上',
+    /:global\(\.log-table\[data-fx='slide'\]\s+tr\.is-new\s*>\s*td\)/.test(fxCode) &&
+      /:global\(\.log-table\[data-fx='glow'\]\s+tr\.is-new\s*>\s*td\)/.test(fxCode),
+  )
 }
+
 
 console.log('')
 console.log('=== 多排数值的列左缘对齐契约 ===')

@@ -7,7 +7,14 @@ import {
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
+import LogFxPreview from '@/components/LogFxPreview.vue'
+import { useLogFxStore } from '@/stores/logFx'
 import { fmtTime } from '@/utils/fmtTime'
+
+// 请求日志的入场动效：这一个不是只读的运行参数，而是可以在这里改的浏览器本地偏好
+// （存 localStorage，与主题、每页条数同一口径）。档位表与持久化都在 utils/effects.ts，
+// store 是看板那一块与这一页共用的同一个实例，所以在这里点一下，回看板立刻生效。
+const logFx = useLogFxStore()
 
 const loading = ref(false)
 // 这一页加载的是「多项设置」而不是列表，没有 length 可数，
@@ -214,6 +221,48 @@ onMounted(load)
     </section>
 
     <section class="panel">
+      <div class="panel-title">界面动效</div>
+      <div class="note">
+        请求日志列表里<strong>实时新增</strong>一条记录时播的入场动画。选中即刻生效，
+        回数据看板就能看到；手动刷新、翻页、改筛选时都不会播 —— 那些操作整屏都在换，
+        闪一下没有信息量，而「凭空多出来一行」才需要提示。
+        没有「完全关闭」这一档：系统开了「减弱动态效果」（各系统的无障碍开关）时，
+        全站动画会自动压到几乎瞬时，那才是统一的静音路径。
+      </div>
+      <!-- 原生 radio 而不是按钮组：它天生可键盘操作、读屏会念「已选中」。
+           卡片本身是 label，点哪儿都能选中（含那块迷你预览）。 -->
+      <div class="fx-grid" role="radiogroup" aria-label="请求日志新增记录的入场动效">
+        <label
+          v-for="opt in logFx.options"
+          :key="opt.id"
+          class="fx-item"
+          :class="{ 'is-active': logFx.fx === opt.id }"
+        >
+          <input
+            class="fx-radio"
+            type="radio"
+            name="log-fx"
+            :value="opt.id"
+            :checked="logFx.fx === opt.id"
+            @change="logFx.setFx(opt.id)"
+          />
+          <LogFxPreview :fx="opt.id" />
+          <span class="fx-name">
+            {{ opt.name }}
+            <span v-if="opt.id === 'sweep'" class="fx-default">默认</span>
+            <span v-if="logFx.fx === opt.id" class="fx-check" aria-hidden="true">✓</span>
+          </span>
+          <span class="fx-desc">{{ opt.desc }}</span>
+        </label>
+      </div>
+      <div class="span-line">
+        这是浏览器本地偏好（存在这台机器的这个浏览器里，与上面的运行参数无关，
+        也不进配置备份）；换机器或换浏览器需要重新选一次。
+        当前档位：<span class="mono">{{ logFx.options.find((o) => o.id === logFx.fx)?.name }}</span>
+      </div>
+    </section>
+
+    <section class="panel">
       <div class="panel-title">运行参数</div>
       <a-table
         :data-source="runtimeRows"
@@ -335,7 +384,63 @@ onMounted(load)
 /* 数值是正文，用 ink 版；--color-primary 在 --color-bg 上只有 3.05:1 */
 .count-value { font-size: 20px; font-weight: 600; color: var(--text-primary-ink); }
 .count-label { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
-.span-line { margin-top: 12px; font-size: 12px; color: var(--color-text-secondary); }
+.span-line { margin-top: 12px; font-size: 12px; color: var(--color-text-secondary); line-height: 1.9; }
+
+/* 界面动效那三张卡：一格一张，整格可点（label 包着 radio）。
+   选中的那一张用主色描边 + 主色浅底 —— 与 StatCard 的 tone 底同一手法
+   （color-mix 派生，不写死色值，深色主题自动换档）。 */
+.fx-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+@media (max-width: 900px) {
+  .fx-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 600px) {
+  .fx-grid { grid-template-columns: 1fr; }
+}
+.fx-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg);
+  cursor: var(--cursor-hand);
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+.fx-item:hover { border-color: color-mix(in srgb, var(--color-primary) 45%, var(--color-border)); }
+.fx-item.is-active {
+  border-color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 8%, var(--color-fg));
+}
+/* radio 本身藏起来但不能 display:none：那样键盘就聚焦不到它了。
+   用 1px + opacity 0 保留可聚焦、可被读屏读到。 */
+.fx-radio {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+/* 键盘焦点必须看得见（项目一贯口径）：焦点在藏起来的 radio 上，
+   把焦点环画到卡片上 */
+.fx-item:focus-within {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+.fx-name { font-size: 13px; font-weight: 600; color: var(--text-primary-ink); display: flex; align-items: center; gap: 6px; }
+.fx-item:not(.is-active) .fx-name { color: var(--color-text); }
+/* 「默认」小标：告诉用户这一档是没人选过时的行为，换档之后想改回来是哪一个 */
+.fx-default {
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 4px;
+  color: var(--color-text-secondary);
+  background: var(--color-border);
+}
+.fx-check { color: var(--color-primary); }
+.fx-desc { font-size: 12px; line-height: 1.7; color: var(--color-text-secondary); }
 /* 等宽片段用全站那一套等宽字族，而不是就地写死一串：
    写死的 ui-monospace/monospace 没有中文回退，正文里「[已隐藏]」这种带中文的
    片段会落到浏览器给 monospace 配的中文字体（Windows 上又是宋体），
