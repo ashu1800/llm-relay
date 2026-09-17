@@ -66,21 +66,7 @@ func (l *GroupLimiter) Sweep(now time.Time) {
 
 // StartSweeper 周期性执行 Sweep，跟着传入 ctx 的生命周期走。
 func (l *GroupLimiter) StartSweeper(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		interval = 10 * time.Minute
-	}
-	go func() {
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				l.Sweep(time.Now())
-			}
-		}
-	}()
+	sweepEvery(ctx, interval, l.Sweep)
 }
 
 // Check 判断该分组当前是否还有额度。返回 false 时 reason 说明是哪一项超了。

@@ -408,7 +408,10 @@ onMounted(load)
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.group-tag.is-custom { --gt-base: var(--gt-color); }
+/* 压暗比例必须与 GroupTag 的浅色 50% 一致：原来这里原色直出，
+   自定义色在浅色主题下「预览即最终效果」不成立（暗色分支对齐过，
+   浅色漏了 —— 两边都改过一次，值各抄一份迟早再漂） */
+.group-tag.is-custom { --gt-base: color-mix(in oklab, var(--gt-color) 50%, black); }
 :root[data-theme='dark'] .group-tag { --gt-l: 0.80; }
 /* 混白比例必须与 GroupTag 的 45% 一致（那边实测过十三个预设的最差对比度）：
    这里曾经是 62%，同一自定义色在表单预览与列表里颜色不一样，

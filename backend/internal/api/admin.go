@@ -31,18 +31,24 @@ func applyUpdates(db *gorm.DB, dest any, id uint, updates map[string]any) error 
 	return nil
 }
 
+// writeConflictOrInternal 把写库失败翻译成响应：唯一名冲突回 409（人话），
+// 其余回 500（不带库细节）。所有 create/update 出口共用这一个分类点 ——
+// 下一个带唯一约束的表接入时不会再有人手抄这五行的机会。
+func writeConflictOrInternal(c *gin.Context, err error, dupMsg string) {
+	if isUniqueViolation(err) {
+		writeUpstreamError(c, http.StatusConflict, dupMsg, "invalid_request_error")
+		return
+	}
+	writeInternalError(c, err)
+}
+
 // writeUpdateError 把更新失败翻译成响应；找不到记录时给 404 而不是 500。
 func writeUpdateError(c *gin.Context, err error) {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		writeUpstreamError(c, http.StatusNotFound, "记录不存在", "not_found_error")
 		return
 	}
-	// 唯一名冲突回 409（分组改名会撞 channel_groups 的唯一索引）
-	if isUniqueViolation(err) {
-		writeUpstreamError(c, http.StatusConflict, "名称已存在", "invalid_request_error")
-		return
-	}
-	writeInternalError(c, err)
+	writeConflictOrInternal(c, err, "名称已存在")
 }
 
 // writeInternalError 回一个不含内部细节的 500，同时把完整错误写进服务端日志。
@@ -1084,13 +1090,9 @@ func (s *Server) createGroup(c *gin.Context) {
 		return tx.Create(&gr).Error
 	})
 	if err != nil {
-		// 撞唯一名回 409 而不是 500：与代理侧同款处理，让前端能显示
-		//「名字已存在」而不是「服务端处理失败」
-		if isUniqueViolation(err) {
-			writeUpstreamError(c, http.StatusConflict, "分组名已存在", "invalid_request_error")
-			return
-		}
-		writeInternalError(c, err)
+		// 撞唯一名回 409 而不是 500，让前端能显示「分组名已存在」
+		// 而不是「服务端处理失败」
+		writeConflictOrInternal(c, err, "分组名已存在")
 		return
 	}
 	c.JSON(http.StatusOK, gr)
@@ -1631,6 +1633,26 @@ func orDefault(v, def string) string {
 	return v
 }
 
+// checkRefExists 校验要被引用的记录存在（id 为 0 表示「不引用」，直接放行）；
+// 提前回 400，不把外键拒绝伪装成 500。分组与代理两个引用方共用一份。
+func checkRefExists(s *Server, id uint, m any, label string) error {
+	if id == 0 {
+		return nil
+	}
+	var n int64
+	if err := s.deps.Store.DB().Model(m).Where("id = ?", id).Count(&n).Error; err != nil {
+		return errors.New("校验" + label + "失败: " + err.Error())
+	}
+	if n == 0 {
+		return errors.New("指定的" + label + "不存在")
+	}
+	return nil
+}
+
+func checkGroupExists(s *Server, id uint) error {
+	return checkRefExists(s, id, &model.ChannelGroup{}, "分组")
+}
+
 // defaultGroupID 取被标为默认分组的 id。
 //
 // 取不到时返回 ok=false，不再退到写死的 1。以前能这么退，是因为 Seed
@@ -1638,23 +1660,8 @@ func orDefault(v, def string) string {
 // 用户可以不设、也可以删掉的（见 store.Seed），再返回 1 就可能落到一个
 // 不存在的分组上（外键拒绝，渠道建不出来），或者另一个不相干的分组上
 // （渠道静默进了错组）。取不到时由调用方决定怎么办，别在这里猜。
-// checkGroupExists 校验分组存在（与 checkProxyExists 同款：提前回 400，
-// 不把外键拒绝伪装成 500）。
-func checkGroupExists(s *Server, id uint) error {
-	if id == 0 {
-		return nil
-	}
-	var n int64
-	if err := s.deps.Store.DB().Model(&model.ChannelGroup{}).Where("id = ?", id).Count(&n).Error; err != nil {
-		return errors.New("校验分组失败: " + err.Error())
-	}
-	if n == 0 {
-		return errors.New("指定的分组不存在")
-	}
-	return nil
-}
-
-func defaultGroupID(s *Server) (uint, bool) {	var g model.ChannelGroup
+func defaultGroupID(s *Server) (uint, bool) {
+	var g model.ChannelGroup
 	if err := s.deps.Store.DB().Where("is_default = ?", true).First(&g).Error; err != nil {
 		return 0, false
 	}

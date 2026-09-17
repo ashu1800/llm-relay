@@ -32,7 +32,7 @@ import ChannelIcon from '@/components/ChannelIcon.vue'
 import { onLive } from '@/composables/useLive'
 import { symbolOf } from '@/utils/money'
 import { writeClipboard } from '@/utils/clipboard'
-import { fmtTime } from '@/utils/fmtTime'
+import { fmtTime, pad2 } from '@/utils/fmtTime'
 import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
 import type { Channel, ChannelGroup, Paged, RequestLog } from '@/api/types'
 
@@ -447,9 +447,6 @@ function tokenTitle(row: RequestLog) {
   )
 }
 
-// 时间格式统一走 utils/fmtTime（这里原来是最完整的一份本地实现，
-// 收拢成单一出口后其余页面与日志列表的长相一致）
-
 // 计价时刻：快照里存的是 RFC3339（如 2026-09-14T09:58:08+08:00），原样摆出来是给机器看的
 // —— T 分隔、带秒级以上的偏移量，和同一行里的其他文案不是一种语气。
 // 这里把它改成与日志列表列一致的 YYYY-MM-DD HH:mm:ss，但**不做时区换算**：
@@ -470,8 +467,7 @@ function fmtTimeAt(t: string) {
   // getTimezoneOffset 返回的是「UTC 减本地」，符号与 RFC3339 相反，这里取反后再比
   if (offMin === -new Date().getTimezoneOffset()) return wall
   const abs = Math.abs(offMin)
-  const p = (n: number) => (n < 10 ? '0' + n : String(n))
-  return wall + ' (UTC' + (offMin < 0 ? '-' : '+') + p(Math.floor(abs / 60)) + ':' + p(abs % 60) + ')'
+  return wall + ' (UTC' + (offMin < 0 ? '-' : '+') + pad2(Math.floor(abs / 60)) + ':' + pad2(abs % 60) + ')'
 }
 
 /* 耗时文本。秒**一律补齐两位小数**（8.70s / 14.00s，而不是 8.7s / 14.0s）：

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -119,11 +118,7 @@ func (s *Server) createProxy(c *gin.Context) {
 		row.PasswordEnc = enc
 	}
 	if err := s.deps.Store.DB().Create(&row).Error; err != nil {
-		if isUniqueViolation(err) {
-			writeUpstreamError(c, http.StatusConflict, "代理名已存在: "+name, "invalid_request_error")
-			return
-		}
-		writeInternalError(c, err)
+		writeConflictOrInternal(c, err, "代理名已存在: "+name)
 		return
 	}
 	c.JSON(http.StatusOK, proxyView(row))
@@ -219,11 +214,7 @@ func (s *Server) updateProxy(c *gin.Context) {
 		return
 	}
 	if err := db.Model(&model.Proxy{}).Where("id = ?", id).Updates(updates).Error; err != nil {
-		if isUniqueViolation(err) {
-			writeUpstreamError(c, http.StatusConflict, "代理名已存在", "invalid_request_error")
-			return
-		}
-		writeInternalError(c, err)
+		writeConflictOrInternal(c, err, "代理名已存在")
 		return
 	}
 	s.invalidateProxyCaches(id)
@@ -438,17 +429,7 @@ func proxyTestView(res proxy.TestResult) gin.H {
 
 // checkProxyExists 校验渠道要引用的代理存在；id 为 0 表示直连，直接放行。
 func checkProxyExists(s *Server, id uint) error {
-	if id == 0 {
-		return nil
-	}
-	var n int64
-	if err := s.deps.Store.DB().Model(&model.Proxy{}).Where("id = ?", id).Count(&n).Error; err != nil {
-		return errors.New("校验代理失败: " + err.Error())
-	}
-	if n == 0 {
-		return errors.New("指定的代理不存在")
-	}
-	return nil
+	return checkRefExists(s, id, &model.Proxy{}, "代理")
 }
 
 func derefString(p *string) string {

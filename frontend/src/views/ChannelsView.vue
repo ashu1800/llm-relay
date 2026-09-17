@@ -23,7 +23,7 @@ import GroupTag from '@/components/GroupTag.vue'
 import ChannelIcon from '@/components/ChannelIcon.vue'
 import { PROTOCOLS, type Channel, type ChannelGroup, type ChannelBinding } from '@/api/types'
 import { symbolOf } from '@/utils/money'
-import { fmtTime } from '@/utils/fmtTime'
+import { fmtTime, pad2 } from '@/utils/fmtTime'
 import { emptyPrice, pickPrice } from '@/components/ModelPricingEditor.vue'
 import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
 
@@ -446,8 +446,6 @@ function fmtCheckedAt(v: string | null | undefined) {
   return v ? fmtTime(v) : ''
 }
 
-// fmtTime 已收拢到 utils/fmtTime（这里曾是一份与日志页重复的本地实现）
-
 // 最近调用显示成「多久以前」而不是时刻：扫一眼列表要判断的是
 // 「这条渠道还在不在干活」，相对时间一眼就能比出哪条是活的、哪条是陈的，
 // 而一串时刻得先在脑子里做减法。精确时刻放在悬停提示里（见模板）。
@@ -466,8 +464,7 @@ function fmtAgo(v: string | null | undefined) {
   if (sec < 3600) return Math.floor(sec / 60) + ' 分钟前'
   if (sec < 86400) return Math.floor(sec / 3600) + ' 小时前'
   if (sec < 7 * 86400) return Math.floor(sec / 86400) + ' 天前'
-  const p = (n: number) => (n < 10 ? '0' + n : String(n))
-  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes())
+  return pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes())
 }
 
 /** 开关的悬停说明：说清当前状态、以及这个状态意味着什么。 */

@@ -113,9 +113,10 @@ func (l *RateLimiter) Sweep(now time.Time) {
 	}
 }
 
-// StartSweeper 周期性执行 Sweep。窗口本身没有任何到期回收机制，
-// 不挂这个循环的话 map 会随密钥数量只增不减（删掉的密钥也留着）。
-func (l *RateLimiter) StartSweeper(ctx context.Context, interval time.Duration) {
+// sweepEvery 周期执行 sweep，跟着传入 ctx 的生命周期走。
+// 包内三个带过期条目的组件（密钥窗口 / 渠道冷却 / 分组限流窗口）共用
+// 这一份调度循环 —— 各自的 Sweep 本体不同，重复的只有 ticker 壳。
+func sweepEvery(ctx context.Context, interval time.Duration, sweep func(time.Time)) {
 	if interval <= 0 {
 		interval = 10 * time.Minute
 	}
@@ -127,10 +128,16 @@ func (l *RateLimiter) StartSweeper(ctx context.Context, interval time.Duration) 
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				l.Sweep(time.Now())
+				sweep(time.Now())
 			}
 		}
 	}()
+}
+
+// StartSweeper 周期性执行 Sweep。窗口本身没有任何到期回收机制，
+// 不挂这个循环的话 map 会随密钥数量只增不减（删掉的密钥也留着）。
+func (l *RateLimiter) StartSweeper(ctx context.Context, interval time.Duration) {
+	sweepEvery(ctx, interval, l.Sweep)
 }
 
 // Sweep 清理已过期的冷却条目。
@@ -155,21 +162,7 @@ func (s *ChannelState) Sweep(now time.Time) {
 
 // StartSweeper 周期性执行 Sweep，跟着传入 ctx 的生命周期走。
 func (s *ChannelState) StartSweeper(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		interval = 10 * time.Minute
-	}
-	go func() {
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				s.Sweep(time.Now())
-			}
-		}
-	}()
+	sweepEvery(ctx, interval, s.Sweep)
 }
 
 // ============================ Retry-After ============================
