@@ -16,12 +16,12 @@ const props = withDefaults(
     /** 补间时长（毫秒） */
     duration?: number
     /**
-     * 格式化方式。预设三种，也接受自定义函数：
-     *   int（默认）整数千分位 / money 金额 / percent 百分比
+     * 格式化方式。预设四种，也接受自定义函数：
+     *   int（默认）整数千分位 / money 金额 / percent 百分比 / compact 紧凑缩写
      * 用预设而不是让调用方各自传函数：这几个格式在看板、日志页要完全一致，
      * 分散在各页面里迟早会对不上（金额的小数位数尤其容易各写各的）
      */
-    format?: 'int' | 'money' | 'percent' | ((v: number) => string)
+    format?: 'int' | 'money' | 'percent' | 'compact' | ((v: number) => string)
     /** 金额币种：只影响符号（¥ / $），不做任何换算 */
     currency?: string
   }>(),
@@ -63,10 +63,21 @@ function applyFormat(v: number) {
       return symbolOf(props.currency) + amountText(v)
     case 'percent':
       return v.toFixed(1) + '%'
+    case 'compact':
+      return compactText(v)
     default:
       // 词元、次数这类都是整数
       return Math.round(v).toLocaleString('en-US')
   }
+}
+
+/** 紧凑缩写：>=10 亿用 B，其余一律用 M —— 百万以下也带单位（123,456 → 0.12M），
+ *  紧凑格式下不再保留千分位读法，两种格式是彻底的两套口径。
+ *  小数固定两位、不足补 0（1.00M / 12.35M / 1.10B）：宽度恒定，
+ *  配合 tabular-nums，补间与切换都不会抖。 */
+function compactText(v: number) {
+  if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B'
+  return (v / 1e6).toFixed(2) + 'M'
 }
 
 watch(

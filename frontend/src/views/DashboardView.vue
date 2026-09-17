@@ -19,7 +19,8 @@ import {
   DollarOutlined,
   ThunderboltOutlined,
   CheckCircleOutlined,
-  ReloadOutlined
+  ReloadOutlined,
+  SwapOutlined
 } from '@ant-design/icons-vue'
 import { useRoute } from 'vue-router'
 import { api } from '@/api/client'
@@ -88,10 +89,21 @@ const RANGE_KEY = 'dashboard-range'
 const GROUP_KEY = 'dashboard-group'
 const CHANNEL_KEY = 'dashboard-channel'
 const MODEL_KEY = 'dashboard-model'
+// 词元卡片的数字格式：完整千分位 / 紧凑缩写（一律带 M/B 单位）。
+// 阅读习惯跟着人走，与上面那组筛选共用同一套持久化机制，默认完整。
+const TOKEN_FMT_KEY = 'dashboard-token-fmt'
 
 // 哨兵值用 'all' 而不是 0：后端的约定是「不传参数＝不筛选」，
 // 而界面上的「全部分组」与「分组 id=0」是两件事，混用迟早出错
 const ALL = 'all'
+
+// 紧凑格式的持久化取值是字符串（persistedChoice 只存字符串），
+// 界面上用布尔更顺手：读时比较、写时反推
+const tokenCompact = ref(readStoredChoice(TOKEN_FMT_KEY, ['full', 'compact'], 'full') === 'compact')
+function toggleTokenFmt() {
+  tokenCompact.value = !tokenCompact.value
+  writeStoredChoice(TOKEN_FMT_KEY, tokenCompact.value ? 'compact' : 'full')
+}
 
 const range = ref('today')
 const groupFilter = ref<string>(ALL)
@@ -518,7 +530,30 @@ onMounted(async () => {
     </StatCard>
     <StatCard label="词元数量" :value="n(summary?.total_tokens)" tone="blue" :hint="'命中率 ' + ((summary?.cache_hit_rate ?? 0) * 100).toFixed(1) + '%'">
       <template #value>
-        <AnimatedNumber :value="summary?.total_tokens ?? null" />
+        <!-- 格式切换的过渡：key 只绑格式，所以数值推送（每 2s）不触发这里，
+             补间仍由 AnimatedNumber 自己做；点按钮换格式时旧值淡出上移、新值淡入 -->
+        <Transition name="num-fmt" mode="out-in">
+          <AnimatedNumber
+            :key="tokenCompact ? 'compact' : 'full'"
+            :value="summary?.total_tokens ?? null"
+            :format="tokenCompact ? 'compact' : 'int'"
+          />
+        </Transition>
+      </template>
+      <template #suffix>
+        <a-tooltip :title="tokenCompact ? '切换为完整数字' : '切换为紧凑缩写（M / B）'">
+          <!-- 原生 button 而不是 a-button：这里只要一个图标位，
+               antd 的链接按钮自带 padding 与字体色会跟卡片色调打架 -->
+          <button
+            type="button"
+            class="fmt-toggle"
+            :aria-label="tokenCompact ? '词元数量改为完整数字显示' : '词元数量改为紧凑缩写显示'"
+            :aria-pressed="tokenCompact"
+            @click="toggleTokenFmt"
+          >
+            <SwapOutlined />
+          </button>
+        </a-tooltip>
       </template>
       <template #icon><ThunderboltOutlined /></template>
     </StatCard>
@@ -599,6 +634,62 @@ onMounted(async () => {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--gap);
   margin-bottom: var(--gap);
+}
+
+/* 词元卡右上角的格式切换按钮。
+   尺寸刻意小于左侧图标块（48px 是主视觉，这里是辅助控件），
+   圆角与其一致（8px）；配色从卡片根上的 tone 变量继承 ——
+   词元卡是 blue 调，hover 浅底与图标块的 15% 透明底同一体系。
+   --tone-* 由 StatCard 的 .tone-blue 定义在卡片根元素上，
+   插槽内容渲染在其内部，变量沿 DOM 继承，不需要在这里重复取色 */
+.fmt-toggle {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    transform 0.1s ease;
+}
+.fmt-toggle:hover {
+  background: var(--tone-bg);
+  color: var(--tone-ink);
+}
+/* 按压反馈：缩一下再弹回，与 antd 按钮的体感一致 */
+.fmt-toggle:active {
+  transform: scale(0.92);
+}
+/* 键盘焦点必须可见（项目一贯的可访问性口径）：
+   outline 用数值色，2px + 2px 偏移在浅底深底都够清楚 */
+.fmt-toggle:focus-visible {
+  outline: 2px solid var(--tone-ink);
+  outline-offset: 2px;
+}
+
+/* 词元数字的格式切换过渡：旧值淡出上移、新值淡入（out-in 模式）。
+   key 只绑格式，数值推送不经过这里 —— 滚动补间是 AnimatedNumber 自己的事。
+   prefers-reduced-motion 由 theme.css 的全站块把 transition 压到 0.01ms，
+   这里不用单独降级 */
+.num-fmt-enter-active,
+.num-fmt-leave-active {
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease;
+}
+.num-fmt-enter-from {
+  opacity: 0;
+  transform: translateY(4px);
+}
+.num-fmt-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
 }
 
 /* 工具栏右侧的作用范围提示。用次要文字色（不是警告色）：它是一个说明，

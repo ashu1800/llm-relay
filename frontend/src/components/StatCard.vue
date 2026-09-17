@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useSlots } from 'vue'
 // 概览统计卡：左侧彩色图标 + 标题 + 大号数值（对齐参考站 summary-card）
 //
 // 各项数值来自 docs/layout-dashboard.json 的实测抓取，
@@ -14,6 +15,11 @@ withDefaults(defineProps<{
   tone?: 'purple' | 'orange' | 'blue' | 'green' | 'red' | 'gray'
   hint?: string
 }>(), { tone: 'purple' })
+
+// 右侧附加区只在被使用时渲染（useSlots 判断）：
+// 空插槽也渲染容器的话，margin-left:auto 会凭空多出一个
+// 不可见的弹性项，其余卡片的布局跟着变。
+const slots = useSlots()
 </script>
 
 <template>
@@ -32,6 +38,12 @@ withDefaults(defineProps<{
         <slot name="value">{{ value }}</slot>
       </div>
       <div v-if="hint" class="summary-hint">{{ hint }}</div>
+    </div>
+    <!-- 右侧附加区：放「切换显示格式」这类只作用于本卡的小控件。
+         margin-left:auto 把它推到卡片最右、垂直居中；
+         只有插槽被使用时才渲染（见 script 里的说明） -->
+    <div v-if="slots.suffix" class="summary-suffix">
+      <slot name="suffix" />
     </div>
   </article>
 </template>
@@ -103,5 +115,15 @@ withDefaults(defineProps<{
   font-size: 14px;
   line-height: 1.3;
   color: var(--color-text-secondary);
+}
+
+/* 右侧附加区。色调变量（--tone-*）定义在卡片根上，
+   这里的控件（如格式切换按钮）直接继承本卡的色调体系 */
+.summary-suffix {
+  margin-left: auto;
+  align-self: center;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
 }
 </style>

@@ -311,3 +311,28 @@ main-layout            flex, bg #f8f5ee, 全屏
     - 回归：`.shots/verify-bottom-align.mjs`（各视口两侧底边差 0、无隐形滚动条、
       表头固定、固定列吸附、筛空后表体仍占满、其它路由几何与截图不变）。
 
+13. 看板「词元数量卡片」的紧凑/完整双格式（2026-09-17 站主提出）：
+    - 两种格式是彻底的两套口径，不是「大了才缩写」：
+      完整 = 整数千分位（`1,234,567`）；
+      紧凑 = 一律带单位（站主明确要求百万以下也用 M）：`>=1e9` 用 B、其余用 M，
+      固定两位小数、不足补 0（`123,456 → 0.12M`、`1,234,567 → 1.23M`、
+      `1.1e9 → 1.10B`）。固定小数位 + `tabular-nums` 让宽度恒定，
+      推送补间与格式切换都不会横向抖动；
+    - 格式实现为 `AnimatedNumber` 的第四个预设 `compact`（与 int/money/percent
+      同级）：格式属于「全站要一致」的那类口径，散在各页面迟早对不上，
+      以后别的卡片要接同一格式直接 `format="compact"`；
+    - 切换入口：卡片右侧 `StatCard` 新增的 `suffix` 插槽里放一个 32px 图标按钮
+      （`SwapOutlined` + tooltip + aria-pressed）。尺寸刻意小于左侧 48px 图标块
+      ——主视觉与辅助控件要有层级；圆角 8px 与图标块一致；hover 浅底取卡片
+      根上 tone 变量的 `--tone-bg/--tone-ink`（词元卡 blue 调），跟卡片同一色彩
+      体系而不是另一套灰。`suffix` 插槽用 `useSlots` 判空才渲染容器：
+      `margin-left:auto` 的弹性项哪怕空着也会占布局位，其余三张卡片不能受影响；
+    - 切换动画：`Transition out-in` 包住 `AnimatedNumber`，key 只绑格式 ——
+      数值推送（每 2s）不触发过渡，滚动补间仍归 AnimatedNumber 的 rAF；
+      点按钮时旧值 0.2s 淡出上移 4px、新值淡入下移进入。
+      `prefers-reduced-motion` 由 theme.css 全站块把 transition 压到 0.01ms，
+      自动降级为直接换文本，无需本组件单独处理；
+    - 选择持久化：`persistedChoice`（键 `dashboard-token-fmt`，合法值
+      `full|compact`，默认 `full`）—— 与看板筛选同一机制，阅读习惯跟着人走；
+      脏值回落 `full`，隐私模式下退化成「不记住」。
+
