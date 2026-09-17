@@ -459,6 +459,52 @@ console.log('=== 请求日志列表不吃筛选条件 ===')
   )
 }
 
+// 看板工具栏不许参与弹性压缩（2026-09-17 站主反馈）。
+//
+// 为什么值得钉：看板整页锁高（路由 meta.fill → MainLayout 的
+// .content-inner.is-fill），工具栏是看板 .dashboard 这个纵向弹性容器的子项。
+// 弹性子项默认 flex-shrink: 1，窗口一矮就按比例被压缩 —— 而 min-height
+// 只有 42px，比内容实际需要的 50px（32px 控件 + 上下各 8px 内边距 +
+// 上下各 1px 边框）还小，于是内容比盒子高、只能朝下溢出，控件贴到面板底边。
+// 站主原话：「浏览器窗口高度不高时，就会出现纵向居中没有正常居中，
+// 而是贴到了底部边缘的问题」。
+//
+// 这个坑的特点是**只在矮窗口下出现**，常规视口（977 高）截图完全正常，
+// 所以肉眼看静态截图、跑常规尺寸的回归都发现不了它；
+// 而 `flex: 0 0 auto` 这行又是最容易被"顺手"删掉的那一类
+// （看起来像没用的冗余声明）。删掉不报错、不失败，只是窗口一矮就回到贴底边。
+console.log('')
+console.log('=== 看板工具栏不吃弹性压缩 ===')
+{
+  const toolbar = readFileSync(join(SRC, 'components/PageToolbar.vue'), 'utf8')
+  const start = toolbar.indexOf('.toolbar-panel {')
+  // 取整条规则：从选择器到配对的右花括号（规则里没有嵌套，第一个 \n} 即结尾）
+  const rule = start >= 0 ? toolbar.slice(start, toolbar.indexOf('\n}', start)) : ''
+  check('PageToolbar 里有 .toolbar-panel 规则', rule.length > 0)
+
+  // flex: 0 0 auto（简写）或显式 flex-shrink: 0 都算，但必须有一条
+  const noShrink = /flex:\s*0\s+0\s+auto/.test(rule) || /flex-shrink:\s*0/.test(rule)
+  check(
+    '工具栏声明了不可压缩（flex: 0 0 auto 或 flex-shrink: 0）',
+    noShrink,
+    '缺少它时窗口一矮工具栏就被压到 min-height，内容溢出到面板底边（站主反馈的那个现象）',
+  )
+
+  // min-height 只能是「下限」，绝不能被当成实际高度来用：
+  //   * 写死 height 会锁死高度 —— 窄屏换行（实测 1100px 宽 3 行 = 88px）时
+  //     内容会溢出面板，等于把站主那个 bug 换个方向又犯一遍；
+  //   * 靠把 min-height 调到刚好够单行（例如 50px）也只是把失效点推到更窄的
+  //     屏幕：换行后照样不够。
+  // 所以这里钉住「没有 height」，而不是去比对某个具体像素 ——
+  // 静态检查量不到真实内容高度，拿主题令牌比会得出「42 > 24 通过」这种
+  // 看着绿、其实没验证到东西的结论（本项目不吃这种虚假信心）。
+  check(
+    '工具栏没有写死 height（换行后高度要能自己长）',
+    !/(^|[;{\s])height:\s*\d/.test(rule),
+    '写死高度后窄屏换行会溢出；正确做法是 flex: 0 0 auto 让它按内容占高',
+  )
+}
+
 console.log('')
 if (failed > 0) {
   console.log(`${failed} 项未通过`)
