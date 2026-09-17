@@ -920,7 +920,7 @@ onBeforeUnmount(() => {
                 type="link"
                 size="small"
                 :loading="testingId === record.id"
-                :disabled="testingId !== null && testingId !== record.id"
+                :disabled="testingId !== 0 && testingId !== record.id"
                 @click="testChannel(record)"
               >
                 <ThunderboltOutlined />
