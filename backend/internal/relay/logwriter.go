@@ -146,6 +146,24 @@ func (w *LogWriter) CloseAndFlush(timeout time.Duration, logger *slog.Logger) bo
 	}
 }
 
+// TruncateRunes 按字符数截断，超出部分以省略号收尾。
+//
+// 为什么按 rune 而不是字节：Postgres varchar(n) 的 n 数的是**字符**，
+// 上游错误体里中英混排很常见，按字节截会把多字节字符切成乱码。
+// 日志列（varchar(1024)）与客户端提示都用它，是超长错误体的统一出口 ——
+// 网关 502 的 HTML 错误页可达几十 KB，不截的话轻则撑爆日志列导致
+// 整条失败日志被丢弃（恰恰是排障最需要的），重则把超长 message 回给客户端。
+func TruncateRunes(s string, limit int) string {
+	r := []rune(s)
+	if len(r) <= limit {
+		return s
+	}
+	if limit <= 0 {
+		return ""
+	}
+	return string(r[:limit]) + "…"
+}
+
 // BuildLog 由转发结果组装一条日志记录。
 func BuildLog(req *RelayRequest, res *RelayResult, usage Usage, status int, errMsg string,
 	firstByteMs, totalMs int,
@@ -158,7 +176,9 @@ func BuildLog(req *RelayRequest, res *RelayResult, usage Usage, status int, errM
 		ModelRequested:      req.PublicModel,
 		IsStream:            req.Stream,
 		StatusCode:          status,
-		Error:               errMsg,
+		// 兜底截断：errMsg 的来源不止一处（上游错误体、无渠道提示拼接的
+		// 可用模型列表……），在这里统一压进 varchar(1024)，谁超长都丢不了日志
+		Error:               TruncateRunes(errMsg, 1000),
 		PromptTokens:        usage.PromptTokens,
 		CompletionTokens:    usage.CompletionTokens,
 		TotalTokens:         usage.TotalTokens,

@@ -46,11 +46,10 @@ async function load() {
     const res = await api.get<{ items: Proxy[] }>('/proxies')
     rows.value = res.items || []
   } catch (e: any) {
-    // 失败时清空列表：旧数据配上错误提示容易被当成「当前真实的代理列表」，
-    // 清空后由 DataState 统一呈现「加载失败 + 重试」，不会退化成「暂无数据」。
-    // 这里原来少了这一行，于是刷新失败时表格里还留着上一次的数据 ——
-    // 用户看到的是「代理都还在」，而实际上一条都没读回来。
-    rows.value = []
+    // 不清空列表：这里原来清空过，但那是在治 DataState 互斥链 bug 的
+    // 衍生症状（alert 命中时 slot 不渲染，表格消失）。根因修复后
+    // （alert 与 slot 同渲染），保留旧数据 + 常驻错误提示是全站统一行为，
+    // 用户既看得到「刷新失败了」也还看得见正在看的内容。
     loadError.value = e.message || '加载失败'
     message.error(e.message)
   } finally {

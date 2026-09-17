@@ -232,6 +232,12 @@ func (s *Service) availableModelsHint(ctx context.Context, req *RelayRequest) st
 }
 
 // Relay 执行转发，按候选顺序做故障转移。
+//
+// 契约：err 非 nil 时 res 也**必须**非 nil（失败路径统一 return res, err）。
+// 调用方拿到错误后第一件事就是读 res.Attempt（按真实状态码回客户端）、
+// 最后还要 finalizeLog(res)——返回 (nil, err) 会让这些解引用直接 panic，
+// 之前就发生过：handler 的新分支撞上「无可用渠道」的 nil 返回，
+// 精心准备的可用模型提示全被一个裸 500 吞掉。
 func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, error) {
 	started := time.Now()
 	res := &RelayResult{TraceID: req.TraceID, StartedAt: started}
@@ -263,7 +269,7 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 			Exclude:       tried,
 		})
 		if err != nil {
-			return nil, err
+			return res, err
 		}
 		// 分组限额：把已达每分钟上限的分组这一轮剔掉。
 		//
@@ -283,7 +289,7 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 		if len(cands) == 0 {
 			if limitedReason != "" {
 				if attemptNo == 0 {
-					return nil, fmt.Errorf("%w: %s", ErrGroupLimited, limitedReason)
+					return res, fmt.Errorf("%w: %s", ErrGroupLimited, limitedReason)
 				}
 				// 重试途中撞上分组额度：剩下的候选多半也在同一个分组里，
 				// 继续重试只是重复撞墙。跳出循环，把真实的上游错误交给调用方
@@ -291,7 +297,7 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 				break
 			}
 			if attemptNo == 0 {
-				return nil, fmt.Errorf("%w: %s", ErrNoChannel, req.noChannelReason()+s.availableModelsHint(ctx, req))
+				return res, fmt.Errorf("%w: %s", ErrNoChannel, req.noChannelReason()+s.availableModelsHint(ctx, req))
 			}
 			break
 		}

@@ -69,9 +69,9 @@ async function load() {
     const res = await api.get<{ items: ChannelGroup[] }>('/groups')
     rows.value = res.items || []
   } catch (e: any) {
-    // 失败时仍然清空列表：旧数据配上错误提示容易被当成「当前真实的分组」，
-    // 清空后由 DataState 统一呈现「加载失败 + 重试」，不会退化成「暂无数据」
-    rows.value = []
+    // 不清空列表：DataState 修复后（alert 与 slot 同渲染），已有数据时
+    // 刷新失败会在表格上方常驻错误提示 + 重试按钮，旧数据与新错误
+    // 不会混淆。清空反而把用户正在看的内容抹掉，与其它页面行为不一致。
     loadError.value = e.message || '加载失败'
     message.error(e.message)
   } finally {

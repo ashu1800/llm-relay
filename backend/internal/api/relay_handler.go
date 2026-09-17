@@ -209,7 +209,9 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 		// 所有渠道都 401 时客户端看到的应该是 401，那才是值得排查的方向。
 		// 网络层失败（拿不到状态码）不命中这里，仍走下面的 502。
 		if att := res.Attempt; att != nil && att.Stream == nil && att.StatusCode >= 400 {
-			upMsg := convert.UpstreamErrorMessage(res.Candidate.Channel.Protocol, att.Body)
+			// 截断：网关 502 的 HTML 错误页可达几十 KB，整段回给客户端既难读
+			// 也浪费流量；日志侧另由 BuildLog 兜底，丢不了记录
+			upMsg := relay.TruncateRunes(convert.UpstreamErrorMessage(res.Candidate.Channel.Protocol, att.Body), 800)
 			p.writeError(c, att.StatusCode, upMsg, "upstream_error")
 			s.finalizeLog(req, res, relay.Usage{}, att.StatusCode, upMsg,
 				att.HeaderMs, totalMs, att.Body, att.Headers)
@@ -245,8 +247,9 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 	// 上游返回不可重试的错误状态：按入站协议的错误结构回给客户端
 	if att.Stream == nil && att.StatusCode >= 400 {
 		// 上游按它自己的协议报错（Anthropic 是 {"type":"error","error":{...}}），
-		// 抽成一行可读信息再回给客户端，别把整段 JSON 塞进 message 里套娃
-		upMsg := convert.UpstreamErrorMessage(res.Candidate.Channel.Protocol, att.Body)
+		// 抽成一行可读信息再回给客户端，别把整段 JSON 塞进 message 里套娃；
+		// 超长错误体（HTML 错误页等）截到 800 字符，与上面失败链同一出口
+		upMsg := relay.TruncateRunes(convert.UpstreamErrorMessage(res.Candidate.Channel.Protocol, att.Body), 800)
 		p.writeError(c, att.StatusCode, upMsg, "upstream_error")
 		s.finalizeLog(req, res, relay.Usage{}, att.StatusCode,
 			upMsg, att.HeaderMs, int(time.Since(started).Milliseconds()), att.Body, att.Headers)

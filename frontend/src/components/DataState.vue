@@ -42,20 +42,20 @@ const emit = defineEmits<{ retry: [] }>()
 </script>
 
 <template>
-  <!-- 已有数据时刷新失败：保留表格，只在顶部说明 -->
-  <a-alert
-    v-if="error && hasData"
-    type="error"
-    show-icon
-    class="ds-alert"
-    :message="error"
-  >
-    <template #action>
-      <!-- 用 a-button 而不是裸 <a>：没有 href 的 <a> 拿不到隐式 tabindex，
-           Tab 键永远聚焦不到、回车也触发不了，键盘用户就卡在这一步。 -->
-      <a-button type="link" size="small" @click="emit('retry')">重试</a-button>
-    </template>
-  </a-alert>
+  <!-- 已有数据时刷新失败：保留表格，只在顶部说明。
+       alert 与 slot 必须放进同一个 template 一起渲染 —— 之前 alert 是互斥链
+       的链首（v-if）、slot 是链尾（v-else），alert 命中时 slot 必然不渲染，
+       正在看的表格整块消失，与这条注释承诺的正好相反 -->
+  <template v-if="error && hasData">
+    <a-alert type="error" show-icon class="ds-alert" :message="error">
+      <template #action>
+        <!-- 用 a-button 而不是裸 <a>：没有 href 的 <a> 拿不到隐式 tabindex，
+             Tab 键永远聚焦不到、回车也触发不了，键盘用户就卡在这一步。 -->
+        <a-button type="link" size="small" @click="emit('retry')">重试</a-button>
+      </template>
+    </a-alert>
+    <slot />
+  </template>
 
   <!-- 首次加载失败：绝不能显示成空列表 -->
   <div v-else-if="error" class="ds-panel">
