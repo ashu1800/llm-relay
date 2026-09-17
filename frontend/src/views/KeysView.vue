@@ -12,6 +12,7 @@ import {
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import GroupTag from '@/components/GroupTag.vue'
+import { writeClipboard } from '@/utils/clipboard'
 
 import type { APIKey, ChannelGroup } from '@/api/types'
 
@@ -92,34 +93,8 @@ function tooltipOf(record: APIKey) {
   return info.key + '（点击复制）'
 }
 
-// 写剪贴板：优先用 clipboard API，失败时退回临时 textarea + execCommand。
-//
-// 两条退路缺一不可：
-//  1. 用 http 且不是 localhost 访问时 clipboard API 直接不可用（抛错）；
-//  2. 浏览器可能把 writeText 挂起等用户授权 —— 那是**既不成功也不失败**的状态，
-//     实测点击后界面毫无反应。所以给它 800ms 的上限，超时就走退路。
-async function writeClipboard(text: string) {
-  try {
-    const ok = await Promise.race([
-      navigator.clipboard.writeText(text).then(() => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 800))
-    ])
-    if (ok) return true
-  } catch {
-    // 落到下面的退路
-  }
-  const ta = document.createElement('textarea')
-  ta.value = text
-  ta.style.position = 'fixed'
-  ta.style.opacity = '0'
-  document.body.appendChild(ta)
-  ta.select()
-  try {
-    return document.execCommand('copy')
-  } finally {
-    document.body.removeChild(ta)
-  }
-}
+// 写剪贴板的实现提取到了 utils/clipboard.ts（日志详情的 Trace ID 复制
+// 也要用）：降级路径只维护一份，别处出问题只改一处。
 
 async function copyRowKey(record: APIKey) {
   const info = await ensureKey(record)

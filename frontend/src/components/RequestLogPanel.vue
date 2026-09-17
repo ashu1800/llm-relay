@@ -23,6 +23,7 @@
 // 仍用 PanelCard，不传 title 时它不会渲染标题栏。
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
+import { CopyOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import PanelCard from '@/components/PanelCard.vue'
@@ -30,6 +31,7 @@ import GroupTag from '@/components/GroupTag.vue'
 import ChannelIcon from '@/components/ChannelIcon.vue'
 import { onLive } from '@/composables/useLive'
 import { symbolOf } from '@/utils/money'
+import { writeClipboard } from '@/utils/clipboard'
 import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
 import type { Channel, ChannelGroup, Paged, RequestLog } from '@/api/types'
 
@@ -285,6 +287,15 @@ function onlyThisTrace() {
   if (!current.value) return
   emit('update:traceId', current.value.trace_id)
   detailOpen.value = false
+}
+
+// 复制 Trace ID：排障时它要被贴进日志搜索、聊天工具或上游工单，
+// 24 位十六进制手动划选又慢又容易断行漏字符。
+// 降级路径与密钥复制共用 utils/clipboard.ts（http 非 localhost 环境照常可用）。
+async function copyTraceId() {
+  if (!current.value) return
+  if (await writeClipboard(current.value.trace_id)) message.success('已复制 Trace ID')
+  else message.warning('复制失败，请手动选择复制')
 }
 
 // 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
@@ -817,6 +828,9 @@ onMounted(() => {
       <a-descriptions v-if="current" :column="1" bordered size="small">
         <a-descriptions-item label="Trace ID">
           {{ current.trace_id }}
+          <a-button type="link" size="small" class="trace-link" @click="copyTraceId">
+            <CopyOutlined /> 复制
+          </a-button>
           <a-button type="link" size="small" class="trace-link" @click="onlyThisTrace">
             只看这条链路
           </a-button>

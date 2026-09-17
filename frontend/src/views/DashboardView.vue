@@ -325,21 +325,32 @@ function n(v: number | undefined) {
  *
  * silent 用于实时推送触发的重取：不显示加载态（否则每两秒闪一次骨架），
  * 失败也不把页面上的数字换掉 —— 宁可显示旧数字，也不能显示错的。
+ *
+ * 请求序号（loadSeq）只让**最后一次**请求的结果落地。与列表是同一个坑
+ * （RequestLogPanel.load 有同款守卫与实测记录）：切换筛选时新旧两个
+ * /stats/summary 并发在途，覆盖面大的旧查询更慢，返回时把新数字盖掉 ——
+ * 看板显示的就一直是错的时间范围，直到下一次操作才纠正。
  */
+let loadSeq = 0
+
 async function load(opts: { silent?: boolean } = {}) {
   const silent = !!opts.silent
+  const seq = ++loadSeq
   if (!silent) loading.value = true
   if (!silent) loadError.value = ''
   try {
     // 只剩概览这一个请求了：图表与热力图移除后，timeseries / models /
     // channels / heatmap 四个接口不再由前端调用（后端保留，见 docs/ui-spec.md 第九节）。
     // 这也让卡片刷新变快 —— 原来一次刷新要打五个接口，任何一个慢都会拖住整排数字。
-    summary.value = await api.get<Summary>('/stats/summary' + statsQuery())
+    const data = await api.get<Summary>('/stats/summary' + statsQuery())
+    // 已经有更新的请求发出去了：这次的结果（以及它的错误、它的 loading）都作废
+    if (seq !== loadSeq) return
+    summary.value = data
   } catch (e: any) {
-    if (silent) return
+    if (silent || seq !== loadSeq) return
     loadError.value = e.message || '加载失败'
   } finally {
-    if (!silent) loading.value = false
+    if (!silent && seq === loadSeq) loading.value = false
   }
 }
 
