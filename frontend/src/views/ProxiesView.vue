@@ -309,7 +309,7 @@ onMounted(load)
       v-model:open="modalOpen"
       :title="editing ? '编辑代理' : '新建代理'"
       :confirm-loading="saving"
-      width="560px"
+      :width="'min(560px, 94vw)'"
       centered
       @ok="save"
     >

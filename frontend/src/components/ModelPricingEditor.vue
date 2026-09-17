@@ -187,7 +187,7 @@ function submit() {
   <a-modal
     :open="open"
     :title="'定价 · ' + modelName"
-    width="640px"
+    :width="'min(640px, 94vw)'"
     centered
     @update:open="(v: boolean) => emit('update:open', v)"
   >

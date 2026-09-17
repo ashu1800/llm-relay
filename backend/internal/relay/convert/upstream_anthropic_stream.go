@@ -46,6 +46,10 @@ type anthropicUpstreamStream struct {
 	readErr  error
 	// writeErr 是转换/写出过程中的错误，交给 Read 抛给调用方
 	writeErr error
+	// sawStop 表示上游明确发过 message_stop（协议的正常终止信封）。
+	// EOF 时没见过它而 started 已置位，说明答到一半被掐断 —— 是截断
+	readBuf  []byte
+	sawStop  bool
 }
 
 // Read 从转换结果里吐出字节，必要时继续从上游读并转换。
@@ -57,12 +61,27 @@ func (s *anthropicUpstreamStream) Read(p []byte) (int, error) {
 		if s.readErr != nil {
 			return 0, s.readErr
 		}
-		buf := make([]byte, 16*1024)
-		n, err := s.src.Read(buf)
+		// 复用读缓冲区：每轮 make 16KB 在长流（数百次读）里是持续垃圾源，
+		// Gemini 版已改，这里同步
+		if s.readBuf == nil {
+			s.readBuf = make([]byte, 16*1024)
+		}
+		n, err := s.src.Read(s.readBuf)
 		if n > 0 {
-			s.feed(buf[:n])
+			s.feed(s.readBuf[:n])
 		}
 		if err != nil {
+			// 「连接关了」有两种含义，必须分开（Gemini 版同款守卫）：
+			//   - 见过 message_stop -> 正常收尾
+			//   - 已见 message_start 却没等到 message_stop -> 截断。
+			// relay_handler 只把**非 EOF** 错误当截断，这里若把干净断开
+			// 补成 finish_reason:"stop"+[DONE]，答到一半的回复就会被
+			// 客户端与计费当作完整成功。
+			// started 仍为 false（一条事件都没发）时保持原有的
+			// 「合成空回复」语义 —— 有测试锁定，那不是截断。
+			if err == io.EOF && s.started && !s.sawStop {
+				err = io.ErrUnexpectedEOF
+			}
 			// 上游断流时先冲刷已转换的内容，再收尾
 			s.finish()
 			s.readErr = err
@@ -139,6 +158,8 @@ func (s *anthropicUpstreamStream) handleLine(line []byte) error {
 		}
 		return nil
 	case "message_stop":
+		// 协议的正常终止信封：见到它，随后的 EOF 才是正常收尾
+		s.sawStop = true
 		s.finish()
 		return nil
 	case "error":

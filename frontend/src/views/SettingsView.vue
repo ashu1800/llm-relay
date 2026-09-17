@@ -284,7 +284,7 @@ onMounted(load)
     </section>
     </DataState>
 
-    <a-modal v-model:open="reportOpen" title="导入结果" :footer="null" width="520px" centered>
+    <a-modal v-model:open="reportOpen" title="导入结果" :footer="null" :width="'min(520px, 94vw)'" centered>
       <a-descriptions :column="1" bordered size="small">
         <a-descriptions-item label="新增">
           {{ sumOf(report.created) }} 项

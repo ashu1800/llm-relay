@@ -255,7 +255,7 @@ onMounted(load)
       </DataState>
     </section>
 
-    <a-modal v-model:open="modalOpen" :title="title" :confirm-loading="saving" width="560px" centered @ok="save">
+    <a-modal v-model:open="modalOpen" :title="title" :confirm-loading="saving" :width="'min(560px, 94vw)'" centered @ok="save">
       <a-form layout="vertical">
         <a-form-item label="分组名称" required>
           <a-input v-model:value="form.name" placeholder="例如 高优先级" />

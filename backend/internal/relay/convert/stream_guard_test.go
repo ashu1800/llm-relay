@@ -1,6 +1,8 @@
 package convert
 
 import (
+	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -125,3 +127,198 @@ func TestLineSplitterJoinsAcrossWrites(t *testing.T) {
 		t.Fatalf("跨分片的行应被拼起来: %v", got)
 	}
 }
+
+// ---------- Anthropic 上游流的同款守卫 ----------
+
+const anthropicTruncatedBody = `event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","model":"m","usage":{"input_tokens":3}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"半句话"}}
+
+`
+
+const anthropicCompleteBody = anthropicTruncatedBody + `event: message_stop
+data: {"type":"message_stop"}
+
+`
+
+// 已见 message_start 却没等到 message_stop 的干净 EOF 是截断，
+// 且已收到的正文必须照常交付（修复前补成 stop+[DONE] 伪装成答完）。
+func TestAnthropicUpstreamCleanEOFWithoutStopIsTruncation(t *testing.T) {
+	s := NewAnthropicStreamToOpenAIChat(io.NopCloser(strings.NewReader(anthropicTruncatedBody)), "m")
+	var out []byte
+	buf := make([]byte, 512)
+	var readErr error
+	for {
+		n, err := s.Read(buf)
+		out = append(out, buf[:n]...)
+		if err != nil {
+			readErr = err
+			break
+		}
+	}
+	if readErr != io.ErrUnexpectedEOF {
+		t.Fatalf("干净断开且没有 message_stop 应报 io.ErrUnexpectedEOF，实际 %v", readErr)
+	}
+	if !strings.Contains(string(out), "半句话") {
+		t.Fatalf("已收到的正文不应丢失:\n%s", out)
+	}
+}
+
+// 有 message_stop 的正常收尾不报错、分片齐全。
+func TestAnthropicUpstreamWithMessageStopIsNormal(t *testing.T) {
+	s := NewAnthropicStreamToOpenAIChat(io.NopCloser(strings.NewReader(anthropicCompleteBody)), "m")
+	out, err := io.ReadAll(s)
+	if err != nil {
+		t.Fatalf("正常收尾不应报错: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, "[DONE]") || !strings.Contains(got, "半句话") {
+		t.Fatalf("正常收尾应带正文与 [DONE]:\n%s", got)
+	}
+}
+
+// ---------- Responses 上游流的同款守卫 ----------
+
+const responsesTruncatedBody = `event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","model":"m"}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"半句话"}
+
+`
+
+const responsesCompleteBody = responsesTruncatedBody + `event: response.completed
+data: {"type":"response.completed","response":{"status":"completed"}}
+
+`
+
+func TestResponsesUpstreamCleanEOFWithoutCompleteIsTruncation(t *testing.T) {
+	s := NewResponsesStreamToOpenAIChat(io.NopCloser(strings.NewReader(responsesTruncatedBody)), "m")
+	var out []byte
+	buf := make([]byte, 512)
+	var readErr error
+	for {
+		n, err := s.Read(buf)
+		out = append(out, buf[:n]...)
+		if err != nil {
+			readErr = err
+			break
+		}
+	}
+	if readErr != io.ErrUnexpectedEOF {
+		t.Fatalf("干净断开且没有终止事件应报 io.ErrUnexpectedEOF，实际 %v", readErr)
+	}
+	if !strings.Contains(string(out), "半句话") {
+		t.Fatalf("已收到的正文不应丢失:\n%s", out)
+	}
+}
+
+func TestResponsesUpstreamWithCompleteIsNormal(t *testing.T) {
+	s := NewResponsesStreamToOpenAIChat(io.NopCloser(strings.NewReader(responsesCompleteBody)), "m")
+	out, err := io.ReadAll(s)
+	if err != nil {
+		t.Fatalf("正常收尾不应报错: %v", err)
+	}
+	if got := string(out); !strings.Contains(got, "[DONE]") || !strings.Contains(got, "半句话") {
+		t.Fatalf("正常收尾应带正文与 [DONE]:\n%s", got)
+	}
+}
+
+// response.failed 必须发错误分片给客户端：修复前它与 completed 同路处理，
+// error 字段被丢弃、补出 stop+[DONE]，服务端生成中途失败被伪装成正常完成。
+func TestResponsesUpstreamFailedEmitsErrorChunk(t *testing.T) {
+	body := `event: response.failed
+data: {"type":"response.failed","response":{"status":"failed","error":{"code":"quota","message":"额度不足"}}}
+
+`
+	s := NewResponsesStreamToOpenAIChat(io.NopCloser(strings.NewReader(body)), "m")
+	out, err := io.ReadAll(s)
+	// failed 后干净关闭：错误分片已交付，EOF 属正常收尾（sawStop 已置位）
+	if err != nil {
+		t.Fatalf("failed 之后的 EOF 不应再报错: %v", err)
+	}
+	if got := string(out); !strings.Contains(got, "额度不足") || !strings.Contains(got, "upstream_error") {
+		t.Fatalf("failed 应发出带原因的错误分片:\n%s", got)
+	}
+}
+
+// ---------- Gemini 入站多模态（R-高2） ----------
+
+// inlineData 图片必须转成 image_url 的 data URI：修复前被无声跳过，
+// 模型收不到图按纯文本作答，无任何报错。
+func TestGeminiRequestInlineDataImage(t *testing.T) {
+	body := []byte(`{"contents":[{"role":"user","parts":[` +
+		`{"text":"看图说话"},` +
+		`{"inlineData":{"mimeType":"image/png","data":"aGk="}}]}]}`)
+	out, err := GeminiRequestToOpenAIChat(body, "m", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	msgs, _ := got["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("应有一条消息，实际 %d", len(msgs))
+	}
+	content, ok := asMap(msgs[0])["content"].([]any)
+	if !ok {
+		t.Fatalf("带图消息的 content 应是块数组，实际 %T", asMap(msgs[0])["content"])
+	}
+	if len(content) != 2 {
+		t.Fatalf("文本 + 图片两块，实际 %d 块", len(content))
+	}
+	img := asMap(content[1])
+	if asString(img["type"]) != "image_url" {
+		t.Fatalf("第二块应是 image_url，实际 %v", img["type"])
+	}
+	url := asString(asMap(img["image_url"])["url"])
+	if url != "data:image/png;base64,aGk=" {
+		t.Fatalf("data URI 拼接错误: %q", url)
+	}
+	// 纯文本块的形状不受影响：数组里混排的 text 块保留原样
+	if asString(asMap(content[0])["text"]) != "看图说话" {
+		t.Fatalf("文本块丢失:\n%s", out)
+	}
+}
+
+// 纯文本请求的 content 仍然拍平成字符串（兼容面最广的形状不能变）。
+func TestGeminiRequestPlainTextStillFlattens(t *testing.T) {
+	body := []byte(`{"contents":[{"role":"user","parts":[{"text":"你好"},{"text":"呀"}]}]}`)
+	out, err := GeminiRequestToOpenAIChat(body, "m", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	msgs, _ := got["messages"].([]any)
+	if c, ok := asMap(msgs[0])["content"].(string); !ok || c != "你好呀" {
+		t.Fatalf("纯文本应拍平成字符串，实际 %v", asMap(msgs[0])["content"])
+	}
+}
+
+// fileData 是 Files API 的文件引用，中继没有那份文件 —— 明确拒绝
+// 而不是静默丢掉让模型当纯文本作答。
+func TestGeminiRequestFileDataRejected(t *testing.T) {
+	body := []byte(`{"contents":[{"role":"user","parts":[{"fileData":{"mimeType":"application/pdf","fileUri":"files/abc"}}]}]}`)
+	_, err := GeminiRequestToOpenAIChat(body, "m", false)
+	if !errorIsUnsupported(err) {
+		t.Fatalf("fileData 应显式报 ErrUnsupportedContent，实际 %v", err)
+	}
+}
+
+// 不认识的 inlineData MIME（如 PDF 内联）同样显式拒绝。
+func TestGeminiRequestInlinePDFRejected(t *testing.T) {
+	body := []byte(`{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"application/pdf","data":"aGk="}}]}]}`)
+	_, err := GeminiRequestToOpenAIChat(body, "m", false)
+	if !errorIsUnsupported(err) {
+		t.Fatalf("PDF inlineData 应显式报 ErrUnsupportedContent，实际 %v", err)
+	}
+}
+
+func errorIsUnsupported(err error) bool { return errors.Is(err, ErrUnsupportedContent) }

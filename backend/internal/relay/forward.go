@@ -274,9 +274,16 @@ func (f *Forwarder) Do(
 	}
 
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
+	// 成功响应体也要有上限：请求体有 MaxRequestBodyMB 保护，响应体原先没有 ——
+	// 上游异常放大响应（或大批量 embeddings）时单请求可吃掉数百 MB 内存，
+	// 而 MaxConcurrency 只限并发数、不限单请求体量。128MB 远超正常的
+	// 非流式回复（KB~几 MB 量级），超限按上游故障处理，给故障转移一个机会
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamResponseBody))
 	if err != nil {
 		return att, fmt.Errorf("读取上游响应失败: %w", err)
+	}
+	if len(raw) >= maxUpstreamResponseBody {
+		return att, fmt.Errorf("上游响应体超过上限 %d MB，已中止读取", maxUpstreamResponseBody>>20)
 	}
 	att.Body = convert.UpstreamResponseBody(cand.Channel.Protocol, raw, cand.Binding.UpstreamName)
 	att.Usage, att.HasUsage = extractUsageFromJSON(att.Body)
@@ -359,6 +366,12 @@ func (a *Attempt) Retryable() bool {
 	// 0 表示网络层失败（连接不上、握手失败等），同样换渠道再试
 	return a.StatusCode < 200 || a.StatusCode >= 300
 }
+
+// maxUpstreamResponseBody 限制单次非流式成功响应体读入的上限（128MB）。
+// 请求体有 MaxRequestBodyMB（默认 64MB）保护，响应体原先没有 ——
+// 上游异常放大响应时单请求可吃掉数百 MB 内存，而并发上限只限请求数
+// 不限单请求体量。正常非流式回复都在 KB~几 MB 量级，128MB 已极宽裕。
+const maxUpstreamResponseBody = 128 << 20
 
 // requestShapeStatus 报告状态码是否属于「请求形状类」错误：
 // 参数不合法、模型不存在、报文或头太大 —— 问题大概率出在请求本身。

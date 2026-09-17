@@ -824,7 +824,7 @@ onMounted(() => {
       </div>
     </DataState>
 
-    <a-drawer v-model:open="detailOpen" title="调用详情" width="720">
+    <a-drawer v-model:open="detailOpen" title="调用详情" :width="'min(720px, 94vw)'">
       <a-descriptions v-if="current" :column="1" bordered size="small">
         <a-descriptions-item label="Trace ID">
           {{ current.trace_id }}

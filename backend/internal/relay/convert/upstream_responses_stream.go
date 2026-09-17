@@ -59,6 +59,10 @@ type responsesUpstreamStream struct {
 	curEvent string
 	readErr  error
 	writeErr error
+	// sawStop 表示上游明确发过终止事件（completed / incomplete / failed）。
+	// EOF 时没见过它而 started 已置位，说明答到一半被掐断 —— 是截断
+	readBuf []byte
+	sawStop bool
 }
 
 // Read 从转换结果里吐出字节，必要时继续从上游读并转换。
@@ -70,12 +74,21 @@ func (s *responsesUpstreamStream) Read(p []byte) (int, error) {
 		if s.readErr != nil {
 			return 0, s.readErr
 		}
-		buf := make([]byte, 16*1024)
-		n, err := s.src.Read(buf)
+		// 复用读缓冲区：每轮 make 16KB 在长流里是持续垃圾源（Gemini 版已改，同步）
+		if s.readBuf == nil {
+			s.readBuf = make([]byte, 16*1024)
+		}
+		n, err := s.src.Read(s.readBuf)
 		if n > 0 {
-			s.feed(buf[:n])
+			s.feed(s.readBuf[:n])
 		}
 		if err != nil {
+			// 同 Anthropic/Gemini 版守卫：已见 response.created 却没等到
+			// 终止事件（response.completed 等）的干净 EOF 是截断，不是完成。
+			// started 为 false 的零事件空流保持「合成空回复」语义。
+			if err == io.EOF && s.started && !s.sawStop {
+				err = io.ErrUnexpectedEOF
+			}
 			// 上游断流时先冲刷已转换的内容，再收尾
 			s.finish()
 			s.readErr = err
@@ -161,7 +174,31 @@ func (s *responsesUpstreamStream) handleLine(line []byte) error {
 		// 工具调用的参数可能只在 done 事件里给全（上游没发 delta 时），
 		// 这里补上差值，避免参数丢失
 		return s.onItemDone(asMap(evt["item"]))
-	case "response.completed", "response.incomplete", "response.failed":
+	case "response.failed":
+		// 失败必须按失败呈现：抽 response.error 发一条错误分片给客户端，
+		// 再收尾。原来它与 completed/incomplete 同路处理 —— 只取 usage
+		// 然后 finish() 补 stop+[DONE]，error 字段被整个丢弃，
+		// 服务端生成中途失败被伪装成「模型答完了」，客户端与计费都按成功处理。
+		msg := ""
+		if r := asMap(evt["response"]); r != nil {
+			if e := asMap(r["error"]); e != nil {
+				msg = asString(e["message"])
+			}
+			if u := asMap(r["usage"]); u != nil {
+				s.usage = u
+			}
+		}
+		if msg == "" {
+			msg = "上游生成失败（response.failed）"
+		}
+		s.appendSSE(map[string]any{
+			"error": map[string]any{"message": msg, "type": "upstream_error"},
+		})
+		// failed 也是明确的终止事件：错误分片之后的 EOF 不再叠一层截断误报
+		s.sawStop = true
+		s.finish()
+		return nil
+	case "response.completed", "response.incomplete":
 		if r := asMap(evt["response"]); r != nil {
 			if u := asMap(r["usage"]); u != nil {
 				s.usage = u
@@ -170,6 +207,8 @@ func (s *responsesUpstreamStream) handleLine(line []byte) error {
 				s.truncated = true
 			}
 		}
+		// 明确的终止信封：随后的 EOF 是正常收尾
+		s.sawStop = true
 		// response.completed 之后通常还有一条同名事件，重复收尾是幂等的
 		s.finish()
 		return nil

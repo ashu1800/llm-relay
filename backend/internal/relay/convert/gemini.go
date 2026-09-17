@@ -44,7 +44,10 @@ func GeminiRequestToOpenAIChat(body []byte, model string, stream bool) ([]byte, 
 		}
 
 		parts, _ := c["parts"].([]any)
-		var textParts []any
+		// contentParts 装这条消息的所有内容块（文本 + 多模态）。
+		// 原来叫 textParts 且只认文本：inlineData（图片/音频）与 fileData
+		// 被无声跳过，模型收不到图按纯文本作答，无任何报错 —— 静默数据损坏
+		var contentParts []any
 		var toolCalls []any
 		var toolResults []any
 
@@ -54,7 +57,36 @@ func GeminiRequestToOpenAIChat(body []byte, model string, stream bool) ([]byte, 
 				continue
 			}
 			if t := asString(p["text"]); t != "" {
-				textParts = append(textParts, map[string]any{"type": "text", "text": t})
+				contentParts = append(contentParts, map[string]any{"type": "text", "text": t})
+			}
+			// inlineData 是 Gemini SDK 的标准多模态用法（:generateContent 带图），
+			// 映射进 OpenAI 通用语；不认识的类型宁可显式拒绝也不静默丢弃
+			if inline := asMap(p["inlineData"]); inline != nil {
+				mime := asString(inline["mimeType"])
+				data := asString(inline["data"])
+				switch {
+				case strings.HasPrefix(mime, "image/"):
+					contentParts = append(contentParts, map[string]any{
+						"type":      "image_url",
+						"image_url": map[string]any{"url": "data:" + mime + ";base64," + data},
+					})
+				case strings.HasPrefix(mime, "audio/"):
+					format := geminiAudioFormat(mime)
+					if format == "" {
+						return nil, errUnsupportedContent("Gemini 协议的音频 " + mime + " 无法转发（通用语仅支持 wav/mp3）")
+					}
+					contentParts = append(contentParts, map[string]any{
+						"type":        "input_audio",
+						"input_audio": map[string]any{"data": data, "format": format},
+					})
+				default:
+					return nil, errUnsupportedContent("Gemini 协议的 inlineData 仅支持图片与音频，收到 " + mime)
+				}
+			}
+			// fileData 是 Files API 的文件引用：中继无状态转发、没有那份文件，
+			// 通用语里也没有对应物。明确拒绝比静默丢掉好 —— 客户端至少知道要改
+			if asMap(p["fileData"]) != nil {
+				return nil, errUnsupportedContent("Gemini 协议的 fileData（Files API 引用）不支持转发，请把文件内容以内联方式发送")
 			}
 			if fc := asMap(p["functionCall"]); fc != nil {
 				args, _ := json.Marshal(fc["args"])
@@ -79,11 +111,18 @@ func GeminiRequestToOpenAIChat(body []byte, model string, stream bool) ([]byte, 
 
 		// 函数结果必须排在下一条用户消息之前，否则上游会拒绝
 		messages = append(messages, toolResults...)
-		if len(textParts) == 0 && len(toolCalls) == 0 {
+		if len(contentParts) == 0 && len(toolCalls) == 0 {
 			continue
 		}
 		msg := map[string]any{"role": role}
-		msg["content"] = geminiFlattenText(textParts)
+		// 全是文本块时拍平成纯字符串（与纯文本请求的通用语形状一致，
+		// 对各类上游兼容面最广）；带图/音频时保留块数组 —— 那才是
+		// OpenAI 通用语的多模态形状，拍平会把非文本块丢掉
+		if onlyTextBlocks(contentParts) {
+			msg["content"] = geminiFlattenText(contentParts)
+		} else {
+			msg["content"] = contentParts
+		}
 		if len(toolCalls) > 0 {
 			msg["tool_calls"] = toolCalls
 		}
@@ -183,6 +222,28 @@ func geminiFlattenText(parts []any) any {
 		sb.WriteString(asString(asMap(p)["text"]))
 	}
 	return sb.String()
+}
+
+// onlyTextBlocks 判断内容块是否全是 text 类型（可安全拍平成字符串）。
+func onlyTextBlocks(parts []any) bool {
+	for _, p := range parts {
+		if asString(asMap(p)["type"]) != "text" {
+			return false
+		}
+	}
+	return true
+}
+
+// geminiAudioFormat 把音频 MIME 映射成 OpenAI input_audio 认的格式串。
+func geminiAudioFormat(mime string) string {
+	switch mime {
+	case "audio/wav", "audio/x-wav", "audio/wave":
+		return "wav"
+	case "audio/mpeg", "audio/mp3":
+		return "mp3"
+	default:
+		return ""
+	}
 }
 
 // ============================ 响应转换 ============================

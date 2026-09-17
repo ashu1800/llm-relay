@@ -950,7 +950,7 @@ onBeforeUnmount(() => {
       v-model:open="modalOpen"
       :title="title"
       :confirm-loading="saving"
-      :width="760"
+      :width="'min(760px, 94vw)'"
       centered
       ok-text="保存"
       @ok="save"

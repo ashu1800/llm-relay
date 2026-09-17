@@ -428,7 +428,7 @@ onMounted(() => {
       v-model:open="modalOpen"
       :title="title"
       :confirm-loading="saving"
-      width="600px"
+      :width="'min(600px, 94vw)'"
       :ok-text="createdKey ? '完成' : '确定'"
       :cancel-text="createdKey ? '再建一把' : '取消'"
       centered
