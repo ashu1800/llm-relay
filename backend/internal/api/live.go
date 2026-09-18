@@ -157,6 +157,8 @@ func (s *Server) liveStatsLoop(ctx context.Context, kick <-chan struct{}) {
 	statsTicker := time.NewTicker(liveStatsInterval)
 	defer statsTicker.Stop()
 	var lastSent string
+	// health 帧的上次内容：日志队列水位与丢弃计数，变了才推（与 stats 同一原则）
+	var lastHealth string
 	for {
 		select {
 		case <-ctx.Done():
@@ -167,6 +169,20 @@ func (s *Server) liveStatsLoop(ctx context.Context, kick <-chan struct{}) {
 		// 没人订阅就不查：聚合查询要扫今天的所有日志
 		if s.deps.Live.subscribers() == 0 {
 			continue
+		}
+		// ---- 日志队列水位（health 帧）----
+		//
+		// 挂在统计循环的同一拍而不是另起循环：醒来时机已经够密（有新日志就
+		// 会被 kick），丢弃从发生到看板喊出来最多隔一个节拍，够快；
+		// 独立循环只会多一份 goroutine 与节拍器。
+		// Logs 为 nil 的防御与 Live 相同：依赖缺省时这一项整体跳过，
+		// 不该让 stats 也跟着不推。
+		if s.deps.Logs != nil {
+			st := s.deps.Logs.QueueStats()
+			if b, err := json.Marshal(st); err == nil && string(b) != lastHealth {
+				lastHealth = string(b)
+				s.deps.Live.broadcast(mustJSON(liveMessage{Type: "health", Data: st}))
+			}
 		}
 		start, end, _ := resolveRange("today")
 		qctx, cancel := context.WithTimeout(ctx, liveQueryTimeout)
@@ -287,6 +303,11 @@ func (s *Server) liveSocket(c *gin.Context) {
 		start, end, _ := resolveRange("today")
 		if data, err := s.summarySnapshot(start, end, statsFilter{}); err == nil {
 			_ = websocket.Message.Send(ws, string(mustJSON(liveMessage{Type: "stats", Data: data})))
+		}
+		// 队列水位同样补一份：否则要等到它变化才显示（大多数时候队列是
+		// 平稳的，那一等可能就是永远）
+		if s.deps.Logs != nil {
+			_ = websocket.Message.Send(ws, string(mustJSON(liveMessage{Type: "health", Data: s.deps.Logs.QueueStats()})))
 		}
 
 		// WebSocket 连接不允许并发写，所以写只在这个 goroutine 里做

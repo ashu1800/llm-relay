@@ -582,6 +582,27 @@ const pagination = computed(() => ({
 // 3. 翻了页 —— 什么都不做：重取会让用户正在看的第二页变成另外一批行。
 const liveReloader = createThrottledLiveReloader(() => load({ silent: true }))
 
+// ---- 日志队列水位（服务端 health 推送）----
+//
+// 看板上的所有数字都出自日志这条异步写入队列；队列满时服务端会静默丢日志
+// （只有后端日志里一条 warn），统计因此「看起来正常」地少算。
+// 服务端把丢弃计数与队列水位做成 health 帧推过来：平时低调显示水位，
+// 一旦真的丢了，这里必须第一个喊出来 —— 在你怀疑「数字怎么对不上」之前。
+type LogQueueInfo = { queued: number; capacity: number; dropped: number }
+const queueInfo = ref<LogQueueInfo | null>(null)
+let lastDroppedAlert = 0
+
+onLive('health', (data: LogQueueInfo) => {
+  const prev = queueInfo.value
+  queueInfo.value = data
+  // 丢弃新增：弹一条 error。持续丢弃时不刷屏 —— 同一场告警 10 秒内只弹一条，
+  // 但状态条保持红色，肉眼不会漏
+  if (prev && data.dropped > prev.dropped && Date.now() - lastDroppedAlert > 10000) {
+    lastDroppedAlert = Date.now()
+    message.error(`日志队列已满：新增 ${data.dropped - prev.dropped} 条统计被丢弃，看板数字暂时不完整`)
+  }
+})
+
 onUnmounted(() => {
   liveReloader.dispose()
   // 入场动效的定时器也要清：它们回调里会写 freshIds，
@@ -815,6 +836,23 @@ onMounted(() => {
           </template>
         </a-table-column>
         </a-table>
+      </div>
+
+      <!-- 日志队列水位：服务端每次统计醒来时把丢弃计数与队列占用量推过来
+           （见 live.go 的 health 帧）。放在表格之下、面板最底部 ——
+           它是这一屏的「仪表地基」状态，不是每天要看的内容；
+           丢弃发生过就保持红色，悬停可见累计数与含义 -->
+      <div v-if="queueInfo" class="queue-status" :class="{ 'queue-alert': queueInfo.dropped > 0 }">
+        <span
+          class="queue-dot"
+          :title="
+            queueInfo.dropped > 0
+              ? '已累计丢弃 ' + queueInfo.dropped + ' 条日志（队列满或服务退出），看板统计因此偏小'
+              : '日志写入队列健康，无丢弃'
+          "
+        />
+        日志队列 {{ queueInfo.queued }}/{{ queueInfo.capacity }}
+        <span v-if="queueInfo.dropped > 0" class="queue-dropped">已丢 {{ queueInfo.dropped }}</span>
       </div>
     </DataState>
 
@@ -1134,5 +1172,43 @@ onMounted(() => {
    一块空面板的最上面。DataState 在别处仍然是普通块，不受影响。 */
 .panel :deep(.ds-panel) {
   flex: 1 1 auto;
+}
+
+/* ---- 日志队列水位 ----
+   12px 小字右对齐：它是这一屏的「地基状态」，存在但不能抢戏。
+   flex: none 是必须的 —— 上面的表格吃掉了弹性分配，这一条按内容占高，
+   否则弹性链把它压扁或被挤出面板。 */
+.queue-status {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.queue-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  /* 正常态：低调的绿。跟渠道列表「可用」同一个语义色 */
+  background: var(--color-green);
+}
+
+/* 丢过日志就整条转红并保持：红色是「统计曾经不完整」的持续提醒，
+   不是瞬时闪烁 —— 这个状态只能靠服务重启清零（计数在内存里） */
+.queue-status.queue-alert {
+  color: var(--color-red);
+  font-weight: 500;
+}
+.queue-status.queue-alert .queue-dot {
+  background: var(--color-red);
+}
+.queue-dropped {
+  font-weight: 600;
 }
 </style>

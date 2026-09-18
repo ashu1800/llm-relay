@@ -3,6 +3,7 @@ package relay
 import (
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gorm.io/gorm"
@@ -24,6 +25,17 @@ type LogWriter struct {
 	logger *slog.Logger
 	done   chan struct{}
 
+	// capacity 是队列容量（buffer 的原值）：看板要显示「日志队列 12/2048」
+	// 这样的水位，只有 len(queue) 没有分母。构造后不变。
+	capacity int
+
+	// dropped 是进程启动以来被丢弃的日志条数（队列满、服务退出各算）。
+	// 看板上的所有数字都出自这张表 —— 这条队列悄悄丢日志时，统计就在
+	// 「看起来正常」地少算。这里把丢弃变成一个可观测的量，经 live 推送
+	// （见 api.liveStatsLoop 的 health 消息）展示到看板，丢弃发生时第一时间喊出来。
+	// 只在内存累计：重启归零是想要的语义，它回答的是「这一程丢了没有」。
+	dropped atomic.Int64
+
 	// mu 保护 queue 的「关闭」与「投递」不交错。
 	//
 	// 为什么需要它：往已关闭的通道发送**即使写在 select 里也会 panic**
@@ -43,7 +55,7 @@ func NewLogWriter(db *gorm.DB, buffer int, logger *slog.Logger) *LogWriter {
 	if buffer <= 0 {
 		buffer = 1024
 	}
-	w := &LogWriter{db: db, queue: make(chan queuedLog, buffer), logger: logger, done: make(chan struct{})}
+	w := &LogWriter{db: db, queue: make(chan queuedLog, buffer), capacity: buffer, logger: logger, done: make(chan struct{})}
 	go w.loop()
 	return w
 }
@@ -67,8 +79,29 @@ func (w *LogWriter) Enqueue(entry model.RequestLog, payload *model.RequestPayloa
 }
 
 func (w *LogWriter) warnDropped(entry model.RequestLog, why string) {
+	w.dropped.Add(1)
 	if w.logger != nil {
 		w.logger.Warn("丢弃一条统计", "why", why, "trace_id", entry.TraceID)
+	}
+}
+
+// LogQueueStats 是日志队列的一个瞬时快照，供看板的「队列水位」展示与告警。
+type LogQueueStats struct {
+	// Queued 是此刻还排在队列里没落库的条数（0..Capacity）
+	Queued int `json:"queued"`
+	// Capacity 是队列容量（不随时间变化，前端拿它当分母）
+	Capacity int `json:"capacity"`
+	// Dropped 是进程启动以来累计丢弃的条数（队列满 + 服务退出）
+	Dropped int64 `json:"dropped"`
+}
+
+// QueueStats 取队列快照。随时可调：len(chan) 与原子读都不需要锁，
+// 关闭后的通道 len 同样安全（残余未取走的仍会计入）。
+func (w *LogWriter) QueueStats() LogQueueStats {
+	return LogQueueStats{
+		Queued:   len(w.queue),
+		Capacity: w.capacity,
+		Dropped:  w.dropped.Load(),
 	}
 }
 
