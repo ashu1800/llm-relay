@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm"
 
 	"llm-relay/internal/model"
+	"llm-relay/internal/relay"
 	"llm-relay/internal/secure"
 )
 
@@ -292,6 +293,11 @@ type channelListItem struct {
 	// 也正因为如此，这里不需要在转发链路上加写库动作 ——
 	// 健康状态那两处 Update 是有意节流的（只在状态变化时写）
 	LastUsedAt *time.Time `json:"last_used_at"`
+	// Runtime 是渠道的运行期状态（冷却剩余 / 失败连击 / 平滑延迟 / 在途数）。
+	// health_status 只回答「最近一次成功或失败」，这一块回答「此刻能不能
+	// 被路由到」—— 冷却中的渠道即使 health_status 还是 healthy 也不会接活。
+	// 没有运行期数据（State 未注入）时为 nil
+	Runtime *relay.ChannelRuntime `json:"runtime,omitempty"`
 }
 
 func (s *Server) listChannels(c *gin.Context) {
@@ -353,14 +359,23 @@ func (s *Server) listChannels(c *gin.Context) {
 	}
 
 	items := make([]channelListItem, 0, len(channels))
+	// 运行期快照一次取全（内存读，O(渠道数)），再按 id 分发到各行
+	var runtimeByID map[uint]relay.ChannelRuntime
+	if s.deps.State != nil {
+		runtimeByID = s.deps.State.Snapshot(time.Now())
+	}
 	for _, ch := range channels {
 		list := names[ch.ID]
 		if list == nil {
 			list = []string{}
 		}
+		var rt *relay.ChannelRuntime
+		if r, ok := runtimeByID[ch.ID]; ok {
+			rt = &r
+		}
 		items = append(items, channelListItem{
 			Channel: ch, Models: list, ModelCount: len(list), UnpricedCount: unpriced[ch.ID],
-			LastUsedAt: lastUsed[ch.ID],
+			LastUsedAt: lastUsed[ch.ID], Runtime: rt,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})

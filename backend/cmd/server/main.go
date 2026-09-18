@@ -152,9 +152,11 @@ func run() error {
 		GroupLimit:  groupLimit,
 		Live:        live,
 		Logger:      logger,
-		// 渠道运行期状态（冷却 / 在途）由 Router 与 Service 自己持有，
-		// 不经过 HTTP 层：原来这里的 State 字段没有任何读取方，
-		// 是路由分析页留下的最后一点残留
+		// State 之前被清出过 Deps（「没有读取方，是路由分析页的残留」）。
+		// 现在读它的地方回来了：渠道列表把运行期状态（冷却剩余/连击/在途）
+		// 并进响应，让「熔断早已生效但谁也看不见」变成看得见 ——
+		// 与 Router、Service 持有的是同一份实例，不存在第二份事实
+		State: state,
 	})
 	srv.Register(engine)
 

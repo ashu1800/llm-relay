@@ -31,6 +31,22 @@ export interface Channel {
    * 也可能是它的调用早于日志保留期已被清理，两种情况在界面上是同一种呈现。
    */
   last_used_at?: string | null
+  /**
+   * 运行期状态（列表接口从转发内核的内存状态里取的快照）。
+   * health_status 只回答「最近一次成功或失败」，这一块回答
+   * 「此刻能不能被路由到」：冷却中的渠道即使 health_status 还是
+   * healthy 也不会接活。缺省表示转发内核没在运行（或旧版后端）。
+   */
+  runtime?: {
+    /** 冷却剩余毫秒；0 = 不在冷却中 */
+    cooldown_ms: number
+    /** 连续失败次数（成功一次清零；达到 3 会触发自动冷却） */
+    fail_streak: number
+    /** 平滑首包延迟（EWMA 毫秒；0 = 还没有成功观测值） */
+    latency_ms: number
+    /** 当前在途请求数 */
+    inflight: number
+  }
 }
 
 // SlotRule 描述渠道可用时段。结束时间早于开始时间表示跨午夜。

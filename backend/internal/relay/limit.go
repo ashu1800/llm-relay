@@ -230,16 +230,27 @@ func NewChannelState() *ChannelState {
 }
 
 // Cooldown 把渠道摘掉一段时间。已存在的更长冷却不会被缩短。
-func (s *ChannelState) Cooldown(id uint, d time.Duration) {
+//
+// 返回 true 表示渠道是**这一次调用才进入冷却的**（之前不在冷却中）：
+// 调用方（Service 的事件回调）用它把「渠道熔断了」只通知一次 ——
+// 冷却中的渠道反复 429 是常态，每次都喊一嗓子就是告警轰炸。
+func (s *ChannelState) Cooldown(id uint, d time.Duration) bool {
 	if s == nil || id == 0 || d <= 0 {
-		return
+		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	until := time.Now().Add(d)
-	if until.After(s.until[id]) {
-		s.until[id] = until
+	// 已经在冷却中（无论剩余长短）都算「不是新进入」：
+	// 延长冷却不需要重新通知，看板上的剩余时间用 until 推算
+	if until, ok := s.until[id]; ok && until.After(time.Now()) {
+		newUntil := time.Now().Add(d)
+		if newUntil.After(s.until[id]) {
+			s.until[id] = newUntil
+		}
+		return false
 	}
+	s.until[id] = time.Now().Add(d)
+	return true
 }
 
 // InCooldown 判断渠道是否在冷却中，返回剩余时间。
@@ -383,6 +394,62 @@ func (s *ChannelState) Release(id uint) {
 	if s.inflight[id] == 0 {
 		delete(s.inflight, id)
 	}
+}
+
+// ChannelRuntime 是一条渠道运行期状态的对外快照：管理接口把它并进
+// 渠道列表响应，看板据此显示「这条渠道现在能不能被路由到」。
+//
+// 熔断机制（冷却、连击）早已在转发链路里生效，但对外一直是黑盒 ——
+// 用户看到「请求绕开了某条渠道」，界面上却没有任何解释。
+// 这个快照就是那块玻璃。
+type ChannelRuntime struct {
+	// CooldownMS 是冷却剩余毫秒；0 = 不在冷却中（不会为负，过期即 0）
+	CooldownMS int64 `json:"cooldown_ms"`
+	// FailStreak 是连续失败次数（成功一次清零；≥3 会触发自动冷却）
+	FailStreak int `json:"fail_streak"`
+	// LatencyMS 是平滑首包延迟（EWMA 毫秒；0 = 还没有成功观测值）
+	LatencyMS int `json:"latency_ms"`
+	// Inflight 是当前在途请求数
+	Inflight int `json:"inflight"`
+}
+
+// Snapshot 一次锁内取**全部有状态**渠道的运行期快照。
+// now 由调用方传入：与 InCooldown 同一手法，剩余时间从给定时刻推算，
+// 测试不用 sleep。返回的 map 是全新副本，调用方可随意持有。
+func (s *ChannelState) Snapshot(now time.Time) map[uint]ChannelRuntime {
+	out := map[uint]ChannelRuntime{}
+	if s == nil {
+		return out
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := map[uint]bool{}
+	for id := range s.until {
+		ids[id] = true
+	}
+	for id := range s.failStreak {
+		ids[id] = true
+	}
+	for id := range s.latency {
+		ids[id] = true
+	}
+	for id := range s.inflight {
+		ids[id] = true
+	}
+	for id := range ids {
+		rt := ChannelRuntime{
+			FailStreak: s.failStreak[id],
+			LatencyMS:  int(s.latency[id]),
+			Inflight:   s.inflight[id],
+		}
+		if until, ok := s.until[id]; ok {
+			if remain := until.Sub(now); remain > 0 {
+				rt.CooldownMS = remain.Milliseconds()
+			}
+		}
+		out[id] = rt
+	}
+	return out
 }
 
 // ============================ 全局并发闸门 ============================

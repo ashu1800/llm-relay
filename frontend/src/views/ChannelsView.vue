@@ -15,6 +15,7 @@ import {
   InfoCircleOutlined
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
+import { onLive } from '@/composables/useLive'
 import DataState from '@/components/DataState.vue'
 import ModelWhitelistEditor, { type WhitelistRow } from '@/components/ModelWhitelistEditor.vue'
 // Proxy 只用于代理下拉的选项类型
@@ -435,9 +436,24 @@ async function testChannel(row: ChannelRow) {
 // 不靠颜色单独表意）。点开图表就能看到最近一次的错误原文。
 type HealthInfo = { text: string; degraded: boolean }
 
+// 健康提示的口径分两层：
+//   - runtime（转发内核的运行期状态）回答「此刻能不能被路由到」——
+//     冷却中的渠道即使 health_status 还是 healthy 也不接活，它优先级最高；
+//   - health_status（最近一次探测/转发的落库结果）回答「最近一次是成功还是失败」。
+// 以前只有后半层：熔断机制一直在生效，但界面上没有任何解释 ——
+// 用户只会看到「请求怎么绕开了这条渠道」，答案其实一直存在于内存里。
 function healthInfo(row: Channel): HealthInfo {
-  if (row.health_status === 'degraded') return { text: '最近一次探测异常', degraded: true }
-  if (row.health_status === 'healthy') return { text: '最近一次探测正常', degraded: false }
+  const rt = row.runtime
+  if (rt && rt.cooldown_ms > 0) {
+    const sec = Math.ceil(rt.cooldown_ms / 1000)
+    const cause = rt.fail_streak >= 3 ? '连续失败' : '上游限流/故障'
+    return { text: `熔断冷却中（剩 ${sec} 秒，${cause} ${rt.fail_streak} 次），期间请求自动绕开`, degraded: true }
+  }
+  if (row.health_status === 'degraded') {
+    const streak = rt?.fail_streak ?? 0
+    return { text: streak > 0 ? `最近转发失败（连击 ${streak} 次）` : '最近一次探测/转发异常', degraded: true }
+  }
+  if (row.health_status === 'healthy') return { text: '最近一次探测/转发正常', degraded: false }
   return { text: '还没探测过', degraded: false }
 }
 
@@ -470,8 +486,19 @@ function fmtAgo(v: string | null | undefined) {
 /** 开关的悬停说明：说清当前状态、以及这个状态意味着什么。 */
 function enableTip(row: Channel) {
   if (!row.enabled) return ['已停用：不参与任何路由', '打开开关即可重新接回流量']
+  const lines: string[] = []
+  // 运行期状态排最前：它决定「下一发会不会打到这条渠道」，比探测结果更急
+  const rt = row.runtime
+  if (rt) {
+    if (rt.cooldown_ms > 0) {
+      lines.push(`熔断冷却中：剩余 ${Math.ceil(rt.cooldown_ms / 1000)} 秒（期间请求自动绕开）`)
+    }
+    if (rt.fail_streak > 0) lines.push(`连续失败：${rt.fail_streak} 次`)
+    if (rt.inflight > 0) lines.push(`在途请求：${rt.inflight} 个`)
+    if (rt.latency_ms > 0) lines.push(`平滑首字延迟：约 ${Math.round(rt.latency_ms)} ms`)
+  }
   const h = healthInfo(row)
-  const lines = ['已启用 · ' + h.text]
+  lines.push('已启用 · ' + h.text)
   if (row.last_error) lines.push('最近错误：' + row.last_error)
   const at = fmtCheckedAt(row.last_checked_at)
   if (at) lines.push('探测时间：' + at)
@@ -685,6 +712,49 @@ function onDragEnd(evt: { item?: HTMLElement }) {
   })
   void submitOrder(moved.group_id, orderedIds)
 }
+
+// ---- 渠道健康事件的实时推送 ----
+//
+// 熔断发生时后端经 live 推 channel_health 帧：这里做两件事 ——
+// 就地改内存里那一行的 runtime/health_status（不重取列表：拖拽排序
+// 依赖 DOM 稳定，列表接口又带一堆聚合，能不动就不动），以及弹一次提示。
+// 恢复事件不弹窗：治好病不用敲锣，列表上的红点消失就足够了。
+type ChannelHealthEvent = {
+  channel_id: number
+  channel_name: string
+  kind: 'cooldown' | 'auto_cooldown' | 'recovered'
+  reason: string
+  until: string
+}
+let lastHealthToast = { key: 0, at: 0 }
+
+onLive('channel_health', (data: ChannelHealthEvent) => {
+  const row = rows.value.find((r) => r.id === data.channel_id)
+  if (row) {
+    if (data.kind === 'recovered') {
+      row.health_status = 'healthy'
+      if (row.runtime) {
+        row.runtime.cooldown_ms = 0
+        row.runtime.fail_streak = 0
+      }
+    } else {
+      row.health_status = 'degraded'
+      const rt = row.runtime || (row.runtime = { cooldown_ms: 0, fail_streak: 0, latency_ms: 0, inflight: 0 })
+      rt.cooldown_ms = Math.max(0, new Date(data.until).getTime() - Date.now())
+      // 事件没带连击数：自动熔断必为阈值 3，上游冷却至少 1 次
+      rt.fail_streak = data.kind === 'auto_cooldown' ? Math.max(rt.fail_streak, 3) : Math.max(rt.fail_streak, 1)
+    }
+  }
+  if (data.kind !== 'recovered') {
+    const what = data.kind === 'auto_cooldown' ? '连续失败，自动熔断 60 秒' : '上游异常，暂时冷却'
+    const now = Date.now()
+    // 节流：同一渠道 10 秒内不重复弹（冷却中的渠道可能反复触发后端事件去重
+    // 之外的场景，比如手动恢复后又立刻失败）
+    if (lastHealthToast.key === data.channel_id && now - lastHealthToast.at < 10000) return
+    lastHealthToast = { key: data.channel_id, at: now }
+    message.warning(`渠道「${data.channel_name || '#' + data.channel_id}」${what}：${data.reason}`)
+  }
+})
 
 onMounted(async () => {
   await load()

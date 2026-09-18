@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"llm-relay/internal/config"
+	"llm-relay/internal/model"
 	"llm-relay/internal/pricing"
 	"llm-relay/internal/relay"
 	"llm-relay/internal/secure"
@@ -29,6 +30,10 @@ type Deps struct {
 	Service *relay.Service
 	Logs    *relay.LogWriter
 	Pricing *pricing.Engine
+	// State 是渠道运行期状态（冷却 / 连击 / 在途）：与 Router、Service 持有
+	// 同一份实例。管理接口用它把「这条渠道现在能不能被路由到」并进响应 ——
+	// 熔断早已生效，这里负责让它看得见。nil 时接口里缺省该字段。
+	State *relay.ChannelState
 
 	// 限流与并发控制
 	RateLimiter *relay.RateLimiter
@@ -50,6 +55,29 @@ type Server struct {
 
 // New 构造 HTTP 层。
 func New(deps *Deps) *Server {
+	// 把渠道健康事件接到 live 推送上（channel_health 帧）。
+	// 事件的产生在 relay.Service（冷却 / 自动熔断 / 恢复三处触发点），
+	// 广播能力在 liveHub，两边的接线只能在这一层做 ——
+	// relay 包不该知道 WebSocket 的存在。
+	// 渠道名在这里补齐：relay 侧只有 id，查一次库换来前端能直接显示名字。
+	if deps.Service != nil && deps.Live != nil {
+		deps.Service.OnChannelEvent = func(e relay.ChannelEvent) {
+			name := ""
+			if deps.Store != nil {
+				var ch model.Channel
+				if err := deps.Store.DB().Select("name").First(&ch, e.ChannelID).Error; err == nil {
+					name = ch.Name
+				}
+			}
+			deps.Live.broadcast(mustJSON(liveMessage{Type: "channel_health", Data: gin.H{
+				"channel_id":   e.ChannelID,
+				"channel_name": name,
+				"kind":         e.Kind,
+				"reason":       e.Reason,
+				"until":        e.Until,
+			}}))
+		}
+	}
 	return &Server{
 		deps:      deps,
 		startedAt: time.Now(),

@@ -57,6 +57,31 @@ type Service struct {
 	// groupLimit 是分组级的每分钟额度（分组上配的 RPM / TPM）。
 	// 为零值时 Check 直接放行，所以未注入也能正常工作。
 	groupLimit *GroupLimiter
+	// OnChannelEvent 是渠道健康事件的出口（冷却 / 自动熔断 / 恢复），
+	// 由 HTTP 层注入并转发到 live 推送。熔断机制本身早已生效，
+	// 但对外一直是黑盒 —— 这里的目的就是把它变成看得见的。
+	// 回调在转发路径上同步执行，必须轻（查一次库 + 一次广播），不得阻塞。
+	OnChannelEvent func(ChannelEvent)
+}
+
+// ChannelEvent 是一次渠道健康状态翻转。
+type ChannelEvent struct {
+	ChannelID uint
+	// Kind：cooldown = 上游信号冷却（429/5xx/401/403，首次进入）；
+	// auto_cooldown = 连续失败达阈值的自动熔断；recovered = 恢复健康
+	Kind string
+	// Reason 是人读得过的原因（上游状态码 / 最近一次错误摘要）
+	Reason string
+	// Until 是冷却截止时间（cooldown / auto_cooldown 有值）
+	Until time.Time
+}
+
+// emit 在回调已注入时发一条事件。nil 检查集中在这里，
+// 三个触发点都不必再判空。
+func (s *Service) emit(e ChannelEvent) {
+	if s.OnChannelEvent != nil {
+		s.OnChannelEvent(e)
+	}
 }
 
 // SetChannelState 注入渠道运行期状态，用于并发闸门与冷却。
@@ -475,7 +500,12 @@ func (s *Service) applyCooldown(channelID uint, attempt *Attempt) {
 	default:
 		return
 	}
-	s.state.Cooldown(channelID, wait)
+	// 只在「新进入冷却」时广播：冷却中的渠道反复 429 是常态，
+	// 每次都通知就是告警轰炸。Cooldown 的返回值正是为此而设
+	if s.state.Cooldown(channelID, wait) {
+		s.emit(ChannelEvent{ChannelID: channelID, Kind: "cooldown",
+			Reason: fmt.Sprintf("上游返回 %d", attempt.StatusCode), Until: time.Now().Add(wait)})
+	}
 	s.logger.Warn("渠道进入冷却",
 		"channel_id", channelID, "status", attempt.StatusCode, "cooldown", wait.String())
 }
@@ -550,7 +580,11 @@ func (s *Service) markChannelFailure(channelID uint, msg string) {
 	// 所以不会出现「冷却刚好过期，失败一次又被摘掉」导致永远没机会
 	// 自愈的死循环：到期后的第一次尝试就是机会。
 	if s.state != nil && s.state.NoteFailure(channelID) >= failStreakThreshold {
-		s.state.Cooldown(channelID, autoCooldownOnStreak)
+		if s.state.Cooldown(channelID, autoCooldownOnStreak) {
+			// 同样只在新进入冷却时广播（与 applyCooldown 同理）
+			s.emit(ChannelEvent{ChannelID: channelID, Kind: "auto_cooldown",
+				Reason: msg, Until: time.Now().Add(autoCooldownOnStreak)})
+		}
 		s.logger.Warn("渠道连续失败，自动冷却",
 			"channel_id", channelID, "streak", failStreakThreshold, "cooldown", autoCooldownOnStreak.String())
 	}
@@ -562,11 +596,18 @@ func (s *Service) markChannelSuccess(channelID uint) {
 	if s.state != nil {
 		s.state.NoteSuccess(channelID)
 	}
-	err := s.db.Model(&model.Channel{}).
+	res := s.db.Model(&model.Channel{}).
 		Where("id = ? AND health_status <> ?", channelID, "healthy").
-		Updates(map[string]any{"health_status": "healthy", "last_error": ""}).Error
-	if err != nil {
-		s.logger.Warn("更新渠道健康状态失败", "channel_id", channelID, "err", err)
+		Updates(map[string]any{"health_status": "healthy", "last_error": ""})
+	if res.Error != nil {
+		s.logger.Warn("更新渠道健康状态失败", "channel_id", channelID, "err", res.Error)
+		return
+	}
+	// 只有 degraded -> healthy 真的翻转时才广播「已恢复」：
+	// 渠道健康时每条成功请求都会走到这里，无差别广播就是每秒一条噪音
+	if res.RowsAffected > 0 {
+		s.emit(ChannelEvent{ChannelID: channelID, Kind: "recovered",
+			Reason: "最近一次转发成功"})
 	}
 }
 
