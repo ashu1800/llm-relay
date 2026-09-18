@@ -145,6 +145,9 @@ type RelayRequest struct {
 	APIKeyName  string
 	ClientIP    string
 	Stream      bool
+	// ThinkingLevel 是入站请求体里的思考等级（归一档位，见 ExtractThinkingLevel）。
+	// 随日志落一份快照：列表的「思考」列显示它；空 = 请求没带思考参数。
+	ThinkingLevel string
 }
 
 // RelayResult 是编排结果。

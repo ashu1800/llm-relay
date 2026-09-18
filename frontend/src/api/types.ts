@@ -169,6 +169,8 @@ export interface RequestLog {
   upstream_protocol: string
   model_requested: string
   model_upstream: string
+  /** 入站思考参数的归一档位（off/minimal/low/medium/high/on/auto）；空 = 请求没带思考参数 */
+  thinking_level?: string
   stream: boolean
   status_code: number
   error: string

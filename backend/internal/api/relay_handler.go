@@ -169,6 +169,7 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 		Headers:       c.Request.Header,
 		ClientIP:      c.ClientIP(),
 		Stream:        relay.ExtractStream(body),
+		ThinkingLevel: relay.ExtractThinkingLevel(p.Name, rawBody),
 		AllowedGroups: allowedGroups,
 	}
 	if key != nil {

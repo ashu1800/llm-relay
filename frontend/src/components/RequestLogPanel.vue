@@ -223,6 +223,28 @@ function markFresh(ids: number[]) {
   freshTimers.add(timer)
 }
 
+// ---- 「思考」列：入站思考参数的归一档位 → 展示文案与色点 ----
+//
+// 档位由后端 relay.ExtractThinkingLevel 归一（openai 的 reasoning_effort、
+// GLM 的 thinking.type、anthropic 的 budget_tokens 粗分档、gemini 的
+// thinkingConfig，四家归到同一套词表）。空 = 请求没带思考参数 ——
+// 它不是「关」：一个是「没说」，一个是「说了不要」，必须可区分。
+// 认不得的档位（上游自定义）原样展示：诚实优于猜测。
+const THINKING_META: Record<string, { label: string; color: string }> = {
+  off: { label: '关', color: '#8c8c8c' },
+  minimal: { label: '极低', color: '#bfbfbf' },
+  low: { label: '低', color: '#36cfc9' },
+  medium: { label: '中', color: '#faad14' },
+  high: { label: '高', color: '#eb2f96' },
+  on: { label: '开', color: '#52c41a' },
+  auto: { label: '自动', color: '#1677ff' },
+}
+
+function thinkingMeta(level?: string) {
+  if (!level) return null
+  return THINKING_META[level] ?? { label: level, color: '#8c8c8c' }
+}
+
 /** 行的 class 由「是否刚新增」决定；antd 在它自己的渲染里调用它，读到的依赖归它 */
 function rowClassName(record: RequestLog) {
   return freshIds.value.has(record.id) ? 'is-new' : ''
@@ -671,6 +693,8 @@ onMounted(() => {
            下排「▣ 479.23K 99.86%」107px，加 16px 内边距 = 140，取 150 留余量。
            操作列 72 -> 64 是「详情」文字链接改成图标按钮那一次
            （见模板里那一列上方的注释）。
+           思考列 2026-09-18 加入：68px（色点 6 + 间距 5 + 两字 24 + 内边距 16
+           = 51，取 68 留出「自动/极低」的余量），scroll.x 随之和 1028 -> 1096。
            改动列宽时这张表的总宽要一起看，scripts/check-table-widths.mjs
            会盯着声明值与各列宽度之和是否一致 -->
       <!-- 外面这层只为扫光存在：亮带是这一层里的绝对定位元素，表格内部
@@ -687,7 +711,7 @@ onMounted(() => {
           :row-class-name="rowClassName"
           row-key="id"
           size="small"
-          :scroll="{ x: 1028, y: TABLE_BODY_Y }"
+          :scroll="{ x: 1096, y: TABLE_BODY_Y }"
         >
         <template #emptyText>
           <a-empty :description="emptyText" />
@@ -707,6 +731,18 @@ onMounted(() => {
                  （当初还有一条理由「按分组看整批请求时，工具栏的分组筛选更好用」，
                  它随列表不再吃筛选而失效 —— 现在列表只回答「最新发生了什么」。） -->
             <GroupTag :name="record.model_requested" v-bind="tagColorOf(record.group_id)" />
+          </template>
+        </a-table-column>
+        <!-- 「思考」：这次请求想要的思考强度（入站参数快照，随日志落库，
+             事后渠道/模型怎么变都不改写）。空 = 没带思考参数，显示 —；
+             「关」是显式关掉，两者不是一回事。色点强弱 = 思考强度直觉。 -->
+        <a-table-column title="思考" :width="68">
+          <template #default="{ record }">
+            <span v-if="record.thinking_level" class="think-cell" :title="'思考等级: ' + record.thinking_level">
+              <span class="think-dot" :style="{ background: thinkingMeta(record.thinking_level)?.color }" />
+              <span>{{ thinkingMeta(record.thinking_level)?.label }}</span>
+            </span>
+            <span v-else class="muted">—</span>
           </template>
         </a-table-column>
         <!-- 渠道列当初是随「按渠道筛选」一起加的，那个筛选现在不再作用于列表；
@@ -882,6 +918,14 @@ onMounted(() => {
         </a-descriptions-item>
         <a-descriptions-item label="上游模型">
           <GroupTag v-if="current.model_upstream" :name="current.model_upstream" v-bind="tagColorOf(current.group_id)" />
+          <template v-else>-</template>
+        </a-descriptions-item>
+        <a-descriptions-item label="思考等级">
+          <span v-if="current.thinking_level" class="think-cell">
+            <span class="think-dot" :style="{ background: thinkingMeta(current.thinking_level)?.color }" />
+            {{ thinkingMeta(current.thinking_level)?.label }}
+            <span class="muted">（{{ current.thinking_level }}）</span>
+          </span>
           <template v-else>-</template>
         </a-descriptions-item>
         <a-descriptions-item label="分组">
@@ -1101,6 +1145,22 @@ onMounted(() => {
    其它四个视图都有这条，只有这里漏了 —— 漏掉的表现是占位符用了正文色，
    比旁边的真实值还显眼，而它本该是「这里什么都没有」 */
 .muted { color: var(--color-text-secondary); }
+
+/* 「思考」列：色点 + 文字。色点 6px 圆、与文字垂直居中，
+   颜色由 THINKING_META 给（强度直觉：灰关、青低、金中、紫红高）。 */
+.think-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.think-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+}
 
 /* 错误原文：详情里唯一保留的代码块（排障时最常看的就是上游报错） */
 .err-box {

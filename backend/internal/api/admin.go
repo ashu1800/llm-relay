@@ -1657,12 +1657,12 @@ func (s *Server) exportLogs(c *gin.Context) {
 	// 所以把被合并掉的「耗时」二字补回列名，并带上单位（毫秒）。
 	// 费用拆成「金额 + 币种」两列：金额离开币种就没意义，
 	// 而现在同一份导出里可能同时有人民币和美元的账
-	b.WriteString("请求时间,模型,状态,密钥,渠道,输入Token,输出Token,缓存命中,缓存写入,推理Token,首字耗时(ms),总共耗时(ms),费用,币种,trace_id\n")
+	b.WriteString("请求时间,模型,思考,状态,密钥,渠道,输入Token,输出Token,缓存命中,缓存写入,推理Token,首字耗时(ms),总共耗时(ms),费用,币种,trace_id\n")
 	for i := range items {
 		r := &items[i]
 		row := []string{
 			r.CreatedAt.Format(time.RFC3339),
-			r.ModelRequested, strconv.Itoa(r.StatusCode), r.APIKeyName, r.ChannelName,
+			r.ModelRequested, r.ThinkingLevel, strconv.Itoa(r.StatusCode), r.APIKeyName, r.ChannelName,
 			strconv.Itoa(r.PromptTokens), strconv.Itoa(r.CompletionTokens),
 			strconv.Itoa(r.CachedTokens), strconv.Itoa(r.CacheCreationTokens), strconv.Itoa(r.ReasoningTokens),
 			strconv.Itoa(r.FirstByteMs), strconv.Itoa(r.TotalMs), r.EstimatedCost.String(), r.CostCurrency, r.TraceID,

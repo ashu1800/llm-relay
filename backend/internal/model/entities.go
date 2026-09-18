@@ -74,7 +74,7 @@ type ChannelGroup struct {
 	// 没有汇率就不该有相加），超支判定逐币种独立进行。目前它只是
 	// 一个提醒（80% / 100% 时经 live 推送各喊一次，每天每档一次），
 	// 不拦截请求 —— 预算配错一刀切断会全站瘫痪，还会腰斩流式响应。
-	DailyBudget JSONMap `gorm:"type:jsonb" json:"daily_budget"`
+	DailyBudget JSONMap   `gorm:"type:jsonb" json:"daily_budget"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -262,10 +262,14 @@ type RequestLog struct {
 	UpstreamProto  string `gorm:"size:32" json:"upstream_protocol"`
 	ModelRequested string `gorm:"size:128;index" json:"model_requested"`
 	ModelUpstream  string `gorm:"size:128" json:"model_upstream"`
-	IsStream       bool   `json:"stream"`
-	StatusCode     int    `json:"status_code"`
-	Error          string `gorm:"size:1024" json:"error"`
-	RetryCount     int    `json:"retry_count"`
+	// ThinkingLevel 是入站请求体里思考参数的归一档位
+	// （off/minimal/low/medium/high/on/auto，见 relay.ExtractThinkingLevel）。
+	// 空串 = 请求没带思考参数 —— 不是「关」，是「没说」，前端据此显示 —。
+	ThinkingLevel string `gorm:"size:16" json:"thinking_level"`
+	IsStream      bool   `json:"stream"`
+	StatusCode    int    `json:"status_code"`
+	Error         string `gorm:"size:1024" json:"error"`
+	RetryCount    int    `json:"retry_count"`
 
 	PromptTokens        int  `json:"prompt_tokens"`
 	CompletionTokens    int  `json:"completion_tokens"`
