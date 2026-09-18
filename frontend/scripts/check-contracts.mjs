@@ -158,39 +158,126 @@ for (const tok of ['--color-red', '--color-orange', '--color-green', '--color-bl
   check(`深色主题覆盖了 ${tok}`, darkBlock.includes(tok + ':'))
 }
 
-// 光标 SVG 里的品牌色是 --color-primary 的第二份定义。
+// 光标 SVG 里的颜色是主题变量的第二份定义。
 //
-// 光标是当作图片加载的，没有 CSS 级联，SVG 里写不了 var(--color-primary)，
-// 只能把色值抄一遍。这与 theme.ts 里记的「双份定义会漂移」是同一类坑：
-// 改主色时漏掉光标，界面不会报错、也不会失败，只是光标停在旧主色上，
-// 肉眼在两种颜色之间很难发现。所以在这里盯住。
+// 光标是当作图片加载的，没有 CSS 级联，SVG 里写不了 var(...)，只能把色值抄一遍。
+// 这与 theme.ts 里记的「双份定义会漂移」是同一类坑：改主题色时漏掉光标，
+// 界面不会报错、也不会失败，只是光标停在旧颜色上，肉眼在相近的两色之间很难发现。
+//
+// 取色来源是「主色实心块」那一对（填充 = 实心块底色、描边 = 压在上面的文字色），
+// 不是 --color-primary：主色 #c87864 压在米白页底上只有 3.05:1，
+// 而实心块那对本就是按「要看得清」挑的。
+//
+// 2026-09-18 起改为每个主题各一套光标（轮廓也不同，不只是换色），
+// 所以下面按主题分块取值、按文件逐个比对。
 console.log('')
 console.log('=== 光标资源 ===')
-const primaryMatch = theme.match(/--color-primary:\s*(#[0-9a-fA-F]{3,8})/)
-check('theme.css 里能读到 --color-primary', !!primaryMatch)
-if (primaryMatch) {
-  const primary = primaryMatch[1].toLowerCase()
-  const publicDir = join(SRC, '..', 'public')
-  for (const f of ['cursor-arrow.svg', 'cursor-hand.svg']) {
-    const svg = readFileSync(join(publicDir, f), 'utf8')
-    check(
-      `${f} 的填充色与 --color-primary 一致`,
-      svg.toLowerCase().includes(primary),
-      `SVG 里没找到 ${primary}，把 fill 同步成主色`
-    )
+
+// 从 theme.css 里切出 :root 与深色块两段，后面的断言都在各自的块里做。
+// 不切成块而是全文 grep 的话，「深色没覆盖光标变量」这种漏配会被浅色的定义
+// 蒙过去 —— 全文里当然能找到那个变量名，但它不在深色块里。
+const rootStart = theme.indexOf(':root {')
+const rootBlock = rootStart >= 0 ? theme.slice(rootStart, theme.indexOf('\n}', rootStart)) : ''
+check('theme.css 里能切出 :root 块', !!rootBlock)
+check('theme.css 里能切出深色块', !!darkBlock)
+
+// 从某个块里读一个颜色变量
+const readColor = (block, tok) => {
+  const m = block.match(new RegExp(tok.replace(/[-]/g, '\\-') + ':\\s*(#[0-9a-fA-F]{3,8})'))
+  return m ? m[1].toLowerCase() : null
+}
+// 从某个块里读一个光标令牌：返回 { url, hotspot: 'x y', fallback }
+const readCursor = (block, tok) => {
+  const m = block.match(new RegExp(tok.replace(/[-]/g, '\\-') + ":\\s*url\\('([^']+)'\\)\\s+(\\d+)\\s+(\\d+)\\s*,\\s*([a-z-]+)"))
+  return m ? { url: m[1], hotspot: `${m[2]} ${m[3]}`, fallback: m[4] } : null
+}
+
+const THEMES = [
+  { name: '浅色', block: rootBlock, arrow: 'cursor-arrow-light.svg', hand: 'cursor-hand-light.svg' },
+  { name: '深色', block: darkBlock, arrow: 'cursor-arrow-dark.svg', hand: 'cursor-hand-dark.svg' },
+]
+
+// 实心块那对颜色在两个主题里各自定义了一次，光标必须跟着各自的走
+const palette = {}
+for (const t of THEMES) {
+  palette[t.name] = { fill: readColor(t.block, '--solid-primary-bg'), stroke: readColor(t.block, '--solid-primary-fg') }
+  check(`${t.name}块里能读到 --solid-primary-bg（光标填充来源）`, !!palette[t.name].fill)
+  check(`${t.name}块里能读到 --solid-primary-fg（光标描边来源）`, !!palette[t.name].stroke)
+}
+
+const publicDir = join(SRC, '..', 'public')
+const attr = (svg, name) => {
+  const m = svg.match(new RegExp(`\\b${name}="(#[0-9a-fA-F]{3,8})"`))
+  return m ? m[1].toLowerCase() : null
+}
+
+for (const t of THEMES) {
+  for (const [kind, file] of [['箭头', t.arrow], ['手型', t.hand]]) {
+    let svg
+    try { svg = readFileSync(join(publicDir, file), 'utf8') } catch { check(`${t.name}${kind}光标 ${file} 存在`, false, '读不到文件'); continue }
+    const tag = `${t.name}${kind} ${file}`
+
+    // 按属性逐项比对，而不是「整份文件里出现过这个色值就算过」：
+    // 后者在 fill/stroke 写反时照样通过 —— 两个色值都在文件里。
+    const fill = attr(svg, 'fill')
+    const stroke = attr(svg, 'stroke')
+    check(`${tag} 的 fill 等于本主题实心块底色 ${palette[t.name].fill}`, fill === palette[t.name].fill, `实测 ${fill}`)
+    check(`${tag} 的 stroke 等于本主题实心块文字色 ${palette[t.name].stroke}`, stroke === palette[t.name].stroke, `实测 ${stroke}`)
+    check(`${tag} 的 fill 与 stroke 不是同一个色`, fill !== stroke)
+
     // 光标图必须自带固有尺寸：Chrome 拿不到 width/height 时不会渲染光标，
     // 也不报错，表现只是「样式改了但没效果」
-    check(`${f} 带固有尺寸`, /<svg[^>]*\bwidth="\d+"[^>]*\bheight="\d+"/.test(svg.replace(/\s+/g, ' ')))
+    check(`${tag} 带固有尺寸`, /<svg[^>]*\bwidth="\d+"[^>]*\bheight="\d+"/.test(svg.replace(/\s+/g, ' ')))
     // Firefox 67 起自定义光标上限 32x32，超了会被整个丢弃
     const wh = svg.match(/<svg[^>]*\bwidth="(\d+)"[^>]*\bheight="(\d+)"/)
-    check(`${f} 不超过 32x32（Firefox 上限）`, !!wh && +wh[1] <= 32 && +wh[2] <= 32, wh ? `实测 ${wh[1]}x${wh[2]}` : '读不到尺寸')
+    check(`${tag} 不超过 32x32（Firefox 上限）`, !!wh && +wh[1] <= 32 && +wh[2] <= 32, wh ? `实测 ${wh[1]}x${wh[2]}` : '读不到尺寸')
     // XML 注释里出现连续两个减号会让整个 SVG 解析失败（favicon 踩过这个坑）
     const comments = svg.match(/<!--[\s\S]*?-->/g) || []
-    check(`${f} 注释里没有连续减号`, !comments.some((c) => c.slice(4, -3).includes('--')))
+    check(`${tag} 注释里没有连续减号`, !comments.some((c) => c.slice(4, -3).includes('--')))
   }
-  // CSS 里的热区必须与图形对得上：写错的表现是「点下去的位置和看到的尖差开」
+}
+
+// CSS 里的热区必须与图形对得上：写错的表现是「点下去的位置和看到的尖差开」。
+// 两套的热区还必须**逐字相同** —— 同一位置在两个主题下点到不同的东西，
+// 用户只会觉得「点歪了」，不会想到是换了套光标。
+// 这里直接比对两个令牌的定义本身：绕道去比图形尺寸或路径长度都验证不到这件事。
+for (const tok of ['--cursor-arrow', '--cursor-hand']) {
+  const got = THEMES.map((t) => ({ name: t.name, v: readCursor(t.block, tok) }))
+  check(`theme.css 两个主题都定义了 ${tok} 且带热区`, got.every((g) => !!g.v), got.map((g) => `${g.name}:${g.v ? '有' : '缺'}`).join(' '))
+  if (got.every((g) => g.v)) {
+    check(`${tok} 两个主题的热区坐标逐字相同`, got[0].v.hotspot === got[1].v.hotspot, `${got[0].name} ${got[0].v.hotspot} vs ${got[1].name} ${got[1].v.hotspot}`)
+    check(`${tok} 两个主题的兜底光标相同`, got[0].v.fallback === got[1].v.fallback, `${got[0].v.fallback} vs ${got[1].v.fallback}`)
+  }
+}
+// 浅色令牌必须指向 -light 文件、深色指向 -dark：两处都写成同一个文件
+// （复制粘贴后忘了改）时，另一套图形就成了没人引用的死资源，而界面上
+// 两个主题看着都「有光标」，不会有人发现。
+for (const t of THEMES) {
+  const a = readCursor(t.block, '--cursor-arrow')
+  const h = readCursor(t.block, '--cursor-hand')
+  const suffix = t.name === '浅色' ? '-light.svg' : '-dark.svg'
+  check(`${t.name}块的 --cursor-arrow 指向 ${suffix}`, !!a && a.url.endsWith(suffix), a ? a.url : '读不到')
+  check(`${t.name}块的 --cursor-hand 指向 ${suffix}`, !!h && h.url.endsWith(suffix), h ? h.url : '读不到')
+}
+// 深色块必须**显式覆盖**这两个令牌：漏掉的话深色模式下会继承 :root 的值，
+// 把浅色那份亮底深描边的图形直接搬到深色底上（填充 #b15840 在面板上只有 2.73:1）
+for (const tok of ['--cursor-arrow', '--cursor-hand']) {
+  check(`深色块覆盖了 ${tok}`, darkBlock.includes(tok + ':'))
+}
+// 光标 URL 必须是根绝对路径：这份 CSS 打包后在 /assets/ 下，相对路径会解析不到
+for (const t of THEMES) {
   for (const tok of ['--cursor-arrow', '--cursor-hand']) {
-    check(`theme.css 定义了 ${tok} 且带热区坐标`, new RegExp(tok + ":\\s*url\\('[^']+'\\)\\s+\\d+\\s+\\d+,").test(theme))
+    const c = readCursor(t.block, tok)
+    check(`${t.name}块的 ${tok} 用根绝对路径`, !!c && c.url.startsWith('/'), c ? c.url : '读不到')
+  }
+}
+// 四份图形都不该是五颜六色的非预期产物：只允许出现一对 fill/stroke
+for (const t of THEMES) {
+  for (const file of [t.arrow, t.hand]) {
+    let svg
+    try { svg = readFileSync(join(publicDir, file), 'utf8') } catch { continue }
+    const fills = [...svg.matchAll(/\bfill="(#[0-9a-fA-F]{3,8})"/g)].map((m) => m[1].toLowerCase())
+    check(`${file} 只有一处 fill`, fills.length === 1, `实测 ${fills.length} 处: ${fills.join(', ')}`)
   }
 }
 

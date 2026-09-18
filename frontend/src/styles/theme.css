@@ -210,18 +210,43 @@
   --scrollbar-width: 0.5rem;
 
   /* ---- 自定义光标 ----
-     箭头与手型是本项目自己的品牌元素（参考站用的是系统光标），
-     图形在 public/cursor-arrow.svg 与 public/cursor-hand.svg。
+     每个主题各有一套自己的光标（不是同一张图换个色）。四份图形在
+       public/cursor-arrow-light.svg  / cursor-hand-light.svg
+       public/cursor-arrow-dark.svg   / cursor-hand-dark.svg
 
-     URL 必须写成根绝对路径：这两个文件不带哈希、原样发布在站点根目录，
+     文件名带主题后缀是刻意的，不是命名洁癖：这两个资源是 embed 进二进制的
+     静态文件，实测响应里没有 ETag、没有 Last-Modified、也没有 Cache-Control
+     （go:embed 的文件修改时间是零值），也就是说浏览器只能靠 URL 判断新旧。
+     沿用旧文件名的话，改完图形用户那边可能一直吃缓存里的旧光标，
+     而且没有任何办法察觉 —— 表现只是「改了没效果」。
+     public/favicon.svg 也是同一个原因才没有沿用旧名。
+
+     刻意不做的两件事：
+       * 不给 URL 加 ?v=2 之类的查询串。它同样能破缓存，但会让资源名
+         与磁盘上的文件名不再一一对应，日后按 URL 反查文件会查不到。
+       * 不做构建期哈希。光标是 embed 的固定路径资源，不经过 Vite 的
+         资源管线，要接哈希得先把它挪进 src/assets 并改成 import，
+         为一个缓存问题引入一套新机制不划算。
+
+     两套图形的颜色各自取自本主题「主色实心块」的那一对变量
+     （--solid-primary-bg 作填充、--solid-primary-fg 作描边），
+     而不是 --color-primary：主色 #c87864 压在米白页底上只有 3.05:1，
+     而实心块那对是为主色按钮挑的、对比度本就是按「要看得清」选的
+     （浅色 4.44:1 / 深色 6.36:1）。取色来源不写进 SVG，
+     因为光标是当图片加载的、没有 CSS 级联，颜色只能是字面量；
+     两处的一致性由 frontend/scripts/check-contracts.mjs 盯着。
+
+     URL 必须写成根绝对路径：这四个文件不带哈希、原样发布在站点根目录，
      而这份 CSS 打包后位于 /assets/index-*.css，相对路径会解析到
-     /assets/ 下面去，两个光标都取不到图（表现是静默退回系统光标）。
+     /assets/ 下面去，四个光标都取不到图（表现是静默退回系统光标）。
 
      url 后面那两个数是热区（相对图形左上角），刻意不在左上角：
-     箭头取 path 的箭尖 2 2，手型取食指指尖 9 2。改 SVG 里的图形时
-     这两个数要一起改，否则点击落点会与看到的尖差开一截。 */
-  --cursor-arrow: url('/cursor-arrow.svg') 2 2, auto;
-  --cursor-hand: url('/cursor-hand.svg') 9 2, pointer;
+     箭头取图形的箭尖 2 2，手型取食指指尖 9 2。两套的热区必须逐字相同 ——
+     同一位置在不同主题下点到不同的东西，用户只会觉得「点歪了」，
+     不会意识到是换了套光标。改 SVG 里的图形时这些数要一起改，
+     否则点击落点会与看到的尖差开一截。 */
+  --cursor-arrow: url('/cursor-arrow-light.svg') 2 2, auto;
+  --cursor-hand: url('/cursor-hand-light.svg') 9 2, pointer;
 }
 
 /* 深色主题：实测自参考站 theme.js 的 dark 配置 */
@@ -233,6 +258,14 @@
   --color-text-secondary: rgba(200, 200, 200, 0.65);
   --color-border: #424242;
   --scrollbar-thumb: rgba(100, 100, 100);
+
+  /* 光标换一套（不光换色，轮廓也不同：浅色是长窄锐角，深色是短阔圆角）。
+     必须在这里显式覆盖两个变量：光标变量是定义在 :root 上的，
+     不覆盖就会把浅色那份亮底深描边的图形直接搬到深色底上 ——
+     浅色填充 #b15840 在深色面板上只有 2.73:1，会糊进背景。
+     热区两个数 2 2 / 9 2 与浅色逐字相同，理由见上面 :root 里的注释。 */
+  --cursor-arrow: url('/cursor-arrow-dark.svg') 2 2, auto;
+  --cursor-hand: url('/cursor-hand-dark.svg') 9 2, pointer;
 
   /* 语义色的深色版。
      这一块原来只覆盖了下面 5 个「文字用」变量，六个 --color-*

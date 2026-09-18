@@ -390,12 +390,21 @@ Harding 不含中文字形，会一路回退到 `--font-family-base`）。
 （参考站那条 64px 顶栏装的是公告条与顶部导航，我们这边只剩品牌一个元素，
 留着就是一行空白，所以去掉了 —— 参考站自身的尺寸仍记录在 `docs/ui-spec.md`）。
 
-鼠标光标是本项目自己的品牌元素（参考站没有）：默认箭头与交互手型用
-`frontend/public/cursor-arrow.svg` 与 `cursor-hand.svg`（主色填充 + 白描边，
-两种主题下都过 3:1），输入框 I 型、拖拽、禁用、帮助保留系统光标。
+鼠标光标是本项目自己的品牌元素（参考站没有）：默认箭头与交互手型**每个主题
+各有一套**，四份图形在 `frontend/public/cursor-arrow-light.svg`、
+`cursor-hand-light.svg`、`cursor-arrow-dark.svg`、`cursor-hand-dark.svg`。
+两套不是同一张图换个色 —— 浅色是长而窄的锐角轮廓（高宽比 1.47），
+深色是短而阔的圆角轮廓（1.19），并列时一眼能分出是两套。填充与描边取自各主题
+「主色实心块」的那一对变量（浅色 `#b15840` 填充 + 白描边，实测对页底 4.44:1；
+深色 `#e8a48c` 填充 + `#3a241d` 描边，对面板 6.36:1）。两套的热区坐标
+（箭头 `2 2`、手型 `9 2`）必须逐字相同，否则切主题时点击落点会跳。
+输入框 I 型、拖拽、禁用、帮助四类保留系统光标。
 要改光标形状或补齐 antd 升级后新增的交互组件，看 `frontend/src/styles/theme.css`
 的「自定义光标」段 —— 那里记着清单的来源、为什么必须 `!important`、
-以及 `npm run check` 里盯住哪几条。
+为什么文件名带主题后缀（这几个资源没有 ETag/Last-Modified，缓存只能靠 URL 判断），
+以及 `npm run check` 里盯住哪几条。形状的生成/核对工具在 `.shots/`（不入库）：
+`gen-cursor-dark.mjs` 生成深色路径、`measure-cursors.mjs` 用浏览器 `getBBox()`
+量实际尺寸、`contrast.mjs` 算对比度 —— 注释里引用的数字都出自这三个脚本。
 
 ## 开发进度
 
@@ -444,7 +453,16 @@ Harding 不含中文字形，会一路回退到 `--font-family-base`）。
 ```bash
 node scripts/audit-cursors.mjs http://127.0.0.1:5173   # 开发态
 node scripts/audit-cursors.mjs                          # 默认打 127.0.0.1:8888
+node scripts/audit-cursors.mjs http://127.0.0.1:8888 light   # 只审浅色（默认两个主题都跑）
 ```
+
+每个用例在两个主题下各跑一遍（靠预置 `localStorage` 里的 `llm-relay-theme`
+切主题，导航前注入，所以首屏那批元素也在审计范围内）。深色页面上出现
+**浅色那套**文件名判失败，单独归为「串主题」一类打印 —— 只检查「是不是自定义
+光标」的话，深色块漏配覆盖时会继承 `:root` 的值，两个主题的审计报告会一模一样
+全绿，而「绿得看不出区别」的检查等于没检查。这条判断本身有反向验证：
+`.shots/verify-cross-theme-detection.mjs` 会手动把深色页面的光标变量改写成浅色
+那套，确认审计真的报出 1062 个串主题箭头 + 205 个串主题手型。
 
 `scripts/verify-all.sh` 会按顺序跑完上面这些可离线执行的用例并汇总，
 最后打印 `ALL_PASS`；日常改完代码跑它一次就够。

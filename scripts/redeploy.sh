@@ -28,6 +28,17 @@ if ! (cd frontend && npm run type-check > /tmp/web-typecheck.log 2>&1); then
 fi
 echo "前端类型检查通过"
 
+# 契约检查也放在这里。它盯的是一批「不报错、不失败、只是悄悄不对」的东西：
+# 双份定义的色值漂移、被删掉还在被引用的令牌、光标热区与图形对不上之类。
+# 以前只在手工跑 npm run check 时才看得到，改坏了没人拦 ——
+# 而这类问题恰恰是编译器与类型系统看不见的那一半。
+if ! (cd frontend && npm run check > /tmp/web-contracts.log 2>&1); then
+  echo "前端契约检查未通过，已中止部署（容器仍运行旧版本）："
+  grep -E 'FAIL|未通过' /tmp/web-contracts.log | head -25
+  exit 1
+fi
+echo "前端契约检查通过"
+
 # ---- 后端 ----
 # 先本地编译一遍：语法与类型错误在这里能直接看到编译器原文，
 # 不用等 docker build 跑完再去 tail 日志
