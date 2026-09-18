@@ -231,6 +231,13 @@ function markFresh(ids: number[]) {
 // 档位词本身就是各家协议词汇，翻译成中文反而和导出 CSV、详情抽屉对不上。
 // 空 = 请求没带思考参数 —— 它不是「off」：一个是「没说」，一个是
 // 「说了不要」，必须可区分。认不得的档位原样展示：诚实优于猜测。
+//
+// 胶囊形态与模型/密钥的 GroupTag 同款（描边胶囊、无动效 —— 2026-09-18
+// 站主点名撤掉之前的整套分层动效），档位之间只靠颜色区分：
+//   off/minimal 灰（关掉的、没说的）  low 青   medium 琥珀   high 品红
+//   on 绿   auto 蓝   max 琥珀金（线上观测到的客户端自定义最高档）
+// 文字色的对比度处理（淡底上原色多数不达 4.5:1）在 .think-pill 的 CSS 里
+// 做 oklab 混黑/混白，这里只管「哪个档位是哪个颜色」。
 const THINKING_COLORS: Record<string, string> = {
   off: '#8c8c8c',
   minimal: '#bfbfbf',
@@ -239,41 +246,8 @@ const THINKING_COLORS: Record<string, string> = {
   high: '#eb2f96',
   on: '#52c41a',
   auto: '#1677ff',
-  // max 是线上观测到的客户端自定义最高档（glm-5.3-flash 的调用方在用）：
-  // 既然叫 max，就给最高的视觉待遇 —— 灵光一闪（琥珀金，与星芒同族）。
+  // max 是线上观测到的客户端自定义最高档（glm-5.3-flash 的调用方在用）
   max: '#faad14',
-}
-
-/**
- * 思考强度的动效分层：档位越高，胶囊越醒目、动得越明显。
- * （2026-09-18 起形态从「模型列里的色点」改为「模型名后的胶囊」，类名沿用。）
- *
- * 空串 = 静止。分层刻意做成「阶梯」而不是每档一套独立动画 ——
- * 强弱是相对的，观感上有梯度才有「等级」的含义：
- *
- *   max     灵光迸发：琥珀金渐变底胶囊，右上角四芒星周期性迸出又收回
- *           （2.4s 一闪），迸出瞬间胶囊同步提亮 ——「思考到顶」的
- *           视觉语言是灵光一闪，不是烧
- *   high    强脉动：光晕向外扩散再收回
- *   medium/on/auto  呼吸：透明度缓慢起伏
- *   low     缓呼吸：更慢更浅
- *   off/minimal/未知  静止 —— 关掉的、没说的、不认识的，都不该动
- *
- * 只动 opacity / transform / filter / box-shadow，且每行动画元素 ≤2 个
- * （一行一个胶囊）；prefers-reduced-motion 的全局规则会把这一切压到
- * 0.01ms，无需单独处理。
- */
-const THINKING_ANIM: Record<string, string> = {
-  low: 'think-anim-low',
-  medium: 'think-anim-mid',
-  on: 'think-anim-mid',
-  auto: 'think-anim-mid',
-  high: 'think-anim-high',
-  max: 'think-anim-max',
-}
-
-function thinkingAnim(level?: string) {
-  return THINKING_ANIM[level ?? ''] ?? ''
 }
 
 function thinkingColor(level?: string) {
@@ -776,7 +750,6 @@ onMounted(() => {
               <span
                 v-if="record.thinking_level"
                 class="think-pill"
-                :class="thinkingAnim(record.thinking_level)"
                 :style="{ '--pill-color': thinkingColor(record.thinking_level) }"
               >{{ record.thinking_level }}</span>
             </span>
@@ -958,7 +931,7 @@ onMounted(() => {
           <template v-else>-</template>
         </a-descriptions-item>
         <a-descriptions-item label="思考等级">
-          <span v-if="current.thinking_level" class="think-pill" :class="thinkingAnim(current.thinking_level)" :style="{ '--pill-color': thinkingColor(current.thinking_level) }">{{ current.thinking_level }}</span>
+          <span v-if="current.thinking_level" class="think-pill" :style="{ '--pill-color': thinkingColor(current.thinking_level) }">{{ current.thinking_level }}</span>
           <template v-else>-</template>
         </a-descriptions-item>
         <a-descriptions-item label="分组">
@@ -1180,10 +1153,15 @@ onMounted(() => {
 .muted { color: var(--color-text-secondary); }
 
 /* 思考胶囊（并入模型列，2026-09-18 起替代独立的「思考」列与色点）。
-   档位色由模板注入 CSS 变量 --pill-color（THINKING_COLORS 的值）：
-   一套「淡底 + 同色字 + 同色边框」规则覆盖全部档位，新增档位只改映射表。
-   动效分层沿用之前的语言（强弱是相对的，观感有梯度才有「等级」的含义）：
-   max 灵光迸发 > high 脉动 > medium/on/auto 呼吸 > low 缓呼吸 > off 静止。 */
+   形态与模型/密钥的 GroupTag 完全同款（padding、圆角、字号、字重、
+   淡底与描边的混合比例全部一致）—— 同一行的两个胶囊是同一族的东西，
+   只是颜色不同：档位色由模板注入 CSS 变量 --pill-color（THINKING_COLORS
+   的值），新增档位只改映射表。
+   文字色不能直接用档位原色：那些预设色是给「色点」挑的，当正文写在
+   13% 淡底上多数不达 4.5:1（#faad14 只有 1.74:1）——沿用 GroupTag 的
+   结论，浅色主题 oklab 混黑、深色主题混白，档位之间仍保有区分度。
+   2026-09-18 二次调整：**胶囊不做任何动效**（站主点名）——之前的
+   灵光迸发/脉动/呼吸整套撤掉，档位只靠颜色区分。 */
 .model-cell {
   display: inline-flex;
   align-items: center;
@@ -1192,80 +1170,21 @@ onMounted(() => {
   white-space: nowrap;
 }
 .think-pill {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  padding: 0 8px;
-  border-radius: 999px;
-  border: 1px solid var(--pill-color, var(--color-text-secondary));
-  background: color-mix(in oklab, var(--pill-color, var(--color-text-secondary)) 12%, transparent);
-  color: var(--pill-color, var(--color-text-secondary));
-  font-size: 11px;
-  line-height: 16px;
+  --tp: var(--pill-color, var(--color-text-secondary));
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: var(--radius-control);
+  border: 1px solid color-mix(in oklab, var(--tp) 32%, transparent);
+  background: color-mix(in oklab, var(--tp) 13%, transparent);
+  color: color-mix(in oklab, var(--tp) 60%, black);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
   white-space: nowrap;
-  flex: none;
+  vertical-align: middle;
 }
-
-/* ---- low：缓呼吸（最慢最浅，存在感刚刚够） ---- */
-.think-pill.think-anim-low {
-  animation: think-pill-breathe 4s ease-in-out infinite;
-}
-
-/* ---- medium / on / auto：呼吸（比点时代柔和：整块呼吸 0.55 太闪） ---- */
-.think-pill.think-anim-mid {
-  animation: think-pill-breathe 2.4s ease-in-out infinite;
-}
-@keyframes think-pill-breathe {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.72; }
-}
-
-/* ---- high：强脉动 —— 光晕向外扩散再收回。
-     光色也走 --pill-color（color-mix 在 keyframes 里读得到元素上的变量），
-     换档位色不用改动画 ---- */
-.think-pill.think-anim-high {
-  animation: think-pulse-high 1.2s ease-in-out infinite;
-}
-@keyframes think-pulse-high {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--pill-color) 0%, transparent); }
-  50% { box-shadow: 0 0 8px 2px color-mix(in oklab, var(--pill-color) 55%, transparent); }
-}
-
-/* ---- max：灵光迸发 ----
-   「思考到顶」的视觉语言不是烧，而是「灵光一闪」：胶囊用琥珀金渐变底 +
-   深棕字（火芯→金的暖色阶），右上角一颗金色四芒星周期性迸出又收回
-   （2.4s 一闪，大部分时间隐没 —— 灵光是偶尔的，不是常亮的），迸出瞬间
-   胶囊同步提亮一下，像想到好点子的那一瞬。星芒走 clip-path 八点多边形，
-   不新增 DOM；胶囊要 position: relative 给它当定位基准。 */
-.think-pill.think-anim-max {
-  border-color: transparent;
-  background: linear-gradient(135deg, #ffd666 0%, #ffc53d 55%, #faad14 100%);
-  color: #612400;
-  animation: think-max-pill 2.4s ease-in-out infinite;
-}
-@keyframes think-max-pill {
-  0%, 55%, 100% { filter: brightness(1); }
-  10% { filter: brightness(1.18); }
-}
-.think-pill.think-anim-max::after {
-  content: '';
-  position: absolute;
-  top: -5px;
-  right: -3px;
-  width: 9px;
-  height: 9px;
-  background: #ffd666;
-  clip-path: polygon(50% 0, 61% 39%, 100% 50%, 61% 61%, 50% 100%, 39% 61%, 0 50%, 39% 39%);
-  filter: drop-shadow(0 0 3px rgba(255, 214, 102, 0.9));
-  transform: scale(0) rotate(45deg);
-  opacity: 0;
-  animation: think-max-spark 2.4s ease-out infinite;
-}
-@keyframes think-max-spark {
-  0%, 55%, 100% { transform: scale(0) rotate(45deg); opacity: 0; }
-  6% { transform: scale(1.2) rotate(0deg); opacity: 1; }
-  20% { transform: scale(1) rotate(-10deg); opacity: 0.95; }
-  40% { transform: scale(0.15) rotate(12deg); opacity: 0; }
+:root[data-theme='dark'] .think-pill {
+  color: color-mix(in oklab, var(--tp) 55%, white);
 }
 
 /* 错误原文：详情里唯一保留的代码块（排障时最常看的就是上游报错） */
