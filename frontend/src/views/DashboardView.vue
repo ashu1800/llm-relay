@@ -29,7 +29,6 @@ import StatCard from '@/components/StatCard.vue'
 import AnimatedNumber from '@/components/AnimatedNumber.vue'
 import DataState from '@/components/DataState.vue'
 import PulseBar from '@/components/PulseBar.vue'
-import HeatmapPanel from '@/components/HeatmapPanel.vue'
 import DailyReport from '@/components/DailyReport.vue'
 import RequestLogPanel from '@/components/RequestLogPanel.vue'
 import { onLive, createThrottledLiveReloader } from '@/composables/useLive'
@@ -620,9 +619,6 @@ onMounted(async () => {
     </StatCard>
     </section>
     </DataState>
-
-    <!-- 最近 7 天活跃热力：使用日记，默认折叠（展开才拉数据） -->
-    <HeatmapPanel />
 
     <!-- 请求日志列表：**不**吃上面那组筛选 —— 它恒定显示全部最新请求
          （2026-09-16 站主要求）。筛过之后列表就看不到刚进来的调用了，
