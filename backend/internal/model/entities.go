@@ -61,10 +61,22 @@ type ChannelGroup struct {
 	//
 	// 这两个列有 default 标签，AutoMigrate 给已有数据的表加列时会带上
 	// DEFAULT 0，因此不会像 multiplier 那样在升级时把应用卡死。
-	RPM       int       `gorm:"not null;default:0" json:"rpm"`
-	TPM       int       `gorm:"not null;default:0" json:"tpm"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	RPM int `gorm:"not null;default:0" json:"rpm"`
+	TPM int `gorm:"not null;default:0" json:"tpm"`
+	// DailyBudget 是分组每日花费预算，按币种分别设额：
+	// {"CNY": 50, "USD": 10}。空 / 缺币种 = 该币种不限。
+	//
+	// 预算直接作为分组的属性而不是独立的一张表：分组本来就是计费的
+	// 自然边界（渠道价格按渠道币种记账，渠道挂在分组下），而且这样
+	// 编辑走分组现有的表单与接口，不需要一整套 CRUD。
+	//
+	// 金额**不做跨币种折算**（与看板金额同一铁律：人民币和美元之间
+	// 没有汇率就不该有相加），超支判定逐币种独立进行。目前它只是
+	// 一个提醒（80% / 100% 时经 live 推送各喊一次，每天每档一次），
+	// 不拦截请求 —— 预算配错一刀切断会全站瘫痪，还会腰斩流式响应。
+	DailyBudget JSONMap `gorm:"type:jsonb" json:"daily_budget"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // Channel 上游渠道。APIKeyEnc 存放 AES-GCM 密文，不随 JSON 输出。

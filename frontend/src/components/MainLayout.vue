@@ -15,10 +15,36 @@ import {
   BulbFilled
 } from '@ant-design/icons-vue'
 import { useThemeStore } from '@/stores/theme'
+import { message } from 'ant-design-vue'
+import { onLive } from '@/composables/useLive'
 
 const route = useRoute()
 const router = useRouter()
 const themeStore = useThemeStore()
+
+// ---- 预算告警（全局）----
+//
+// 花费跨过分组日预算的 80% / 100% 档位时，后端经 live 推 budget_alert
+// （每天每档一次，见后端 budget.go —— 只提醒不拦截是站主拍板的策略）。
+// 放在常驻的布局层而不是某一页：预算烧穿这件事跟「用户此刻在哪个页面」
+// 无关，任何页面都该第一时间知道。
+type BudgetAlert = {
+  group_id: number
+  group_name: string
+  currency: string
+  level: '80' | '100'
+  limit: number
+  spent: number
+  ratio: number
+}
+
+onLive('budget_alert', (a: BudgetAlert) => {
+  const pct = Math.round(a.ratio * 100)
+  const money = a.currency === 'CNY' ? '¥' + a.spent.toFixed(2) : a.currency + ' ' + a.spent.toFixed(2)
+  const text = `分组「${a.group_name}」今日${a.currency}消费已达预算 ${pct}%（${money}）`
+  if (a.level === '100') message.error(text + '，请注意控制用量')
+  else message.warning(text)
+})
 
 // 默认加密密钥的提示。
 //

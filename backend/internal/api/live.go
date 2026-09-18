@@ -185,6 +185,10 @@ func (s *Server) liveStatsLoop(ctx context.Context, kick <-chan struct{}) {
 			}
 		}
 		start, end, _ := resolveRange("today")
+		// 预算检查与统计同一拍、同一份时间范围：有新日志才醒，
+		// 跨过 80%/100% 档位时广播 budget_alert（每天每档一次，
+		// 见 budget.go —— 只提醒不拦截是站主拍板的策略）
+		s.checkBudgets(ctx, start, end)
 		qctx, cancel := context.WithTimeout(ctx, liveQueryTimeout)
 		// 零值筛选 = 全站：推送的视角固定是「今天 + 未筛选」，
 		// 前端只在同样视角下才合并它（见 DashboardView 的 onLive）

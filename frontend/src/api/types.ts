@@ -80,6 +80,17 @@ export interface ChannelGroup {
   rpm: number
   /** 每分钟 token 数上限，0 = 不限制 */
   tpm: number
+  /**
+   * 按币种的日预算（{"CNY": 50}）。逐币种独立判定，不做任何折算
+   * （与看板金额同一铁律）。null / 缺币种 = 该币种不限。
+   * 只提醒不拦截：80% / 100% 各档每天经 live 推送提醒一次。
+   */
+  daily_budget?: Record<string, number> | null
+  /**
+   * 今日各币种已花费金额（列表接口带出，只对配了预算的分组计算）。
+   * 与 daily_budget 逐币对照着读。
+   */
+  today_spent?: Record<string, number>
 }
 
 /**

@@ -35,8 +35,42 @@ const form = reactive({
   enabled: true,
   color: '',
   rpm: 0,
-  tpm: 0
+  tpm: 0,
+  // 日预算按币种各一格（项目目前就 CNY/USD 两种记账币种，见渠道表单的
+  // CURRENCY_OPTIONS）。null = 该币种不限；两个都空 = 不设预算
+  budgetCny: null as number | null,
+  budgetUsd: null as number | null
 })
+
+// 预算表单 -> 提交值：把两个输入框收敛成按币种的 map，空的不带。
+// 两个都空时提交空对象（= 清除预算），而不是省略字段 —— 省略在编辑接口
+// 里是「保持原值」，用户删掉两个数字再保存，期望的显然是删掉预算
+function budgetPayload(): Record<string, number> {
+  const out: Record<string, number> = {}
+  if (form.budgetCny != null && form.budgetCny > 0) out.CNY = form.budgetCny
+  if (form.budgetUsd != null && form.budgetUsd > 0) out.USD = form.budgetUsd
+  return out
+}
+
+/** 预算列的金额显示：符号跟随币种（与 utils/money 的符号约定一致） */
+function budgetMoney(v: number, cur: string) {
+  const sym = cur === 'CNY' ? '¥' : cur === 'USD' ? '$' : cur + ' '
+  return sym + v.toFixed(2)
+}
+
+/** 预算列的一格：配了预算才有内容 —— 花费/限额 + 占比，80% 变黄、100% 变红 */
+function budgetCell(row: ChannelGroup) {
+  const limit = row.daily_budget
+  const spent = row.today_spent
+  if (!limit || !Object.keys(limit).length) return null
+  return Object.entries(limit).map(([cur, cap]) => {
+    const sp = spent?.[cur] ?? 0
+    const ratio = cap > 0 ? sp / cap : 0
+    const tone = ratio >= 1 ? 'is-over' : ratio >= 0.8 ? 'is-warn' : ''
+    const pct = Math.round(ratio * 100)
+    return { cur, cap, sp, ratio, tone, pct }
+  })
+}
 
 // 预览用的样式：表单里改颜色时，胶囊要立刻跟着变
 const previewStyle = computed(() => groupStyle(form.name || '分组名', form.color))
@@ -95,7 +129,9 @@ function openCreate() {
     enabled: true,
     color: '',
     rpm: 0,
-    tpm: 0
+    tpm: 0,
+    budgetCny: null,
+    budgetUsd: null
   })
   modalOpen.value = true
 }
@@ -110,7 +146,9 @@ function openEdit(row: ChannelGroup) {
     enabled: !!row.enabled,
     color: row.color || '',
     rpm: row.rpm || 0,
-    tpm: row.tpm || 0
+    tpm: row.tpm || 0,
+    budgetCny: row.daily_budget?.CNY ?? null,
+    budgetUsd: row.daily_budget?.USD ?? null
   })
   modalOpen.value = true
 }
@@ -131,7 +169,10 @@ async function save() {
       // 空串是有效值（恢复自动配色），必须原样传，不能省成 undefined
       color: form.color || '',
       rpm: Number(form.rpm) || 0,
-      tpm: Number(form.tpm) || 0
+      tpm: Number(form.tpm) || 0,
+      // 恒带上：空对象表示清除预算。省略字段在编辑接口里是「保持原值」，
+      // 用户清空两个输入框保存的期望是删掉预算，两者必须分开
+      daily_budget: budgetPayload()
     }
     if (editing.value) {
       await api.put('/groups/' + editing.value.id, body)
@@ -191,11 +232,12 @@ onMounted(load)
         @retry="load"
       >
       <!-- scroll.x 必须不小于各列宽度之和（名称 200 + 备注 220 + 路由策略 120
-           + 每分钟额度 170 + 是否默认 100 + 是否启用 100 + 操作 84 = 994）：
+           + 每分钟额度 170 + 日预算 170 + 是否默认 100 + 是否启用 100 + 操作 84 = 1164）：
            声明偏小时右侧固定的「操作」列会盖住左边最后一列，
            表现为表头被截断、单元格内容被压住，而且不报错。
            原来写的是 1040、少了 20（那是「编辑 / 删除」还是文字链接的时候）。
            操作 150 -> 84 是图标按钮那一次，见下方操作列上方的注释。
+           +170 日预算是「分组日预算」这一次，见上方该列的注释。
            核对脚本：scripts/check-table-widths.mjs -->
       <a-table
         :data-source="rows"
@@ -203,7 +245,7 @@ onMounted(load)
         :pagination="false"
         row-key="id"
         size="small"
-        :scroll="{ x: 994 }"
+        :scroll="{ x: 1164 }"
       >
         <a-table-column title="名称" :width="200">
           <template #default="{ record }">
@@ -224,6 +266,19 @@ onMounted(load)
         <a-table-column title="每分钟额度" :width="170">
           <template #default="{ record }">
             <span :class="{ muted: !record.rpm && !record.tpm }">{{ quotaText(record) }}</span>
+          </template>
+        </a-table-column>
+        <!-- 日预算：花费/限额 + 占比。80% 变黄、100% 变红 ——
+             颜色只在真的逼近/越过时才出现，常态是安静的正文色 -->
+        <a-table-column title="日预算" :width="170">
+          <template #default="{ record }">
+            <template v-if="budgetCell(record)">
+              <div v-for="cell in budgetCell(record)" :key="cell.cur" class="budget-cell" :class="cell.tone">
+                {{ budgetMoney(cell.sp, cell.cur) }} / {{ budgetMoney(cell.cap, cell.cur) }}
+                <span class="budget-pct">{{ cell.pct }}%</span>
+              </div>
+            </template>
+            <span v-else class="muted">—</span>
           </template>
         </a-table-column>
         <a-table-column title="是否默认" :width="100">
@@ -335,6 +390,20 @@ onMounted(load)
             TPM 统计上游回报的实际 token 数 —— 因此 TPM 会在越过额度后的下一个请求才拦住。
           </div>
         </a-form-item>
+        <a-form-item label="日预算（按币种）">
+          <a-row :gutter="8">
+            <a-col :span="12">
+              <a-input-number v-model:value="form.budgetCny" :min="0" :step="10" style="width: 100%" addon-before="¥ CNY" placeholder="不限" />
+            </a-col>
+            <a-col :span="12">
+              <a-input-number v-model:value="form.budgetUsd" :min="0" :step="10" style="width: 100%" addon-before="$ USD" placeholder="不限" />
+            </a-col>
+          </a-row>
+          <div class="field-hint">
+            该分组每日花费上限，按币种分别设额、互不折算。今天用到 80% / 100%
+            时会各提醒一次（每天最多提醒一次），只提醒不拦截请求。两个都留空 = 不设预算。
+          </div>
+        </a-form-item>
         <a-row :gutter="8">
           <a-col :span="12">
             <a-form-item label="设为默认分组">
@@ -366,6 +435,17 @@ onMounted(load)
 .toolbar-spacer { flex: 1; }
 .toolbar-hint { color: var(--color-text-secondary); font-size: 13px; }
 .muted { color: var(--color-text-secondary); }
+
+/* 日预算一格：花费/限额 占比。常态走正文色 —— 它是每天要扫的内容，
+   不是告警；只有逼近（80%）和越过（100%）时才借 warn/over 的颜色喊话 */
+.budget-cell {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.budget-pct { color: var(--color-text-secondary); }
+.budget-cell.is-warn { color: var(--text-amber); font-weight: 500; }
+.budget-cell.is-over { color: var(--color-red); font-weight: 600; }
+.budget-cell.is-over .budget-pct { color: var(--color-red); }
 .field-hint { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
 .color-row { display: flex; align-items: center; gap: 8px; }
 .color-input {

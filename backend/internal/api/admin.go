@@ -1001,13 +1001,77 @@ func registerGroupRoutes(g *gin.RouterGroup, s *Server) {
 	r.DELETE("/:id", s.deleteGroup)
 }
 
+// groupListItem 是分组列表行：实体之外带「今日各币种花费」。
+type groupListItem struct {
+	model.ChannelGroup
+	// TodaySpent 是今日各币种已花费金额（与 daily_budget 同一口径逐币对照）。
+	// 只在分组配了预算时才算（一次聚合查询），没配预算的分组带 nil ——
+	// 没有预算的花费数字没有读者，白付一次聚合
+	TodaySpent map[string]float64 `json:"today_spent"`
+}
+
 func (s *Server) listGroups(c *gin.Context) {
 	var items []model.ChannelGroup
 	if err := s.deps.Store.DB().Order("id").Find(&items).Error; err != nil {
 		writeInternalError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
+
+	// 今日花费只对配了预算的分组聚合（同一口子：today + resolveRange）
+	budgeted := map[uint]bool{}
+	for _, g := range items {
+		if len(normalizeBudgetAmounts(g.DailyBudget)) > 0 {
+			budgeted[g.ID] = true
+		}
+	}
+	spentByGroup := map[uint]map[string]float64{}
+	if len(budgeted) > 0 {
+		start, end, _ := resolveRange("today")
+		var rows []struct {
+			GroupID      uint
+			CostCurrency string
+			Spent        float64
+		}
+		if err := s.deps.Store.DB().Model(&model.RequestLog{}).
+			Select("group_id, cost_currency, COALESCE(SUM(estimated_cost), 0) AS spent").
+			Where("created_at >= ? AND created_at <= ? AND group_id IN ?", start, end, mapKeys(budgeted)).
+			Group("group_id, cost_currency").
+			Scan(&rows).Error; err != nil {
+			writeInternalError(c, err)
+			return
+		}
+		for _, r := range rows {
+			if r.CostCurrency == "" {
+				continue
+			}
+			if spentByGroup[r.GroupID] == nil {
+				spentByGroup[r.GroupID] = map[string]float64{}
+			}
+			spentByGroup[r.GroupID][r.CostCurrency] = r.Spent
+		}
+	}
+
+	out := make([]groupListItem, 0, len(items))
+	for _, g := range items {
+		item := groupListItem{ChannelGroup: g}
+		if budgeted[g.ID] {
+			item.TodaySpent = spentByGroup[g.ID]
+			if item.TodaySpent == nil {
+				item.TodaySpent = map[string]float64{}
+			}
+		}
+		out = append(out, item)
+	}
+	c.JSON(http.StatusOK, gin.H{"items": out, "total": len(out)})
+}
+
+// mapKeys 把集合 map 转成切片（Go 没有内建的 keys 提取）。
+func mapKeys[V any](m map[uint]V) []uint {
+	ks := make([]uint, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	return ks
 }
 
 // groupCreatePayload 是新建分组的入参。
@@ -1027,6 +1091,9 @@ type groupCreatePayload struct {
 	Color     string `json:"color"`
 	RPM       int    `json:"rpm"`
 	TPM       int    `json:"tpm"`
+	// DailyBudget 按币种的日预算（{"CNY": 50}）。创建时可选；
+	// 空表/缺省 = 不设预算（见 normalizeDailyBudget 的清除语义）
+	DailyBudget map[string]float64 `json:"daily_budget"`
 }
 
 // normalizeGroupColor 校验并归一化分组颜色。
@@ -1086,10 +1153,15 @@ func (s *Server) createGroup(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
+	budget, err := normalizeDailyBudget(p.DailyBudget)
+	if err != nil {
+		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
+	}
 	gr := model.ChannelGroup{
 		Name: strings.TrimSpace(p.Name), Remark: p.Remark,
 		Strategy: strategy, IsDefault: p.IsDefault, Enabled: enabled,
-		Color: color, RPM: p.RPM, TPM: p.TPM,
+		Color: color, RPM: p.RPM, TPM: p.TPM, DailyBudget: budget,
 	}
 	db := s.deps.Store.DB()
 	// 默认分组只能有一个：strategyFor(0) 取的是第一条 is_default=true 的记录，
@@ -1130,6 +1202,10 @@ type groupUpdatePayload struct {
 	Color *string `json:"color"`
 	RPM   *int    `json:"rpm"`
 	TPM   *int    `json:"tpm"`
+	// DailyBudget 用指针区分「没传」（保持原值）与「传空对象」（清除预算）。
+	// 与 RPM 直接改成 0 不同，预算的「取消」在语义上就是空对象 ——
+	// 不用指针的话用户永远删不掉预算
+	DailyBudget *map[string]float64 `json:"daily_budget"`
 }
 
 func (s *Server) updateGroup(c *gin.Context) {
@@ -1192,6 +1268,19 @@ func (s *Server) updateGroup(c *gin.Context) {
 		}
 		updates["rpm"] = rpm
 		updates["tpm"] = tpm
+	}
+	if p.DailyBudget != nil {
+		budget, err := normalizeDailyBudget(*p.DailyBudget)
+		if err != nil {
+			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+			return
+		}
+		if budget == nil {
+			// 空对象 = 清除预算：写成 SQL NULL，而不是空 jsonb
+			updates["daily_budget"] = gorm.Expr("NULL")
+		} else {
+			updates["daily_budget"] = budget
+		}
 	}
 	if len(updates) == 0 {
 		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
