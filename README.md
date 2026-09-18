@@ -468,6 +468,23 @@ node scripts/audit-cursors.mjs http://127.0.0.1:8888 light   # 只审浅色（�
 最后打印 `ALL_PASS`；日常改完代码跑它一次就够。
 （`test-coldstart.sh` 要拆容器与镜像，不在其中。）
 
+界面动效的回归脚本在 `.shots/`（不入库，随源码本地保留）。它们都需要一个带
+调试端口的 Chrome，用真实数据造场景，所以不进 `verify-all.sh`：
+
+```bash
+# 带调试端口起一个专用 Chrome（Windows）
+chrome.exe --headless=new --remote-debugging-port=9222 \
+           --user-data-dir=%TEMP%\chrome-cdp about:blank
+
+node .shots/verify-log-effects.mjs layout   # 入场动效三档不许参与布局
+node .shots/verify-log-effects.mjs sweep    # 默认档：亮带贴行底、2.4s 后撤掉
+node .shots/verify-live-sync.mjs            # 新行与卡片数字必须同时到达（见 ui-spec 第 16 条）
+```
+
+三者都会往 `request_logs` 插探针行（trace_id 前缀 `logfx-probe` /
+`live-sync-probe`），跑完按前缀删掉；插入的是真日志，后端会照常推送，
+所以验的是「线上收到新日志」这条路，而不是模拟事件。
+
 ## 安全提醒
 
 管理接口**没有登录鉴权**（`deploy/.env.example` 里默认 `BIND_ADDR=127.0.0.1`
