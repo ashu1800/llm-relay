@@ -10,7 +10,7 @@
 // 档位清单全部取自 LOG_FX_OPTIONS。分散在各处迟早会漂移成「设置页叫光晕脉动、
 // 面板里叫呼吸光」这种对不上，而且不会报错。
 
-export type LogFxId = 'sweep' | 'slide' | 'glow'
+export type LogFxId = 'sweep' | 'pulse' | 'stardust'
 
 export type LogFxOption = {
   id: LogFxId
@@ -26,9 +26,9 @@ export type LogFxOption = {
  * sweep 是 2026-09-16 就有的那道彩虹扫光，也是**默认档**：站主没有显式选过时
  * 一切照旧，谁也不该因为多了一个功能而发现自己的列表变了样。
  *
- * 2026-09-17 站主原本还想加一档「卡通猫趴在表头上扒拉、新日志从它爪子里抽出来」，
- * 做到一半决定不做了（形象与工作量都不划算），已经实现的猫相关代码整体拆掉，
- * 只留下面两档纯 CSS 的。要恢复的话 git 历史里有。
+ * pulse（双星对撞）与 stardust（星尘上浮）是 2026-09-18 站主嫌原来的
+ * 「自上滑入」「光晕脉动」太一般之后换上的两档，全部画在效果层里
+ * （不碰任何单元格的样式，布局契约因此天然满足）。
  *
  * 这里刻意没有「完全关闭」档：站主定清单时没有选它，而系统层面已经有统一的
  * 静音路径 —— theme.css 末尾那条 prefers-reduced-motion 会把全站动画压到
@@ -42,14 +42,14 @@ export const LOG_FX_OPTIONS: LogFxOption[] = [
     desc: '沿新行下沿从左扫过一道彩虹亮带，约 2 秒后从右端消失',
   },
   {
-    id: 'slide',
-    name: '自上滑入',
-    desc: '新行从上方轻轻滑到位并淡入，像刚被摆上桌面',
+    id: 'pulse',
+    name: '双星对撞',
+    desc: '行中央迸出一个亮点，两道光沿行底边同时奔向左右两端，到端点闪一下熄灭',
   },
   {
-    id: 'glow',
-    name: '光晕脉动',
-    desc: '新行泛起一层光晕，快速呼吸两下后褪去',
+    id: 'stardust',
+    name: '星尘上浮',
+    desc: '七粒星尘从新行错落升起、上浮飘散，轻柔不吵',
   },
 ]
 
@@ -57,6 +57,16 @@ export const LOG_FX_OPTIONS: LogFxOption[] = [
 export const LOG_FX_IDS: LogFxId[] = LOG_FX_OPTIONS.map((o) => o.id)
 
 export const DEFAULT_LOG_FX: LogFxId = 'sweep'
+
+/**
+ * 旧档位到新档位的映射：2026-09-18 换血后 slide/glow 两个 id 从档位表里
+ * 消失了，但存了旧值的浏览器不应该被静默打回默认档 —— 选过「自上滑入」的
+ * 显然偏好「有点动作」的效果，把他迁到气质最接近的新档上，选择被尊重。
+ */
+const LEGACY_ALIAS: Record<string, LogFxId> = {
+  slide: 'pulse',
+  glow: 'stardust',
+}
 
 /** localStorage 键名（前缀由下面的 withPrefix 补，与全站 llm-relay- 前缀一致） */
 const LOG_FX_KEY = 'log-fx'
@@ -67,7 +77,7 @@ function withPrefix(key: string) {
 }
 
 /**
- * 读取档位。拿到不认识的值（旧版本留下的、用户手改的脏数据）一律回落默认档。
+ * 读取档位。旧档位按上面的映射迁移；真正不认识的值（手改的脏数据）回落默认档。
  *
  * 必须容错：面板是按这个值选样式块的，取到一个没有对应样式的 id 时不会报错，
  * 表现只是「这一步什么都不动」—— 而「新日志没有入场提示」正是这个功能要解决的
@@ -77,6 +87,7 @@ export function readLogFx(): LogFxId {
   try {
     const raw = localStorage.getItem(withPrefix(LOG_FX_KEY))
     if (raw && (LOG_FX_IDS as string[]).includes(raw)) return raw as LogFxId
+    if (raw && LEGACY_ALIAS[raw]) return LEGACY_ALIAS[raw]
   } catch {
     // 隐私模式下 localStorage 会抛异常：退化成「不记住」，不该让看板打不开
   }

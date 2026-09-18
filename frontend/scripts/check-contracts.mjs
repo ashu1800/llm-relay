@@ -390,13 +390,26 @@ console.log('=== 新日志入场动效契约 ===')
     !/:global\([^)]*\)\s*:deep\(/.test(fxCode),
     ':global(A) :deep(B) 编译后只剩 A，规则会落到 tr 而不是 td 上',
   )
+  // 2026-09-18 换血之后（slide/glow 退役，pulse/stardust 上岗）三档**全部**
+  // 画在效果层里，任何一档都不再有「往单元格上挂动画」的实现方式 ——
+  // 当年 :global/:deep 那个坑正是从行内动画长出来的，现在的契约因此升级成
+  // 「不许再有行内动画档位」：效果层里不允许出现选 tr.is-new 的选择器。
   check(
-    '滑入 / 光晕两档的选择器都落到 tr.is-new > td 上',
-    /:global\(\.log-table\[data-fx='slide'\]\s+tr\.is-new\s*>\s*td\)/.test(fxCode) &&
-      /:global\(\.log-table\[data-fx='glow'\]\s+tr\.is-new\s*>\s*td\)/.test(fxCode),
+    '入场动效全部画在效果层（不再有依赖行内动画的档位）',
+    !/data-fx='[\w-]+'\]\s+tr\.is-new/.test(fxCode) && !/data-fx="[\w-]+"\]\s+tr\.is-new/.test(fxCode),
+    '行内动画的选择器写法是当年 :global/:deep 静默失效的温床，新档一律走效果层',
   )
+  // 新两档的元素都是 .fx-layer 里 v-for 出来的 span（与扫光同一套定位数据）：
+  // 类名必须出现在效果层根节点**之后**，防止将来有人绕过效果层往表格里塞动画节点。
+  const iLayer = fxComp.indexOf('class="fx-layer"')
+  for (const cls of ['fx-pulse', 'fx-star']) {
+    const iCls = fxComp.indexOf(`class="${cls}"`)
+    check(
+      `「${cls}」元素挂在效果层模板里（不是表格内部）`,
+      iLayer >= 0 && iCls > iLayer,
+    )
+  }
 }
-
 
 console.log('')
 console.log('=== 多排数值的列左缘对齐契约 ===')

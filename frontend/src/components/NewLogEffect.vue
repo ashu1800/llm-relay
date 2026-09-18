@@ -8,20 +8,19 @@
 // 实测记录与隔离实验见 RequestLogPanel 里 fxTargets 那段注释与 docs/ui-spec 第 11 条；
 // frontend/scripts/check-contracts.mjs 也钉着不许再挂回去。
 // 所以：is-new 这个类**不带任何样式**，只是「这一行正在做入场动画」的标记，
-// 真正的效果由这一层按量好的位置画出来。
+// 真正的效果由这一层按量好的位置画出来。三档现在**全部**走这一层 ——
+// 2026-09-18 换血时把最后两档依赖行内动画的（slide/glow）一起送走了，
+// 「单元格上跑动画」从此不再是任何一档的实现方式。
 //
 // 三档各自的机制：
-//   sweep 彩虹扫光（默认）—— 沿新行下沿是一条绝对定位亮带，动 background-position-x。
-//         原来在 RequestLogPanel 里，2026-09-17 搬到这里，行为一个字节没改。
-//   slide 自上滑入 —— 纯 CSS：新行的每个单元格 translateY(-8px) + 淡入。
-//   glow  光晕脉动 —— 这一层里的一道光带贴在新行上，呼吸两下后褪去。
+//   sweep    彩虹扫光（默认）—— 沿新行下沿是一条绝对定位亮带，动 background-position-x。
+//   pulse    双星对撞 —— 行中央迸出一个亮点，两道光沿行底边同时奔向左右两端，
+//            到端点各闪一下熄灭。「一个请求，分发两端」，正是这个站干的事。
+//   stardust 星尘上浮 —— 七粒星尘从新行错落升起、上浮飘散。
 //
-// 为什么 slide 敢动单元格的 transform，而扫光当初连伪元素都不敢往 tr 里放：
-// 那一次的问题是「tr 里多了一个非单元格子元素」改变了列宽分配，而 transform 是
-// 绘制期属性、不参与布局，单元格加它不会影响 table-layout 的列宽计算。固定列
-// （position: sticky）本身已经构成包含块，也不会因为多一个 transform 改变吸附基准。
-// 这条结论由 .shots/verify-log-effects.mjs 的 layout 模式逐项复测（列宽 / 行高 /
-// 表体高 / 页面横溢出全部与切换前一致）。
+// 星尘的位置带随机数（粒子落在行内哪个 x、飘多快）：每次新日志到达都会生成
+// 一批新的粒子参数，所以同一行两次入场飘法不一样 —— 「每次都一样」是机械感
+// 的主要来源，宁可多写两行也不要它。
 import { computed } from 'vue'
 import type { LogFxId } from '@/utils/effects'
 
@@ -31,25 +30,53 @@ export type FxTarget = { key: number; top: number; left: number; width: number }
 const props = defineProps<{
   /** 当前档位 */
   mode: LogFxId
-  /** 正在做入场动画的那些行（扫光与光晕共用这一份位置数据） */
+  /** 正在做入场动画的那些行（三档共用这一份位置数据） */
   targets: FxTarget[]
 }>()
 
-/** 光晕那一道光带：贴在新行上（顶边压进分割线 2px，与扫光同一手法） */
-const GLOW_H = 3
+// ---- 双星对撞的元素清单 ----
+// 每个 target 拆成 5 个零件：中央亮点、左/右两道光带、左/右两端最后的闪光。
+const pulseParts = computed(() => {
+  if (props.mode !== 'pulse') return []
+  return props.targets.flatMap((t) => {
+    const mid = t.left + t.width / 2
+    return [
+      { key: 'p' + t.key, cls: 'fx-pulse-dot', style: { top: t.top + 'px', left: mid + 'px' } },
+      { key: 'pl' + t.key, cls: 'fx-pulse-beam is-left', style: { top: t.top + 'px', left: t.left + 'px', width: t.width / 2 + 'px' } },
+      { key: 'pr' + t.key, cls: 'fx-pulse-beam is-right', style: { top: t.top + 'px', left: mid + 'px', width: t.width / 2 + 'px' } },
+      { key: 'sl' + t.key, cls: 'fx-pulse-spark is-left', style: { top: t.top + 'px', left: t.left + 3 + 'px' } },
+      { key: 'sr' + t.key, cls: 'fx-pulse-spark is-right', style: { top: t.top + 'px', left: t.left + t.width - 9 + 'px' } },
+    ]
+  })
+})
 
-const glowBands = computed(() =>
-  props.mode !== 'glow'
-    ? []
-    : props.targets.map((t) => ({
-        // key 加前缀：光晕带与扫光亮带指向同一行，两个 v-for 是兄弟节点，
-        // 不加前缀 Vue 会认为它们在同一组里有两个同 key 的兄弟
-        key: 'g' + t.key,
-        top: t.top - GLOW_H,
-        left: t.left,
-        width: t.width,
-      })),
-)
+// ---- 星尘上浮的元素清单 ----
+// 7 粒；起点 x 在行内取伪随机位置，升速与延迟也各自错开。
+// 随机性只存在于元素生成的那一刻（内联样式写死）：不追求真随机，
+// 只追求「两次入场不一样」。
+const STAR_COLORS = ['var(--color-primary)', '#ffa940', '#36cfc9']
+const stardust = computed(() => {
+  if (props.mode !== 'stardust') return []
+  return props.targets.flatMap((t) =>
+    Array.from({ length: 7 }, (_, i) => {
+      const left = t.left + t.width * (0.06 + 0.88 * Math.random())
+      const dur = 0.9 + Math.random() * 0.4
+      const delay = Math.random() * 0.28
+      const rise = 22 + Math.random() * 12
+      return {
+        key: 's' + t.key + '-' + i,
+        style: {
+          top: t.top + 4 + 'px',
+          left: left.toFixed(1) + 'px',
+          background: STAR_COLORS[i % STAR_COLORS.length],
+          animationDuration: dur.toFixed(2) + 's',
+          animationDelay: delay.toFixed(2) + 's',
+          '--star-rise': rise.toFixed(0) + 'px',
+        },
+      }
+    }),
+  )
+})
 </script>
 
 <template>
@@ -69,12 +96,21 @@ const glowBands = computed(() =>
       :style="{ top: b.top + 'px', left: b.left + 'px', width: b.width + 'px' }"
     />
 
-    <!-- 光晕脉动：整行宽度的一道光带，呼吸两下 -->
+    <!-- 双星对撞：中央亮点 + 两道对奔的光带 + 两端收尾的闪光 -->
     <span
-      v-for="g in glowBands"
-      :key="g.key"
-      class="fx-glow"
-      :style="{ top: g.top + 'px', left: g.left + 'px', width: g.width + 'px' }"
+      v-for="p in pulseParts"
+      :key="p.key"
+      class="fx-pulse"
+      :class="p.cls"
+      :style="p.style"
+    />
+
+    <!-- 星尘上浮：七粒小星错落升起 -->
+    <span
+      v-for="s in stardust"
+      :key="s.key"
+      class="fx-star"
+      :style="s.style"
     />
   </div>
 </template>
@@ -131,90 +167,92 @@ const glowBands = computed(() =>
   }
 }
 
-/* ---------- 光晕脉动（档位：glow） ----------
-   一道贴在新行上的光带，用不透明度做两次呼吸。
-   为什么是"一道带子"而不是给整行铺一层底：单元格有各自的背景，行本身没有
-   一个可以被着色的盒子（同扫光的理由）。带宽 = 行宽、高 3px 是刻意的 ——
-   扫光的高度也是 3px，两档的"着力点"因此落在同一条分割线上。 */
-.fx-glow {
+/* ---------- 双星对撞（档位：pulse） ----------
+   三个阶段写在一个 0.95s 的循环里：
+   0-0.15s 中央亮点迸出（scale 0 -> 1.6）；
+   0.1-0.55s 两道光带从中央向两端展开（scaleX 0 -> 1）；
+   0.5-0.95s 光带渐隐、两端各闪一下火花后全部熄灭。
+   光带只有 3px 高、贴着行底分割线（与扫光同一个着力点），
+   所以它读起来是「这一行在发信号」，而不是「这一行被盖住了」。 */
+.fx-pulse {
   position: absolute;
   height: 3px;
   z-index: 3;
   pointer-events: none;
-  background-image: linear-gradient(
-    90deg,
-    transparent 0%,
-    color-mix(in srgb, var(--color-primary) 70%, transparent) 18%,
-    color-mix(in srgb, var(--color-primary) 95%, transparent) 50%,
-    color-mix(in srgb, var(--color-primary) 70%, transparent) 82%,
-    transparent 100%
-  );
-  /* 呼吸两下：两次起伏之间不停顿，第二次比第一次弱一点，收尾是渐隐不是硬切 */
-  animation: fx-glow 1.6s ease-in-out 1;
+}
+.fx-pulse-dot {
+  width: 7px;
+  height: 7px;
+  margin-top: -2px;
+  margin-left: -3.5px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #fff 0% 30%, var(--color-primary) 62%, transparent 100%);
+  transform: scale(0);
+  animation: fx-pulse-dot 0.95s ease-out forwards;
+}
+@keyframes fx-pulse-dot {
+  0% { transform: scale(0); opacity: 0; }
+  16% { transform: scale(1.6); opacity: 1; }
+  34% { transform: scale(0.9); opacity: 0.95; }
+  60%, 100% { transform: scale(0); opacity: 0; }
+}
+.fx-pulse-beam {
+  background-image: linear-gradient(90deg, transparent 0%, var(--color-primary) 92%, #fff 100%);
+  transform: scaleX(0);
+  animation: fx-pulse-beam 0.95s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+.fx-pulse-beam.is-left {
+  transform-origin: right center;
+  background-image: linear-gradient(90deg, #fff 0%, var(--color-primary) 8%, transparent 100%);
+}
+.fx-pulse-beam.is-right {
+  transform-origin: left center;
+}
+@keyframes fx-pulse-beam {
+  0%, 10% { transform: scaleX(0); opacity: 0; }
+  12% { opacity: 1; }
+  58% { transform: scaleX(1); opacity: 0.95; }
+  82% { opacity: 0.4; }
+  100% { transform: scaleX(1); opacity: 0; }
+}
+/* 端点火花：光到达时才亮，一小圈就灭 */
+.fx-pulse-spark {
+  width: 6px;
+  height: 6px;
+  margin-top: -1.5px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #fff 0% 40%, var(--color-primary) 70%, transparent 100%);
+  transform: scale(0);
+  opacity: 0;
+  animation: fx-pulse-spark 0.95s ease-out forwards;
+}
+@keyframes fx-pulse-spark {
+  0%, 48% { transform: scale(0); opacity: 0; }
+  60% { transform: scale(1.5); opacity: 1; }
+  85%, 100% { transform: scale(0); opacity: 0; }
 }
 
-@keyframes fx-glow {
-  0% { opacity: 0; }
-  14% { opacity: 0.95; }
-  32% { opacity: 0.28; }
-  50% { opacity: 0.8; }
-  72% { opacity: 0.2; }
-  100% { opacity: 0; }
+/* ---------- 星尘上浮（档位：stardust） ----------
+   七粒小星从行内升起、上浮、缩没。颜色三选一轮换（主色/琥珀/青），
+   与扫光的彩虹同一家族；上升距离由每粒自己的 --star-rise 给（内联注入），
+   所以同一次入场的七粒也不是整齐划一的。 */
+.fx-star {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  z-index: 3;
+  pointer-events: none;
+  opacity: 0;
+  box-shadow: 0 0 5px color-mix(in srgb, currentColor 60%, transparent);
+  animation: fx-star-rise 1.1s ease-out forwards;
 }
-
-/* ---------- 自上滑入 / 光晕脉动的行内部分（纯 CSS，靠面板挂在 .log-table 上的 data-fx） ----------
-   这里 MUST 用 :global(...) 把整条选择器包起来，不能写成
-   `:global(.log-table[data-fx='slide']) :deep(tr.is-new > td)`。
-
-   为什么：scoped 编译对 ":global(A) :deep(B)" 这种组合会**丢掉选择器的后半截**
-   （实测编译产物就是 `.log-table[data-fx="slide"]`），于是规则落到 tr 上而不是
-   它里面的单元格上 —— 而 transform / background-image 挂在 tr 上基本看不出效果，
-   整条动画静默失效、不报任何错。包成 :global(...) 之后是按原样输出的，
-   而且这里本来就没有"本组件的元素"要锚定：.log-table 是父组件的根节点，
-   tr/td 由 antd 渲染，两边都不吃 scope 属性。
-
-   为什么这两条是安全的（当初扫光连伪元素都不敢往 tr 里放）：那一次的问题是
-   「tr 里多了一个非单元格子元素」，改变了 table-layout: fixed 的列宽分配；
-   而 transform 与 background-image 都是绘制期属性，不参与布局，也不会改变
-   固定列（position: sticky）的吸附基准。这条由 .shots/verify-log-effects.mjs
-   的 layout 模式逐项复测（列宽 / 行高 / 表体高 / 页面横溢出三档一致）。 */
-:global(.log-table[data-fx='slide'] tr.is-new > td) {
-  animation: fx-slide-in 0.45s var(--ease-expo) both;
-}
-
-@keyframes fx-slide-in {
-  from {
+@keyframes fx-star-rise {
+  0% { opacity: 0; transform: translateY(4px) scale(0.6); }
+  22% { opacity: 0.95; }
+  100% {
     opacity: 0;
-    transform: translateY(-8px);
+    transform: translateY(calc(-1 * var(--star-rise, 26px))) scale(0.35);
   }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-/* 光晕那两下呼吸：整行的单元格各加一层很淡的主色底。
-   放在单元格上而不是行上，理由同扫光 —— 行没有可着色的盒子。
-   它只是"底噪"，所以 alpha 很低（0.13 上下），要的是"整行泛起一层光"，
-   不是把行染成主色。 */
-:global(.log-table[data-fx='glow'] tr.is-new > td) {
-  animation: fx-glow-cell 1.6s ease-in-out 1;
-}
-
-@keyframes fx-glow-cell {
-  0% { background-image: none; }
-  16% {
-    background-image: linear-gradient(
-      color-mix(in srgb, var(--color-primary) 13%, transparent),
-      color-mix(in srgb, var(--color-primary) 13%, transparent)
-    );
-  }
-  60% {
-    background-image: linear-gradient(
-      color-mix(in srgb, var(--color-primary) 6%, transparent),
-      color-mix(in srgb, var(--color-primary) 6%, transparent)
-    );
-  }
-  100% { background-image: none; }
 }
 </style>

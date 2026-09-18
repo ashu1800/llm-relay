@@ -3,8 +3,8 @@
 // 让用户不用来回切换就能看出"哪一档是什么样子"。
 //
 // 为什么是自绘的迷你舞台而不是截图或真表格：真表格搬进来要一整套数据与列宽，
-// 而这里只需要表达"亮带怎么走 / 行怎么滑进来 / 光晕怎么呼吸"。迷你舞台用的是
-// 与真效果同一套画法（同一组彩虹色标、同一个 --ease-expo、同一个主色），
+// 而这里只需要表达"亮带怎么走 / 光怎么对奔 / 星尘怎么升"。迷你舞台用的是
+// 与真效果同一套画法（同一组彩虹色标、同一个主色、同一套节奏），
 // 所以小样与真身不会说两套话。
 //
 // 纯装饰：对读屏器隐藏（外面那张卡片的名字与描述才是可读的信息）。
@@ -22,11 +22,19 @@ defineProps<{ fx: LogFxId }>()
     <!-- 彩虹扫光：一道亮带沿第一行下沿扫过。色标与真效果逐字一致 -->
     <span v-if="fx === 'sweep'" class="fxp-band" />
 
-    <!-- 自上滑入：第一行每隔一轮从上方滑进来一次。纯 CSS，靠舞台上的
-         data-fx 选中它（不在这里写 v-if，好让三档在模板里长一个样子） -->
+    <!-- 双星对撞：中央亮点 + 两道对奔的光（循环节奏与真效果同源） -->
+    <template v-if="fx === 'pulse'">
+      <span class="fxp-pulse-dot" />
+      <span class="fxp-pulse-beam is-left" />
+      <span class="fxp-pulse-beam is-right" />
+    </template>
 
-    <!-- 光晕脉动：第一行泛起一层主色光 -->
-    <span v-if="fx === 'glow'" class="fxp-halo" />
+    <!-- 星尘上浮：三粒小星错落升起（真效果是七粒，小样放三粒意思到了） -->
+    <template v-if="fx === 'stardust'">
+      <span class="fxp-star" style="left: 14px; animation-delay: 0s" />
+      <span class="fxp-star" style="left: 29px; animation-delay: 0.3s" />
+      <span class="fxp-star" style="left: 43px; animation-delay: 0.55s" />
+    </template>
   </span>
 </template>
 
@@ -83,44 +91,72 @@ defineProps<{ fx: LogFxId }>()
   100% { background-position-x: 150%; }
 }
 
-/* ---- 自上滑入 / 光晕脉动 ----
-   两条规则都指向同一个元素（`.fxp-row-1`），靠舞台上的 data-fx 分开 ——
-   写两条同优先级的 animation 会互相覆盖，谁是后写的谁生效，
-   而"后写的"取决于样式表里的顺序，这种 bug 只在切档时才看得出来。 */
-.fxp[data-fx='slide'] .fxp-row-1 { animation: fxp-slide 2.2s var(--ease-expo) infinite; }
-@keyframes fxp-slide {
-  0%, 8% { opacity: 0; transform: translateY(-7px); }
-  32%, 100% { opacity: 1; transform: translateY(0); }
-}
-
-/* 光晕那两下呼吸：整行泛起一层主色底 + 底下一道光带，与真效果的
-   fx-glow-cell + .fx-glow 是同一套画法，只是缩到 5px 的行高上。
-   呼吸两下（第一次强、第二次弱）也照着真效果的节奏来。 */
-.fxp[data-fx='glow'] .fxp-row-1 { animation: fxp-glow-row 2s ease-in-out infinite; }
-@keyframes fxp-glow-row {
-  0% { background: var(--color-border); }
-  16% { background: color-mix(in srgb, var(--color-primary) 65%, var(--color-bg)); }
-  60% { background: color-mix(in srgb, var(--color-primary) 32%, var(--color-bg)); }
-  100% { background: var(--color-border); }
-}
-
-.fxp-halo {
+/* ---- 双星对撞 ----
+   中线在行底（top: 21px），亮点迸出后两道光向两端跑，收在端点。
+   2.2s 一轮，前 40% 演完、后面留白喘口气 —— 循环预览需要呼吸感。 */
+.fxp-pulse-dot {
   position: absolute;
-  left: 6px;
-  right: 6px;
+  left: 50%;
+  top: 21px;
+  width: 7px;
+  height: 7px;
+  margin: -2px 0 0 -3.5px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #fff 0% 30%, var(--color-primary) 62%, transparent 100%);
+  transform: scale(0);
+  animation: fxp-pulse-dot 2.2s ease-out infinite;
+}
+@keyframes fxp-pulse-dot {
+  0% { transform: scale(0); opacity: 0; }
+  4% { transform: scale(1.6); opacity: 1; }
+  9% { transform: scale(0.9); opacity: 0.95; }
+  16%, 100% { transform: scale(0); opacity: 0; }
+}
+.fxp-pulse-beam {
+  position: absolute;
   top: 21px;
   height: 3px;
-  border-radius: 2px;
-  background: var(--color-primary);
-  opacity: 0;
-  animation: fxp-glow-band 2s ease-in-out infinite;
+  background-image: linear-gradient(90deg, transparent 0%, var(--color-primary) 92%, #fff 100%);
+  transform: scaleX(0);
+  animation: fxp-pulse-beam 2.2s cubic-bezier(0.22, 1, 0.36, 1) infinite;
 }
-@keyframes fxp-glow-band {
-  0% { opacity: 0; }
-  16% { opacity: 0.95; }
-  34% { opacity: 0.3; }
-  50% { opacity: 0.8; }
-  74% { opacity: 0.2; }
-  100% { opacity: 0; }
+.fxp-pulse-beam.is-left {
+  left: 6px;
+  right: 50%;
+  transform-origin: right center;
+  background-image: linear-gradient(90deg, #fff 0%, var(--color-primary) 8%, transparent 100%);
+}
+.fxp-pulse-beam.is-right {
+  left: 50%;
+  right: 6px;
+  transform-origin: left center;
+}
+@keyframes fxp-pulse-beam {
+  0%, 3% { transform: scaleX(0); opacity: 0; }
+  5% { opacity: 1; }
+  14% { transform: scaleX(1); opacity: 0.95; }
+  20% { opacity: 0.4; }
+  24%, 100% { transform: scaleX(1); opacity: 0; }
+}
+
+/* ---- 星尘上浮 ----
+   三粒小星从第一行升起，节奏各自错开（真效果的随机性在循环预览里
+   用固定的 delay 表达）。颜色轮换与真效果同源。 */
+.fxp-star {
+  position: absolute;
+  top: 19px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  opacity: 0;
+  animation: fxp-star-rise 2.2s ease-out infinite;
+}
+.fxp-star:nth-of-type(odd) { background: var(--color-primary); }
+.fxp-star:nth-of-type(even) { background: #36cfc9; }
+@keyframes fxp-star-rise {
+  0% { opacity: 0; transform: translateY(3px) scale(0.6); }
+  10% { opacity: 0.95; }
+  26% { opacity: 0; transform: translateY(-13px) scale(0.35); }
+  100% { opacity: 0; transform: translateY(-13px) scale(0.35); }
 }
 </style>
