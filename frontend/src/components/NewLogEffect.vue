@@ -14,14 +14,13 @@
 //
 // 三档各自的机制：
 //   sweep    彩虹扫光（默认）—— 沿新行下沿是一条绝对定位亮带，动 background-position-x。
-//   pulse    双星对撞 —— 行中央迸出一个亮点，两道光沿行底边同时奔向左右两端，
-//            到端点各闪一下熄灭。「一个请求，分发两端」，正是这个站干的事。
-//   stardust 星尘上浮 —— 七粒星尘从新行错落升起、上浮飘散。
+//   pulse    双星对撞 —— 行中央迸出火星，两道火红光带沿行底边同时奔向左右两端，
+//            到端点各炸一个光斑后熄灭。「一个请求，分发两端」，正是这个站干的事。
+//   stardust 星尘上浮 —— 十四粒星尘从新行错落升起、上浮飘散。
 //
-// 星尘的位置带随机数（粒子落在行内哪个 x、飘多快）：每次新日志到达都会生成
-// 一批新的粒子参数，所以同一行两次入场飘法不一样 —— 「每次都一样」是机械感
-// 的主要来源，宁可多写两行也不要它。
-import { computed } from 'vue'
+// 随机参数必须**冻结**（见下面两个缓存）：每次新日志到达生成一批新参数，
+// 同一行两次入场飘法不一样；但同一次入场的参数绝不能变。
+import { computed, watch } from 'vue'
 import type { LogFxId } from '@/utils/effects'
 
 /** 一条新行的位置：由面板量好传下来（以 .log-table 的盒子为原点的相对坐标） */
@@ -38,10 +37,30 @@ const props = defineProps<{
 // 火红是站主点名的主题色：与扫光的彩虹不同，这里的色标刻意写死
 // 而不取 --color-primary（陶土色偏暗，对撞的「火焰感」需要饱和的暖红）。
 const EMBER_COLORS = ['#ff3d1f', '#ff6a3d', '#ffa940', '#ffb199']
-// 每个 target 拆成两批零件：
-//   对撞本体 5 个：中央亮点、左/右两道光带、左/右两端最后的闪光；
-//   溅射火星 10 粒：亮点迸出的瞬间从中心向随机方向飞散（方向与距离
-//   内联写死在生成那一刻，同一次入场的十粒也不整齐）。
+
+/**
+ * 粒子的随机参数按行 key 缓存。
+ *
+ * 为什么必须缓存：pulseParts / stardust 这两个 computed 在 targets 每次
+ * 变化时都会重算，而 targets 会被面板的 repositionBeams 重写（滚动、缩放
+ * 窗口、连发时的新行插入都会触发）—— 如果每次重算都重新 Math.random()，
+ * 飞行中的粒子就会突然换位置换速度：滚动一下，满天星集体闪跳。
+ * 参数以行 key 为键在**首次生成时冻结**，重算只把冻结的比例参数乘上
+ * 最新的行几何；行 key 消失（动画收尾清理）时缓存一并释放。
+ */
+const emberCache = new Map<number, { ratio: number; dx: number; dy: number; size: number; delay: number }[]>()
+
+/** 释放已经不在 targets 里的行缓存（两个 computed 共用这一份清理逻辑） */
+function pruneCaches() {
+  const live = new Set(props.targets.map((t) => t.key))
+  for (const k of emberCache.keys()) if (!live.has(k)) emberCache.delete(k)
+  for (const k of starCache.keys()) if (!live.has(k)) starCache.delete(k)
+}
+watch(
+  () => props.targets.map((t) => t.key),
+  () => pruneCaches(),
+)
+
 const pulseParts = computed(() => {
   if (props.mode !== 'pulse') return []
   return props.targets.flatMap((t) => {
@@ -53,63 +72,76 @@ const pulseParts = computed(() => {
       { key: 'sl' + t.key, cls: 'fx-pulse-spark is-left', style: { top: t.top + 'px', left: t.left + 3 + 'px' } },
       { key: 'sr' + t.key, cls: 'fx-pulse-spark is-right', style: { top: t.top + 'px', left: t.left + t.width - 9 + 'px' } },
     ]
-    // 溅射火星：从中心向两侧上方飞散（dy 向上、dx 一左一右），
-    // 颜色在火红的深浅里轮换 —— 它们是「迸出的火星」，不是背景噪音
-    const embers = Array.from({ length: 10 }, (_, i) => {
-      const dx = (i % 2 === 0 ? -1 : 1) * (14 + Math.random() * 42)
-      const dy = -(6 + Math.random() * 20)
-      const size = 3 + Math.random() * 3
-      return {
-        key: 'e' + t.key + '-' + i,
-        cls: 'fx-pulse-ember',
-        style: {
-          top: t.top + 'px',
-          left: mid + 'px',
-          width: size.toFixed(1) + 'px',
-          height: size.toFixed(1) + 'px',
-          background: EMBER_COLORS[i % EMBER_COLORS.length],
-          animationDelay: (Math.random() * 0.1).toFixed(2) + 's',
-          '--ember-dx': dx.toFixed(0) + 'px',
-          '--ember-dy': dy.toFixed(0) + 'px',
-        },
-      }
-    })
+    // 溅射火星：从中心附近向两侧上方飞散（dy 向上、dx 一左一右），
+    // 颜色在火红的深浅里轮换 —— 它们是「迸出的火星」，不是背景噪音。
+    // ratio 是起点在中央附近的小散布（±6% 行宽），10 粒不挤在一个点上。
+    let batch = emberCache.get(t.key)
+    if (!batch) {
+      batch = Array.from({ length: 10 }, (_, i) => ({
+        ratio: Math.random(),
+        dx: (i % 2 === 0 ? -1 : 1) * (14 + Math.random() * 42),
+        dy: -(6 + Math.random() * 20),
+        size: 3 + Math.random() * 3,
+        delay: Math.random() * 0.1,
+      }))
+      emberCache.set(t.key, batch)
+    }
+    const embers = batch.map((p, i) => ({
+      key: 'e' + t.key + '-' + i,
+      cls: 'fx-pulse-ember',
+      style: {
+        top: t.top + 'px',
+        left: (mid + (p.ratio - 0.5) * t.width * 0.12).toFixed(1) + 'px',
+        width: p.size.toFixed(1) + 'px',
+        height: p.size.toFixed(1) + 'px',
+        background: EMBER_COLORS[i % EMBER_COLORS.length],
+        animationDelay: p.delay.toFixed(2) + 's',
+        '--ember-dx': p.dx.toFixed(0) + 'px',
+        '--ember-dy': p.dy.toFixed(0) + 'px',
+      },
+    }))
     return core.concat(embers)
   })
 })
 
 // ---- 星尘上浮的元素清单 ----
 // 14 粒（初版 7 粒被站主判为「基本看不到」）：起点 x 在行内取伪随机
-// 位置，升速与延迟各自错开。颜色同时写进 --star-glow —— 粒子的
-// 光晕必须与本体同色，用 currentColor 会取到继承的文字色，
-// 星星就成了「彩色的点配一圈灰光」，这正是第一版发暗的原因。
+// 位置，升速与延迟各自错开。光晕与本体同色（内联 boxShadow）——
+// 第一版用 currentColor 会取到继承的文字色，星星就成了
+// 「彩色的点配一圈灰光」，这正是第一版发暗的原因。
 const STAR_COLORS = ['#ff5a3c', '#ffc53d', '#36cfc9', '#ab8ef2']
+const starCache = new Map<number, { ratio: number; dur: number; delay: number; rise: number; color: string; size: number }[]>()
+
 const stardust = computed(() => {
   if (props.mode !== 'stardust') return []
-  return props.targets.flatMap((t) =>
-    Array.from({ length: 14 }, (_, i) => {
-      const left = t.left + t.width * (0.04 + 0.92 * Math.random())
-      const dur = 1.5 + Math.random() * 0.5
-      const delay = Math.random() * 0.35
-      const rise = 30 + Math.random() * 14
-      const color = STAR_COLORS[i % STAR_COLORS.length]
-      const size = 4.5 + Math.random() * 1.5
-      return {
-        key: 's' + t.key + '-' + i,
-        style: {
-          top: t.top + 4 + 'px',
-          left: left.toFixed(1) + 'px',
-          width: size.toFixed(1) + 'px',
-          height: size.toFixed(1) + 'px',
-          background: `radial-gradient(circle, #fff 0% 28%, ${color} 70%, transparent 100%)`,
-          boxShadow: `0 0 7px ${color}`,
-          animationDuration: dur.toFixed(2) + 's',
-          animationDelay: delay.toFixed(2) + 's',
-          '--star-rise': rise.toFixed(0) + 'px',
-        },
-      }
-    }),
-  )
+  return props.targets.flatMap((t) => {
+    let batch = starCache.get(t.key)
+    if (!batch) {
+      batch = Array.from({ length: 14 }, (_, i) => ({
+        ratio: 0.04 + 0.92 * Math.random(),
+        dur: 1.5 + Math.random() * 0.5,
+        delay: Math.random() * 0.35,
+        rise: 30 + Math.random() * 14,
+        color: STAR_COLORS[i % STAR_COLORS.length],
+        size: 4.5 + Math.random() * 1.5,
+      }))
+      starCache.set(t.key, batch)
+    }
+    return batch.map((p, i) => ({
+      key: 's' + t.key + '-' + i,
+      style: {
+        top: t.top + 4 + 'px',
+        left: (t.left + t.width * p.ratio).toFixed(1) + 'px',
+        width: p.size.toFixed(1) + 'px',
+        height: p.size.toFixed(1) + 'px',
+        background: `radial-gradient(circle, #fff 0% 28%, ${p.color} 70%, transparent 100%)`,
+        boxShadow: `0 0 7px ${p.color}`,
+        animationDuration: p.dur.toFixed(2) + 's',
+        animationDelay: p.delay.toFixed(2) + 's',
+        '--star-rise': p.rise.toFixed(0) + 'px',
+      },
+    }))
+  })
 })
 </script>
 
@@ -139,7 +171,7 @@ const stardust = computed(() => {
       :style="p.style"
     />
 
-    <!-- 星尘上浮：七粒小星错落升起 -->
+    <!-- 星尘上浮：十四粒小星错落升起 -->
     <span
       v-for="s in stardust"
       :key="s.key"
@@ -268,9 +300,9 @@ const stardust = computed(() => {
   92%, 100% { transform: scale(0); opacity: 0; }
 }
 /* 溅射火星：迸出瞬间从中心向两侧上空飞散的小粒子，
-   飞行向量由内联 --ember-dx / --ember-dy 给（生成时随机）。 */
+   飞行向量由内联 --ember-dx / --ember-dy 给（生成时随机冻结）。
+   尺寸也是内联的，这里只钉共同属性。 */
 .fx-pulse-ember {
-  height: 4px;
   border-radius: 50%;
   opacity: 0;
   animation: fx-pulse-ember 1.3s ease-out forwards;

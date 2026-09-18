@@ -96,7 +96,10 @@ const freshIds = ref(new Set<number>())
 
 // 2s 动画 + 0.4s 余量。到点把 id 与那条亮带一起撤掉。
 const FRESH_MS = 2400
-const freshTimers: number[] = []
+// 只留「还没到期的计时器」：到点后从集合里自摘。面板是常驻组件，
+// 每条新日志都会 markFresh 一次，数组只增不减的话一个月能攒上万个
+// 死 id（无害但不体面）。
+const freshTimers = new Set<number>()
 
 /**
  * 正在做入场动画的那些行的位置（三档动效共用这一份）。
@@ -211,13 +214,13 @@ function markFresh(ids: number[]) {
     //   这正是这条 bug 只在连发时出现的原因。）
     repositionBeams()
   })
-  freshTimers.push(
-    window.setTimeout(() => {
-      const gone = new Set(fresh)
-      for (const id of fresh) freshIds.value.delete(id)
-      fxTargets.value = fxTargets.value.filter((b) => !gone.has(b.key))
-    }, FRESH_MS),
-  )
+  const timer = window.setTimeout(() => {
+    freshTimers.delete(timer)
+    const gone = new Set(fresh)
+    for (const id of fresh) freshIds.value.delete(id)
+    fxTargets.value = fxTargets.value.filter((b) => !gone.has(b.key))
+  }, FRESH_MS)
+  freshTimers.add(timer)
 }
 
 /** 行的 class 由「是否刚新增」决定；antd 在它自己的渲染里调用它，读到的依赖归它 */
@@ -615,7 +618,7 @@ onUnmounted(() => {
   // 入场动效的定时器也要清：它们回调里会写 freshIds，
   // 卸载后再写是在动一个已经不在屏幕上的组件的状态
   for (const t of freshTimers) window.clearTimeout(t)
-  freshTimers.length = 0
+  freshTimers.clear()
   fxTargets.value = []
   detachBeamWatch()
 })
