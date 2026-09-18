@@ -22,6 +22,7 @@ import ModelWhitelistEditor, { type WhitelistRow } from '@/components/ModelWhite
 import type { Proxy } from '@/api/types'
 import GroupTag from '@/components/GroupTag.vue'
 import ChannelIcon from '@/components/ChannelIcon.vue'
+import ChannelLifeDot from '@/components/ChannelLifeDot.vue'
 import { PROTOCOLS, type Channel, type ChannelGroup, type ChannelBinding } from '@/api/types'
 import { symbolOf } from '@/utils/money'
 import { fmtTime, pad2 } from '@/utils/fmtTime'
@@ -859,6 +860,14 @@ onBeforeUnmount(() => {
         <a-table-column title="名称" :width="210">
           <template #default="{ record }">
             <div class="chan-title">
+              <!-- 生命灯：绿呼吸=正常 / 橙闪=有失败 / 橙环收缩=冷却倒计时 /
+                   灰=停用。runtime 数据来自列表快照与 channel_health 推送，
+                   本组件内自己倒数，不用等下一次刷新 -->
+              <ChannelLifeDot
+                :enabled="record.enabled"
+                :health="record.health_status"
+                :runtime="record.runtime"
+              />
               <ChannelIcon :name="record.name" :icon="record.icon" :size="20" />
               <!-- 名称带 title：加了「代理」胶囊之后这一格更挤，长名字会被
                    省略号截掉，截掉的部分要能悬停看到 -->
