@@ -15,7 +15,8 @@ let retry = 0
 let reconnectTimer: number | null = null
 let watchdogTimer: number | null = null
 
-/** 多久没收到任何消息就认为连接已经死了。服务端 1s/2s 各推一次，取 45s 很宽松 */
+/** 多久没收到任何消息就认为连接已经死了。服务端有新日志就推，闲时也有 1s/2s 的
+ *  兜底节拍，取 45s 很宽松 */
 const STALE_MS = 45000
 
 /** 连接状态：界面上用它显示「实时/已断开」，断线时数字不再跳动是正常现象 */

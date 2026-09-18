@@ -19,6 +19,13 @@ import (
 // 日志是异步批量落库的（relay.LogWriter 带 2048 缓冲），在写入口广播会漏掉
 // 重试与批量刷盘的路径；而按 id 增量查询天然不会漏、也不会重，
 // 断线重连后还能自动补上断线期间的数据。
+//
+// 两条循环的**耦合**（2026-09-18 站主反馈后加的）：
+// 日志循环查到新日志时，会通过 statsKick 立刻叫醒统计循环算一次。
+// 在此之前两者各按自己的定时器跑（1s / 2s），相位无关 —— 同一条请求造成的
+// 「新行插进来」与「卡片数字变了」被拆成两拍，平均差约 1 秒、最坏接近 2 秒。
+// 站主看到的正是这个：「新日志入场动画结束后统计卡片里的数值才会变动」。
+// 详见 liveStatsLoop 上方的说明。
 type liveHub struct {
 	mu   sync.Mutex
 	next int
@@ -100,8 +107,9 @@ type liveMessage struct {
 	Data any    `json:"data"`
 }
 
-// 推送节奏。统计每 2 秒算一次（聚合查询不便宜，而看板上的数字
-// 慢一拍没人会察觉）；日志每 1 秒查一次增量（它是「实时」的主要观感）。
+// 推送节奏。统计每 2 秒算一次（聚合查询不便宜，而这只是**兜底**节拍 ——
+// 有新日志时由日志循环叫醒它立刻算，见 liveStatsLoop）；
+// 日志每 1 秒查一次增量（它是「实时」的主要观感）。
 const liveStatsInterval = 2 * time.Second
 const liveLogsInterval = time.Second
 
@@ -118,11 +126,34 @@ func (s *Server) StartLive(ctx context.Context) {
 	if s.deps.Live == nil {
 		return
 	}
-	go s.liveStatsLoop(ctx)
-	go s.liveLogsLoop(ctx)
+	// 统计循环负责算，日志循环负责在「有新日志」时叫它立刻算一次。
+	// 通道容量 1 + 非阻塞发送：推动方是日志循环，它一秒才推一次新日志，
+	// 而接收方算一次统计要几毫秒 —— 容量 1 已经足够，多余的信号合并成一个
+	// （要的只是「有新数据，再算一遍」，攒着几个没有意义）。
+	statsKick := make(chan struct{}, 1)
+	go s.liveStatsLoop(ctx, statsKick)
+	go s.liveLogsLoop(ctx, statsKick)
 }
 
-func (s *Server) liveStatsLoop(ctx context.Context) {
+// liveStatsLoop 每 2 秒算一次今日汇总，变了才推。
+//
+// kick 让「有新日志入库」能立刻触发一次计算，而不是干等下一个 2 秒节拍。
+//
+// 为什么非要它（站主 2026-09-18 反馈「新日志入场动画结束后统计卡片里的数值
+// 才会变动，正常应该是一起变动的」）：日志循环 1s 一拍、统计循环 2s 一拍，
+// 两个 time.Ticker 的相位互不相干，同一条请求造成的两件事因此被拆成两拍 ——
+// 实测（.shots/verify-live-sync.mjs，线上产物 8888）新行 487ms 就插进来了，
+// 卡片数字到 1551ms 才动，中间空着 1064ms；两拍的相位差本身在 0..2s 之间漂移，
+// 所以用户看到的是「有时候一起动、有时候差一大截」，最坏接近整整两秒。
+//
+// 为什么不是把统计也改成 1 秒一拍：那只是把窗口从 2s 缩到 1s，两拍仍然是两拍，
+// 平均还差半秒；而且空转的聚合查询翻倍 —— 而它们绝大多数时候算出来一模一样
+// （没变化就不推，白算）。用 kick 之后，闲时一次都不多算，
+// 有流量时两件事落在同一个节拍里（先后差一次查询的时间，约几毫秒）。
+//
+// kick 只表示「有新日志」，不替代定时器：定时器负责兜住 kick 之外的变化
+// （清理历史数据、手工改库、以及 kick 被合并掉的那些时刻）。
+func (s *Server) liveStatsLoop(ctx context.Context, kick <-chan struct{}) {
 	statsTicker := time.NewTicker(liveStatsInterval)
 	defer statsTicker.Stop()
 	var lastSent string
@@ -131,6 +162,7 @@ func (s *Server) liveStatsLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-statsTicker.C:
+		case <-kick:
 		}
 		// 没人订阅就不查：聚合查询要扫今天的所有日志
 		if s.deps.Live.subscribers() == 0 {
@@ -156,7 +188,8 @@ func (s *Server) liveStatsLoop(ctx context.Context) {
 	}
 }
 
-func (s *Server) liveLogsLoop(ctx context.Context) {
+// liveLogsLoop 每秒查一次增量日志并推给前端，有新行时顺带叫醒统计循环。
+func (s *Server) liveLogsLoop(ctx context.Context, kick chan<- struct{}) {
 	ticker := time.NewTicker(liveLogsInterval)
 	defer ticker.Stop()
 	// 绑定 ctx：关停时正在跑的查询会被取消，而不是让进程干等它查完
@@ -191,6 +224,15 @@ func (s *Server) liveLogsLoop(ctx context.Context) {
 		}
 		last = rows[len(rows)-1].ID
 		s.deps.Live.broadcast(mustJSON(liveMessage{Type: "logs", Data: rows}))
+		// 日志先推、再叫醒统计循环：两帧落到同一条 WebSocket 上，
+		// 顺序保持「行先到、数字随后」，间隔只有一次聚合查询的时间（毫秒级），
+		// 前端的入场动画与数字滚动因此是同时开始的（见 liveStatsLoop 的说明）。
+		select {
+		case kick <- struct{}{}:
+		default:
+			// 已经有一个待处理的信号：那一次计算自然会看到这几行，
+			// 不必再排一个（这正是通道容量 1 想要的合并效果）
+		}
 	}
 }
 
