@@ -29,7 +29,7 @@ import DataState from '@/components/DataState.vue'
 import PanelCard from '@/components/PanelCard.vue'
 import GroupTag from '@/components/GroupTag.vue'
 import ChannelIcon from '@/components/ChannelIcon.vue'
-import { onLive } from '@/composables/useLive'
+import { onLive, createThrottledLiveReloader } from '@/composables/useLive'
 import NewLogEffect, { type FxTarget } from '@/components/NewLogEffect.vue'
 import { useLogFxStore } from '@/stores/logFx'
 import { symbolOf } from '@/utils/money'
@@ -347,7 +347,7 @@ async function load(opts: { silent?: boolean } = {}) {
     freshIds.value.clear()
     fxTargets.value = []
   }
-  // silent 是实时推送独有的路径（scheduleSilentReload 是唯一调用点），
+  // silent 是实时推送独有的路径（useLive.createThrottledLiveReloader 是唯一调用点），
   // 所以「多出来的行」必然是刚入库的那几条，不会是筛选切换带来的整屏替换
   const before = silent ? new Set(rows.value.map((r) => r.id)) : null
   try {
@@ -573,31 +573,17 @@ const pagination = computed(() => ({
 // 分三种情况：
 // 1. 没有深链条件且在第一页 —— 直接插到第一行（保留滚动动画，不重绘整页）。
 //    列表不带筛选之后这是常态路径：推到什么就插什么，连「符不符合条件」都不用问；
-// 2. 带 trace / 仅失败深链且在第一页 —— 隔一小段安静地重取一次当前查询。
+// 2. 带 trace / 仅失败深链且在第一页 —— 立刻（受 1 秒节流）安静地重取一次当前查询。
 //    新日志符不符合条件只有服务端知道，客户端不重复实现一遍筛选语义
-//    （以后加一个条件就会漏一处，而且错得很安静）；
+//    （以后加一个条件就会漏一处，而且错得很安静）。
+//    原来这里也是 setTimeout(1500)：与看板卡片那份同款的人为延迟，重取回来
+//    新增行才做入场动画 —— 数字/行的变动因此落在动画结束之后（2026-09-18
+//    站主二次反馈的同一根因，见 useLive.createThrottledLiveReloader 的说明）；
 // 3. 翻了页 —— 什么都不做：重取会让用户正在看的第二页变成另外一批行。
-const liveReloadDelay = 1500
-let liveTimer: number | null = null
-let liveReloading = false
-
-function scheduleSilentReload() {
-  if (liveTimer !== null) return
-  liveTimer = window.setTimeout(async () => {
-    liveTimer = null
-    // 上一次还没回来就跳过这一轮：慢查询堆起来只会让列表更晚更新
-    if (liveReloading) return
-    liveReloading = true
-    try {
-      await load({ silent: true })
-    } finally {
-      liveReloading = false
-    }
-  }, liveReloadDelay)
-}
+const liveReloader = createThrottledLiveReloader(() => load({ silent: true }))
 
 onUnmounted(() => {
-  if (liveTimer !== null) window.clearTimeout(liveTimer)
+  liveReloader.dispose()
   // 入场动效的定时器也要清：它们回调里会写 freshIds，
   // 卸载后再写是在动一个已经不在屏幕上的组件的状态
   for (const t of freshTimers) window.clearTimeout(t)
@@ -611,7 +597,7 @@ onLive('logs', (items: RequestLog[]) => {
   if (page.value !== 1) return
   const filtered = !!props.traceId || !!props.statusClass
   if (filtered) {
-    scheduleSilentReload()
+    liveReloader.request()
     return
   }
   // 列表不带时间范围，新日志必然属于「全部最新」，直接插即可

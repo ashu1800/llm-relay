@@ -164,3 +164,55 @@ export function onLive(type: string, fn: Handler) {
     }
   })
 }
+
+/**
+ * 实时推送触发的「静默重取」节流器（看板卡片与日志深链共用同一套行为）。
+ *
+ * 为什么不能有固定延迟（2026-09-18 站主二次反馈「入场动画播完了数字才变动」）：
+ * 两个组件原来各自写着 setTimeout(1500) —— 推送到了先等 1.5 秒再重取，
+ * 而入场动画 sweep 是 2s、glow 是 1.6s，数字的变动因此落在动画尾声甚至结束
+ * 之后。上一次修复（a3a2341）只打通了服务端两帧的同拍，且那条路径只在
+ * 「今天 + 全站」默认视角下被走到（其余视角合并不了推送、必须重取），
+ * 这 1.5 秒的人为延迟就是残留的根因 —— 回归脚本当时只测了默认视角，测不到它。
+ *
+ * 所以这里的第一原则：**首帧立即执行**（数字与动画同时开始变动），
+ * 只用「最小间隔」挡住持续流量下的请求风暴 —— 有流量时服务端大约每秒推
+ * 一帧（logs 循环 1s 一拍，每帧日志都叫醒统计循环），不设间隔就是每秒
+ * 好几次聚合请求；1000ms 意味着最坏情况数字也只比动画晚一拍请求耗时
+ * （几十毫秒），仍在动画播放中，观感上就是「一起变」。
+ *
+ * busy 在途保护保留原语义：上一次还没回来就跳过本轮，慢查询堆起来只会
+ * 让数据更晚更新。
+ */
+export function createThrottledLiveReloader(run: () => Promise<void>, minInterval = 1000) {
+  let timer: number | null = null
+  let busy = false
+  let lastAt = 0
+
+  /** 请求一次重取。首帧立即，间隔期内的后续帧合并进已排的那一次 */
+  function request() {
+    if (timer !== null) return
+    const wait = Math.max(0, lastAt + minInterval - Date.now())
+    timer = window.setTimeout(async () => {
+      timer = null
+      if (busy) return
+      busy = true
+      lastAt = Date.now()
+      try {
+        await run()
+      } finally {
+        busy = false
+      }
+    }, wait)
+  }
+
+  /** 组件卸载时清掉待执行的定时器：回调里会写已卸载组件的状态 */
+  function dispose() {
+    if (timer !== null) {
+      window.clearTimeout(timer)
+      timer = null
+    }
+  }
+
+  return { request, dispose }
+}

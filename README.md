@@ -479,6 +479,8 @@ chrome.exe --headless=new --remote-debugging-port=9222 \
 node .shots/verify-log-effects.mjs layout   # 入场动效三档不许参与布局
 node .shots/verify-log-effects.mjs sweep    # 默认档：亮带贴行底、2.4s 后撤掉
 node .shots/verify-live-sync.mjs            # 新行与卡片数字必须同时到达（见 ui-spec 第 16 条）
+node .shots/verify-live-sync-filtered.mjs   # 同上，但先切到「近 7 天」—— 非默认视角走的是
+                                            # 静默重取那条路，与默认视角的推送合并不是同一条代码路径
 ```
 
 三者都会往 `request_logs` 插探针行（trace_id 前缀 `logfx-probe` /

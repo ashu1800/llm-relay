@@ -29,7 +29,7 @@ import StatCard from '@/components/StatCard.vue'
 import AnimatedNumber from '@/components/AnimatedNumber.vue'
 import DataState from '@/components/DataState.vue'
 import RequestLogPanel from '@/components/RequestLogPanel.vue'
-import { onLive } from '@/composables/useLive'
+import { onLive, createThrottledLiveReloader } from '@/composables/useLive'
 // 金额一律走 utils/money.ts：符号与小数位数只此一份（见那里的说明）
 import { currencyKeys, moneyText, primaryCurrency, symbolOf } from '@/utils/money'
 import type { Channel, ChannelGroup } from '@/api/types'
@@ -396,30 +396,17 @@ const rateValue = computed(() => (summary.value ? summary.value.success_rate * 1
 // - 当前正好是「今天 + 全站」→ 直接合并（它不带 range 等本地查询字段，
 //   整个替换会把页面依赖的其它字段抹掉，这里只做字段合并）；
 // - 当前是别的视角（近 7 天 / 筛了分组或渠道）→ 合并不了，但**收到推送本身
-//   就说明有新流量**（服务端只在数据真的变了才推），于是借这个信号隔一小段
-//   安静地重取一次当前视角。以前这里是直接 return，选着「近 7 天」或某个分组时
-//   卡片就再也不动了，只能靠手点「刷新」。
-const liveReloadDelay = 1500
-let liveTimer: number | null = null
-let liveReloading = false
-
-function scheduleSilentReload() {
-  if (liveTimer !== null) return
-  liveTimer = window.setTimeout(async () => {
-    liveTimer = null
-    // 上一次还没回来就跳过这一轮：慢查询堆起来只会让数字更晚才更新
-    if (liveReloading) return
-    liveReloading = true
-    try {
-      await load({ silent: true })
-    } finally {
-      liveReloading = false
-    }
-  }, liveReloadDelay)
-}
+//   就说明有新流量**（服务端只在数据真的变了才推），于是立刻静默重取一次
+//   当前视角。以前这里是直接 return，选着「近 7 天」或某个分组时卡片就
+//   再也不动了，只能靠手点「刷新」；后来改成 setTimeout(1500) 之后卡片会动了，
+//   但那 1.5 秒人为延迟恰好把数字的变动推到入场动画（sweep 2s / glow 1.6s）
+//   结束之后 —— 站主二次反馈「动画播完了数值才变动」指的就是它。
+//   现在：首帧立即重取（数字与动画同时开始变动），只保留 1 秒最小间隔挡
+//   持续流量下的请求风暴（节流器的取舍见 useLive.createThrottledLiveReloader）。
+const statsReloader = createThrottledLiveReloader(() => load({ silent: true }))
 
 onUnmounted(() => {
-  if (liveTimer !== null) window.clearTimeout(liveTimer)
+  statsReloader.dispose()
 })
 
 onLive('stats', (data: Record<string, unknown>) => {
@@ -435,7 +422,7 @@ onLive('stats', (data: Record<string, unknown>) => {
     channelFilter.value !== ALL ||
     modelFilter.value !== ALL
   ) {
-    scheduleSilentReload()
+    statsReloader.request()
     return
   }
   summary.value = { ...summary.value, ...(data as object) } as Summary
