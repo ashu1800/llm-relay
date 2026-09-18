@@ -1270,16 +1270,20 @@ onMounted(() => {
 }
 
 /* ---- 日志队列水位 ----
-   12px 小字右对齐：它是这一屏的「地基状态」，存在但不能抢戏。
-   flex: none 是必须的 —— 上面的表格吃掉了弹性分配，这一条按内容占高，
-   否则弹性链把它压扁或被挤出面板。 */
+   12px 小字，与分页组件同一水平（左侧）—— 它和「共 N 条 / 页码」都是
+   表格的地基信息，拆成两行高度白费；负边距把它拉上分页那一行：
+   分页块高 32 + 上下边距 16，小字行高 20，上移 28px 后两者中线对齐。
+   width: fit-content 是必须的 —— 块级盒子会横撑整行盖住分页的点击区，
+   收到内容宽就只占左下角。flex: none 是必须的 —— 上面的表格吃掉了
+   弹性分配，这一条按内容占高，否则弹性链把它压扁或被挤出面板。 */
 .queue-status {
   flex: none;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
+  width: fit-content;
   gap: 6px;
-  margin-top: 6px;
+  margin: -28px 0 0;
   font-size: 12px;
   color: var(--color-text-secondary);
   font-variant-numeric: tabular-nums;
