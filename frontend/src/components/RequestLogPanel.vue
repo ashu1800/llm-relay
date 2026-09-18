@@ -203,6 +203,13 @@ function markFresh(ids: number[]) {
       const r = tr.getBoundingClientRect()
       fxTargets.value.push({ key: id, top: r.bottom - base.top - BEAM_H, left: r.left - base.left, width: r.width })
     }
+    // 新行插入会把所有正在飞行中的老行整体顶下去（两次日志间隔 1 秒左右时
+    // 必现）：老亮带没有跟着行走，就留在旧行的位置上 —— 正好是第二条新行
+    // 的位置，与第二条的亮带叠在一起，看起来就是「两次动画播在了同一行」。
+    // 按行 key 把全部飞行中的 target 重新量一遍，各归各行。
+    // （repositionBeams 原本只挂在 scroll/resize 上，行数变化不触发它 ——
+    //   这正是这条 bug 只在连发时出现的原因。）
+    repositionBeams()
   })
   freshTimers.push(
     window.setTimeout(() => {

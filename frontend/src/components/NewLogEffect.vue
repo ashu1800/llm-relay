@@ -35,40 +35,74 @@ const props = defineProps<{
 }>()
 
 // ---- 双星对撞的元素清单 ----
-// 每个 target 拆成 5 个零件：中央亮点、左/右两道光带、左/右两端最后的闪光。
+// 火红是站主点名的主题色：与扫光的彩虹不同，这里的色标刻意写死
+// 而不取 --color-primary（陶土色偏暗，对撞的「火焰感」需要饱和的暖红）。
+const EMBER_COLORS = ['#ff3d1f', '#ff6a3d', '#ffa940', '#ffb199']
+// 每个 target 拆成两批零件：
+//   对撞本体 5 个：中央亮点、左/右两道光带、左/右两端最后的闪光；
+//   溅射火星 10 粒：亮点迸出的瞬间从中心向随机方向飞散（方向与距离
+//   内联写死在生成那一刻，同一次入场的十粒也不整齐）。
 const pulseParts = computed(() => {
   if (props.mode !== 'pulse') return []
   return props.targets.flatMap((t) => {
     const mid = t.left + t.width / 2
-    return [
+    const core = [
       { key: 'p' + t.key, cls: 'fx-pulse-dot', style: { top: t.top + 'px', left: mid + 'px' } },
       { key: 'pl' + t.key, cls: 'fx-pulse-beam is-left', style: { top: t.top + 'px', left: t.left + 'px', width: t.width / 2 + 'px' } },
       { key: 'pr' + t.key, cls: 'fx-pulse-beam is-right', style: { top: t.top + 'px', left: mid + 'px', width: t.width / 2 + 'px' } },
       { key: 'sl' + t.key, cls: 'fx-pulse-spark is-left', style: { top: t.top + 'px', left: t.left + 3 + 'px' } },
       { key: 'sr' + t.key, cls: 'fx-pulse-spark is-right', style: { top: t.top + 'px', left: t.left + t.width - 9 + 'px' } },
     ]
+    // 溅射火星：从中心向两侧上方飞散（dy 向上、dx 一左一右），
+    // 颜色在火红的深浅里轮换 —— 它们是「迸出的火星」，不是背景噪音
+    const embers = Array.from({ length: 10 }, (_, i) => {
+      const dx = (i % 2 === 0 ? -1 : 1) * (14 + Math.random() * 42)
+      const dy = -(6 + Math.random() * 20)
+      const size = 3 + Math.random() * 3
+      return {
+        key: 'e' + t.key + '-' + i,
+        cls: 'fx-pulse-ember',
+        style: {
+          top: t.top + 'px',
+          left: mid + 'px',
+          width: size.toFixed(1) + 'px',
+          height: size.toFixed(1) + 'px',
+          background: EMBER_COLORS[i % EMBER_COLORS.length],
+          animationDelay: (Math.random() * 0.1).toFixed(2) + 's',
+          '--ember-dx': dx.toFixed(0) + 'px',
+          '--ember-dy': dy.toFixed(0) + 'px',
+        },
+      }
+    })
+    return core.concat(embers)
   })
 })
 
 // ---- 星尘上浮的元素清单 ----
-// 7 粒；起点 x 在行内取伪随机位置，升速与延迟也各自错开。
-// 随机性只存在于元素生成的那一刻（内联样式写死）：不追求真随机，
-// 只追求「两次入场不一样」。
-const STAR_COLORS = ['var(--color-primary)', '#ffa940', '#36cfc9']
+// 14 粒（初版 7 粒被站主判为「基本看不到」）：起点 x 在行内取伪随机
+// 位置，升速与延迟各自错开。颜色同时写进 --star-glow —— 粒子的
+// 光晕必须与本体同色，用 currentColor 会取到继承的文字色，
+// 星星就成了「彩色的点配一圈灰光」，这正是第一版发暗的原因。
+const STAR_COLORS = ['#ff5a3c', '#ffc53d', '#36cfc9', '#ab8ef2']
 const stardust = computed(() => {
   if (props.mode !== 'stardust') return []
   return props.targets.flatMap((t) =>
-    Array.from({ length: 7 }, (_, i) => {
-      const left = t.left + t.width * (0.06 + 0.88 * Math.random())
-      const dur = 0.9 + Math.random() * 0.4
-      const delay = Math.random() * 0.28
-      const rise = 22 + Math.random() * 12
+    Array.from({ length: 14 }, (_, i) => {
+      const left = t.left + t.width * (0.04 + 0.92 * Math.random())
+      const dur = 1.5 + Math.random() * 0.5
+      const delay = Math.random() * 0.35
+      const rise = 30 + Math.random() * 14
+      const color = STAR_COLORS[i % STAR_COLORS.length]
+      const size = 4.5 + Math.random() * 1.5
       return {
         key: 's' + t.key + '-' + i,
         style: {
           top: t.top + 4 + 'px',
           left: left.toFixed(1) + 'px',
-          background: STAR_COLORS[i % STAR_COLORS.length],
+          width: size.toFixed(1) + 'px',
+          height: size.toFixed(1) + 'px',
+          background: `radial-gradient(circle, #fff 0% 28%, ${color} 70%, transparent 100%)`,
+          boxShadow: `0 0 7px ${color}`,
           animationDuration: dur.toFixed(2) + 's',
           animationDelay: delay.toFixed(2) + 's',
           '--star-rise': rise.toFixed(0) + 'px',
@@ -168,10 +202,11 @@ const stardust = computed(() => {
 }
 
 /* ---------- 双星对撞（档位：pulse） ----------
-   三个阶段写在一个 0.95s 的循环里：
-   0-0.15s 中央亮点迸出（scale 0 -> 1.6）；
-   0.1-0.55s 两道光带从中央向两端展开（scaleX 0 -> 1）；
-   0.5-0.95s 光带渐隐、两端各闪一下火花后全部熄灭。
+   四个阶段写在一个 1.3s 的循环里（站主拍板「再久一点点」后的时长）：
+   0-0.2s 中央亮点迸出（scale 0 -> 1.6）+ 十粒火星向两侧上空溅射；
+   0.15-0.75s 两道光带从中央向两端展开（scaleX 0 -> 1）；
+   0.7-1.3s 光带渐隐、两端各闪一下火红光斑后全部熄灭。
+   配色是写死的火红 —— 陶土主色偏暗，撑不起「对撞的火焰感」；
    光带只有 3px 高、贴着行底分割线（与扫光同一个着力点），
    所以它读起来是「这一行在发信号」，而不是「这一行被盖住了」。 */
 .fx-pulse {
@@ -181,78 +216,95 @@ const stardust = computed(() => {
   pointer-events: none;
 }
 .fx-pulse-dot {
-  width: 7px;
-  height: 7px;
-  margin-top: -2px;
-  margin-left: -3.5px;
+  width: 8px;
+  height: 8px;
+  margin-top: -2.5px;
+  margin-left: -4px;
   border-radius: 50%;
-  background: radial-gradient(circle, #fff 0% 30%, var(--color-primary) 62%, transparent 100%);
+  background: radial-gradient(circle, #fff 0% 30%, #ff5a3c 62%, transparent 100%);
   transform: scale(0);
-  animation: fx-pulse-dot 0.95s ease-out forwards;
+  animation: fx-pulse-dot 1.3s ease-out forwards;
 }
 @keyframes fx-pulse-dot {
   0% { transform: scale(0); opacity: 0; }
-  16% { transform: scale(1.6); opacity: 1; }
-  34% { transform: scale(0.9); opacity: 0.95; }
-  60%, 100% { transform: scale(0); opacity: 0; }
+  12% { transform: scale(1.6); opacity: 1; }
+  26% { transform: scale(0.9); opacity: 0.95; }
+  62%, 100% { transform: scale(0); opacity: 0; }
 }
 .fx-pulse-beam {
-  background-image: linear-gradient(90deg, transparent 0%, var(--color-primary) 92%, #fff 100%);
+  background-image: linear-gradient(90deg, transparent 0%, #ff5a3c 78%, #ffb199 94%, #fff 100%);
   transform: scaleX(0);
-  animation: fx-pulse-beam 0.95s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  animation: fx-pulse-beam 1.3s cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 .fx-pulse-beam.is-left {
   transform-origin: right center;
-  background-image: linear-gradient(90deg, #fff 0%, var(--color-primary) 8%, transparent 100%);
+  background-image: linear-gradient(90deg, #fff 0%, #ffb199 6%, #ff5a3c 22%, transparent 100%);
 }
 .fx-pulse-beam.is-right {
   transform-origin: left center;
 }
 @keyframes fx-pulse-beam {
-  0%, 10% { transform: scaleX(0); opacity: 0; }
-  12% { opacity: 1; }
-  58% { transform: scaleX(1); opacity: 0.95; }
-  82% { opacity: 0.4; }
+  0%, 8% { transform: scaleX(0); opacity: 0; }
+  10% { opacity: 1; }
+  56% { transform: scaleX(1); opacity: 0.95; }
+  84% { opacity: 0.35; }
   100% { transform: scaleX(1); opacity: 0; }
 }
-/* 端点火花：光到达时才亮，一小圈就灭 */
+/* 端点火红光斑：光到达时才亮，一大圈再灭 —— 这是「撞到了」的收束 */
 .fx-pulse-spark {
-  width: 6px;
-  height: 6px;
-  margin-top: -1.5px;
+  width: 9px;
+  height: 9px;
+  margin-top: -3px;
   border-radius: 50%;
-  background: radial-gradient(circle, #fff 0% 40%, var(--color-primary) 70%, transparent 100%);
+  background: radial-gradient(circle, #fff 0% 32%, #ff5a3c 66%, transparent 100%);
   transform: scale(0);
   opacity: 0;
-  animation: fx-pulse-spark 0.95s ease-out forwards;
+  animation: fx-pulse-spark 1.3s ease-out forwards;
 }
 @keyframes fx-pulse-spark {
-  0%, 48% { transform: scale(0); opacity: 0; }
-  60% { transform: scale(1.5); opacity: 1; }
-  85%, 100% { transform: scale(0); opacity: 0; }
+  0%, 46% { transform: scale(0); opacity: 0; }
+  58% { transform: scale(2.4); opacity: 1; }
+  76% { transform: scale(1); opacity: 0.6; }
+  92%, 100% { transform: scale(0); opacity: 0; }
+}
+/* 溅射火星：迸出瞬间从中心向两侧上空飞散的小粒子，
+   飞行向量由内联 --ember-dx / --ember-dy 给（生成时随机）。 */
+.fx-pulse-ember {
+  height: 4px;
+  border-radius: 50%;
+  opacity: 0;
+  animation: fx-pulse-ember 1.3s ease-out forwards;
+}
+@keyframes fx-pulse-ember {
+  0% { opacity: 0; transform: translate(0, 0) scale(1); }
+  10% { opacity: 1; }
+  70% { opacity: 0.85; }
+  100% {
+    opacity: 0;
+    transform: translate(var(--ember-dx, 20px), calc(var(--ember-dy, -12px) - 6px)) scale(0.3);
+  }
 }
 
 /* ---------- 星尘上浮（档位：stardust） ----------
-   七粒小星从行内升起、上浮、缩没。颜色三选一轮换（主色/琥珀/青），
-   与扫光的彩虹同一家族；上升距离由每粒自己的 --star-rise 给（内联注入），
-   所以同一次入场的七粒也不是整齐划一的。 */
+   14 粒小星从行内升起、上浮、缩没（初版 7 粒 / 1.1s 被站主判为
+   「基本看不到」：粒子加倍、时长拉到 1.5-2.0s、本体改白心亮核、
+   光晕与本体同色 —— 第一版光晕误用 currentColor，星星周围是一圈
+   灰光，发暗的锅在那里）。上升距离由每粒自己的 --star-rise 给。 */
 .fx-star {
   position: absolute;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
   z-index: 3;
   pointer-events: none;
+  border-radius: 50%;
   opacity: 0;
-  box-shadow: 0 0 5px color-mix(in srgb, currentColor 60%, transparent);
-  animation: fx-star-rise 1.1s ease-out forwards;
+  animation: fx-star-rise 1.7s ease-out forwards;
 }
 @keyframes fx-star-rise {
-  0% { opacity: 0; transform: translateY(4px) scale(0.6); }
-  22% { opacity: 0.95; }
+  0% { opacity: 0; transform: translateY(5px) scale(0.5); }
+  18% { opacity: 1; }
+  72% { opacity: 0.8; }
   100% {
     opacity: 0;
-    transform: translateY(calc(-1 * var(--star-rise, 26px))) scale(0.35);
+    transform: translateY(calc(-1 * var(--star-rise, 36px))) scale(0.4);
   }
 }
 </style>

@@ -27,13 +27,17 @@ defineProps<{ fx: LogFxId }>()
       <span class="fxp-pulse-dot" />
       <span class="fxp-pulse-beam is-left" />
       <span class="fxp-pulse-beam is-right" />
+      <span class="fxp-pulse-spark is-left" />
+      <span class="fxp-pulse-spark is-right" />
     </template>
 
-    <!-- 星尘上浮：三粒小星错落升起（真效果是七粒，小样放三粒意思到了） -->
+    <!-- 星尘上浮：五粒小星错落升起（真效果是十四粒，小样放五粒意思到了） -->
     <template v-if="fx === 'stardust'">
-      <span class="fxp-star" style="left: 14px; animation-delay: 0s" />
-      <span class="fxp-star" style="left: 29px; animation-delay: 0.3s" />
-      <span class="fxp-star" style="left: 43px; animation-delay: 0.55s" />
+      <span class="fxp-star" style="left: 12px; animation-delay: 0s" />
+      <span class="fxp-star" style="left: 22px; animation-delay: 0.25s" />
+      <span class="fxp-star" style="left: 31px; animation-delay: 0.5s" />
+      <span class="fxp-star" style="left: 40px; animation-delay: 0.15s" />
+      <span class="fxp-star" style="left: 49px; animation-delay: 0.4s" />
     </template>
   </span>
 </template>
@@ -92,17 +96,18 @@ defineProps<{ fx: LogFxId }>()
 }
 
 /* ---- 双星对撞 ----
-   中线在行底（top: 21px），亮点迸出后两道光向两端跑，收在端点。
-   2.2s 一轮，前 40% 演完、后面留白喘口气 —— 循环预览需要呼吸感。 */
+   火红配色与真效果同一组色标（#ff5a3c 主焰 / #ffb199 亮边 / 白心）。
+   中线在行底（top: 21px），亮点迸出后两道光向两端跑、端点炸一个光斑，
+   收在端点。2.2s 一轮，前 40% 演完、后面留白喘口气 —— 循环预览需要呼吸感。 */
 .fxp-pulse-dot {
   position: absolute;
   left: 50%;
   top: 21px;
-  width: 7px;
-  height: 7px;
-  margin: -2px 0 0 -3.5px;
+  width: 8px;
+  height: 8px;
+  margin: -2.5px 0 0 -4px;
   border-radius: 50%;
-  background: radial-gradient(circle, #fff 0% 30%, var(--color-primary) 62%, transparent 100%);
+  background: radial-gradient(circle, #fff 0% 30%, #ff5a3c 62%, transparent 100%);
   transform: scale(0);
   animation: fxp-pulse-dot 2.2s ease-out infinite;
 }
@@ -116,7 +121,7 @@ defineProps<{ fx: LogFxId }>()
   position: absolute;
   top: 21px;
   height: 3px;
-  background-image: linear-gradient(90deg, transparent 0%, var(--color-primary) 92%, #fff 100%);
+  background-image: linear-gradient(90deg, transparent 0%, #ff5a3c 78%, #ffb199 94%, #fff 100%);
   transform: scaleX(0);
   animation: fxp-pulse-beam 2.2s cubic-bezier(0.22, 1, 0.36, 1) infinite;
 }
@@ -124,7 +129,7 @@ defineProps<{ fx: LogFxId }>()
   left: 6px;
   right: 50%;
   transform-origin: right center;
-  background-image: linear-gradient(90deg, #fff 0%, var(--color-primary) 8%, transparent 100%);
+  background-image: linear-gradient(90deg, #fff 0%, #ffb199 6%, #ff5a3c 22%, transparent 100%);
 }
 .fxp-pulse-beam.is-right {
   left: 50%;
@@ -138,25 +143,50 @@ defineProps<{ fx: LogFxId }>()
   20% { opacity: 0.4; }
   24%, 100% { transform: scaleX(1); opacity: 0; }
 }
+.fxp-pulse-spark {
+  position: absolute;
+  top: 21px;
+  width: 8px;
+  height: 8px;
+  margin-top: -2.5px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #fff 0% 32%, #ff5a3c 66%, transparent 100%);
+  transform: scale(0);
+  opacity: 0;
+  animation: fxp-pulse-spark 2.2s ease-out infinite;
+}
+.fxp-pulse-spark.is-left { left: 5px; }
+.fxp-pulse-spark.is-right { right: 5px; }
+@keyframes fxp-pulse-spark {
+  0%, 12% { transform: scale(0); opacity: 0; }
+  15% { transform: scale(2); opacity: 1; }
+  20%, 100% { transform: scale(0); opacity: 0; }
+}
 
 /* ---- 星尘上浮 ----
-   三粒小星从第一行升起，节奏各自错开（真效果的随机性在循环预览里
-   用固定的 delay 表达）。颜色轮换与真效果同源。 */
+   五粒小星从第一行升起，节奏各自错开（真效果的随机性在循环预览里
+   用固定的 delay 表达）。白心亮核 + 同色光晕，与真效果同画法。 */
 .fxp-star {
   position: absolute;
   top: 19px;
-  width: 4px;
-  height: 4px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   opacity: 0;
   animation: fxp-star-rise 2.2s ease-out infinite;
 }
-.fxp-star:nth-of-type(odd) { background: var(--color-primary); }
-.fxp-star:nth-of-type(even) { background: #36cfc9; }
+.fxp-star:nth-of-type(odd) {
+  background: radial-gradient(circle, #fff 0% 30%, #ff5a3c 70%, transparent 100%);
+  box-shadow: 0 0 5px #ff5a3c;
+}
+.fxp-star:nth-of-type(even) {
+  background: radial-gradient(circle, #fff 0% 30%, #36cfc9 70%, transparent 100%);
+  box-shadow: 0 0 5px #36cfc9;
+}
 @keyframes fxp-star-rise {
   0% { opacity: 0; transform: translateY(3px) scale(0.6); }
-  10% { opacity: 0.95; }
-  26% { opacity: 0; transform: translateY(-13px) scale(0.35); }
-  100% { opacity: 0; transform: translateY(-13px) scale(0.35); }
+  8% { opacity: 1; }
+  22% { opacity: 0; transform: translateY(-15px) scale(0.4); }
+  100% { opacity: 0; transform: translateY(-15px) scale(0.4); }
 }
 </style>
