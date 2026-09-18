@@ -7,7 +7,10 @@ import {
   DeleteOutlined,
   CopyOutlined,
   EditOutlined,
-  KeyOutlined
+  KeyOutlined,
+  DashboardOutlined,
+  StopOutlined,
+  PlayCircleOutlined
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
@@ -345,11 +348,13 @@ onMounted(() => {
         @retry="load"
       >
       <!-- scroll.x 必须不小于各列宽度之和（名称 150 + 密钥 170 + 模型白名单 160
-           + 分组白名单 180 + 最后使用 150 + 限流 130 + 状态 90 + 操作 200 = 1230）：
+           + 分组白名单 180 + 最后使用 150 + 限流 130 + 状态 90 + 操作 132 = 1162）：
            声明偏小时右侧固定的「操作」列会盖住左边最后一列，
            表现为表头被截断、单元格内容被压住，而且不报错。
-           原来写的是 1170、少了 60。核对脚本：scripts/check-table-widths.mjs -->
-      <a-table :data-source="rows" :loading="loading" :pagination="false" row-key="id" size="small" :scroll="{ x: 1230 }">
+           原来写的是 1170、少了 60（那是四列宽度还没跟着改的时候）。
+           操作 200 -> 132 是图标按钮那一次，见下方操作列上方的注释。
+           核对脚本：scripts/check-table-widths.mjs -->
+      <a-table :data-source="rows" :loading="loading" :pagination="false" row-key="id" size="small" :scroll="{ x: 1162 }">
         <template #emptyText>
           <a-empty description="还没有密钥，点「新建密钥」创建第一个" />
         </template>
@@ -403,22 +408,66 @@ onMounted(() => {
             <a-tag :color="record.enabled ? 'green' : 'default'">{{ record.enabled ? '启用' : '停用' }}</a-tag>
           </template>
         </a-table-column>
-        <!-- 宽度按内容实测：四个动作加间距共 181px，加上左右各 8px 内边距需要 197px，
-             原来写 190 会让链接被压缩到从词中间换行 -->
-        <a-table-column title="操作" :width="200" fixed="right">
+        <!-- 四个动作改成图标按钮，与渠道页同一个写法（.table-icon-btn）。
+             原来四个「图标 + 文字」链接实测占 181px，列宽因此要 200；
+             图标按钮每个 28px，四个加间距共 124px，列宽 132 就够，
+             表格总宽从 1230 降到 1162 —— 1440 与 1334 两个视口下都能完整装进
+             容器，横向滚动消失，也不再出现「固定列悬停提示被裁掉一截」。
+
+             四个动作里有两个不是自解释的：
+               · 「改限额」—— 图标只能是仪表盘/速度一类，看不出改的是「每分钟上限」
+               · 「启用/停用」—— 同一个按钮两种语义，图标必须跟着 :checked 换
+             这两处靠 tooltip 补名字，其余两个（编辑、删除）本就是通用约定。 -->
+        <a-table-column title="操作" :width="132" fixed="right">
           <template #default="{ record }">
-            <!-- 用 a-button 而不是裸 <a>：无 href 的 <a> 键盘不可达 -->
-            <a-space>
-              <a-button type="link" size="small" @click="openEdit(record)">
-                <EditOutlined /> 编辑
-              </a-button>
-              <a-button type="link" size="small" @click="setLimit(record)">改限额</a-button>
-              <a-button type="link" size="small" @click="toggle(record)">
-                {{ record.enabled ? '停用' : '启用' }}
-              </a-button>
-              <a-button type="link" size="small" danger @click="confirmDelete(record)">
-                <DeleteOutlined /> 删除
-              </a-button>
+            <a-space :size="4">
+              <a-tooltip title="编辑密钥：名称、白名单">
+                <a-button
+                  class="table-icon-btn"
+                  type="text"
+                  size="small"
+                  :aria-label="'编辑密钥 ' + record.name"
+                  @click="openEdit(record)"
+                >
+                  <EditOutlined />
+                </a-button>
+              </a-tooltip>
+              <a-tooltip title="改限额：每分钟请求数上限">
+                <a-button
+                  class="table-icon-btn"
+                  type="text"
+                  size="small"
+                  :aria-label="'修改 ' + record.name + ' 的每分钟请求上限'"
+                  @click="setLimit(record)"
+                >
+                  <DashboardOutlined />
+                </a-button>
+              </a-tooltip>
+              <a-tooltip :title="record.enabled ? '停用：使用该密钥的客户端立即失效' : '启用：恢复这把密钥的调用'">
+                <a-button
+                  class="table-icon-btn"
+                  type="text"
+                  size="small"
+                  :aria-label="(record.enabled ? '停用密钥 ' : '启用密钥 ') + record.name"
+                  @click="toggle(record)"
+                >
+                  <!-- 图标跟着状态换，不只换颜色：色觉障碍下也要能分辨
+                       「这一下会把它关掉」还是「会把它打开」 -->
+                  <StopOutlined v-if="record.enabled" />
+                  <PlayCircleOutlined v-else />
+                </a-button>
+              </a-tooltip>
+              <a-tooltip title="删除密钥">
+                <a-button
+                  class="table-icon-btn is-danger"
+                  type="text"
+                  size="small"
+                  :aria-label="'删除密钥 ' + record.name"
+                  @click="confirmDelete(record)"
+                >
+                  <DeleteOutlined />
+                </a-button>
+              </a-tooltip>
             </a-space>
           </template>
         </a-table-column>

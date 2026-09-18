@@ -747,21 +747,27 @@ onBeforeUnmount(() => {
            「操作」列会盖住左边最后一列，表现为表头被截断、内容被压住。
            反过来偏大也不行 —— antd 会把多出来的宽度摊到各列上，
            于是「声明值」和实际渲染宽度对不上，量出来的数就没法用来核对。
-           1267 = 各列宽度之和（顺序 44 + 名称 210 + 模型 200 + 上游协议 125
-           + 最近调用 174 + 分组 110 + 币种 86 + 启用 78 + 操作 240）。
+           1177 = 各列宽度之和（顺序 44 + 名称 210 + 模型 200 + 上游协议 125
+           + 最近调用 174 + 分组 110 + 币种 86 + 启用 78 + 操作 150）。
            名称 170 -> 210 是因为名称后面加了「代理」胶囊：胶囊约 42px，
            原来那 170 减去图标与两处间距只剩 126px，长一点的渠道名会被挤成省略号。
            「最近调用」占的就是原来「地址」那 174。
            「权重」列已去掉（顺序由列表本身表达，不再显示数字），
-           换成 44px 的拖拽手柄列；操作列 292 -> 240 是更早那次改动。
-           改完实测（scripts/measure-tables.mjs，1440 视口）：容器 1182、表格 1267 -->
+           换成 44px 的拖拽手柄列。
+           操作列 240 -> 150 是这一版：四个动作从「图标 + 文字」改成纯图标按钮，
+           每个 28px、间距 4px，连同单元格内边距一共只要 140px。
+           原来那 240 仍不足以装下四个带文字的按钮，而**固定列装不下时不会换行、
+           也不会自己被截断**，多出来的部分直接溢出到表格右边界之外 ——
+           用户看到的就是「删除」飘在列外。缩短到实际需要之后，
+           表格总宽 1177 也回到 1440 视口下的容器宽度（1182）以内，横向滚动消失。
+           改完实测（scripts/measure-tables.mjs，1440 视口） -->
       <a-table
         :data-source="visibleRows"
         :loading="loading"
         :pagination="false"
         row-key="id"
         size="small"
-        :scroll="{ x: 1267 }"
+        :scroll="{ x: 1177 }"
       >
         <template #emptyText>
           <a-empty
@@ -898,31 +904,68 @@ onBeforeUnmount(() => {
             </a-tooltip>
           </template>
         </a-table-column>
-        <a-table-column title="操作" :width="240" fixed="right">
+        <a-table-column title="操作" :width="150" fixed="right">
           <template #default="{ record }">
-            <!-- 操作项统一用 a-button type="link"：裸 <a> 没有 href 就没有
-                 隐式 tabindex，键盘用户 Tab 不到、回车也点不动。
-                 禁用态交给 :disabled，它会带上 aria-disabled 并阻止点击。 -->
-            <a-space>
-              <a-button
-                type="link"
-                size="small"
-                :loading="testingId === record.id"
-                :disabled="testingId !== 0 && testingId !== record.id"
-                @click="testChannel(record)"
-              >
-                <ThunderboltOutlined />
-                {{ testingId === record.id ? '测试中…' : '测试' }}
-              </a-button>
-              <a-button type="link" size="small" @click="openBindings(record)">
-                <LinkOutlined /> 模型
-              </a-button>
-              <a-button type="link" size="small" @click="openEdit(record)">
-                <EditOutlined /> 编辑
-              </a-button>
-              <a-button type="link" size="small" danger @click="confirmDelete(record)">
-                <DeleteOutlined /> 删除
-              </a-button>
+            <!-- 四个动作改成图标按钮。
+                 原来每个动作都是「图标 + 文字」的 link 按钮，四项合计要 240px
+                 上下，而这一列是 fixed="right"：列宽装不下时固定列既不会换行
+                 也不会自己被截断，多出来的部分只能溢出到表格右边界之外 ——
+                 表现就是最后一个「删除」飘在列外，越窄的窗口越明显。
+                 图标按钮每个 28px，四个加间距一共 124px，列宽 150 就够，
+                 表格总宽也跟着回到容器宽度以内（见上方 scroll.x 的注释）。
+
+                 代价是「哪个图标是哪个动作」不再写在脸上，所以每个按钮都配
+                 tooltip，并给 :aria-label 让读屏念得出动作名 —— 图标按钮没有
+                 可见文字，这两件事是可访问性的下限，不是可选项。
+                 统一仍用 a-button（不是裸 <button>）：它自带 :disabled 的
+                 阻止点击与 :loading 的转圈，测试中的反馈就落在这个转圈上。 -->
+            <a-space :size="4">
+              <a-tooltip title="测试连通性：向上游发一个最小请求">
+                <a-button
+                  class="table-icon-btn"
+                  type="text"
+                  size="small"
+                  :loading="testingId === record.id"
+                  :disabled="testingId !== 0 && testingId !== record.id"
+                  :aria-label="'测试渠道 ' + record.name"
+                  @click="testChannel(record)"
+                >
+                  <ThunderboltOutlined />
+                </a-button>
+              </a-tooltip>
+              <a-tooltip title="模型白名单：这条渠道能跑哪些模型">
+                <a-button
+                  class="table-icon-btn"
+                  type="text"
+                  size="small"
+                  :aria-label="'配置 ' + record.name + ' 的模型白名单'"
+                  @click="openBindings(record)"
+                >
+                  <LinkOutlined />
+                </a-button>
+              </a-tooltip>
+              <a-tooltip title="编辑渠道">
+                <a-button
+                  class="table-icon-btn"
+                  type="text"
+                  size="small"
+                  :aria-label="'编辑渠道 ' + record.name"
+                  @click="openEdit(record)"
+                >
+                  <EditOutlined />
+                </a-button>
+              </a-tooltip>
+              <a-tooltip title="删除渠道">
+                <a-button
+                  class="table-icon-btn is-danger"
+                  type="text"
+                  size="small"
+                  :aria-label="'删除渠道 ' + record.name"
+                  @click="confirmDelete(record)"
+                >
+                  <DeleteOutlined />
+                </a-button>
+              </a-tooltip>
             </a-space>
           </template>
         </a-table-column>

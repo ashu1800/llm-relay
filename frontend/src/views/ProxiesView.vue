@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { PlusOutlined, ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons-vue'
+import { PlusOutlined, ReloadOutlined, ThunderboltOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import { fmtTime } from '@/utils/fmtTime'
@@ -240,12 +240,18 @@ onMounted(load)
         :empty="!loading && !loadError && rows.length === 0"
         empty-text="还没有配置代理"
       >
+        <!-- scroll.x 必须不小于各列宽度之和（名称 130 + 协议 80 + 地址 210
+             + 状态 200 + 启用 70 + 操作 104 = 794）：
+             声明偏大偏小都不行 —— 偏小会让右侧固定的「操作」列压住左邻列，
+             偏大则 antd 会把多出来的宽度摊到各列上，量出来的数与声明对不上。
+             操作 190 -> 104 是图标按钮那一次（见下方操作列的注释）。
+             核对脚本：scripts/check-table-widths.mjs -->
         <a-table
           :data-source="rows"
           row-key="id"
           size="small"
           :pagination="false"
-          :scroll="{ x: 890 }"
+          :scroll="{ x: 794 }"
         >
           <a-table-column title="名称" :width="130">
             <template #default="{ record }">
@@ -286,23 +292,50 @@ onMounted(load)
               <a-tag :color="record.enabled ? 'green' : 'default'">{{ record.enabled ? '启用' : '停用' }}</a-tag>
             </template>
           </a-table-column>
-          <a-table-column title="操作" :width="190" fixed="right">
+          <a-table-column title="操作" :width="104" fixed="right">
             <template #default="{ record }">
-              <!-- 用 a-button 而不是裸 <a>：无 href 的 <a> 键盘不可达，
-                   而且 .disabled 只是视觉上的 class，点击仍会触发 -->
-              <a-button
-                type="link"
-                size="small"
-                :loading="testing === record.id"
-                :disabled="testing !== null && testing !== record.id"
-                @click="testRow(record)"
-              >
-                <ThunderboltOutlined /> {{ testing === record.id ? '测试中…' : '测试' }}
-              </a-button>
-              <a-divider type="vertical" />
-              <a-button type="link" size="small" @click="openEdit(record)">编辑</a-button>
-              <a-divider type="vertical" />
-              <a-button type="link" size="small" danger @click="remove(record)">删除</a-button>
+              <!-- 三个动作改成图标按钮，与渠道页同一个写法（.table-icon-btn）。
+                   带文字的 link 按钮实测占 181px，列宽因此写着 190；
+                   图标按钮每个 28px，三个加间距共 92px，列宽 104 就够。
+                   测试按钮保留转圈反馈（:loading），与渠道页一致。
+                   tooltip 与 aria-label 是图标按钮的动作名，缺一不可。 -->
+              <a-space :size="4">
+                <a-tooltip title="测试连通性：用当前配置连一次">
+                  <a-button
+                    class="table-icon-btn"
+                    type="text"
+                    size="small"
+                    :loading="testing === record.id"
+                    :disabled="testing !== null && testing !== record.id"
+                    :aria-label="'测试代理 ' + record.name"
+                    @click="testRow(record)"
+                  >
+                    <ThunderboltOutlined />
+                  </a-button>
+                </a-tooltip>
+                <a-tooltip title="编辑代理">
+                  <a-button
+                    class="table-icon-btn"
+                    type="text"
+                    size="small"
+                    :aria-label="'编辑代理 ' + record.name"
+                    @click="openEdit(record)"
+                  >
+                    <EditOutlined />
+                  </a-button>
+                </a-tooltip>
+                <a-tooltip title="删除代理">
+                  <a-button
+                    class="table-icon-btn is-danger"
+                    type="text"
+                    size="small"
+                    :aria-label="'删除代理 ' + record.name"
+                    @click="remove(record)"
+                  >
+                    <DeleteOutlined />
+                  </a-button>
+                </a-tooltip>
+              </a-space>
             </template>
           </a-table-column>
         </a-table>

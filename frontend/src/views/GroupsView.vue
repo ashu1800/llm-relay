@@ -191,17 +191,19 @@ onMounted(load)
         @retry="load"
       >
       <!-- scroll.x 必须不小于各列宽度之和（名称 200 + 备注 220 + 路由策略 120
-           + 每分钟额度 170 + 是否默认 100 + 是否启用 100 + 操作 150 = 1060）：
+           + 每分钟额度 170 + 是否默认 100 + 是否启用 100 + 操作 84 = 994）：
            声明偏小时右侧固定的「操作」列会盖住左边最后一列，
            表现为表头被截断、单元格内容被压住，而且不报错。
-           原来写的是 1040、少了 20。核对脚本：scripts/check-table-widths.mjs -->
+           原来写的是 1040、少了 20（那是「编辑 / 删除」还是文字链接的时候）。
+           操作 150 -> 84 是图标按钮那一次，见下方操作列上方的注释。
+           核对脚本：scripts/check-table-widths.mjs -->
       <a-table
         :data-source="rows"
         :loading="loading"
         :pagination="false"
         row-key="id"
         size="small"
-        :scroll="{ x: 1060 }"
+        :scroll="{ x: 994 }"
       >
         <a-table-column title="名称" :width="200">
           <template #default="{ record }">
@@ -235,16 +237,34 @@ onMounted(load)
             <a-tag :color="record.enabled ? 'green' : 'default'">{{ record.enabled ? '启用' : '停用' }}</a-tag>
           </template>
         </a-table-column>
-        <a-table-column title="操作" :width="150" fixed="right">
+        <!-- 两个动作改成图标按钮，与渠道页同一个写法（.table-icon-btn）。
+             编辑与删除是通用约定，不额外配文字；tooltip 与 aria-label
+             仍然各给一份 —— 图标按钮没有可见文字，读屏只能靠它。 -->
+        <a-table-column title="操作" :width="84" fixed="right">
           <template #default="{ record }">
-            <!-- 用 a-button 而不是裸 <a>：无 href 的 <a> 键盘不可达 -->
-            <a-space>
-              <a-button type="link" size="small" @click="openEdit(record)">
-                <EditOutlined /> 编辑
-              </a-button>
-              <a-button type="link" size="small" danger @click="confirmDelete(record)">
-                <DeleteOutlined /> 删除
-              </a-button>
+            <a-space :size="4">
+              <a-tooltip title="编辑分组">
+                <a-button
+                  class="table-icon-btn"
+                  type="text"
+                  size="small"
+                  :aria-label="'编辑分组 ' + record.name"
+                  @click="openEdit(record)"
+                >
+                  <EditOutlined />
+                </a-button>
+              </a-tooltip>
+              <a-tooltip title="删除分组">
+                <a-button
+                  class="table-icon-btn is-danger"
+                  type="text"
+                  size="small"
+                  :aria-label="'删除分组 ' + record.name"
+                  @click="confirmDelete(record)"
+                >
+                  <DeleteOutlined />
+                </a-button>
+              </a-tooltip>
             </a-space>
           </template>
         </a-table-column>

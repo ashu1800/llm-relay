@@ -81,6 +81,15 @@
   --solid-primary-bg: #b15840;
   --solid-primary-fg: #ffffff;
 
+  /* ---- 悬浮提示（a-tooltip）的底色与文字 ----
+     这两个值必须成对使用，理由和上面那对实心块一样。
+     浅色主题：暖深底 + 米白字（#57473f 上 8.20:1；相对页面米白 8.11:1）
+     —— 用暖色而不是 antd 默认的冷灰 rgba(48,48,48,.85)：全站底色是米白
+     #f8f5ee，一块中性冷灰压在上面像是从别的站点飘过来的。
+     深色主题在下方换成暖浅底 + 深字，与主色实心块同一个换档方向。 */
+  --tooltip-bg: #57473f;
+  --tooltip-fg: #faf6f0;
+
   /* ---- 正文用语义色 ----
      上面那组 --color-* 是给图标底色与图表选的，直接拿来当正文颜色对比度不够：
      例如 #10b37d 在白底上只有 2.7:1，低于 WCAG AA 要求的 4.5:1。
@@ -261,6 +270,14 @@
   --solid-primary-bg: #e8a48c;
   --solid-primary-fg: #3a241d;
 
+  /* 悬浮提示：深色主题下用暖浅底 + 深字（#e8cec2 上 9.68:1，
+     相对面板 #303030 是 8.82:1）。数值上它正好和上面那对实心块重合，
+     但**不复用**那两个变量：实心块是按钮（要显眼、要压住背景），
+     提示是浮层（要能看出「这是临时飘在上面的一层」），
+     两者的取色会各自演化，共用一对变量迟早会因为改按钮而顺带改了提示。 */
+  --tooltip-bg: #e8cec2;
+  --tooltip-fg: #3a241d;
+
   /* 正文用语义色的深色版：对比度按面板底色 #303030 计算，均在 4.5:1 以上 */
   --text-green: #45c79a;      /* 6.22:1 */
   --text-amber: #e0a83c;      /* 6.18:1 */
@@ -353,6 +370,68 @@ a:hover { opacity: 0.85; }
    中文词被拆开比换行难读得多，宁可让列宽去适配内容。 */
 .ant-table-tbody .ant-space-item {
   white-space: nowrap;
+}
+
+/* 「操作」列里的图标按钮（.table-icon-btn）。
+   动作名不在图标上，所以每个按钮都必须自带 tooltip 与 :aria-label ——
+   悬停看得到、读屏念得出，这是图标按钮可访问性的下限（见 ChannelsView 的模板）。
+
+   尺寸 28px 是量出来的：渠道页四个动作 28×4 + 4×3 间距 = 124px，
+   加单元格内边距共 140px，列宽 150 有富余。这条不是纯审美问题 ——
+   带文字的 link 按钮四项要 240px 以上，而 fixed="right" 的列装不下时
+   既不会换行也不会自己截断，多出来的部分会溢出到表格右边界外，
+   最后一个「删除」就这么飘到了列外面。
+
+   这里必须用 !important：antd 的按钮样式由 CSS-in-JS 在运行时插进 <head>，
+   排在 theme.css 之后，而 `.ant-btn-text:not(:disabled):hover` 已经是
+   3 个类/伪类，同权重下后写的赢 —— 不加 !important 改了等于没改
+   （与上面表头 text-align 那条同因）。 */
+.table-icon-btn.ant-btn {
+  width: 28px !important;
+  height: 28px !important;
+  padding: 0 !important;
+  color: var(--color-text-secondary);
+  font-size: 15px;
+}
+.table-icon-btn.ant-btn:hover {
+  color: var(--text-primary-ink) !important;
+  background: var(--color-icon-hover-bg) !important;
+}
+/* 删除与另外三个不同类：它是破坏性动作，悬停给红色。
+   颜色只是加速识别，不是唯一线索 —— 按钮本身有 tooltip 与 aria-label
+   写明动作名，色觉障碍下同样能分辨。 */
+.table-icon-btn.ant-btn.is-danger:hover {
+  color: var(--color-red) !important;
+  background: color-mix(in oklab, var(--color-red) 12%, transparent) !important;
+}
+
+/* ---- 悬浮提示的配色（全局，不只是操作列的图标按钮）----
+   全站的 a-tooltip 都用这一套：底色 --tooltip-bg 配文字 --tooltip-fg。
+
+   为什么要从 CSS 覆写，而不是在 App.vue 里改 token：
+   antd 的 tooltip 文字色取的是 colorTextLightSolid，也就是**主色实心按钮
+   上的文字色**。而本项目为了让深色主题下的主按钮可读，把它反转成了深色
+   （见 App.vue 的说明）。两个组件共用一个 token，底色却各走各的，
+   于是深色主题下出现了深棕字压在 #626262 灰块上 —— 实测 2.37:1，
+   比 antd 默认还差，而且只在深色主题下出现（浅色主题下它恰好是对的）。
+   从 token 层改会把按钮一起改坏，所以配色在这里按组件单独配对。
+
+   写两个类（.ant-tooltip .ant-tooltip-inner）而不是只写后者：
+   antd 自己的规则是 `.ant-tooltip .ant-tooltip-inner`，同级同权重下
+   后写进 <head> 的赢，而 CSS-in-JS 一定排在 theme.css 之后。
+   多一个类把权重提到 0-2-0，再加 !important 双保险。
+
+   箭头也跟着换：它的背景走 --antd-arrow-background-color（antd 写在
+   .ant-tooltip 上的自定义属性），不覆盖的话会留一个灰三角贴在暖底上。
+   这个变量只在 tooltip 自己的规则里被读取，覆盖作用域仅限提示框。
+   它必须带 !important：两边都是 0-1-0 的单类选择器，
+   而 CSS-in-JS 排在后面，不加就改不动。 */
+.ant-tooltip {
+  --antd-arrow-background-color: var(--tooltip-bg) !important;
+}
+.ant-tooltip .ant-tooltip-inner {
+  background: var(--tooltip-bg) !important;
+  color: var(--tooltip-fg) !important;
 }
 
 /* 表格、列表与标签统一用列表字体（变量定义见文件顶部）。

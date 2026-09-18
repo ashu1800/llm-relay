@@ -23,7 +23,7 @@
 // 仍用 PanelCard，不传 title 时它不会渲染标题栏。
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { CopyOutlined } from '@ant-design/icons-vue'
+import { CopyOutlined, ProfileOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import PanelCard from '@/components/PanelCard.vue'
@@ -652,6 +652,8 @@ onMounted(() => {
            （28px），不再撑宽列，列宽改由内容决定 —— 12px 字体下最宽的一排是
            「↓ 300.48K ↑ 32.76K」124px（近 7 天输入词元的最大值 304483），
            下排「▣ 479.23K 99.86%」107px，加 16px 内边距 = 140，取 150 留余量。
+           操作列 72 -> 64 是「详情」文字链接改成图标按钮那一次
+           （见模板里那一列上方的注释）。
            改动列宽时这张表的总宽要一起看，scripts/check-table-widths.mjs
            会盯着声明值与各列宽度之和是否一致 -->
       <!-- 外面这层只为扫光存在：亮带是这一层里的绝对定位元素，表格内部
@@ -668,7 +670,7 @@ onMounted(() => {
           :row-class-name="rowClassName"
           row-key="id"
           size="small"
-          :scroll="{ x: 1036, y: TABLE_BODY_Y }"
+          :scroll="{ x: 1028, y: TABLE_BODY_Y }"
         >
         <template #emptyText>
           <a-empty :description="emptyText" />
@@ -806,9 +808,24 @@ onMounted(() => {
             <span v-else class="muted">—</span>
           </template>
         </a-table-column>
-        <a-table-column title="操作" :width="72" fixed="right">
+        <!-- 操作列与其它列表页同一个写法：28px 图标按钮（.table-icon-btn）。
+             这一列只有一个「详情」，原来是一行文字链接，占 72px 里的大半；
+             换成图标后列收到 64px，表格总宽跟着从 1036 降到 1028。
+             图标按钮没有可见文字，tooltip 与 aria-label 是它的动作名 ——
+             少了这两样，读屏用户只会听到一个没有名字的按钮。 -->
+        <a-table-column title="操作" :width="64" fixed="right">
           <template #default="{ record }">
-            <a-button type="link" size="small" @click="openDetail(record)">详情</a-button>
+            <a-tooltip title="调用详情：报文、错误原文与链路">
+              <a-button
+                class="table-icon-btn"
+                type="text"
+                size="small"
+                aria-label="查看这次调用的详情"
+                @click="openDetail(record)"
+              >
+                <ProfileOutlined />
+              </a-button>
+            </a-tooltip>
           </template>
         </a-table-column>
         </a-table>
