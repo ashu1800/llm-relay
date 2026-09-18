@@ -1138,7 +1138,7 @@ onBeforeUnmount(() => {
         <a-form-item>
           <template #label>
             渠道图标
-            <a-tooltip title="「从上游获取」会去渠道的上游站点抓一次 favicon；抓不到就用默认图标（渠道名首字母）。也可以直接填一个 emoji。">
+            <a-tooltip title="「从上游获取」会去渠道的上游站点抓一次 favicon，抓下来就转成内置图标存库。抓不到就用默认图标（渠道名首字母）。也可以直接填一个 emoji。">
               <InfoCircleOutlined class="label-hint" />
             </a-tooltip>
           </template>
@@ -1152,6 +1152,10 @@ onBeforeUnmount(() => {
             <a-button :loading="iconFetching" @click="fetchIcon">
               <CloudDownloadOutlined /> 从上游获取
             </a-button>
+          </div>
+          <div class="field-hint">
+            建议用「从上游获取」抓成内置图标：填外链地址的话，每次打开页面都要现去
+            上游站点拉图，境内访问会很慢，上游一换图或加鉴权还会变成裂图。
           </div>
         </a-form-item>
 
