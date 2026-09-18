@@ -245,21 +245,22 @@ const THINKING_COLORS: Record<string, string> = {
 }
 
 /**
- * 思考强度的动效分层：档位越高，点越大、动得越明显。
+ * 思考强度的动效分层：档位越高，胶囊越醒目、动得越明显。
+ * （2026-09-18 起形态从「模型列里的色点」改为「模型名后的胶囊」，类名沿用。）
  *
  * 空串 = 静止。分层刻意做成「阶梯」而不是每档一套独立动画 ——
  * 强弱是相对的，观感上有梯度才有「等级」的含义：
  *
- *   max     灵光迸发：档位词染琥珀金，点右上角一颗四芒星周期性
- *           迸出又收回（2.4s 一闪），迸出瞬间文字同步提亮 ——
- *           「思考到顶」的视觉语言是灵光一闪，不是烧
- *   high    强脉动：光晕向外扩散再收回（点 8px）
- *   medium/on/auto  呼吸：透明度缓慢起伏（点 6px）
+ *   max     灵光迸发：琥珀金渐变底胶囊，右上角四芒星周期性迸出又收回
+ *           （2.4s 一闪），迸出瞬间胶囊同步提亮 ——「思考到顶」的
+ *           视觉语言是灵光一闪，不是烧
+ *   high    强脉动：光晕向外扩散再收回
+ *   medium/on/auto  呼吸：透明度缓慢起伏
  *   low     缓呼吸：更慢更浅
  *   off/minimal/未知  静止 —— 关掉的、没说的、不认识的，都不该动
  *
  * 只动 opacity / transform / filter / box-shadow，且每行动画元素 ≤2 个
- * （一行一个点）；prefers-reduced-motion 的全局规则会把这一切压到
+ * （一行一个胶囊）；prefers-reduced-motion 的全局规则会把这一切压到
  * 0.01ms，无需单独处理。
  */
 const THINKING_ANIM: Record<string, string> = {
@@ -728,11 +729,12 @@ onMounted(() => {
            下排「▣ 479.23K 99.86%」107px，加 16px 内边距 = 140，取 150 留余量。
            操作列 72 -> 64 是「详情」文字链接改成图标按钮那一次
            （见模板里那一列上方的注释）。
-           思考列 2026-09-18 加入：80px（英文档位词最长 minimal/medium 约
-           47px + 色点 6 + 间距 5 + 内边距 16 ≈ 74，取 80），scroll.x 随之
-           1028 -> 1108。
-           改动列宽时这张表的总宽要一起看，scripts/check-table-widths.mjs
-           会盯着声明值与各列宽度之和是否一致 -->
+           思考等级 2026-09-18 并入模型列（独立 80px 列删除）：胶囊贴在模型名
+           后面，「用什么模型、什么强度思考」一行读完；腾出的 80px 连同余量
+           给模型列（155 -> 240，要装下模型 tag + 胶囊），scroll.x 随之
+           1108 -> 1113。
+           改动列宽时这张表的总宽要一起看（模板里 scroll.x 的声明值 =
+           各列宽度之和，155+240+130+150+120+90+64+100+64 = 1113） -->
       <!-- 外面这层只为扫光存在：亮带是这一层里的绝对定位元素，表格内部
            一个字节都不动（原因见脚本里 fxTargets 的注释 —— 往 tr 里加伪元素会让
            列宽塌回声明宽度）。overflow: hidden 是兜底：亮带永远不该撑出滚动条。
@@ -747,7 +749,7 @@ onMounted(() => {
           :row-class-name="rowClassName"
           row-key="id"
           size="small"
-          :scroll="{ x: 1108, y: TABLE_BODY_Y }"
+          :scroll="{ x: 1113, y: TABLE_BODY_Y }"
         >
         <template #emptyText>
           <a-empty :description="emptyText" />
@@ -758,7 +760,7 @@ onMounted(() => {
         <!-- 模型名带 ellipsis：不加的话长模型名会在这里折成两三行，
              把整行从 40px 顶到 98px（50 行就是 5000px 的页面）；
              完整名字悬停可见，详情里也有 -->
-        <a-table-column title="模型" :width="155" ellipsis>
+        <a-table-column title="模型" :width="240" ellipsis>
           <template #default="{ record }">
             <!-- 模型、密钥两处用的是同一个组件与同一个颜色：
                  它们描述的是「这次请求属于哪个分组」，颜色因此必须一致。
@@ -766,20 +768,18 @@ onMounted(() => {
                  胶囊颜色所指的那件事，却占着 110px；分组名在详情抽屉里。
                  （当初还有一条理由「按分组看整批请求时，工具栏的分组筛选更好用」，
                  它随列表不再吃筛选而失效 —— 现在列表只回答「最新发生了什么」。） -->
-            <GroupTag :name="record.model_requested" v-bind="tagColorOf(record.group_id)" />
-          </template>
-        </a-table-column>
-        <!-- 「思考」：这次请求想要的思考强度（入站参数快照，随日志落库，
-             事后渠道/模型怎么变都不改写）。空 = 没带思考参数，显示 —；
-             off 是显式关掉，两者不是一回事。档位统一英文原词（站主要求），
-             色点强弱 = 思考强度直觉。 -->
-        <a-table-column title="思考" :width="80">
-          <template #default="{ record }">
-            <span v-if="record.thinking_level" class="think-cell">
-              <span class="think-dot" :class="thinkingAnim(record.thinking_level)" :style="{ background: thinkingColor(record.thinking_level) }" />
-              <span :class="{ 'think-text-max': record.thinking_level === 'max' }">{{ record.thinking_level }}</span>
+            <span class="model-cell">
+              <GroupTag :name="record.model_requested" v-bind="tagColorOf(record.group_id)" />
+              <!-- 思考胶囊：档位色由 CSS 变量 --pill-color 注入（一套底/字/边框
+                   规则覆盖全部档位），分层样式与动效见 .think-pill 的注释。
+                   没带思考参数的请求不渲染胶囊 —— 「没有」不需要占位。 -->
+              <span
+                v-if="record.thinking_level"
+                class="think-pill"
+                :class="thinkingAnim(record.thinking_level)"
+                :style="{ '--pill-color': thinkingColor(record.thinking_level) }"
+              >{{ record.thinking_level }}</span>
             </span>
-            <span v-else class="muted">—</span>
           </template>
         </a-table-column>
         <!-- 渠道列当初是随「按渠道筛选」一起加的，那个筛选现在不再作用于列表；
@@ -958,10 +958,7 @@ onMounted(() => {
           <template v-else>-</template>
         </a-descriptions-item>
         <a-descriptions-item label="思考等级">
-          <span v-if="current.thinking_level" class="think-cell">
-            <span class="think-dot" :class="thinkingAnim(current.thinking_level)" :style="{ background: thinkingColor(current.thinking_level) }" />
-            <span :class="{ 'think-text-max': current.thinking_level === 'max' }">{{ current.thinking_level }}</span>
-          </span>
+          <span v-if="current.thinking_level" class="think-pill" :class="thinkingAnim(current.thinking_level)" :style="{ '--pill-color': thinkingColor(current.thinking_level) }">{{ current.thinking_level }}</span>
           <template v-else>-</template>
         </a-descriptions-item>
         <a-descriptions-item label="分组">
@@ -1182,68 +1179,79 @@ onMounted(() => {
    比旁边的真实值还显眼，而它本该是「这里什么都没有」 */
 .muted { color: var(--color-text-secondary); }
 
-/* 「思考」列：色点 + 文字。色点 6px 圆、与文字垂直居中，
-   颜色由 THINKING_COLORS 给（强度直觉：灰关、青低、金中、紫红高）。
-   动效分层见 THINKING_ANIM 的注释：max 灵光迸发 > high 脉动 > medium 呼吸 >
-   low 缓呼吸 > 其余静止。点加 position: relative，max 的热浪层（::after）
-   以它为定位基准。 */
-.think-cell {
+/* 思考胶囊（并入模型列，2026-09-18 起替代独立的「思考」列与色点）。
+   档位色由模板注入 CSS 变量 --pill-color（THINKING_COLORS 的值）：
+   一套「淡底 + 同色字 + 同色边框」规则覆盖全部档位，新增档位只改映射表。
+   动效分层沿用之前的语言（强弱是相对的，观感有梯度才有「等级」的含义）：
+   max 灵光迸发 > high 脉动 > medium/on/auto 呼吸 > low 缓呼吸 > off 静止。 */
+.model-cell {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  font-size: 12px;
+  gap: 6px;
+  min-width: 0;
   white-space: nowrap;
 }
-.think-dot {
+.think-pill {
   position: relative;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--pill-color, var(--color-text-secondary));
+  background: color-mix(in oklab, var(--pill-color, var(--color-text-secondary)) 12%, transparent);
+  color: var(--pill-color, var(--color-text-secondary));
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
   flex: none;
 }
 
 /* ---- low：缓呼吸（最慢最浅，存在感刚刚够） ---- */
-.think-dot.think-anim-low {
-  animation: think-breathe 4s ease-in-out infinite;
+.think-pill.think-anim-low {
+  animation: think-pill-breathe 4s ease-in-out infinite;
 }
 
-/* ---- medium / on / auto：呼吸 ---- */
-.think-dot.think-anim-mid {
-  animation: think-breathe 2.4s ease-in-out infinite;
+/* ---- medium / on / auto：呼吸（比点时代柔和：整块呼吸 0.55 太闪） ---- */
+.think-pill.think-anim-mid {
+  animation: think-pill-breathe 2.4s ease-in-out infinite;
 }
-@keyframes think-breathe {
+@keyframes think-pill-breathe {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.55; }
+  50% { opacity: 0.72; }
 }
 
-/* ---- high：强脉动 —— 光晕向外扩散再收回，点放大一号 ---- */
-.think-dot.think-anim-high {
-  width: 8px;
-  height: 8px;
+/* ---- high：强脉动 —— 光晕向外扩散再收回。
+     光色也走 --pill-color（color-mix 在 keyframes 里读得到元素上的变量），
+     换档位色不用改动画 ---- */
+.think-pill.think-anim-high {
   animation: think-pulse-high 1.2s ease-in-out infinite;
 }
 @keyframes think-pulse-high {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(235, 47, 150, 0); }
-  50% { box-shadow: 0 0 8px 2px rgba(235, 47, 150, 0.55); }
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--pill-color) 0%, transparent); }
+  50% { box-shadow: 0 0 8px 2px color-mix(in oklab, var(--pill-color) 55%, transparent); }
 }
 
 /* ---- max：灵光迸发 ----
-   「思考到顶」的视觉语言不是烧，而是「灵光一闪」：点右上角一颗
-   金色四芒星周期性迸出又收回（2.4s 一闪，大部分时间隐没 ——
-   灵光是偶尔的，不是常亮的），迸出瞬间点与档位词同步提亮一下，
-   像想到好点子的那一瞬。星芒走 clip-path 八点多边形，不新增 DOM。 */
-.think-dot.think-anim-max {
-  animation: think-max-dot 2.4s ease-in-out infinite;
+   「思考到顶」的视觉语言不是烧，而是「灵光一闪」：胶囊用琥珀金渐变底 +
+   深棕字（火芯→金的暖色阶），右上角一颗金色四芒星周期性迸出又收回
+   （2.4s 一闪，大部分时间隐没 —— 灵光是偶尔的，不是常亮的），迸出瞬间
+   胶囊同步提亮一下，像想到好点子的那一瞬。星芒走 clip-path 八点多边形，
+   不新增 DOM；胶囊要 position: relative 给它当定位基准。 */
+.think-pill.think-anim-max {
+  border-color: transparent;
+  background: linear-gradient(135deg, #ffd666 0%, #ffc53d 55%, #faad14 100%);
+  color: #612400;
+  animation: think-max-pill 2.4s ease-in-out infinite;
 }
-@keyframes think-max-dot {
+@keyframes think-max-pill {
   0%, 55%, 100% { filter: brightness(1); }
-  10% { filter: brightness(1.55); }
+  10% { filter: brightness(1.18); }
 }
-.think-dot.think-anim-max::after {
+.think-pill.think-anim-max::after {
   content: '';
   position: absolute;
-  top: -7px;
-  left: 3px;
+  top: -5px;
+  right: -3px;
   width: 9px;
   height: 9px;
   background: #ffd666;
@@ -1258,15 +1266,6 @@ onMounted(() => {
   6% { transform: scale(1.2) rotate(0deg); opacity: 1; }
   20% { transform: scale(1) rotate(-10deg); opacity: 0.95; }
   40% { transform: scale(0.15) rotate(12deg); opacity: 0; }
-}
-/* 迸出瞬间的文字提亮：与星芒同一个周期，星芒先出、亮度跟到 */
-.think-text-max {
-  color: var(--color-text, inherit);
-  animation: think-max-text 2.4s ease-in-out infinite;
-}
-@keyframes think-max-text {
-  0%, 55%, 100% { filter: brightness(1); }
-  10% { filter: brightness(1.4); }
 }
 
 /* 错误原文：详情里唯一保留的代码块（排障时最常看的就是上游报错） */
