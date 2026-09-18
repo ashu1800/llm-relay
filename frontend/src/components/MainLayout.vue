@@ -39,9 +39,14 @@ type BudgetAlert = {
 }
 
 onLive('budget_alert', (a: BudgetAlert) => {
-  const pct = Math.round(a.ratio * 100)
   const money = a.currency === 'CNY' ? '¥' + a.spent.toFixed(2) : a.currency + ' ' + a.spent.toFixed(2)
-  const text = `分组「${a.group_name}」今日${a.currency}消费已达预算 ${pct}%（${money}）`
+  const limitMoney = a.currency === 'CNY' ? '¥' + a.limit.toFixed(2) : a.currency + ' ' + a.limit.toFixed(2)
+  // 超支不显示百分比：花费 36 倍于预算时「已达预算 3600%」除了吓人没有信息量，
+  // 直接说「已超支」并给出两个数，用户自己看得懂
+  const text =
+    a.level === '100'
+      ? `分组「${a.group_name}」今日${a.currency}消费已超支（${money} / 预算 ${limitMoney}）`
+      : `分组「${a.group_name}」今日${a.currency}消费已达预算 ${Math.round(a.ratio * 100)}%（${money}）`
   if (a.level === '100') message.error(text + '，请注意控制用量')
   else message.warning(text)
 })
