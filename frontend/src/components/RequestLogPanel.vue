@@ -240,8 +240,8 @@ const THINKING_COLORS: Record<string, string> = {
   on: '#52c41a',
   auto: '#1677ff',
   // max 是线上观测到的客户端自定义最高档（glm-5.3-flash 的调用方在用）：
-  // 既然叫 max，就给最高的视觉待遇 —— 一团火。
-  max: '#ff7a45',
+  // 既然叫 max，就给最高的视觉待遇 —— 灵光一闪（琥珀金，与星芒同族）。
+  max: '#faad14',
 }
 
 /**
@@ -250,15 +250,17 @@ const THINKING_COLORS: Record<string, string> = {
  * 空串 = 静止。分层刻意做成「阶梯」而不是每档一套独立动画 ——
  * 强弱是相对的，观感上有梯度才有「等级」的含义：
  *
- *   max     火焰燃烧：点放大成火核（白心→黄→橙红），双层错相闪烁 +
- *           外圈热浪光晕，永远没有重复的相位（0.62s 与 1.1s 两个周期）
+ *   max     灵光迸发：档位词染琥珀金，点右上角一颗四芒星周期性
+ *           迸出又收回（2.4s 一闪），迸出瞬间文字同步提亮 ——
+ *           「思考到顶」的视觉语言是灵光一闪，不是烧
  *   high    强脉动：光晕向外扩散再收回（点 8px）
  *   medium/on/auto  呼吸：透明度缓慢起伏（点 6px）
  *   low     缓呼吸：更慢更浅
  *   off/minimal/未知  静止 —— 关掉的、没说的、不认识的，都不该动
  *
- * 只动 opacity / transform / box-shadow，且每行动画元素 ≤2 个（一行一个点）；
- * prefers-reduced-motion 的全局规则会把这一切压到 0.01ms，无需单独处理。
+ * 只动 opacity / transform / filter / box-shadow，且每行动画元素 ≤2 个
+ * （一行一个点）；prefers-reduced-motion 的全局规则会把这一切压到
+ * 0.01ms，无需单独处理。
  */
 const THINKING_ANIM: Record<string, string> = {
   low: 'think-anim-low',
@@ -266,7 +268,7 @@ const THINKING_ANIM: Record<string, string> = {
   on: 'think-anim-mid',
   auto: 'think-anim-mid',
   high: 'think-anim-high',
-  max: 'think-anim-fire',
+  max: 'think-anim-max',
 }
 
 function thinkingAnim(level?: string) {
@@ -775,7 +777,7 @@ onMounted(() => {
           <template #default="{ record }">
             <span v-if="record.thinking_level" class="think-cell">
               <span class="think-dot" :class="thinkingAnim(record.thinking_level)" :style="{ background: thinkingColor(record.thinking_level) }" />
-              <span>{{ record.thinking_level }}</span>
+              <span :class="{ 'think-text-max': record.thinking_level === 'max' }">{{ record.thinking_level }}</span>
             </span>
             <span v-else class="muted">—</span>
           </template>
@@ -958,7 +960,7 @@ onMounted(() => {
         <a-descriptions-item label="思考等级">
           <span v-if="current.thinking_level" class="think-cell">
             <span class="think-dot" :class="thinkingAnim(current.thinking_level)" :style="{ background: thinkingColor(current.thinking_level) }" />
-            {{ current.thinking_level }}
+            <span :class="{ 'think-text-max': current.thinking_level === 'max' }">{{ current.thinking_level }}</span>
           </span>
           <template v-else>-</template>
         </a-descriptions-item>
@@ -1182,7 +1184,7 @@ onMounted(() => {
 
 /* 「思考」列：色点 + 文字。色点 6px 圆、与文字垂直居中，
    颜色由 THINKING_COLORS 给（强度直觉：灰关、青低、金中、紫红高）。
-   动效分层见 THINKING_ANIM 的注释：max 火焰 > high 脉动 > medium 呼吸 >
+   动效分层见 THINKING_ANIM 的注释：max 灵光迸发 > high 脉动 > medium 呼吸 >
    low 缓呼吸 > 其余静止。点加 position: relative，max 的热浪层（::after）
    以它为定位基准。 */
 .think-cell {
@@ -1225,44 +1227,46 @@ onMounted(() => {
   50% { box-shadow: 0 0 8px 2px rgba(235, 47, 150, 0.55); }
 }
 
-/* ---- max：一团火在燃烧 ----
-   火核放大到 10px：白心→黄→橙红的径向渐变，本体做「缩放 + 亮度」的
-   错相闪烁（0.62s），外圈一层热浪光晕（::after，1.1s）—— 两个周期
-   互质，永远没有重复的相位，火焰因此不会显得机械。 */
-.think-dot.think-anim-fire {
-  width: 10px;
-  height: 10px;
-  background: radial-gradient(
-    circle at 50% 62%,
-    #fff 0 18%,
-    #ffe58f 36%,
-    #ffa940 54%,
-    #ff5a3c 74%,
-    rgba(255, 61, 31, 0) 100%
-  );
-  animation: think-fire-body 0.62s ease-in-out infinite alternate;
+/* ---- max：灵光迸发 ----
+   「思考到顶」的视觉语言不是烧，而是「灵光一闪」：点右上角一颗
+   金色四芒星周期性迸出又收回（2.4s 一闪，大部分时间隐没 ——
+   灵光是偶尔的，不是常亮的），迸出瞬间点与档位词同步提亮一下，
+   像想到好点子的那一瞬。星芒走 clip-path 八点多边形，不新增 DOM。 */
+.think-dot.think-anim-max {
+  animation: think-max-dot 2.4s ease-in-out infinite;
 }
-.think-dot.think-anim-fire::after {
+@keyframes think-max-dot {
+  0%, 55%, 100% { filter: brightness(1); }
+  10% { filter: brightness(1.55); }
+}
+.think-dot.think-anim-max::after {
   content: '';
   position: absolute;
-  inset: -7px;
-  border-radius: 50%;
-  background: radial-gradient(
-    circle,
-    rgba(255, 169, 64, 0.5) 0 30%,
-    rgba(255, 90, 60, 0.25) 55%,
-    transparent 75%
-  );
-  animation: think-fire-halo 1.1s ease-in-out infinite;
+  top: -7px;
+  left: 3px;
+  width: 9px;
+  height: 9px;
+  background: #ffd666;
+  clip-path: polygon(50% 0, 61% 39%, 100% 50%, 61% 61%, 50% 100%, 39% 61%, 0 50%, 39% 39%);
+  filter: drop-shadow(0 0 3px rgba(255, 214, 102, 0.9));
+  transform: scale(0) rotate(45deg);
+  opacity: 0;
+  animation: think-max-spark 2.4s ease-out infinite;
 }
-@keyframes think-fire-body {
-  0% { transform: scale(1) translateY(0); filter: brightness(1); }
-  40% { transform: scale(1.18, 0.88) translateY(0.5px); filter: brightness(1.3); }
-  100% { transform: scale(0.9, 1.2) translateY(-1px); filter: brightness(1.08); }
+@keyframes think-max-spark {
+  0%, 55%, 100% { transform: scale(0) rotate(45deg); opacity: 0; }
+  6% { transform: scale(1.2) rotate(0deg); opacity: 1; }
+  20% { transform: scale(1) rotate(-10deg); opacity: 0.95; }
+  40% { transform: scale(0.15) rotate(12deg); opacity: 0; }
 }
-@keyframes think-fire-halo {
-  0%, 100% { opacity: 0.35; transform: scale(0.9); }
-  50% { opacity: 0.85; transform: scale(1.12); }
+/* 迸出瞬间的文字提亮：与星芒同一个周期，星芒先出、亮度跟到 */
+.think-text-max {
+  color: var(--color-text, inherit);
+  animation: think-max-text 2.4s ease-in-out infinite;
+}
+@keyframes think-max-text {
+  0%, 55%, 100% { filter: brightness(1); }
+  10% { filter: brightness(1.4); }
 }
 
 /* 错误原文：详情里唯一保留的代码块（排障时最常看的就是上游报错） */
