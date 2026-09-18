@@ -29,6 +29,8 @@ import StatCard from '@/components/StatCard.vue'
 import AnimatedNumber from '@/components/AnimatedNumber.vue'
 import DataState from '@/components/DataState.vue'
 import PulseBar from '@/components/PulseBar.vue'
+import HeatmapPanel from '@/components/HeatmapPanel.vue'
+import DailyReport from '@/components/DailyReport.vue'
 import RequestLogPanel from '@/components/RequestLogPanel.vue'
 import { onLive, createThrottledLiveReloader } from '@/composables/useLive'
 // 金额一律走 utils/money.ts：符号与小数位数只此一份（见那里的说明）
@@ -619,6 +621,9 @@ onMounted(async () => {
     </section>
     </DataState>
 
+    <!-- 最近 7 天活跃热力：使用日记，默认折叠（展开才拉数据） -->
+    <HeatmapPanel />
+
     <!-- 请求日志列表：**不**吃上面那组筛选 —— 它恒定显示全部最新请求
          （2026-09-16 站主要求）。筛过之后列表就看不到刚进来的调用了，
          而刚进来的几条恰恰是最该被看到的；筛选留给上面的概览卡，
@@ -635,6 +640,10 @@ onMounted(async () => {
       @update:trace-id="traceId = $event"
       @update:status-class="statusClass = $event"
     />
+
+    <!-- 昨日战报：每天第一次打开看板时自弹（含里程碑彩带判定），
+         组件自包含 —— 拉不到数据就完全安静，页面不为它操心 -->
+    <DailyReport />
   </div>
 </template>
 

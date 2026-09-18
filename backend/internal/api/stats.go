@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
+	"gorm.io/gorm"
 
 	"llm-relay/internal/model"
 	"llm-relay/internal/relay"
@@ -79,6 +81,7 @@ func registerStatsRoutes(g *gin.RouterGroup, s *Server) {
 	r.GET("/models", s.statsModels)
 	r.GET("/channels", s.statsChannels)
 	r.GET("/heatmap", s.statsHeatmap)
+	r.GET("/daily-report", s.statsDailyReport)
 }
 
 // resolveRange 把时间范围关键字换算成区间与分桶粒度。
@@ -673,4 +676,90 @@ func (s *Server) statsHeatmap(c *gin.Context) {
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"days": days, "timezone": localTZ(), "items": items})
+}
+
+// statsDailyReport 昨日战报：看板每天第一次打开时弹的那张小卡片的数据源。
+//
+// 复用 summarySnapshot 拿总量（与看板卡片完全同一口径，数字必须对得上），
+// 另聚两样有「故事感」的：最忙的模型（按对外请求名）、最贵的一单
+// （模型 + 渠道 + 金额）。date 参数可回看任意一天（YYYY-MM-DD），
+// 默认昨天 —— 顺带让前端不必为「补看」做任何特殊处理。
+func (s *Server) statsDailyReport(c *gin.Context) {
+	loc := time.Now().Location()
+	day := strings.TrimSpace(c.Query("date"))
+	var start time.Time
+	if day == "" {
+		y, m, d := time.Now().AddDate(0, 0, -1).Date()
+		start = time.Date(y, m, d, 0, 0, 0, 0, loc)
+	} else {
+		parsed, err := time.ParseInLocation("2006-01-02", day, loc)
+		if err != nil {
+			writeUpstreamError(c, http.StatusBadRequest, "date 要写成 YYYY-MM-DD", "invalid_request_error")
+			return
+		}
+		start = parsed
+	}
+	end := start.AddDate(0, 0, 1)
+	if end.After(time.Now()) {
+		// 当天还没过完：上界收到此刻，战报只统计已经发生的
+		end = time.Now()
+	}
+
+	summary, err := s.summarySnapshot(start, end, statsFilter{})
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+
+	// 最忙模型：按对外请求名。空模型名（极端的脏数据）参与排名无妨 ——
+	// 它确实被请求过，只是名字是空的
+	var topModel struct {
+		Model    string
+		Requests int64
+	}
+	if err := s.deps.Store.DB().Model(&model.RequestLog{}).
+		Select("model_requested AS model, COUNT(*)::bigint AS requests").
+		Where("created_at >= ? AND created_at <= ?", start, end).
+		Group("model_requested").
+		Order("requests DESC").
+		First(&topModel).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		writeInternalError(c, err)
+		return
+	}
+
+	// 最贵一单：金额只做排序比较（同为 numeric 可比），展示时带着自己的币种
+	var priciest struct {
+		Model       string
+		ChannelName string
+		Cost        decimal.Decimal
+		Currency    string
+	}
+	if err := s.deps.Store.DB().Model(&model.RequestLog{}).
+		Select("model_requested AS model, channel_name AS channel_name, estimated_cost AS cost, cost_currency AS currency").
+		Where("created_at >= ? AND created_at <= ?", start, end).
+		Order("estimated_cost DESC").
+		First(&priciest).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		writeInternalError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"day":       start.Format("2006-01-02"),
+		"summary":   summary,
+		"top_model": gin.H{"model": topModel.Model, "requests": topModel.Requests},
+		"priciest": gin.H{
+			"model": priciest.Model, "channel": priciest.ChannelName,
+			"cost": priciest.Cost.StringFixed(8), "currency": priciest.Currency,
+		},
+		// 全表累计请求数：给前端的里程碑彩蛋当标尺（破 1 千/1 万/10 万）。
+		// 战报一天最多弹一次，这条 COUNT 也就一天跑一次 —— 单独开一个
+		// 每次进页面都要调的端点反而不划算
+		"lifetime_requests": func() int64 {
+			var n int64
+			if err := s.deps.Store.DB().Model(&model.RequestLog{}).Count(&n).Error; err != nil {
+				return 0 // 数不出来就没有里程碑，不该拖垮整张战报
+			}
+			return n
+		}(),
+	})
 }
