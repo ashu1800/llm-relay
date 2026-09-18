@@ -223,26 +223,27 @@ function markFresh(ids: number[]) {
   freshTimers.add(timer)
 }
 
-// ---- 「思考」列：入站思考参数的归一档位 → 展示文案与色点 ----
+// ---- 「思考」列：入站思考参数的归一档位 → 色点颜色 ----
 //
 // 档位由后端 relay.ExtractThinkingLevel 归一（openai 的 reasoning_effort、
 // GLM 的 thinking.type、anthropic 的 budget_tokens 粗分档、gemini 的
-// thinkingConfig，四家归到同一套词表）。空 = 请求没带思考参数 ——
-// 它不是「关」：一个是「没说」，一个是「说了不要」，必须可区分。
-// 认不得的档位（上游自定义）原样展示：诚实优于猜测。
-const THINKING_META: Record<string, { label: string; color: string }> = {
-  off: { label: '关', color: '#8c8c8c' },
-  minimal: { label: '极低', color: '#bfbfbf' },
-  low: { label: '低', color: '#36cfc9' },
-  medium: { label: '中', color: '#faad14' },
-  high: { label: '高', color: '#eb2f96' },
-  on: { label: '开', color: '#52c41a' },
-  auto: { label: '自动', color: '#1677ff' },
+// thinkingConfig，四家归到同一套词表）。展示**不翻译**（站主要求统一英文）：
+// 档位词本身就是各家协议词汇，翻译成中文反而和导出 CSV、详情抽屉对不上。
+// 空 = 请求没带思考参数 —— 它不是「off」：一个是「没说」，一个是
+// 「说了不要」，必须可区分。认不得的档位原样展示：诚实优于猜测。
+const THINKING_COLORS: Record<string, string> = {
+  off: '#8c8c8c',
+  minimal: '#bfbfbf',
+  low: '#36cfc9',
+  medium: '#faad14',
+  high: '#eb2f96',
+  on: '#52c41a',
+  auto: '#1677ff',
 }
 
-function thinkingMeta(level?: string) {
-  if (!level) return null
-  return THINKING_META[level] ?? { label: level, color: '#8c8c8c' }
+function thinkingColor(level?: string) {
+  if (!level) return ''
+  return THINKING_COLORS[level] ?? '#8c8c8c'
 }
 
 /** 行的 class 由「是否刚新增」决定；antd 在它自己的渲染里调用它，读到的依赖归它 */
@@ -693,8 +694,9 @@ onMounted(() => {
            下排「▣ 479.23K 99.86%」107px，加 16px 内边距 = 140，取 150 留余量。
            操作列 72 -> 64 是「详情」文字链接改成图标按钮那一次
            （见模板里那一列上方的注释）。
-           思考列 2026-09-18 加入：68px（色点 6 + 间距 5 + 两字 24 + 内边距 16
-           = 51，取 68 留出「自动/极低」的余量），scroll.x 随之和 1028 -> 1096。
+           思考列 2026-09-18 加入：80px（英文档位词最长 minimal/medium 约
+           47px + 色点 6 + 间距 5 + 内边距 16 ≈ 74，取 80），scroll.x 随之
+           1028 -> 1108。
            改动列宽时这张表的总宽要一起看，scripts/check-table-widths.mjs
            会盯着声明值与各列宽度之和是否一致 -->
       <!-- 外面这层只为扫光存在：亮带是这一层里的绝对定位元素，表格内部
@@ -711,7 +713,7 @@ onMounted(() => {
           :row-class-name="rowClassName"
           row-key="id"
           size="small"
-          :scroll="{ x: 1096, y: TABLE_BODY_Y }"
+          :scroll="{ x: 1108, y: TABLE_BODY_Y }"
         >
         <template #emptyText>
           <a-empty :description="emptyText" />
@@ -735,12 +737,13 @@ onMounted(() => {
         </a-table-column>
         <!-- 「思考」：这次请求想要的思考强度（入站参数快照，随日志落库，
              事后渠道/模型怎么变都不改写）。空 = 没带思考参数，显示 —；
-             「关」是显式关掉，两者不是一回事。色点强弱 = 思考强度直觉。 -->
-        <a-table-column title="思考" :width="68">
+             off 是显式关掉，两者不是一回事。档位统一英文原词（站主要求），
+             色点强弱 = 思考强度直觉。 -->
+        <a-table-column title="思考" :width="80">
           <template #default="{ record }">
-            <span v-if="record.thinking_level" class="think-cell" :title="'思考等级: ' + record.thinking_level">
-              <span class="think-dot" :style="{ background: thinkingMeta(record.thinking_level)?.color }" />
-              <span>{{ thinkingMeta(record.thinking_level)?.label }}</span>
+            <span v-if="record.thinking_level" class="think-cell">
+              <span class="think-dot" :style="{ background: thinkingColor(record.thinking_level) }" />
+              <span>{{ record.thinking_level }}</span>
             </span>
             <span v-else class="muted">—</span>
           </template>
@@ -922,9 +925,8 @@ onMounted(() => {
         </a-descriptions-item>
         <a-descriptions-item label="思考等级">
           <span v-if="current.thinking_level" class="think-cell">
-            <span class="think-dot" :style="{ background: thinkingMeta(current.thinking_level)?.color }" />
-            {{ thinkingMeta(current.thinking_level)?.label }}
-            <span class="muted">（{{ current.thinking_level }}）</span>
+            <span class="think-dot" :style="{ background: thinkingColor(current.thinking_level) }" />
+            {{ current.thinking_level }}
           </span>
           <template v-else>-</template>
         </a-descriptions-item>
