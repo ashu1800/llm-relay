@@ -483,6 +483,8 @@ node .shots/verify-live-sync-filtered.mjs   # 同上，但先切到「近 7 天�
                                             # 静默重取那条路，与默认视角的推送合并不是同一条代码路径
 node .shots/verify-reliability.mjs          # 可靠性三件套端到端：队列水位、渠道运行态、
                                             # 日预算告警（会临时设一个必超支的预算，跑完自动清除）
+node .shots/verify-delight.mjs              # 观感增强端到端：脉搏条、页签心跳、昨日战报、
+                                            # 里程碑彩带、渠道生命灯、热力图、主题扩散
 ```
 
 三者都会往 `request_logs` 插探针行（trace_id 前缀 `logfx-probe` /

@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
-	"gorm.io/gorm"
 
 	"llm-relay/internal/model"
 	"llm-relay/internal/relay"
@@ -712,7 +710,11 @@ func (s *Server) statsDailyReport(c *gin.Context) {
 	}
 
 	// 最忙模型：按对外请求名。空模型名（极端的脏数据）参与排名无妨 ——
-	// 它确实被请求过，只是名字是空的
+	// 它确实被请求过，只是名字是空的。
+	//
+	// 用 Limit(1).Scan 而不是 First：First 会自动追加主键排序
+	// （ORDER BY ..., request_logs.id），而 id 不在 GROUP BY 里，
+	// Postgres 直接拒绝聚合查询里出现裸的主键列 —— 这正是线上 500 的原因
 	var topModel struct {
 		Model    string
 		Requests int64
@@ -722,7 +724,8 @@ func (s *Server) statsDailyReport(c *gin.Context) {
 		Where("created_at >= ? AND created_at <= ?", start, end).
 		Group("model_requested").
 		Order("requests DESC").
-		First(&topModel).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		Limit(1).
+		Scan(&topModel).Error; err != nil {
 		writeInternalError(c, err)
 		return
 	}
@@ -738,7 +741,8 @@ func (s *Server) statsDailyReport(c *gin.Context) {
 		Select("model_requested AS model, channel_name AS channel_name, estimated_cost AS cost, cost_currency AS currency").
 		Where("created_at >= ? AND created_at <= ?", start, end).
 		Order("estimated_cost DESC").
-		First(&priciest).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		Limit(1).
+		Scan(&priciest).Error; err != nil {
 		writeInternalError(c, err)
 		return
 	}
