@@ -17,10 +17,17 @@ import {
 import { useThemeStore } from '@/stores/theme'
 import { message } from 'ant-design-vue'
 import { onLive } from '@/composables/useLive'
+import { startTabPulse } from '@/utils/tabPulse'
 
 const route = useRoute()
 const router = useRouter()
 const themeStore = useThemeStore()
+
+// 主题切换带上点击坐标：新主题从灯泡位置圆形扩散铺满全屏
+// （动画本身在 themeStore.toggleWithBurst，这里只负责把事件坐标递过去）
+function toggleTheme(e: MouseEvent) {
+  themeStore.toggleWithBurst(e.clientX, e.clientY)
+}
 
 // ---- 预算告警（全局）----
 //
@@ -102,6 +109,9 @@ onMounted(() => {
     collapsed.value = narrowMq.matches
     narrowMq.addEventListener('change', onNarrowChange)
   }
+  // 页签心跳：角标显示今日请求数，熔断/超支转红（数据走已有 live 推送）。
+  // MainLayout 常驻，这里启动一次就覆盖整个会话
+  startTabPulse()
   // 系统信息与窄屏初始化合在同一个 onMounted：原来有两个，各自请求一次
   // /system/info —— 每次进页面白打一个重复请求（窄屏适配改造时留下的）
   api
@@ -171,7 +181,7 @@ onUnmounted(() => {
               :title="themeStore.isDark ? '切换浅色' : '切换深色'"
               :aria-label="themeStore.isDark ? '切换到浅色主题' : '切换到深色主题'"
               :aria-pressed="themeStore.isDark"
-              @click="themeStore.toggle()"
+              @click="toggleTheme"
             >
               <BulbOutlined v-if="!themeStore.isDark" aria-hidden="true" />
               <BulbFilled v-else aria-hidden="true" />

@@ -28,6 +28,7 @@ import PageToolbar from '@/components/PageToolbar.vue'
 import StatCard from '@/components/StatCard.vue'
 import AnimatedNumber from '@/components/AnimatedNumber.vue'
 import DataState from '@/components/DataState.vue'
+import PulseBar from '@/components/PulseBar.vue'
 import RequestLogPanel from '@/components/RequestLogPanel.vue'
 import { onLive, createThrottledLiveReloader } from '@/composables/useLive'
 // 金额一律走 utils/money.ts：符号与小数位数只此一份（见那里的说明）
@@ -409,6 +410,46 @@ onUnmounted(() => {
   statsReloader.dispose()
 })
 
+// ---- 金钱流：花费卡对「进账」的即时反馈 ----
+//
+// costs 真的变了（不是首屏加载）就给消耗金额卡一次金色微光。流量大时
+// 每次推送都重新计时，光会常亮 —— 钱持续在进来，灯不该灭（见 StatCard.flash）。
+// 注意比较的是整个 costs 对象：币种之间不能相加，哪一笔进了哪个币种
+// 都值得闪一下。
+const costFlash = ref(0)
+watch(
+  () => summary.value?.costs,
+  (nv, ov) => {
+    if (!nv || !ov) return
+    if (JSON.stringify(nv) !== JSON.stringify(ov)) costFlash.value = Date.now()
+  }
+)
+
+// ---- 预算热度：消耗卡的体温 ----
+//
+// 后端只在分组预算跨过 80%/100% 档位时推一次 budget_alert（每天每档一次）。
+// 看板消耗卡是全站视角，跟单条分组预算没有严格对应，但「有分组烧到警戒线」
+// 对站主来说就是「钱包在发热」—— 卡片进入对应的温度档，当天不退烧
+// （sessionStorage 按天存档，跨天自然冷却）。refresh 后热度也还在。
+const costHeat = ref<'warm' | 'hot' | null>(null)
+const HEAT_KEY = 'llm-relay-cost-heat'
+try {
+  const raw = JSON.parse(sessionStorage.getItem(HEAT_KEY) || 'null') as { day: string; level: 'warm' | 'hot' } | null
+  if (raw && raw.day === new Date().toDateString()) costHeat.value = raw.level
+} catch {
+  // 存档坏了就当没有：热度只是氛围，不值得为它报错
+}
+onLive('budget_alert', (a: { level: '80' | '100' }) => {
+  const level = a.level === '100' ? 'hot' : 'warm'
+  if (costHeat.value === 'hot') return // 已经烧红了不会再降温
+  costHeat.value = level
+  try {
+    sessionStorage.setItem(HEAT_KEY, JSON.stringify({ day: new Date().toDateString(), level }))
+  } catch {
+    // 存不下就不存：本轮会话里热度仍然生效
+  }
+})
+
 onLive('stats', (data: Record<string, unknown>) => {
   // 首屏还没加载完时忽略推送：那一份由 load() 负责，
   // 提前合并会得到一个缺字段的 summary
@@ -498,6 +539,10 @@ onMounted(async () => {
       </template>
     </PageToolbar>
 
+    <!-- 请求脉搏条：一个请求一道流光，失败闪红。它回答的是数字回答不了的
+         「此刻还有没有人用」—— 光带安静了就是没流量 -->
+    <PulseBar class="dash-pulse" />
+
     <DataState
       :error="loadError"
       :has-data="hasStats"
@@ -522,6 +567,9 @@ onMounted(async () => {
       :value="moneyText(summary?.costs?.[costCur], costCur)"
       tone="orange"
       :hint="costHint"
+      :flash="costFlash"
+      :heat="costHeat ?? undefined"
+      :title="costHeat === 'hot' ? '有分组今日预算已超支' : costHeat === 'warm' ? '有分组今日消费已过预算 80%' : undefined"
     >
       <template #value>
         <AnimatedNumber :value="costValue" format="money" :currency="costCur" />
@@ -634,6 +682,12 @@ onMounted(async () => {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--gap);
   margin-bottom: var(--gap);
+}
+
+/* 脉搏条贴在工具栏与概览卡之间：间距取 gap 的一半，
+   它是仪器读数不是内容块，不该与卡片抢视觉重量 */
+.dash-pulse {
+  margin: calc(var(--gap) / 2) 0;
 }
 
 /* 词元卡右上角的格式切换按钮。

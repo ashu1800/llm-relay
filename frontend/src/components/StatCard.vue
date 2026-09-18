@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useSlots } from 'vue'
+import { onUnmounted, ref, useSlots, watch } from 'vue'
 // 概览统计卡：左侧彩色图标 + 标题 + 大号数值（对齐参考站 summary-card）
 //
 // 各项数值来自 docs/layout-dashboard.json 的实测抓取，
@@ -8,25 +8,55 @@ import { useSlots } from 'vue'
 //                  字号 24px，背景为该色调 15% 透明度
 //   summary-label  16px / 400 / rgba(48,48,48,0.65)
 //   summary-value  24px / 700，颜色 = 该卡的色调色
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   label: string
   value: string | number
   /** 语义色：purple | orange | blue | green | red | gray */
   tone?: 'purple' | 'orange' | 'blue' | 'green' | 'red' | 'gray'
   hint?: string
+  /**
+   * 数值变化闪光的触发戳：值一变卡片泛起一次本色调的微光。
+   * 传时间戳由父组件决定何时闪（通常是实时推送里数字真的变了）。
+   * 连续触发时光会保持常亮、停了才熄 —— 「持续进账时光亮着」正是想要的语义。
+   */
+  flash?: number
+  /**
+   * 持续的热度状态（预算体系用）：warm = 逼近预算（琥珀晕），
+   * hot = 超支（红晕 + 缓慢脉动）。不传 = 常态。
+   */
+  heat?: 'warm' | 'hot'
 }>(), { tone: 'purple' })
 
 // 右侧附加区只在被使用时渲染（useSlots 判断）：
 // 空插槽也渲染容器的话，margin-left:auto 会凭空多出一个
 // 不可见的弹性项，其余卡片的布局跟着变。
 const slots = useSlots()
+
+// 闪光不是「变化瞬间」而是「亮 0.7s 再熄」：流量大时每次推送都重新计时，
+// 光就一直在 —— 钱在持续进来，灯不该灭
+const flashing = ref(false)
+let flashTimer: number | null = null
+watch(() => props.flash, (v) => {
+  if (!v) return
+  flashing.value = true
+  if (flashTimer !== null) window.clearTimeout(flashTimer)
+  flashTimer = window.setTimeout(() => {
+    flashing.value = false
+  }, 700)
+})
+onUnmounted(() => {
+  if (flashTimer !== null) window.clearTimeout(flashTimer)
+})
 </script>
 
 <template>
   <!-- 色调类挂在卡片根节点上，图标与数值都从它取色。
        原来只挂在图标上，于是数值只能固定用正文色 ——
        参考站里数值和图标是同一个颜色，这正是「数值全是黑的」的原因。 -->
-  <article class="summary-card" :class="'tone-' + tone">
+  <article
+    class="summary-card"
+    :class="['tone-' + tone, { 'is-flash': flashing, 'heat-warm': heat === 'warm', 'heat-hot': heat === 'hot' }]"
+  >
     <div class="summary-icon">
       <slot name="icon" />
     </div>
@@ -129,5 +159,47 @@ const slots = useSlots()
   flex: 0 0 auto;
   display: flex;
   align-items: center;
+}
+
+/* ---- 数值变化闪光 ----
+   光晕用本卡色调（--tone-color）：请求数闪紫、花费闪橙，
+   不用眼睛读数字，余光扫过就知道是哪张卡在动 */
+.summary-card.is-flash {
+  animation: card-flash 0.7s ease-out;
+}
+@keyframes card-flash {
+  0% {
+    box-shadow:
+      var(--color-fg-shadow),
+      0 0 0 0 color-mix(in oklab, var(--tone-color) 42%, transparent);
+  }
+  100% {
+    box-shadow:
+      var(--color-fg-shadow),
+      0 0 16px 3px transparent;
+  }
+}
+
+/* ---- 预算热度 ----
+   warm（逼近 80%）与 hot（超支）都是「常驻状态色」而不是一次动画：
+   卡片边框着色 + 向外柔光，hot 再叠一层缓慢脉动 ——
+   体温计越烧越红，收回预算线以下自然消失（跨天/后端不再推 hot） */
+.summary-card.heat-warm {
+  border-color: color-mix(in oklab, var(--color-orange) 55%, var(--color-border));
+  box-shadow: var(--color-fg-shadow), 0 0 14px color-mix(in oklab, var(--color-orange) 20%, transparent);
+}
+.summary-card.heat-hot {
+  border-color: color-mix(in oklab, var(--color-red) 60%, var(--color-border));
+  box-shadow: var(--color-fg-shadow), 0 0 16px color-mix(in oklab, var(--color-red) 24%, transparent);
+  animation: heat-pulse 2.4s ease-in-out infinite;
+}
+@keyframes heat-pulse {
+  0%,
+  100% {
+    box-shadow: var(--color-fg-shadow), 0 0 10px color-mix(in oklab, var(--color-red) 14%, transparent);
+  }
+  50% {
+    box-shadow: var(--color-fg-shadow), 0 0 20px color-mix(in oklab, var(--color-red) 30%, transparent);
+  }
 }
 </style>

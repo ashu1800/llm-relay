@@ -647,3 +647,14 @@ code,
     scroll-behavior: auto !important;
   }
 }
+
+/* 主题切换的圆形扩散（View Transitions，动画由 themeStore.toggleWithBurst
+   用 Web Animations 驱动 clipPath）。浏览器默认给新旧快照交叉淡变，
+   不关掉的话它会和 clipPath 动画叠着放，圆形边缘带一层鬼影。
+   mix-blend-mode 同理：默认的 blend 会让新旧两层互相透色。
+   不支持该 API 的浏览器根本不会产生这些伪元素，规则自然不生效。 */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}

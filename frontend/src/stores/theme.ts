@@ -41,6 +41,40 @@ export const useThemeStore = defineStore('theme', () => {
     mode.value = mode.value === 'dark' ? 'light' : 'dark'
   }
 
+  /**
+   * 带圆形扩散的主题切换（View Transitions API）。
+   *
+   * 从点击位置把新主题「扩散」出去 —— 十几行代码换来一次观感拔群的切换，
+   * 让一个本来纯功能性的按钮变成全站最顺手的小玩具。
+   * 浏览器不支持（Firefox 旧版等）或系统开了「减少动态效果」时，
+   * 退回普通切换：功能完全不受影响，只是没有动画。
+   */
+  function toggleWithBurst(x: number, y: number) {
+    const doc = document as Document & {
+      startViewTransition?: (cb: () => void) => { ready: Promise<void> }
+    }
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    if (!doc.startViewTransition || reduced) {
+      toggle()
+      return
+    }
+    // 扩散半径取「点击点到最远角」：圆要盖满整个视口才收尾
+    const radius = Math.hypot(Math.max(x, window.innerWidth - x), Math.max(y, window.innerHeight - y))
+    const transition = doc.startViewTransition(() => toggle())
+    transition.ready
+      .then(() => {
+        document.documentElement.animate(
+          {
+            clipPath: [`circle(0px at ${x}px ${y}px)`, `circle(${radius}px at ${x}px ${y}px)`]
+          },
+          { duration: 450, easing: 'ease-in-out', pseudoElement: '::view-transition-new(root)' }
+        )
+      })
+      .catch(() => {
+        // ready 被打断（用户快速连点）不算错：浏览器对新旧快照有兜底的交叉淡变
+      })
+  }
+
   watch(
     mode,
     (v) => {
@@ -55,7 +89,7 @@ export const useThemeStore = defineStore('theme', () => {
     { immediate: true }
   )
 
-  return { mode, isDark, apply, toggle }
+  return { mode, isDark, apply, toggle, toggleWithBurst }
 })
 
 // readStoredMode 读取并校验本地存储里的主题。
