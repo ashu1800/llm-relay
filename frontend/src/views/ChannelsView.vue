@@ -384,7 +384,47 @@ interface ChannelTestResult {
   error?: string
 }
 
-async function testChannel(row: ChannelRow) {
+// ---- 测试连通性：先选模型，再测 ----
+//
+// 后端本来就支持按模型测（payload.model，留空才取白名单第一条），但界面上
+// 一直是「点按钮 → 直接测第一条」：白名单里有多个模型时用户没法决定用哪个，
+// 而不同模型的可用性可能天差地别（推理型 vs 普通型、不同上游名）。
+// 现在点测试按钮先弹小窗：选模型（必选，默认第一条启用的，与老行为一致）、
+// 可选自定义提示词，再开始测。模型下拉只列**启用中**的条目 ——
+// 停用的条目测了也不作数。
+const testModal = ref({
+  open: false,
+  row: null as ChannelRow | null,
+  model: '',
+  prompt: '',
+  options: [] as string[],
+  loadingModels: false,
+})
+
+async function openTest(row: ChannelRow) {
+  if (testingId.value !== 0) {
+    message.info('上一项测试还在进行中，请稍候')
+    return
+  }
+  testModal.value = { open: true, row, model: '', prompt: '', options: [], loadingModels: true }
+  try {
+    const res = await api.get<{ items: ChannelBinding[] }>('/channels/' + row.id + '/models')
+    const enabled = (res.items || []).filter((b) => b.enabled)
+    testModal.value.options = enabled.map((b) => b.public_name)
+    // 默认第一条启用的：与后端「留空取第一条」的老行为对齐
+    testModal.value.model = enabled[0]?.public_name || ''
+  } catch (e: any) {
+    message.error(e.message)
+    testModal.value.open = false
+  } finally {
+    testModal.value.loadingModels = false
+  }
+}
+
+async function runTest() {
+  const m = testModal.value
+  const row = m.row
+  if (!row || !m.model) return
   // 只挡同一行：原来用 if (testingId.value) return 会让「A 行在测时点 B 行」
   // 被静默吞掉 —— 按钮看起来点了没反应。现在 B 行按钮是 disabled 的，
   // 这里再兜一层只防同一行的重复提交。
@@ -395,7 +435,10 @@ async function testChannel(row: ChannelRow) {
   }
   testingId.value = row.id
   try {
-    const res = await api.post<ChannelTestResult>('/channels/' + row.id + '/test', {})
+    const res = await api.post<ChannelTestResult>('/channels/' + row.id + '/test', {
+      model: m.model,
+      prompt: m.prompt.trim() || undefined,
+    })
     // 停用的渠道也允许测：排查与「先调好再启用」都要用到。
     // 但必须说清楚这次成功不等于已经生效，否则会以为改完就能用了
     const disabledHint = row.enabled ? null : '这条渠道当前是停用状态，测通也不会参与路由；要让它生效请点「启用」'
@@ -419,6 +462,7 @@ async function testChannel(row: ChannelRow) {
     }
     // 后端会把这次结果写进 health_status，列表要跟着刷新
     await load()
+    testModal.value.open = false
   } catch (e: any) {
     message.error(e.message)
   } finally {
@@ -999,7 +1043,7 @@ onBeforeUnmount(() => {
                  统一仍用 a-button（不是裸 <button>）：它自带 :disabled 的
                  阻止点击与 :loading 的转圈，测试中的反馈就落在这个转圈上。 -->
             <a-space :size="4">
-              <a-tooltip title="测试连通性：向上游发一个最小请求">
+              <a-tooltip title="测试连通性：选一个模型，向上游发一个最小请求">
                 <a-button
                   class="table-icon-btn"
                   type="text"
@@ -1007,7 +1051,7 @@ onBeforeUnmount(() => {
                   :loading="testingId === record.id"
                   :disabled="testingId !== 0 && testingId !== record.id"
                   :aria-label="'测试渠道 ' + record.name"
-                  @click="testChannel(record)"
+                  @click="openTest(record)"
                 >
                   <ThunderboltOutlined />
                 </a-button>
@@ -1240,6 +1284,42 @@ onBeforeUnmount(() => {
         </div>
       </template>
     </a-drawer>
+
+    <!-- 测试连通性：先选模型。下拉只列启用中的白名单条目 —— 停用的条目
+         测了也不作数；提示词可选，留空用后端默认的 "hi"。没有启用模型时
+         禁用开始按钮并给出指引（与后端 pickTestBinding 的报错同一句话）。 -->
+    <a-modal
+      v-model:open="testModal.open"
+      :title="'测试连通性 · ' + (testModal.row?.name || '')"
+      :width="440"
+      :ok-text="'开始测试'"
+      :ok-button-props="{ disabled: !testModal.model }"
+      :confirm-loading="testingId !== 0"
+      @ok="runTest"
+    >
+      <a-form layout="vertical" style="margin-top: 12px">
+        <a-form-item label="测试模型" required>
+          <a-select
+            v-model:value="testModal.model"
+            :options="testModal.options.map((o) => ({ value: o, label: o }))"
+            :loading="testModal.loadingModels"
+            placeholder="选择该渠道白名单里启用中的模型"
+            show-search
+          />
+        </a-form-item>
+        <a-form-item label="提示词（可选）">
+          <a-input
+            v-model:value="testModal.prompt"
+            placeholder="留空用默认的 hi"
+            :maxlength="200"
+            allow-clear
+          />
+        </a-form-item>
+      </a-form>
+      <div v-if="!testModal.loadingModels && !testModal.options.length" class="muted">
+        这条渠道还没有启用中的模型，先在「模型白名单」里加一个再测。
+      </div>
+    </a-modal>
   </div>
 </template>
 
