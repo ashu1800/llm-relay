@@ -381,6 +381,7 @@ interface ChannelTestResult {
   model?: string
   upstream_model?: string
   reply?: string
+  finish_reason?: string
   error?: string
 }
 
@@ -447,7 +448,12 @@ async function runTest() {
         title: row.name + ' 连通正常（' + res.latency_ms + ' ms）',
         content: h('div', [
           h('div', '模型：' + (res.model || '-') + (res.upstream_model && res.upstream_model !== res.model ? ' → ' + res.upstream_model : '')),
-          h('div', res.reply ? '回复：' + res.reply : '上游返回 ' + (res.status_code || 200) + '，但没有正文（推理型模型可能把内容放在 reasoning 里）'),
+          h('div', res.reply
+            ? '回复：' + res.reply
+            // 正文为空时把 finish_reason 带出来：length = 输出预算被思考吃光,
+            // 空字符串 = 上游真的一个字都没给,两种情况该排查的方向不同
+            : '上游返回 ' + (res.status_code || 200) + '，但没有正文' +
+              (res.finish_reason ? '（finish_reason: ' + res.finish_reason + '）' : '（推理型模型可能把内容放在 reasoning 里）')),
           // 颜色走令牌（h() 渲染进 portal 的元素仍继承 :root 变量）：
           // 写死 #d46b08 在白底上只有 3.55:1，不达 AA
           disabledHint ? h('div', { style: 'margin-top:8px;color:var(--text-amber)' }, disabledHint) : null

@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -21,12 +23,14 @@ import (
 const channelTestTimeout = 25 * time.Second
 
 // 测试用的提示词。一句 "hi" 就够：要验证的是链路（鉴权、协议、出口、模型名），
-// 不是模型的回答质量。max_tokens 也压到最小，测试不该产生可观的费用。
+// 不是模型的回答质量。
 const channelTestPrompt = "hi"
 
-// 64 而不是 1：推理型模型会先把预算花在思考上，给太少会拿到一个空的正文，
-// 「通了但看不到任何内容」看起来像失败。64 个 token 的费用可以忽略。
-const channelTestMaxTokens = 64
+// 1024 而不是 64：推理型模型（GLM thinking、deepseek-reasoner 这类）会先把
+// 输出预算花在思考上，64 个 token 连思维链都装不下，正文必然为空 ——
+// 测试明明通了，界面上却显示「没有任何内容」，看起来像失败。
+// 输入只有一句 "hi"，1024 的输出费用依然可以忽略。
+const channelTestMaxTokens = 1024
 
 type channelTestPayload struct {
 	// Model 是**对外模型名**，留空时用该渠道白名单里的第一条
@@ -127,12 +131,97 @@ func (s *Server) testChannel(c *gin.Context) {
 		return
 	}
 
+	// 上游可能无视 stream:false 直接回 SSE（转发器无条件带 Accept: text/event-stream）：
+	// 那种情况下正文在 Stream 里，Body 是空的 —— 不解析的话「明明通了却什么内容
+	// 都显示不出来」。读取（读完即弃，不关连接的话 FD 会悬挂）。
+	var reply, finishReason string
+	if att.Stream != nil {
+		defer att.Stream.Close()
+		reply, finishReason = readReplyFromStream(att.Stream)
+	} else {
+		reply, finishReason = extractReply(att.Body)
+	}
+
 	s.recordChannelTest(db, id, true, "")
 	c.JSON(http.StatusOK, gin.H{
 		"ok": true, "status_code": att.StatusCode, "latency_ms": latency,
 		"model": binding.PublicName, "upstream_model": binding.UpstreamName,
-		"reply": extractReply(att.Body),
+		"reply": reply, "finish_reason": finishReason,
 	})
+}
+
+// readReplyFromStream 从「上游以流式传输回的响应体」里拼出正文。
+//
+// 实测上游有两种做法（D1 中转两种都会出现，同一渠道不同时刻还不一样）：
+//   - 标准 SSE：一行一个 "data: {chunk}"，chunk 用 choices[].delta；
+//   - 更不讲理的：直接把完整的 chat.completion JSON（choices[].message）
+//     按 chunked 传输——没有 "data:" 前缀，整行就是一个大 JSON。
+//
+// 所以这里对每一行：有 "data:" 前缀就剥掉；然后只要是 "{"
+// 开头就尝试解析，delta（流式块）与 message（整块响应）两种形状都认，
+// 正文优先、思维链兜底。读完即弃。8KB 截到足够界面展示。
+func readReplyFromStream(r io.Reader) (string, string) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 512*1024)
+	var content, reasoning, extra strings.Builder
+	finish := ""
+	type segShape struct {
+		Content          string `json:"content"`
+		ReasoningContent string `json:"reasoning_content"`
+		Reasoning        string `json:"reasoning"`
+	}
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		payload := line
+		if strings.HasPrefix(line, "data:") {
+			payload = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		}
+		if payload == "" || payload == "[DONE]" || !strings.HasPrefix(payload, "{") {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta   segShape `json:"delta"`
+				Message segShape `json:"message"`
+				// 整块响应的正文也可能直接放在 choice 顶层（个别中转的怪形状）
+				Text         string `json:"text"`
+				FinishReason string `json:"finish_reason"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal([]byte(payload), &chunk) != nil {
+			continue
+		}
+		for _, c := range chunk.Choices {
+			seg := c.Delta
+			if seg.Content == "" && seg.ReasoningContent == "" && seg.Reasoning == "" {
+				seg = c.Message
+			}
+			if content.Len() < 8192 {
+				content.WriteString(seg.Content)
+			}
+			if reasoning.Len() < 8192 {
+				reasoning.WriteString(seg.ReasoningContent)
+				extra.WriteString(seg.Reasoning)
+			}
+			if content.Len() < 8192 && c.Text != "" {
+				content.WriteString(c.Text)
+			}
+			if c.FinishReason != "" {
+				finish = c.FinishReason
+			}
+		}
+		if content.Len() >= 8192 {
+			break
+		}
+	}
+	text := strings.TrimSpace(content.String())
+	if text == "" {
+		text = strings.TrimSpace(reasoning.String())
+	}
+	if text == "" {
+		text = strings.TrimSpace(extra.String())
+	}
+	return truncate(text, 200), finish
 }
 
 // pickTestBinding 选一个用来测试的模型条目。
@@ -194,35 +283,108 @@ func summarizeUpstreamError(body []byte) string {
 	return truncate(raw, 600)
 }
 
-// extractReply 取出助手回复的文本，只用于在界面上给一个「确实通了」的证据。
-func extractReply(body []byte) string {
-	var parsed struct {
+// extractReply 取出助手回复的文本与结束原因，用于在界面上给一个
+// 「确实通了」的证据。
+//
+// 探测与真实转发不同：真实转发的响应会经出站适配器归一，而探测拿到的是
+// **上游原生形状**。渠道协议不止一种，正文/结束原因的字段名各说各话，
+// 这里按形状逐一认领：
+//
+//	OpenAI Chat      choices[0].message.{content,reasoning_content,reasoning} + finish_reason
+//	Anthropic        content[].text（type=text）+ stop_reason
+//	OpenAI Responses output[].content[].text（type=output_text）+ status
+//	Gemini           candidates[0].content.parts[].text + finishReason
+//
+// 正文仍为空时 finish_reason 能说明是为什么（length = 输出预算耗尽）。
+// 站内统一格式的 reasoning 字段也在认领范围内（部分上游把思维链放这里）。
+func extractReply(body []byte) (string, string) {
+	// OpenAI Chat 形状
+	var chat struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
-				// 推理型模型（deepseek-reasoner 这一类）会把正文先写进
-				// reasoning_content；只看 content 会拿到空字符串，
-				// 界面上就变成「通了但什么都没返回」
+				Content          string `json:"content"`
 				ReasoningContent string `json:"reasoning_content"`
-				// 站内统一格式用的是 reasoning：Anthropic / Responses / Gemini
-				// 这几个出站适配器都把思维链放在这个字段（见 convert 包）。
-				// 少了它，测 GLM 这类「预算全花在思考上」的模型时正文为空，
-				// 明明通了却显示不出任何内容。
-				Reasoning string `json:"reasoning"`
+				Reasoning        string `json:"reasoning"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 	}
-	if err := json.Unmarshal(body, &parsed); err != nil || len(parsed.Choices) == 0 {
-		return ""
+	if err := json.Unmarshal(body, &chat); err == nil && len(chat.Choices) > 0 {
+		c := chat.Choices[0]
+		msg := strings.TrimSpace(c.Message.Content)
+		if msg == "" {
+			msg = strings.TrimSpace(c.Message.ReasoningContent)
+		}
+		if msg == "" {
+			msg = strings.TrimSpace(c.Message.Reasoning)
+		}
+		return msg, c.FinishReason
 	}
-	msg := strings.TrimSpace(parsed.Choices[0].Message.Content)
-	if msg == "" {
-		msg = strings.TrimSpace(parsed.Choices[0].Message.ReasoningContent)
+
+	// Anthropic Messages 形状：content 是块数组，只拼 type=text 的正文
+	var anthropic struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		StopReason string `json:"stop_reason"`
 	}
-	if msg == "" {
-		msg = strings.TrimSpace(parsed.Choices[0].Message.Reasoning)
+	if err := json.Unmarshal(body, &anthropic); err == nil && len(anthropic.Content) > 0 {
+		var b strings.Builder
+		for _, blk := range anthropic.Content {
+			if blk.Type == "text" {
+				b.WriteString(blk.Text)
+			}
+		}
+		return strings.TrimSpace(b.String()), anthropic.StopReason
 	}
-	return truncate(msg, 200)
+
+	// OpenAI Responses 形状：output[].content[].text（type=output_text）
+	var responses struct {
+		Output []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(body, &responses); err == nil && len(responses.Output) > 0 {
+		var b strings.Builder
+		for _, item := range responses.Output {
+			if item.Type != "message" {
+				continue
+			}
+			for _, seg := range item.Content {
+				if seg.Type == "output_text" {
+					b.WriteString(seg.Text)
+				}
+			}
+		}
+		return strings.TrimSpace(b.String()), responses.Status
+	}
+
+	// Gemini generateContent 形状：candidates[0].content.parts[].text
+	var gemini struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+			FinishReason string `json:"finishReason"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(body, &gemini); err == nil && len(gemini.Candidates) > 0 {
+		var b strings.Builder
+		for _, p := range gemini.Candidates[0].Content.Parts {
+			b.WriteString(p.Text)
+		}
+		return strings.TrimSpace(b.String()), gemini.Candidates[0].FinishReason
+	}
+
+	return "", ""
 }
 
 func truncate(s string, n int) string {
