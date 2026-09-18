@@ -239,6 +239,38 @@ const THINKING_COLORS: Record<string, string> = {
   high: '#eb2f96',
   on: '#52c41a',
   auto: '#1677ff',
+  // max 是线上观测到的客户端自定义最高档（glm-5.3-flash 的调用方在用）：
+  // 既然叫 max，就给最高的视觉待遇 —— 一团火。
+  max: '#ff7a45',
+}
+
+/**
+ * 思考强度的动效分层：档位越高，点越大、动得越明显。
+ *
+ * 空串 = 静止。分层刻意做成「阶梯」而不是每档一套独立动画 ——
+ * 强弱是相对的，观感上有梯度才有「等级」的含义：
+ *
+ *   max     火焰燃烧：点放大成火核（白心→黄→橙红），双层错相闪烁 +
+ *           外圈热浪光晕，永远没有重复的相位（0.62s 与 1.1s 两个周期）
+ *   high    强脉动：光晕向外扩散再收回（点 8px）
+ *   medium/on/auto  呼吸：透明度缓慢起伏（点 6px）
+ *   low     缓呼吸：更慢更浅
+ *   off/minimal/未知  静止 —— 关掉的、没说的、不认识的，都不该动
+ *
+ * 只动 opacity / transform / box-shadow，且每行动画元素 ≤2 个（一行一个点）；
+ * prefers-reduced-motion 的全局规则会把这一切压到 0.01ms，无需单独处理。
+ */
+const THINKING_ANIM: Record<string, string> = {
+  low: 'think-anim-low',
+  medium: 'think-anim-mid',
+  on: 'think-anim-mid',
+  auto: 'think-anim-mid',
+  high: 'think-anim-high',
+  max: 'think-anim-fire',
+}
+
+function thinkingAnim(level?: string) {
+  return THINKING_ANIM[level ?? ''] ?? ''
 }
 
 function thinkingColor(level?: string) {
@@ -742,7 +774,7 @@ onMounted(() => {
         <a-table-column title="思考" :width="80">
           <template #default="{ record }">
             <span v-if="record.thinking_level" class="think-cell">
-              <span class="think-dot" :style="{ background: thinkingColor(record.thinking_level) }" />
+              <span class="think-dot" :class="thinkingAnim(record.thinking_level)" :style="{ background: thinkingColor(record.thinking_level) }" />
               <span>{{ record.thinking_level }}</span>
             </span>
             <span v-else class="muted">—</span>
@@ -925,7 +957,7 @@ onMounted(() => {
         </a-descriptions-item>
         <a-descriptions-item label="思考等级">
           <span v-if="current.thinking_level" class="think-cell">
-            <span class="think-dot" :style="{ background: thinkingColor(current.thinking_level) }" />
+            <span class="think-dot" :class="thinkingAnim(current.thinking_level)" :style="{ background: thinkingColor(current.thinking_level) }" />
             {{ current.thinking_level }}
           </span>
           <template v-else>-</template>
@@ -1149,7 +1181,10 @@ onMounted(() => {
 .muted { color: var(--color-text-secondary); }
 
 /* 「思考」列：色点 + 文字。色点 6px 圆、与文字垂直居中，
-   颜色由 THINKING_META 给（强度直觉：灰关、青低、金中、紫红高）。 */
+   颜色由 THINKING_COLORS 给（强度直觉：灰关、青低、金中、紫红高）。
+   动效分层见 THINKING_ANIM 的注释：max 火焰 > high 脉动 > medium 呼吸 >
+   low 缓呼吸 > 其余静止。点加 position: relative，max 的热浪层（::after）
+   以它为定位基准。 */
 .think-cell {
   display: inline-flex;
   align-items: center;
@@ -1158,10 +1193,76 @@ onMounted(() => {
   white-space: nowrap;
 }
 .think-dot {
+  position: relative;
   width: 6px;
   height: 6px;
   border-radius: 50%;
   flex: none;
+}
+
+/* ---- low：缓呼吸（最慢最浅，存在感刚刚够） ---- */
+.think-dot.think-anim-low {
+  animation: think-breathe 4s ease-in-out infinite;
+}
+
+/* ---- medium / on / auto：呼吸 ---- */
+.think-dot.think-anim-mid {
+  animation: think-breathe 2.4s ease-in-out infinite;
+}
+@keyframes think-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* ---- high：强脉动 —— 光晕向外扩散再收回，点放大一号 ---- */
+.think-dot.think-anim-high {
+  width: 8px;
+  height: 8px;
+  animation: think-pulse-high 1.2s ease-in-out infinite;
+}
+@keyframes think-pulse-high {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(235, 47, 150, 0); }
+  50% { box-shadow: 0 0 8px 2px rgba(235, 47, 150, 0.55); }
+}
+
+/* ---- max：一团火在燃烧 ----
+   火核放大到 10px：白心→黄→橙红的径向渐变，本体做「缩放 + 亮度」的
+   错相闪烁（0.62s），外圈一层热浪光晕（::after，1.1s）—— 两个周期
+   互质，永远没有重复的相位，火焰因此不会显得机械。 */
+.think-dot.think-anim-fire {
+  width: 10px;
+  height: 10px;
+  background: radial-gradient(
+    circle at 50% 62%,
+    #fff 0 18%,
+    #ffe58f 36%,
+    #ffa940 54%,
+    #ff5a3c 74%,
+    rgba(255, 61, 31, 0) 100%
+  );
+  animation: think-fire-body 0.62s ease-in-out infinite alternate;
+}
+.think-dot.think-anim-fire::after {
+  content: '';
+  position: absolute;
+  inset: -7px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(255, 169, 64, 0.5) 0 30%,
+    rgba(255, 90, 60, 0.25) 55%,
+    transparent 75%
+  );
+  animation: think-fire-halo 1.1s ease-in-out infinite;
+}
+@keyframes think-fire-body {
+  0% { transform: scale(1) translateY(0); filter: brightness(1); }
+  40% { transform: scale(1.18, 0.88) translateY(0.5px); filter: brightness(1.3); }
+  100% { transform: scale(0.9, 1.2) translateY(-1px); filter: brightness(1.08); }
+}
+@keyframes think-fire-halo {
+  0%, 100% { opacity: 0.35; transform: scale(0.9); }
+  50% { opacity: 0.85; transform: scale(1.12); }
 }
 
 /* 错误原文：详情里唯一保留的代码块（排障时最常看的就是上游报错） */
