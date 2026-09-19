@@ -11,7 +11,11 @@ import (
 //
 // 归一成有限档位，空串 = 请求没带思考参数（历史行与不带思考的模型自然是空）：
 //
-//	off · minimal · low · medium · high · on · auto
+//	off · minimal · low · medium · high · xhigh · on · auto · max
+//
+// 档位词表跟着各家客户端长 —— 认不得的词原样透传（诚实优于猜测），
+// 前端只为其中一部分配了颜色。xhigh / max 是 anthropic 4.6+ 的
+// effort 档，minimal 来自 OpenAI 的 reasoning_effort。
 //
 // 协议名与 api/protocols.go 的 inboundProfile.Name 对齐（relay 不能反向
 // import api，这里以常量钉住字面量；thinking_test 会用真实字面量逐个覆盖）。
@@ -69,14 +73,45 @@ func ExtractThinkingLevel(proto string, raw []byte) string {
 		}
 		return normalizeEffort(p.Reasoning.Effort)
 	case protoAnthropic:
-		// Anthropic：thinking.type = enabled/disabled，enabled 必带 budget_tokens
+		// Anthropic 有两种「开思考」的表达，按代际分的：
+		//
+		//  4.6 之前：thinking.type = enabled/disabled，强度写在 budget_tokens 里
+		//  4.6 起：  thinking.type = adaptive，强度改由 output_config.effort
+		//            表达（low/medium/high/xhigh/max）。
+		//            budget_tokens 在这一代已废弃 —— 在 Opus 5 / Sonnet 5
+		//            这类新模型上直接 400，所以新版客户端不会再发它。
+		//
+		// Claude Code 走的是后者，且它发的 effort 是 "max"。只认 enabled
+		// 会让这一整类请求静默落成空档（列表里那一格什么都没有），
+		// 而请求其实一直在正常思考 —— 观察值与该列存在的意义正好相反。
 		var p struct {
 			Thinking *struct {
 				Type         string `json:"type"`
 				BudgetTokens int    `json:"budget_tokens"`
 			} `json:"thinking"`
+			OutputConfig *struct {
+				// 指针：区分「没传 effort」与「传了空串」，
+				// 后者不该被当成一个未知档位透传上去
+				Effort *string `json:"effort"`
+			} `json:"output_config"`
 		}
-		if json.Unmarshal(raw, &p) != nil || p.Thinking == nil {
+		if json.Unmarshal(raw, &p) != nil {
+			return ""
+		}
+		// 明确关掉优先于 effort：off 是「说了不要」，
+		// 此时再按 effort 报一个档位等于把这次请求说成在思考。
+		if p.Thinking != nil && strings.EqualFold(p.Thinking.Type, "disabled") {
+			return "off"
+		}
+		// effort 是比 type 更精确的意图，先看它。
+		// "max" 原样透传 —— 前端 THINKING_COLORS 里有这一档
+		// （注释记着「线上观测到的客户端自定义最高档」就是它）。
+		if p.OutputConfig != nil && p.OutputConfig.Effort != nil {
+			if v := normalizeEffort(*p.OutputConfig.Effort); v != "" {
+				return v
+			}
+		}
+		if p.Thinking == nil {
 			return ""
 		}
 		switch strings.ToLower(p.Thinking.Type) {
@@ -84,6 +119,10 @@ func ExtractThinkingLevel(proto string, raw []byte) string {
 			return "off"
 		case "enabled":
 			return budgetBand(p.Thinking.BudgetTokens, budgetMediumFrom, anthropicHighFrom, "on")
+		case "adaptive":
+			// 自适应但没有 effort：思考开着、强度交给模型自己定，
+			// 与 Gemini 的 budget -1 是同一个语义，共用 "auto"。
+			return "auto"
 		}
 		return ""
 	case protoGemini:

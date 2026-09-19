@@ -31,6 +31,22 @@ func TestExtractThinkingLevel(t *testing.T) {
 		{"anthropic enabled 缺 budget 回 on", protoAnthropic, `{"thinking":{"type":"enabled"}}`, "on"},
 		{"anthropic disabled", protoAnthropic, `{"thinking":{"type":"disabled"}}`, "off"},
 		{"anthropic 没有 thinking", protoAnthropic, `{"model":"claude-x","max_tokens":16}`, ""},
+		// ---- anthropic 4.6+ 形状：adaptive + output_config.effort ----
+		// Claude Code 的实际报文（真实抓包，省略 messages）：
+		//   "max_tokens":32000,"thinking":{"type":"adaptive"},
+		//   "context_management":{...},"output_config":{"effort":"max"},"stream":true
+		// budget_tokens 在这一代已废弃（Opus 5 / Sonnet 5 上直接 400），
+		// effort 取代它表达强度。
+		{"Claude Code adaptive + effort max", protoAnthropic, `{"max_tokens":32000,"thinking":{"type":"adaptive"},"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]},"output_config":{"effort":"max"},"stream":true}`, "max"},
+		{"anthropic effort 单独（没带 thinking）", protoAnthropic, `{"output_config":{"effort":"low"}}`, "low"},
+		{"anthropic adaptive 单独", protoAnthropic, `{"thinking":{"type":"adaptive"}}`, "auto"},
+		{"anthropic effort xhigh 原样透传", protoAnthropic, `{"output_config":{"effort":"xhigh"}}`, "xhigh"},
+		{"anthropic effort 大写归一", protoAnthropic, `{"output_config":{"effort":"HIGH"}}`, "high"},
+		// 「明确关掉」压过 effort：off 是「说了不要」，effort 在不想的时候没有意义
+		{"anthropic disabled 优先于 effort", protoAnthropic, `{"thinking":{"type":"disabled"},"output_config":{"effort":"max"}}`, "off"},
+		// 老形状不受影响（budget_tokens 仍是 4.6 之前的合法写法）
+		{"anthropic enabled 仍走 budget 分档", protoAnthropic, `{"thinking":{"type":"enabled","budget_tokens":1024}}`, "low"},
+		{"anthropic adaptive + enabled 缺 budget 回 on", protoAnthropic, `{"thinking":{"type":"enabled"},"context_management":{}}`, "on"},
 		// ---- gemini-generateContent ----
 		{"gemini thinkingLevel 优先", protoGemini, `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high","thinkingBudget":1024}}}`, "high"},
 		{"gemini budget 0 关", protoGemini, `{"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}`, "off"},

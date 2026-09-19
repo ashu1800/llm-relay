@@ -235,7 +235,7 @@ function markFresh(ids: number[]) {
 // 胶囊形态与模型/密钥的 GroupTag 同款（描边胶囊、无动效 —— 2026-09-18
 // 站主点名撤掉之前的整套分层动效），档位之间只靠颜色区分：
 //   off/minimal 灰（关掉的、没说的）  low 青   medium 琥珀   high 品红
-//   on 绿   auto 蓝   max 琥珀金（线上观测到的客户端自定义最高档）
+//   on 绿   auto 蓝   xhigh 暗琥珀   max 琥珀金（effort 的最高档）
 // 文字色的对比度处理（淡底上原色多数不达 4.5:1）在 .think-pill 的 CSS 里
 // 做 oklab 混黑/混白，这里只管「哪个档位是哪个颜色」。
 const THINKING_COLORS: Record<string, string> = {
@@ -246,7 +246,9 @@ const THINKING_COLORS: Record<string, string> = {
   high: '#eb2f96',
   on: '#52c41a',
   auto: '#1677ff',
-  // max 是线上观测到的客户端自定义最高档（glm-5.3-flash 的调用方在用）
+  // xhigh / max 是 anthropic 4.6+ output_config.effort 的两档
+  // （Claude Code 发的就是 max）。max 曾经只由客户端自定义档位用上。
+  xhigh: '#d48806',
   max: '#faad14',
 }
 
