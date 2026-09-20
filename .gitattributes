@@ -38,6 +38,13 @@ go.sum text eol=lf
 *.md text eol=lf
 *.json text eol=lf
 *.mjs text eol=lf
+# PowerShell 脚本：Windows 侧执行，CRLF 本身无害，但这里仍然钉 LF ——
+# 理由是**一致性**而不是兼容性：不声明的话它们走 core.autocrlf，
+# 每台机器 checkout 出来的行尾可能不同，diff 里会混入看不见的换行改动。
+# （scripts/wsl-bash.psm1 是给 WSL 里的 bash 调用的工具，保持与其它
+#   仓库文本同一种行尾，省得日后有人拿它当 .sh 用而踩 CRLF 的坑。）
+*.ps1 text eol=lf
+*.psm1 text eol=lf
 
 # 二进制：明确标记，免得 git 去猜（也不会被 autocrlf 碰）
 *.png binary

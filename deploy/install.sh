@@ -65,6 +65,58 @@ die()  { printf '\033[1;31m[%s]\033[0m %s\n' "$APP_NAME" "$*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "需要 root 权限。请用：sudo bash install.sh  或  wsl -u root -- bash install.sh"
 
+# ---------- 0. --verify：只读体检，不做任何改动 ----------
+#
+# 部署或重启之后最需要回答的一个问题是「现在到底跑的是哪个版本、健不健康」。
+# 没有这个模式时只能靠人拼凑：docker ps 看容器、curl 看健康、翻日志看镜像时间 ——
+# 而判断「镜像比源码新还是旧」这件事根本没法一眼看出来。
+# （2026-09-20 就卡在这里：部署成功、服务随后因整机重启停了 27 秒，
+#  但当时无法快速确认「重启回来的到底是新版本还是旧版本」。）
+#
+# 只读：不构建、不重启、不写文件。随时可以跑。
+if [[ "${1:-}" == "--verify" || "${1:-}" == "-v" ]]; then
+  echo "============================================================"
+  echo " LLM Relay 体检（只读，不做任何改动）"
+  echo "------------------------------------------------------------"
+  printf ' 服务健康   : '
+  if curl -fsS -m 5 "http://127.0.0.1:8888/healthz" >/dev/null 2>&1; then
+    printf 'healthz 200（进程活着）'
+    if curl -fsS -m 5 "http://127.0.0.1:8888/readyz" >/dev/null 2>&1; then
+      echo "，readyz 200（数据库可连，能接请求）"
+    else
+      echo "，但 readyz 失败（数据库连不上）"
+    fi
+  else
+    echo "不通 —— 服务没在跑，或端口不是 8888"
+  fi
+  printf ' 容器       : '
+  docker ps -a --filter "name=^llm-relay" --format '{{.Names}}={{.Status}}' 2>/dev/null | paste -sd'  ' - || echo '(docker 不可用)'
+  printf ' 运行中镜像 : '
+  docker inspect -f '{{.Image}}' llm-relay 2>/dev/null || echo '(容器不存在)'
+  printf ' 镜像构建于 : '
+  docker inspect -f '{{.Created}}' llm-relay:local 2>/dev/null || echo '(镜像不存在)'
+  printf ' systemd    : '
+  systemctl is-enabled llm-relay.service 2>/dev/null || echo '未注册（开机不会自启）'
+  # 源码与镜像的时间对比：镜像比源码旧 ⇒ 改了代码但没重新部署。
+  # README 明确写过「改了前端或后端必须重新部署才会在 8888 上生效」，
+  # 这条判断把它变成可自动核对的，而不是靠人记住。
+  IMG_EPOCH="$(docker inspect -f '{{.Created}}' llm-relay:local 2>/dev/null | xargs -r -I{} date -d {} +%s 2>/dev/null || true)"
+  SRC_EPOCH="$(find "$INSTALL_DIR/backend" "$INSTALL_DIR/frontend/src" -type f \
+      \( -name '*.go' -o -name '*.vue' \) -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)"
+  printf ' 版本新鲜度 : '
+  if [[ -z "$IMG_EPOCH" ]]; then
+    echo "查不到镜像构建时间"
+  elif [[ -z "$SRC_EPOCH" ]]; then
+    echo "查不到源码时间（$INSTALL_DIR 还没部署过？）"
+  elif [[ "$SRC_EPOCH" -gt "$IMG_EPOCH" ]]; then
+    echo "⚠ 源码比镜像新 —— 改动尚未部署，8888 上跑的还是旧代码"
+  else
+    echo "OK（镜像不早于源码）"
+  fi
+  echo "============================================================"
+  exit 0
+fi
+
 # ---------- 1. 清理失效软链 ----------
 log "清理 Docker Desktop 残留软链"
 for p in /usr/bin/docker /usr/bin/docker-compose /usr/local/bin/docker /usr/bin/docker-credential-desktop.exe; do
@@ -320,11 +372,20 @@ docker compose --env-file "$ENV_FILE" build || die "docker compose 构建失败�
 # 直接切过去再检查「起没起来」是不够的：新镜像如果启动就崩（迁移写错、
 # 依赖缺失、配置项改名），线上要一直挂着旧容器等我们发现 —— 而 systemd
 # 已经把旧容器停了，实际表现是一次长时间的 502。
-# 所以先在 127.0.0.1:8899 上把新镜像跑起来，配一个**临时数据库**：
-#   · 不占用 8888，线上这一秒还在正常服务
+# 所以先把新镜像跑起来，配一个**临时数据库**：
+#   · 不碰 8888，线上这一秒还在正常服务
 #   · 不连线上库，迁移的副作用只落在这个用完就删的空库上
 # 预检失败就 die —— 此时线上仍是旧版本、仍然可用（这正是要保住的东西）。
-SMOKE_PORT="${SMOKE_PORT:-8899}"
+#
+# **预检容器不发布任何宿主端口**（原来用 -p 127.0.0.1:8899:8888）。
+# 发布端口这个动作本身会打断 Windows↔WSL 的 localhost 转发（wslrelay.exe），
+# 表现是**部署完成后浏览器打不开 localhost:8888** —— 而服务其实是好的。
+# README 里因此写着「遇到就一直转圈的话 wsl --shutdown」。实测踩到过：
+# 2026-09-20 我照做之后整台 WSL 重启，服务停了 27 秒（数据库数据没丢，
+# 容器都是开机自启，但这 27 秒是白白赔进去的）。
+# 现在改用 `docker exec` 在容器**内部**探 /readyz：既拿到同样的结论
+# （容器起来、迁移跑通、数据库连得上），又完全不新增宿主监听端口，
+# 于是那条「打不开 → 重启 WSL」的链路从根上不会再有。
 # 凭据从**安装目录的 .env** 里读，不用脚本前面 source 进来的变量：
 # 脚本 source 的是源码目录的 .env（可能不存在或是旧的），而容器真正吃的是
 # $ENV_FILE。两者混用会让临时库用错密码、预检必然失败，从而挡住正常部署。
@@ -337,7 +398,7 @@ smoke_image() {
   local net="$1"
   local db="llm-relay-smoke-db" app="llm-relay-smoke-app"
   docker rm -f "$db" "$app" >/dev/null 2>&1 || true
-  log "预检新镜像：临时数据库 + $SMOKE_PORT 端口试跑"
+  log "预检新镜像：临时数据库 + 容器内探针试跑（不发布宿主端口）"
   docker run -d --name "$db" --network "$net" \
     -e POSTGRES_PASSWORD="$SMOKE_DB_PASSWORD" -e POSTGRES_USER="$SMOKE_DB_USER" \
     -e POSTGRES_DB="$SMOKE_DB_NAME" postgres:16-alpine >/dev/null || return 1
@@ -347,16 +408,17 @@ smoke_image() {
     docker exec "$db" pg_isready -h 127.0.0.1 -p 5432 >/dev/null 2>&1 && break
     sleep 1
   done
-  docker run -d --name "$app" --network "$net" -p "127.0.0.1:$SMOKE_PORT:8888" \
+  docker run -d --name "$app" --network "$net" \
     --env-file "$ENV_FILE" \
     -e SERVER_HOST=0.0.0.0 -e SERVER_PORT=8888 -e GIN_MODE=release \
     -e DB_HOST="$db" -e DB_PORT=5432 -e DB_SSLMODE=disable \
     -e RELAY_PAYLOAD_STORAGE_MODE="${RELAY_PAYLOAD_STORAGE_MODE:-errors}" \
     -e LOG_LEVEL=warn -e TZ="${TZ:-Asia/Shanghai}" \
     llm-relay:local >/dev/null || return 1
-  # /readyz 会实际探一次数据库，迁移失败时它不会通过 —— 这才是「能不能接请求」
+  # /readyz 会实际探一次数据库，迁移失败时它不会通过 —— 这才是「能不能接请求」。
+  # 探针在容器内跑（镜像里有 wget），命令的退出码直接代表探测结果
   for i in $(seq 1 40); do
-    if curl -fsS -m 2 "http://127.0.0.1:$SMOKE_PORT/readyz" >/dev/null 2>&1; then
+    if docker exec "$app" wget -qO- -T 3 http://127.0.0.1:8888/readyz >/dev/null 2>&1; then
       log "预检通过：新镜像能启动、迁移跑通、/readyz 正常"
       return 0
     fi
@@ -470,6 +532,37 @@ fi
 PG_ID_BEFORE="$(docker inspect -f '{{.Id}}' "${APP_NAME}-postgres" 2>/dev/null || true)"
 PG_START_BEFORE="$(docker inspect -f '{{.State.StartedAt}}' "${APP_NAME}-postgres" 2>/dev/null || true)"
 DOWNTIME_PROBE="$(mktemp)"
+
+# 从这一刻起脚本开始**改动线上**（重建容器）。如果它在切换中途被打断
+# （Ctrl+C、SSH 断开、WSL 整机重启、预检失败……），必须留下明确结论，
+# 而不是让人对着半个屏幕的输出猜「现在跑的是新版本还是旧版本」。
+# 2026-09-20 就卡在这件事上：部署过程被打断，服务随后又经历一次整机重启，
+# 无从快速判断回来的是哪个版本。
+#
+# 只读式收尾：不尝试自动回滚（那可能把服务弄得更糟），只如实报告状态并
+# 给出下一步命令。用 `|| true` 保证报告本身绝不成为新的失败点。
+report_state() {
+  printf '\n\033[1;33m[%s]\033[0m 当前服务状态：\n' "$APP_NAME"
+  if curl -fsS -m 5 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 \
+     && curl -fsS -m 5 "http://127.0.0.1:$PORT/readyz" >/dev/null 2>&1; then
+    printf '  健康   : 正常（healthz 与 readyz 均通过）\n'
+  elif curl -fsS -m 5 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+    printf '  健康   : 进程活着但数据库连不上（readyz 失败）\n'
+  else
+    printf '  健康   : ⚠ 服务不通 —— 请求会失败\n'
+  fi
+  printf '  容器   : %s\n' "$(docker ps -a --filter "name=^${APP_NAME}$" \
+      --format '{{.Status}}' 2>/dev/null | head -1 || echo '查询失败')"
+  printf '  镜像   : %s\n' "$(docker inspect -f '{{.Created}}' llm-relay:local 2>/dev/null || echo '查询失败')"
+  printf '  下一步 : bash %s --verify     # 只读体检，随时可跑\n' "$0"
+  printf '           systemctl restart llm-relay   # 让服务按当前镜像整个重来\n'
+}
+# INT/TERM 必须显式 exit：bash 设了 trap 之后，处理完仍会从被打断处继续执行 ——
+# 那会让 Ctrl+C 变成「报告完状态接着往下重建容器」，比不拦还糟。
+# 130 是 128+SIGINT 的惯例退出码。
+trap 'report_state; exit 130' INT TERM
+trap 'rm -f "$DOWNTIME_PROBE"' EXIT
+
 (
   while :; do
     code="$(curl -fsS -o /dev/null -m 1 -w '%{http_code}' "http://127.0.0.1:$PORT/healthz" 2>/dev/null || echo 000)"
@@ -591,12 +684,20 @@ echo " 端口       : $PORT"
 echo
 # 部署本身成功、但浏览器打不开时，先看这一条：服务在 WSL 里是好的，
 # 断的是 Windows↔WSL 的 localhost 转发（wslrelay.exe 会接受连接却不转发数据，
-# 表现为浏览器一直转圈）。实测触发点是这次部署新建/替换了 WSL 内的监听端口
-# （预检的 8899 与重建后的 app），同一个 VM 里连没被动过的端口也会一起不通。
+# 表现为浏览器一直转圈）。
+#
+# 预检原先会在 WSL 内新建一个宿主监听端口（8899），那正是这个转发的常见触发点，
+# 2026-09-20 已去掉（改为容器内探针）。剩下仍会新建端口的是**重建 app 容器**本身
+# （8888 重新发布），所以这段提示仍然保留。
 if [[ -n "$WSL_IP" ]]; then
-  echo " 打不开？   : 若浏览器访问 http://localhost:$PORT 一直转圈，先在 WSL 里自测"
-  echo "              curl -I http://127.0.0.1:$PORT/healthz（返回 200 就说明服务没问题），"
-  echo "              然后在 Windows 上执行 wsl --shutdown —— 容器与服务都是开机自启，会自己回来。"
+  echo " 打不开？   : 先在 WSL 里自测（返回 200 就说明服务本身没问题）："
+  echo "              curl -I http://127.0.0.1:$PORT/healthz"
+  echo "              断的若是 Windows↔WSL 的转发，可用 wsl --shutdown 重建。"
+  # 明确写出代价：从前这里只写「会自己回来」，没写要多久，于是重启期间
+  # 看起来像服务挂了。实测（2026-09-20）整机重启后约 27 秒恢复。
+  echo "              ⚠ 注意：wsl --shutdown 会让中转服务**真的停掉约 30 秒**"
+  echo "                （容器要等 docker 与数据库重新就绪）。数据不丢，但这段时间"
+  echo "                所有请求都会失败 —— 不是必须重启，就先别重启。"
   echo
 fi
 echo " 常用命令:"
