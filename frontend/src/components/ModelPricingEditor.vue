@@ -89,8 +89,9 @@ export function priceSummary(p?: PriceConfig | null, currency?: string): string 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { symbolOf } from '@/utils/money'
+import { writeClipboard } from '@/utils/clipboard'
 import { message } from 'ant-design-vue'
-import { PlusOutlined, DeleteOutlined } from '@ant-design/icons-vue'
+import { PlusOutlined, DeleteOutlined, CopyOutlined, ImportOutlined } from '@ant-design/icons-vue'
 
 const props = defineProps<{
   open: boolean
@@ -151,6 +152,138 @@ function presetNightDiscount() {
 
 const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/
 
+// ---- 复制 / 导入定价参数（站主 2026-09-20 要求）----
+//
+// 场景：同一家上游的多个模型常常同价（或只差输出价），渠道之间也要搬价。
+// 逐格手填既慢又容易错位，错位的单价在账面上看不出来 —— 与「未定价记 0」
+// 是同一类静默问题。所以给整套参数一个可搬运的形态：JSON。
+//
+// 复制的是**当前表单**（不是已保存值）：改了两格想搬到隔壁模型时，
+// 不必先保存再复制。导入只回填表单、不自动保存 —— 保存路径上的校验
+// 一条不少，导入端先做同口径预检只是为了让错误落在导入这步而不是
+// 留到保存时才炸。
+
+async function copyPrice() {
+  // 只带价格六字段：value 是整条白名单行（含模型名/代理等），照抄会把
+  // 行属性混进「定价参数」—— 导入端虽然会忽略，但复制产物应该名实相符
+  const f = form.value
+  const payload = {
+    input_per_1m: f.input_per_1m,
+    output_per_1m: f.output_per_1m,
+    cache_read_per_1m: f.cache_read_per_1m,
+    cache_write_per_1m: f.cache_write_per_1m,
+    multiplier: f.multiplier,
+    peak_rules: f.peak_rules
+  }
+  const ok = await writeClipboard(JSON.stringify(payload))
+  if (ok) message.success('已复制定价参数（JSON）')
+  else message.warning('复制失败，请手动复制')
+}
+
+const importOpen = ref(false)
+const importText = ref('')
+
+function openImport() {
+  importText.value = ''
+  importOpen.value = true
+}
+
+// 单价格式与 submit 同判据：空串（未配）或 ≥0 的数字
+function validPrice(v: unknown): boolean {
+  if (v === '' || v === null || v === undefined) return true
+  return typeof v === 'string' && Number(v) >= 0 && !Number.isNaN(Number(v))
+}
+
+function applyImport() {
+  let raw: any
+  try {
+    raw = JSON.parse(importText.value)
+  } catch {
+    message.error('不是合法 JSON')
+    return
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    message.error('内容应是一个 JSON 对象（复制按钮导出的那种）')
+    return
+  }
+
+  // 白名单拣字段：粘贴手编辑过的 JSON 多出来的键直接忽略，
+  // 拣不出任何已知键时如实报错（贴错东西最常见的样子）
+  const out = emptyPrice()
+  const prices: [string, string][] = [
+    ['输入单价', 'input_per_1m'],
+    ['输出单价', 'output_per_1m'],
+    ['缓存读单价', 'cache_read_per_1m'],
+    ['缓存写单价', 'cache_write_per_1m']
+  ]
+  let gotAny = false
+  for (const [label, key] of prices) {
+    const v = raw[key as keyof PriceConfig]
+    if (v === undefined) continue
+    if (!validPrice(v)) {
+      message.error(`${label}要填一个不小于 0 的数字`)
+      return
+    }
+    ;(out[key as keyof PriceConfig] as string) = v === null ? '' : String(v)
+    gotAny = true
+  }
+  if (raw.multiplier !== undefined) {
+    const m = Number(raw.multiplier)
+    // 与保存/后端同口径：0 视为「没配」归一成 1（「故意填 0」不成立，
+    // 免费模型用单价 0 表达）
+    if (!(m >= 0) || m > 100) {
+      message.error('固定倍率需要在 0 到 100 之间')
+      return
+    }
+    out.multiplier = m === 0 ? 1 : m
+    gotAny = true
+  }
+  if (raw.peak_rules !== undefined) {
+    if (!Array.isArray(raw.peak_rules)) {
+      message.error('时段倍率（peak_rules）应是一个数组')
+      return
+    }
+    const rules: RateRule[] = []
+    for (const [i, r] of (raw.peak_rules as any[]).entries()) {
+      if (r === null || typeof r !== 'object') {
+        message.error(`第 ${i + 1} 条时段规则不是对象`)
+        return
+      }
+      const start = String(r.start ?? '')
+      const end = String(r.end ?? '')
+      // 三条判据与 submit 完全一致，报错文案也带上序号
+      if (!timeRe.test(start) || !timeRe.test(end)) {
+        message.error(`第 ${i + 1} 条时段的时间格式应为 HH:MM`)
+        return
+      }
+      if (start === end) {
+        message.error(`第 ${i + 1} 条时段的开始与结束时间相同，这条规则永远不会生效`)
+        return
+      }
+      if (!(Number(r.multiplier) > 0)) {
+        message.error(`第 ${i + 1} 条时段的倍率要大于 0`)
+        return
+      }
+      // days 是 0-6（0=周日，与表单 day-chip 同一套索引）；脏值剔掉而不是报错，
+      // 手编辑 JSON 时多打个引号很常见
+      const days: number[] = Array.isArray(r.days)
+        ? [...new Set((r.days as unknown[]).map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))]
+        : []
+      rules.push({ days, start, end, multiplier: Number(r.multiplier), label: r.label ? String(r.label) : '' })
+    }
+    out.peak_rules = rules
+    gotAny = true
+  }
+  if (!gotAny) {
+    message.error('没有识别到任何定价字段（需要 input_per_1m / multiplier / peak_rules 等）')
+    return
+  }
+
+  form.value = out
+  importOpen.value = false
+  message.success('已导入，请核对后保存')
+}
+
 function submit() {
   for (const [i, r] of rules().entries()) {
     if (!timeRe.test(r.start) || !timeRe.test(r.end)) {
@@ -203,16 +336,12 @@ function submit() {
           <a-input v-model:value="form.cache_read_per_1m" placeholder="0.003" />
         </a-form-item>
         <a-form-item label="缓存写价">
-          <!-- placeholder 引导填输入价：Anthropic 官方对缓存写收输入价的
-               1.25 倍（5m 档）/ 2 倍（1h 档），留空按 0 计会让这笔费用
-               在账面上消失，而界面看起来一切正常 -->
           <a-input v-model:value="form.cache_write_per_1m" :placeholder="form.input_per_1m || '0'" />
         </a-form-item>
       </div>
       <div class="field-hint currency-hint">
         单价按所属渠道的币种录入：{{ symbolOf(currency) || '原币' }}{{ currency ? '（' + currency + '）' : '' }}。
-        改渠道币种不会自动折算已有单价，需要自己重填。缓存写价留空按 0 计 ——
-        Anthropic 渠道建议填输入价的 1.25 倍（5 分钟档）或 2 倍（1 小时档）。
+        改渠道币种不会自动折算已有单价，需要自己重填。缓存写价留空按 0 计。
       </div>
       <a-form-item label="固定倍率（1 = 原价，可以填 0.5 表示打折）">
         <a-input-number
@@ -264,9 +393,46 @@ function submit() {
     </a-form>
 
     <template #footer>
-      <a-button @click="emit('update:open', false)">取消</a-button>
-      <a-button type="primary" @click="submit">保存</a-button>
+      <!-- 左侧工具按钮（复制/导入），右侧常规动作。图钉成组放在取消/保存
+           的对面，不会与主流程误触 —— 复制无破坏性，导入只回填表单 -->
+      <div class="pricing-footer">
+        <div class="pricing-tools">
+          <a-tooltip title="把当前表单的定价参数（单价、倍率、时段规则）复制为 JSON，可粘到其它模型/渠道的导入里">
+            <a-button class="table-icon-btn" type="text" size="small" aria-label="复制定价参数" @click="copyPrice">
+              <CopyOutlined />
+            </a-button>
+          </a-tooltip>
+          <a-tooltip title="粘贴定价参数 JSON 回填表单（导入后需自己点保存）">
+            <a-button class="table-icon-btn" type="text" size="small" aria-label="导入定价参数" @click="openImport">
+              <ImportOutlined />
+            </a-button>
+          </a-tooltip>
+        </div>
+        <a-button @click="emit('update:open', false)">取消</a-button>
+        <a-button type="primary" @click="submit">保存</a-button>
+      </div>
     </template>
+  </a-modal>
+
+  <!-- 导入弹窗：形态参照白名单编辑器的「批量粘贴」（项目里 a-textarea 的先例） -->
+  <a-modal
+    v-model:open="importOpen"
+    title="导入定价参数"
+    :width="'min(560px, 94vw)'"
+    centered
+    ok-text="导入"
+    cancel-text="取消"
+    @ok="applyImport"
+  >
+    <a-textarea
+      v-model:value="importText"
+      :rows="8"
+      placeholder="粘贴「复制」按钮导出的定价 JSON，例如：{&quot;input_per_1m&quot;:&quot;0.15&quot;,&quot;output_per_1m&quot;:&quot;0.6&quot;}"
+    />
+    <div class="field-hint import-hint">
+      只回填表单，不会自动保存 —— 导入后请核对再点「保存」。未知字段会被忽略；
+      单价/倍率/时段规则的校验与保存时同一套。
+    </div>
   </a-modal>
 </template>
 
@@ -296,4 +462,9 @@ function submit() {
 .rule-sep { color: var(--color-text-secondary); font-size: 12px; }
 .rule-hint { color: var(--color-text-secondary); font-size: 12px; margin-top: 4px; }
 .currency-hint { margin: -4px 0 12px; color: var(--color-text-secondary); font-size: 12px; line-height: 1.7; }
+/* footer 三段式：工具组贴左，取消/保存贴右（modal footer 默认右对齐，
+   外面这层 flex 把两个区域分开） */
+.pricing-footer { display: flex; align-items: center; gap: 8px; }
+.pricing-tools { display: flex; gap: 2px; margin-right: auto; }
+.import-hint { margin: 8px 0 0; color: var(--color-text-secondary); font-size: 12px; line-height: 1.7; }
 </style>
