@@ -676,6 +676,24 @@ PROBE_PID=$!
 # 「先停再起」，中间那几百毫秒是白白断掉的；up -d --no-deps 只需要重建 app。
 cd "$INSTALL_DIR/deploy"
 if docker ps --format '{{.Names}}' | grep -qx "${APP_NAME}-postgres"; then
+  # postgres 的 compose 配置若也变了（如新增端口映射），必须一起重建 ——
+  # 否则 app 按新配置连库（127.0.0.1:15432）而 postgres 还按旧配置跑
+  # （只在内部网络），readyz 必然超时。数据在 bind mount 里，重建容器不丢数据，
+  # 代价只是数据库自己重启几秒。判定方式：比较「compose 认为的容器配置」与
+  # 「实际在跑的容器」是否一致（compose 对配置漂移的标准做法）。
+  if ! docker compose --env-file "$ENV_FILE" up -d --no-deps postgres >/dev/null 2>&1; then
+    die "重建 postgres 容器失败（检查 docker compose logs postgres）"
+  fi
+  # 重建后等它恢复健康（最多 60s），app 起来时库必须已可连
+  PG_OK=no
+  for i in $(seq 1 60); do
+    st="$(docker inspect -f '{{.State.Health.Status}}' "${APP_NAME}-postgres" 2>/dev/null || echo unknown)"
+    if [[ "$st" == "healthy" ]]; then PG_OK=yes; break; fi
+    sleep 1
+  done
+  if [[ "$PG_OK" != "yes" ]]; then
+    warn "postgres 重建后 60 秒内未恢复 healthy,继续切换（app 会自己重试连库）"
+  fi
   docker compose --env-file "$ENV_FILE" up -d --no-deps app || die "重建 app 容器失败"
 else
   # 数据库没在跑（首次安装，或机器刚重启）：交给单元按依赖顺序整体拉起
