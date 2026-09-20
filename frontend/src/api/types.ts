@@ -169,6 +169,12 @@ export interface RequestLog {
   upstream_protocol: string
   model_requested: string
   model_upstream: string
+  /**
+   * 这次调用是否被渠道的「默认模型映射」接下的：model_requested 是客户端
+   * 请求的名字（没命中任何白名单），model_upstream 才是真正发给上游的默认模型。
+   * 开了兜底之后客户端把模型名写错也不再报错，这个标记是唯一的发现途径。
+   */
+  fallback_mapped?: boolean
   /** 入站思考参数的归一档位（off/minimal/low/medium/high/on/auto）；空 = 请求没带思考参数 */
   thinking_level?: string
   stream: boolean

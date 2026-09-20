@@ -30,6 +30,10 @@ func TestBooleanFieldsHaveNoGormDefault(t *testing.T) {
 		{model.Channel{}, "Enabled"},
 		{model.ChannelModel{}, "Enabled"},
 		{model.APIKey{}, "Enabled"},
+		// 兜底映射的标记：带默认值时「精确命中的请求」会被顶成兜底，
+		// 日志上就再也分不清哪些请求其实没命中白名单
+		{model.RequestLog{}, "FallbackMapped"},
+		{model.RequestLog{}, "UsageEstimated"},
 	}
 	for _, c := range cases {
 		field, ok := reflect.TypeOf(c.entity).FieldByName(c.field)
@@ -115,5 +119,47 @@ func TestNormalizeWhitelistRejectsDuplicates(t *testing.T) {
 func TestNormalizeWhitelistRejectsEmptyName(t *testing.T) {
 	if _, err := normalizeWhitelist([]whitelistItem{{PublicName: "   "}}); err == nil {
 		t.Fatal("空白的对外名应该报错")
+	}
+}
+
+// 默认模型映射的保存校验。
+//
+// 前端也会拦，但后端必须也拦：接口不是只有界面在用（脚本、备份导入都在打）。
+// 拦的是两种配不上套的状态 ——
+//
+//  1. 开关开着但模型名空：这个组合在路由侧等同于没开（见 relay.ChannelDefaultModel），
+//     保存成功等于给用户一个「配了但没生效」的假象，而表现又是那个 2ms 的 502。
+//  2. 指定的模型不在该渠道白名单里：候选查询的 JOIN 匹配不到它，兜底同样不生效 ——
+//     而且这条更隐蔽，因为白名单看起来是配好的，只是没配这个名字。
+//
+// 注意「开关关着且没填模型名」是合法状态（大多数渠道就是如此），不能拦。
+func TestValidateDefaultModel(t *testing.T) {
+	cases := []struct {
+		name    string
+		extra   map[string]any
+		models  []string
+		wantErr bool
+	}{
+		{"没配（合法）", nil, []string{"deepseek-chat"}, false},
+		{"开关关着（合法）", map[string]any{"default_model_enabled": false}, []string{"deepseek-chat"}, false},
+		{"开关关着且没填模型名（合法）", map[string]any{"default_model_enabled": false, "default_model": ""}, []string{"deepseek-chat"}, false},
+		{"配齐且在白名单里（合法）", map[string]any{"default_model_enabled": true, "default_model": "deepseek-chat"}, []string{"deepseek-chat", "deepseek-reasoner"}, false},
+		{"开关开着但没填模型名", map[string]any{"default_model_enabled": true}, []string{"deepseek-chat"}, true},
+		{"开关开着但模型名为空串", map[string]any{"default_model_enabled": true, "default_model": ""}, []string{"deepseek-chat"}, true},
+		{"开关开着但模型名只有空白", map[string]any{"default_model_enabled": true, "default_model": "  "}, []string{"deepseek-chat"}, true},
+		{"模型名不在白名单里", map[string]any{"default_model_enabled": true, "default_model": "gpt-4o"}, []string{"deepseek-chat"}, true},
+		{"白名单为空但开了开关", map[string]any{"default_model_enabled": true, "default_model": "deepseek-chat"}, nil, true},
+		{"模型名两侧空白应剪掉再比", map[string]any{"default_model_enabled": true, "default_model": " deepseek-chat "}, []string{"deepseek-chat"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateDefaultModel(c.extra, c.models)
+			if c.wantErr && err == nil {
+				t.Fatal("应该报错")
+			}
+			if !c.wantErr && err != nil {
+				t.Fatalf("不该报错，实际 %v", err)
+			}
+		})
 	}
 }

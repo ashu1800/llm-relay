@@ -532,3 +532,58 @@ func ChannelMaxConcurrency(extra map[string]any) int {
 		return 0
 	}
 }
+
+// ChannelDefaultModelEnabled 只回答「开关是不是开着」，不管模型名填没填。
+//
+// 与 ChannelDefaultModel 分开是给写入侧校验用的：保存时要区分
+// 「开关关着」（合法，default_model 里残留什么都不影响路由）与
+// 「开关开着但没填名字」（非法，是个配了不生效的假象）。
+// 路由侧只关心两者相与的结果，用 ChannelDefaultModel 就够。
+func ChannelDefaultModelEnabled(extra map[string]any) bool {
+	if extra == nil {
+		return false
+	}
+	return truthyFlag(extra["default_model_enabled"])
+}
+
+// ChannelDefaultModel 从渠道扩展配置里读「默认模型映射」（白名单没精确命中的
+// 请求统一改写成的那个模型）。返回 (模型名, 是否开启)。
+//
+// 判据只在这一处：路由侧与渠道列表都调它，SQL 只做粗筛不重复判断 ——
+// 三处各判一次迟早会漂移，而漂移的表现是「界面上开着、路由里没开」。
+//
+// 两个键都有效才算开启。**「开关开着但模型名没填」等同于没开**，这一条最要紧：
+// 半残配置若被当成开启，路由会构造出一个上游名为空的候选，请求带着客户端的
+// 原名发出去，又变成那个 2ms 的 502 —— 正是本功能要消灭的东西。
+func ChannelDefaultModel(extra map[string]any) (string, bool) {
+	if extra == nil {
+		return "", false
+	}
+	if !truthyFlag(extra["default_model_enabled"]) {
+		return "", false
+	}
+	name, _ := extra["default_model"].(string)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", false
+	}
+	return name, true
+}
+
+// truthyFlag 认布尔与它的字符串形式。
+//
+// 字符串形式是真实存在的：前端传字符串、手工改库、导入一份手写的备份。
+// 认出它比静默失效好 —— 「配了没反应」比报错更难查，而这个字段失效时
+// 用户看到的是「502 又回来了」，不会想到是这里。
+// 其余类型（数字等）一律当作未开启：宁可要用户重新点一次开关，
+// 也不要把 float64(0) 之外的任何值猜成「开」。
+func truthyFlag(v any) bool {
+	switch b := v.(type) {
+	case bool:
+		return b
+	case string:
+		return strings.EqualFold(strings.TrimSpace(b), "true")
+	default:
+		return false
+	}
+}

@@ -197,6 +197,30 @@ func TruncateRunes(s string, limit int) string {
 	return string(r[:limit]) + "…"
 }
 
+// BillingModel 返回这次调用该按哪个模型名定价。
+//
+// 价格是「渠道 × 模型」维度的（见 pricing.Engine），所以必须用真正承接这次
+// 调用的那条白名单行的**对外名**，而不是客户端请求的名字：
+//
+//   - 精确命中时两者本就相等 —— 候选查询的条件就是 public_name = 请求名，
+//     所以这是一次行为无变化的等价替换；
+//   - 兜底时它们不同：客户端的 claude-opus-4-7 在渠道里根本没配价，按请求名
+//     查只会得到「没配价、记 0 元」，而按默认模型名查才能拿到那条真实单价
+//     （候选的 Binding 已被指向默认模型那一行，见 Router.buildCandidates）。
+//
+// 两种情况用同一个表达式覆盖，调用方不需要判断分支。
+// 候选不存在（请求根本没走到路由就失败）时回落到请求名，让失败日志
+// 仍有一个能看懂的名字。
+func BillingModel(req *RelayRequest, res *RelayResult) string {
+	if res != nil && res.Candidate.Binding.PublicName != "" {
+		return res.Candidate.Binding.PublicName
+	}
+	if req != nil {
+		return req.PublicModel
+	}
+	return ""
+}
+
 // BuildLog 由转发结果组装一条日志记录。
 func BuildLog(req *RelayRequest, res *RelayResult, usage Usage, status int, errMsg string,
 	firstByteMs, totalMs int,
@@ -231,6 +255,10 @@ func BuildLog(req *RelayRequest, res *RelayResult, usage Usage, status int, errM
 			entry.UpstreamProto = res.Candidate.Channel.Protocol
 			entry.ModelUpstream = res.Candidate.Binding.UpstreamName
 			entry.UpstreamMs = res.Attempt.HeaderMs
+			// 兜底标记只在真的发出去过（Attempt 非空）时才为真：
+			// Attempt 为空说明连候选都没走到，那条路径上的 Fallback 无意义，
+			// 标成兜底反而会让人以为「兜底生效了但失败了」。
+			entry.FallbackMapped = res.Candidate.Fallback
 		}
 		if res.Candidate.Channel.ID != 0 {
 			entry.ChannelID = res.Candidate.Channel.ID

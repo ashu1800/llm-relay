@@ -265,6 +265,46 @@ func TestChannelMaxConcurrencyParsing(t *testing.T) {
 	}
 }
 
+// 「默认模型映射」的读取规则。
+//
+// 判据只在这一处 —— 路由侧与渠道列表都调它，SQL 不重复判断。
+// 最要紧的是「开关开着但模型名没填」必须等同于没开：这种半残配置如果被当成
+// 开启，路由会构造出一个上游名为空的候选，请求带着客户端原名发出去，
+// 又变成那个 2ms 的 502 —— 而这正是本功能要消灭的东西。
+func TestChannelDefaultModelParsing(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        map[string]any
+		wantModel string
+		wantOn    bool
+	}{
+		{"空", nil, "", false},
+		{"无键", map[string]any{"max_concurrency": 8}, "", false},
+		{"开关与模型名齐全", map[string]any{"default_model_enabled": true, "default_model": "deepseek-chat"}, "deepseek-chat", true},
+		{"开关关闭", map[string]any{"default_model_enabled": false, "default_model": "deepseek-chat"}, "", false},
+		{"开关开着但没填模型名", map[string]any{"default_model_enabled": true}, "", false},
+		{"开关开着但模型名为空串", map[string]any{"default_model_enabled": true, "default_model": ""}, "", false},
+		{"开关开着但模型名只有空白", map[string]any{"default_model_enabled": true, "default_model": "   "}, "", false},
+		{"模型名前后空白要剪掉", map[string]any{"default_model_enabled": true, "default_model": "  deepseek-chat  "}, "deepseek-chat", true},
+		// 布尔值可能以字符串形式落在 jsonb 里：前端传字符串、或手工改库、
+		// 或导入一份手写的旧备份。认出它比静默失效好 —— 静默失效正是
+		// 本功能最该避免的失败方式（用户以为配好了，实际没生效）
+		{"开关是字符串 true", map[string]any{"default_model_enabled": "true", "default_model": "deepseek-chat"}, "deepseek-chat", true},
+		{"开关是字符串 false", map[string]any{"default_model_enabled": "false", "default_model": "deepseek-chat"}, "", false},
+		{"开关类型不认识", map[string]any{"default_model_enabled": float64(1), "default_model": "deepseek-chat"}, "", false},
+		{"模型名类型不是字符串", map[string]any{"default_model_enabled": true, "default_model": 42}, "", false},
+	}
+	for _, c := range cases {
+		gotModel, gotOn := ChannelDefaultModel(c.in)
+		if gotOn != c.wantOn {
+			t.Errorf("%s: 开关得到 %v，期望 %v", c.name, gotOn, c.wantOn)
+		}
+		if gotModel != c.wantModel {
+			t.Errorf("%s: 模型名得到 %q，期望 %q", c.name, gotModel, c.wantModel)
+		}
+	}
+}
+
 func TestRateLimiterSweep(t *testing.T) {
 	rl := NewRateLimiter()
 	now := time.Unix(1700000000, 0)

@@ -170,6 +170,90 @@ type channelPayload struct {
 	Models    *[]whitelistItem `json:"models"`
 }
 
+// validateDefaultModel 校验「默认模型映射」的配置配得上套。
+//
+// 前端也会拦（保存前 message.warning），但后端必须也拦：接口不是只有界面在用，
+// 脚本与备份导入都在打。拦的是两种「配了但不会生效」的状态：
+//
+//  1. 开关开着但模型名空 —— 路由侧把它等同于没开（见 relay.ChannelDefaultModel），
+//     保存成功等于给用户一个假象，而表现又是那个 2ms 的 502。
+//  2. 指定的模型不在该渠道白名单里 —— 候选查询按
+//     channel_models.public_name = extra_config->>'default_model' 做 JOIN 匹配，
+//     匹配不到就不成为兜底候选。这条更隐蔽：白名单看着是配好的，只是没配这个名字。
+//
+// 判据复用 relay 侧的两个读取函数，与路由一字不差 —— 两边各写一份迟早漂移，
+// 而漂移的表现正是「保存时说没问题、路由里不生效」。
+func validateDefaultModel(extra map[string]any, publicNames []string) error {
+	if !relay.ChannelDefaultModelEnabled(extra) {
+		// 开关关着（或压根没配）：这时 default_model 里残留什么都不影响路由，
+		// ChannelDefaultModel 不会认它，不必拦住保存
+		return nil
+	}
+	name, on := relay.ChannelDefaultModel(extra)
+	if !on {
+		return errors.New("开了「默认模型映射」但没填默认模型名；不填的话这个开关不会生效")
+	}
+	for _, n := range publicNames {
+		if strings.TrimSpace(n) == name {
+			return nil
+		}
+	}
+	return fmt.Errorf("默认模型 %s 不在这条渠道的白名单里；兜底请求靠它去匹配白名单行，配不上就不会生效", name)
+}
+
+// publicNamesOf 抽出白名单的对外名，供默认模型映射的校验比对。
+func publicNamesOf(items []model.ChannelModel) []string {
+	names := make([]string, 0, len(items))
+	for _, it := range items {
+		names = append(names, it.PublicName)
+	}
+	return names
+}
+
+// validateDefaultModelOnUpdate 用「更新之后」的状态校验默认模型映射。
+//
+// 更新是部分字段语义：本次没传的那一半要取库里现有的，否则两种漏检都会发生 ——
+// 只交白名单时（把默认模型那一行删掉）不报错、只交 extra_config 时
+// （指定一个白名单里没有的模型）也不报错，两者都让兜底静默失效。
+func (s *Server) validateDefaultModelOnUpdate(id uint, p channelPayload, whitelist []model.ChannelModel) error {
+	// 两边都传了就不必查库 —— 绝大多数保存走这条，省一次往返
+	if p.Models != nil && p.ExtraConf != nil {
+		return validateDefaultModel(p.ExtraConf, publicNamesOf(whitelist))
+	}
+
+	var existing model.Channel
+	if err := s.deps.Store.DB().Select("id", "extra_config").First(&existing, id).Error; err != nil {
+		// 渠道不存在由后面的事务路径统一报错（它本来就要查一次），这里不抢答
+		return nil
+	}
+	extra := effectiveDefaultModelExtra(existing.ExtraConfig, p.ExtraConf)
+
+	// 本次没交白名单就取库里现有的对外名。注意只取 PublicName：
+	// 校验只关心「名字在不在」，价格、代理这些与它无关
+	names := publicNamesOf(whitelist)
+	if p.Models == nil {
+		var rows []model.ChannelModel
+		if err := s.deps.Store.DB().Model(&model.ChannelModel{}).
+			Where("channel_id = ?", id).Find(&rows).Error; err != nil {
+			return nil
+		}
+		names = publicNamesOf(rows)
+	}
+	return validateDefaultModel(extra, names)
+}
+
+// effectiveDefaultModelExtra 算出这条渠道在本次更新**之后**的 extra_config。
+//
+// 更新是部分字段语义：没传 extra_config 表示「这次不动它」，那就得拿库里
+// 现成的那份来校验 —— 否则「只改白名单、不动默认映射」这种常见操作会校验不到，
+// 于是用户把默认模型那一行从白名单里删掉时不会报错，兜底静默失效。
+func effectiveDefaultModelExtra(existing model.JSONMap, incoming model.JSONMap) map[string]any {
+	if incoming != nil {
+		return incoming
+	}
+	return existing
+}
+
 // validateWhitelistProxies 校验白名单里引用的代理都存在。
 //
 // 刻意不塞进 normalizeWhitelist：那是个纯函数（有单测直接调），
@@ -285,6 +369,12 @@ type channelListItem struct {
 	// 判据（四个单价全 0 且没有倍率）必须与计价引擎一字不差，
 	// 两边各写一份迟早会不一致
 	UnpricedCount int `json:"unpriced_count"`
+	// FallbackModel 是这条渠道「默认模型映射」指定的模型名（没开则为空）。
+	//
+	// 由 relay.ChannelDefaultModel 算，与路由侧同一出口 —— 列表显示的和
+	// 实际生效的必须是同一个判断，否则会出现「界面上标着兜底、路由里没兜底」。
+	// 它回答的是「客户端的模型名没命中白名单时，这条渠道会用什么接单」。
+	FallbackModel string `json:"fallback_model"`
 	// LastUsedAt 是这条渠道最近一次实际承接请求的时间（没有则为 null）。
 	//
 	// 取自请求日志而不是渠道行上的字段：日志里记的是**最终承接这次请求的渠道**
@@ -379,10 +469,24 @@ func (s *Server) listChannels(c *gin.Context) {
 		}
 		items = append(items, channelListItem{
 			Channel: ch, Models: list, ModelCount: len(list), UnpricedCount: unpriced[ch.ID],
-			LastUsedAt: lastUsed[ch.ID], Runtime: &rt,
+			FallbackModel: fallbackModelOf(ch),
+			LastUsedAt:    lastUsed[ch.ID], Runtime: &rt,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
+}
+
+// fallbackModelOf 取这条渠道实际生效的默认模型名（没开则为空串）。
+//
+// 只回答「开没开」，不回答「开了但配错」—— 指定的模型不在白名单里时
+// 候选查询匹配不到它、兜底不会生效，但那种状态在保存时就被
+// validateDefaultModel 拦下了，不会进库。这里如实回显用户配了什么。
+func fallbackModelOf(ch model.Channel) string {
+	name, on := relay.ChannelDefaultModel(ch.ExtraConfig)
+	if !on {
+		return ""
+	}
+	return name
 }
 
 func (s *Server) createChannel(c *gin.Context) {
@@ -449,6 +553,12 @@ func (s *Server) createChannel(c *gin.Context) {
 			return
 		}
 		whitelist = items
+	}
+	// 默认模型映射要对着**本次提交的白名单**校验：指定的模型必须在白名单里，
+	// 否则候选查询的 JOIN 匹配不到它，兜底不会生效（见 validateDefaultModel）
+	if verr := validateDefaultModel(p.ExtraConf, publicNamesOf(whitelist)); verr != nil {
+		writeUpstreamError(c, http.StatusBadRequest, verr.Error(), "invalid_request_error")
+		return
 	}
 
 	enc, err := s.deps.Cipher.Encrypt(strings.TrimSpace(p.APIKey))
@@ -595,7 +705,14 @@ func (s *Server) updateChannel(c *gin.Context) {
 		}
 		whitelist = items
 	}
-
+	// 默认模型映射的校验要用**更新之后**的状态：本次没传的字段取库里现有的。
+	// 少取一边就会出现两种漏检 —— 只改白名单时（把默认模型那行删掉）不报错、
+	// 或只改 extra_config 时（指定一个白名单里没有的模型）不报错，
+	// 两者都让兜底静默失效。
+	if verr := s.validateDefaultModelOnUpdate(id, p, whitelist); verr != nil {
+		writeUpstreamError(c, http.StatusBadRequest, verr.Error(), "invalid_request_error")
+		return
+	}
 	// 渠道字段与白名单放同一个事务：白名单是整表替换，
 	// 中途失败留下「渠道改了、白名单没改」会让人以为保存没生效
 	err := s.deps.Store.DB().Transaction(func(tx *gorm.DB) error {

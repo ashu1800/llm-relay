@@ -42,6 +42,8 @@ type ChannelRow = Channel & {
   model_count?: number
   /** 白名单里还没配价的条数（由服务端按与计价引擎相同的判据算出） */
   unpriced_count?: number
+  /** 「默认模型映射」指定的模型名；空表示没开。由服务端按与路由相同的判据算出 */
+  fallback_model?: string
 }
 
 const loading = ref(false)
@@ -124,6 +126,11 @@ const form = reactive({
   // 单渠道并发上限。新建时给 10：不限并发会让一条渠道把上游打满，
   // 而用户多半没意识到「不限」就是当前的行为
   max_concurrency: 10,
+  // 默认模型映射：打开后，白名单没精确命中的请求一律改用 default_model
+  // 发给上游。客户端换模型名（Claude Code 换个版本号）就不必回来改配置。
+  // 存在 extra_config 里（见 nextExtraConfig），与 max_concurrency 同一套路
+  default_model_enabled: false,
+  default_model: '',
   // 白名单随渠道一起提交：新建渠道时就把「能跑哪些模型」填完
   models: [] as WhitelistRow[]
 })
@@ -188,6 +195,8 @@ function openCreate() {
     icon: '',
     max_concurrency: 10,
     enabled: true,
+    default_model_enabled: false,
+    default_model: '',
     models: [{ public_name: '', upstream_name: '', enabled: true, ...emptyPrice() }]
   })
   modalOpen.value = true
@@ -209,6 +218,11 @@ async function openEdit(row: ChannelRow) {
     // 没配过并发上限的渠道读出来是 0（不限制），如实显示 ——
     // 强行显示成 10 会让用户以为它一直是 10
     max_concurrency: Number((row.extra_config as any)?.max_concurrency) || 0,
+    // 开关状态必须从 extra_config 反读，不能用列表接口回的那个
+    // fallback_model 反推：那个字段只在「开关开着且模型名有效」时非空，
+    // 拿它反推会让「开着但还没填名字」的渠道显示成关闭，用户点保存就把它关了
+    default_model_enabled: (row.extra_config as any)?.default_model_enabled === true,
+    default_model: String((row.extra_config as any)?.default_model || ''),
     models: [] as WhitelistRow[]
   })
   modalOpen.value = true
@@ -256,7 +270,7 @@ function whitelistPayload(): WhitelistRow[] | null {
   return rows
 }
 
-// nextExtraConfig 在原有扩展配置上只改并发这一项。
+// nextExtraConfig 在原有扩展配置上只改我们这两个字段。
 //
 // 单独提交一个 { max_concurrency } 会把 headers 等键整体覆盖掉 ——
 // 「改个并发把自定义请求头弄没了」是那种当场看不出、过几天才发作的问题。
@@ -267,8 +281,30 @@ function nextExtraConfig(): Record<string, unknown> {
   } else {
     delete extra.max_concurrency
   }
+  // 开关关着时两个键一起删掉，而不是只删模型名：留下一个
+  // default_model_enabled:true 而名字为空的组合，路由侧虽然也认作「没开」
+  // （见 relay.ChannelDefaultModel），但那是个「配了不生效」的状态，
+  // 日后有人只改名字不看开关就会被绕进去
+  if (form.default_model_enabled && form.default_model.trim()) {
+    extra.default_model_enabled = true
+    extra.default_model = form.default_model.trim()
+  } else {
+    delete extra.default_model_enabled
+    delete extra.default_model
+  }
   return extra
 }
+
+// fallbackModelOptions 是「默认模型映射」下拉的选项：只列启用中的白名单条目。
+//
+// 只取启用中的，是因为兜底靠 channel_models.public_name 精确匹配来落地
+// （见 relay.Router.queryCandidates 的 JOIN），停用的条目匹配不上 ——
+// 列出来等于给用户一个选了就失效的选项。
+const fallbackModelOptions = computed(() =>
+  form.models
+    .filter((m) => m.enabled && m.public_name.trim())
+    .map((m) => ({ value: m.public_name.trim(), label: m.public_name.trim() }))
+)
 
 async function save() {
   if (!form.name.trim() || !form.base_url.trim()) {
@@ -279,6 +315,18 @@ async function save() {
   if (!models) return
   if (!models.length) {
     message.warning('请至少填一个模型：没有白名单的渠道不会参与任何路由')
+    return
+  }
+  // 默认模型映射的两个必填关系（后端也会拦，但等一个来回再报错体验差得多）：
+  // 开关开着必须有模型名；指定的模型必须在白名单里 —— 兜底请求靠它去匹配
+  // 白名单行，配不上就不会生效，那正是本功能要消灭的「配了没反应」
+  const defaultModel = form.default_model.trim()
+  if (form.default_model_enabled && !defaultModel) {
+    message.warning('开了「默认模型映射」就要选一个默认模型：不选的话这个开关不会生效')
+    return
+  }
+  if (defaultModel && !models.some((m) => m.public_name === defaultModel)) {
+    message.warning('默认模型「' + defaultModel + '」不在白名单里：请先把它加进白名单')
     return
   }
   saving.value = true
@@ -943,11 +991,24 @@ onBeforeUnmount(() => {
             <!-- 列宽有限，装不下的模型名走省略号，完整清单放 title（悬停可见）：
                  模型目录现在只存在于这些白名单里，列表是最常用的查看入口 -->
             <span v-else class="model-names" :title="(record.models || []).join('、')">
-              {{ (record.models || []).join('、') }}
+              <!-- 模型名先截断，给后面的状态标记让位：这一列只有 200px，
+                   名字长起来会把标记整个挤出单元格（单元格是 ellipsis 的，
+                   溢出的部分直接看不见）。完整清单在悬停的 title 里 -->
+              <span class="model-names-text">{{ (record.models || []).join('、') }}</span>
               <!-- 漏配价的后果是这笔调用被记成 0 元，而账面上完全看不出异常，
                    所以这里必须点名，而不是等用户自己去核对 -->
               <span v-if="record.unpriced_count" class="unpriced-hint">
                 {{ record.unpriced_count }} 个未定价
+              </span>
+              <!-- 兜底标记：只写短名、映射放 title，与「名称」列的代理胶囊
+                   同一处理 —— 具体兜到哪个模型是细节，这里先回答
+                   「这条渠道会不会接白名单外的请求」 -->
+              <span
+                v-if="record.fallback_model"
+                class="fallback-hint"
+                :title="'白名单没命中的请求会改用 ' + record.fallback_model + ' 发给上游'"
+              >
+                兜底
               </span>
             </span>
           </template>
@@ -1248,6 +1309,35 @@ onBeforeUnmount(() => {
           </a-col>
         </a-row>
 
+        <a-form-item>
+          <template #label>
+            默认模型映射
+            <a-tooltip title="打开后，白名单没精确命中的请求一律改用这里指定的模型发给上游。适合 Claude Code 这类会自己挑模型名的客户端：以后它换模型名或版本号，都不必回来改白名单。">
+              <InfoCircleOutlined class="label-hint" />
+            </a-tooltip>
+          </template>
+          <div class="switch-row">
+            <a-switch v-model:checked="form.default_model_enabled" />
+            <span class="switch-hint">
+              白名单没命中的请求改用它接单；精确命中的仍按白名单走
+            </span>
+          </div>
+          <div v-if="form.default_model_enabled" class="fallback-model-row">
+            <!-- 用下拉而不是自由输入：兜底靠「白名单里正好有这个名字」匹配，
+                 自由输入能配出匹配不上的名字，那是个配了不生效的假象 -->
+            <a-select
+              v-model:value="form.default_model"
+              placeholder="选一个白名单里的模型"
+              :options="fallbackModelOptions"
+              show-search
+            />
+            <div class="switch-hint">
+              客户端的模型名仍会记进日志，可用它分辨哪些请求是被兜底接下的；
+              费用按所选模型的单价计算。
+            </div>
+          </div>
+        </a-form-item>
+
         <a-form-item required>
           <template #label>
             模型白名单与映射
@@ -1367,6 +1457,11 @@ onBeforeUnmount(() => {
 /* 开关与它的说明同一行：开关只有 16px 高，下面再单起一行说明太浪费 */
 .switch-row { display: flex; align-items: center; gap: 8px; height: 32px; }
 .switch-hint { font-size: 12px; color: var(--color-text-secondary); }
+/* 默认模型映射的模型选择行：下拉占一行，说明文字换到下一行。
+   说明里那句「费用按所选模型的单价计算」点出了这个设置的第二层影响，
+   挤在开关同一行会被省略号截掉（与白名单抽屉里的说明同一个处理） */
+.fallback-model-row { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.fallback-model-row .switch-hint { line-height: 1.6; }
 /* 白名单抽屉的说明块：用左侧一道主色竖线代替整块告警底色。
    这句话是「怎么填」的说明，不是需要警惕的异常状态；用 a-alert 会得到
    一整块主题色底 + 图标，在抽屉里比它要说明的表格还抢眼 */
@@ -1405,7 +1500,21 @@ onBeforeUnmount(() => {
   line-height: 20px;
   white-space: nowrap;
 }
-.model-names { color: var(--color-text); }
+/* 「模型」列：模型名与状态标记共处一格。用 flex 让名字先被压缩，
+   标记（未定价 / 兜底）保持完整 —— 否则名字一长就把标记挤出 200px 的
+   单元格，而单元格是 ellipsis 的，挤出去的部分直接看不见 */
+.model-names {
+  display: flex;
+  align-items: center;
+  color: var(--color-text);
+  min-width: 0;
+}
+.model-names-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
 /* 上游协议那一列：行内块自己截断（原因见模板里的注释） */
 .proto-name {
   display: inline-block;
@@ -1433,6 +1542,19 @@ onBeforeUnmount(() => {
   background: color-mix(in oklab, var(--color-orange) 15%, transparent);
   color: var(--color-orange);
   font-size: 12px;
+}
+/* 兜底映射用主色而不是橙色：橙色是「这里缺东西」（未定价、探测失败），
+   而兜底是用户主动配好的一项能力，不是待办。
+   只写短名「兜底」，兜到哪个模型放 title —— 与「名称」列的代理胶囊同一处理 */
+.fallback-hint {
+  flex: none;
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--color-primary) 13%, transparent);
+  color: var(--text-primary-ink);
+  font-size: 12px;
+  white-space: nowrap;
 }
 .muted { color: var(--color-text-secondary); }
 .disabled { color: var(--color-text-secondary); cursor: not-allowed; }

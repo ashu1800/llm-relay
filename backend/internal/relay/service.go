@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -253,10 +254,64 @@ func (s *Service) availableModelsHint(ctx context.Context, req *RelayRequest) st
 	if err := q.Order("channel_models.public_name").Limit(12).Pluck("channel_models.public_name", &names).Error; err != nil {
 		return ""
 	}
-	if len(names) == 0 {
-		return "；当前范围内没有任何渠道配置模型白名单，请到「渠道管理」里给渠道加上模型"
+	return modelsHintText(names, s.brokenFallbackCount(ctx, req))
+}
+
+// brokenFallbackCount 数出范围内「开了默认模型映射但不会生效」的渠道。
+//
+// 这种半残状态（开关开着、模型名没填，或填的名字不在它自己的白名单里）在
+// 请求失败时的表现与「完全没配」一模一样 —— 用户对着渠道列表看半天也找不出
+// 差在哪。保存接口会拦它，但直接改库、导入旧备份都可能留下它，
+// 所以在失败提示里点名。
+//
+// **只数「开关真的开着」的**：开关明确关掉是用户的决定，不是配置坏掉。
+// 把「关着」也算进来会变成误报，而反复误报的提示会让人开始整体忽略它。
+// 开关的判据用 lower(btrim(...)) 与 Go 侧的 truthyFlag 对齐
+// （jsonb 的 true 与字符串 "true" 取出来都是 'true'，大小写不保证）。
+func (s *Service) brokenFallbackCount(ctx context.Context, req *RelayRequest) int {
+	q := s.router.db.WithContext(ctx).
+		Table("channels").
+		Joins("JOIN channel_groups ON channel_groups.id = channels.group_id AND channel_groups.enabled = true").
+		Where("channels.enabled = true").
+		Where("lower(btrim(channels.extra_config->>'default_model_enabled')) = 'true'").
+		// 把「已配齐」的排除掉，剩下的就是半残的。
+		// 用 NOT EXISTS 而不是 LEFT JOIN ... IS NULL：只关心条数，
+		// EXISTS 的语义更直接，也不必担心后续加列时把 NULL 判断写漏
+		Where(`NOT EXISTS (
+			SELECT 1 FROM channel_models cm
+			WHERE cm.channel_id = channels.id AND cm.enabled = true
+			  AND cm.public_name = channels.extra_config->>'default_model'
+		)`)
+	if req.GroupID > 0 {
+		q = q.Where("channels.group_id = ?", req.GroupID)
 	}
-	return "；当前范围内可用的模型有 " + strings.Join(names, "、")
+	if len(req.AllowedGroups) > 0 {
+		q = q.Where("channels.group_id IN ?", req.AllowedGroups)
+	}
+	var n int64
+	if err := q.Count(&n).Error; err != nil {
+		return 0
+	}
+	return int(n)
+}
+
+// modelsHintText 拼装「没有可用渠道」时的补充说明。
+//
+// 抽成纯函数是为了能直接断言文案（这个包没有 DB 测试环境）。
+func modelsHintText(names []string, brokenFallback int) string {
+	var b strings.Builder
+	if len(names) == 0 {
+		b.WriteString("；当前范围内没有任何渠道配置模型白名单，请到「渠道管理」里给渠道加上模型")
+	} else {
+		b.WriteString("；当前范围内可用的模型有 " + strings.Join(names, "、"))
+	}
+	if brokenFallback > 0 {
+		// 与上面那句并置而不替换：半残渠道可能与正常渠道同时存在，
+		// 只报其中一种会让用户以为另一种也没问题
+		b.WriteString("。另有 " + strconv.Itoa(brokenFallback) +
+			" 条渠道开了「默认模型映射」但不会生效（没填模型名，或填的名字不在它自己的白名单里）")
+	}
+	return b.String()
 }
 
 // Relay 执行转发，按候选顺序做故障转移。

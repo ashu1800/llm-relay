@@ -262,6 +262,16 @@ type RequestLog struct {
 	UpstreamProto  string `gorm:"size:32" json:"upstream_protocol"`
 	ModelRequested string `gorm:"size:128;index" json:"model_requested"`
 	ModelUpstream  string `gorm:"size:128" json:"model_upstream"`
+	// FallbackMapped 表示这次调用是被渠道的「默认模型映射」接下的：
+	// ModelRequested 是客户端请求的名字（没命中任何白名单），
+	// ModelUpstream 才是真正发给上游的默认模型名。
+	//
+	// 这个标记是**唯一的发现途径**：开了兜底之后，客户端把模型名写错
+	// 也不再得到 502（会被兜底悄悄接走），只有靠它才能回答
+	// 「有多少请求其实没命中白名单」。**刻意不带 gorm default** ——
+	// 带默认值的 bool 在零值时会被 GORM 从 INSERT 里整列省掉（见
+	// api/channels_test.go 的 TestBooleanFieldsHaveNoGormDefault）。
+	FallbackMapped bool `json:"fallback_mapped"`
 	// ThinkingLevel 是入站请求体里思考参数的归一档位
 	// （off/minimal/low/medium/high/on/auto，见 relay.ExtractThinkingLevel）。
 	// 空串 = 请求没带思考参数 —— 不是「关」，是「没说」，前端据此显示 —。

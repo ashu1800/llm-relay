@@ -257,6 +257,13 @@ function thinkingColor(level?: string) {
   return THINKING_COLORS[level] ?? '#8c8c8c'
 }
 
+// 兜底胶囊的颜色。用紫色：它不在思考档位的九色里（那九色各自已有明确语义），
+// 也不与「未定价」的橙色系撞车 —— 橙色在全站的含义是「这里缺东西、待处理」，
+// 而兜底是用户主动配好的一项能力，不是待办。
+// 与 .think-pill 共用胶囊形态，于是「模型列里第三个小胶囊」在扫列表时
+// 能被认出是同一类状态标记，而不是模型名的一部分。
+const FALLBACK_COLOR = '#722ed1'
+
 /** 行的 class 由「是否刚新增」决定；antd 在它自己的渲染里调用它，读到的依赖归它 */
 function rowClassName(record: RequestLog) {
   return freshIds.value.has(record.id) ? 'is-new' : ''
@@ -754,6 +761,18 @@ onMounted(() => {
                 class="think-pill"
                 :style="{ '--pill-color': thinkingColor(record.thinking_level) }"
               >{{ record.thinking_level }}</span>
+              <!-- 兜底胶囊：这条请求的模型名没命中白名单，是渠道的默认模型映射
+                   接下的（真正发给上游的是 model_upstream）。
+                   必须显眼 —— 开了兜底之后客户端写错模型名也不再报错，
+                   这个标记是发现「其实没命中」的唯一途径。
+                   颜色借用思考档位里最低调的那一档同款（灰），不抢主信息，
+                   但形状与位置让它在扫列表时能被一眼扫到。 -->
+              <span
+                v-if="record.fallback_mapped"
+                class="think-pill"
+                :style="{ '--pill-color': FALLBACK_COLOR }"
+                :title="'模型名没命中白名单，已改用 ' + (record.model_upstream || '默认模型') + ' 请求上游'"
+              >兜底</span>
             </span>
           </template>
         </a-table-column>
@@ -931,6 +950,15 @@ onMounted(() => {
         <a-descriptions-item label="上游模型">
           <GroupTag v-if="current.model_upstream" :name="current.model_upstream" v-bind="tagColorOf(current.group_id)" />
           <template v-else>-</template>
+          <!-- 两个模型名不一样时必须解释「为什么」，否则看着像串了数据。
+               兜底是其中最常见的原因：客户端请求的模型名没命中白名单，
+               渠道用它的默认模型接单（见渠道管理的「默认模型映射」）。
+               另一处提示放在这里而不是单独列一项：它修饰的正是上面这个
+               「上游模型」值，分开写会让人以为是两件无关的事 -->
+          <div v-if="current.fallback_mapped" class="fallback-note">
+            模型名没命中白名单，经渠道的「默认模型映射」改用
+            {{ current.model_upstream || '默认模型' }} 请求上游；费用按它的单价计算
+          </div>
         </a-descriptions-item>
         <a-descriptions-item label="思考等级">
           <span v-if="current.thinking_level" class="think-pill" :style="{ '--pill-color': thinkingColor(current.thinking_level) }">{{ current.thinking_level }}</span>
@@ -1187,6 +1215,16 @@ onMounted(() => {
 }
 :root[data-theme='dark'] .think-pill {
   color: color-mix(in oklab, var(--tp) 55%, white);
+}
+
+/* 兜底说明：跟在上游模型那一项下面的一行解释。
+   用次要色且不加底色 —— 它是「为什么这两个值不一样」的解题过程，
+   不是告警（请求本身成功了），抢眼会让人以为出了问题 */
+.fallback-note {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
 }
 
 /* 错误原文：详情里唯一保留的代码块（排障时最常看的就是上游报错） */
