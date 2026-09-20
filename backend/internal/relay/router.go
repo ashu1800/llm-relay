@@ -80,7 +80,10 @@ func NewRouter(db *gorm.DB, cipher *secure.Cipher) *Router {
 // CandidateQuery 是一次候选渠道查询的条件。
 type CandidateQuery struct {
 	PublicModel string
-	// GroupID > 0 时只在该分组内选择，分组策略也取它的
+	// GroupID > 0 时只在该分组内选择，分组策略也取它的。
+	// 注意：生产链路（service.Relay）目前只传白名单、不传分组 ——
+	// 这个条件当前只有测试在用，保留它是 router 作为查询引擎的 API
+	// 完整性；真要暴露「请求级指定分组」，从 service 层把参数接进来。
 	GroupID uint
 	// AllowedGroups 非空时只在这些分组内选择（来自密钥白名单）
 	AllowedGroups []uint

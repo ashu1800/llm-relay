@@ -21,6 +21,9 @@ import (
 // 模型目录不单独维护：它就是「启用渠道的启用白名单条目」的并集，
 // 与路由用的是同一份数据 —— 列表里有、请求却调不通（或反过来）是不可能出现的。
 // 密钥配了分组白名单时只列那些分组里的模型，否则客户端会看到一堆自己调不了的模型。
+// 模型白名单同理：配了 allowed_models 就只列其中的 —— 原来这里只落实了
+// 分组那一半，模型这一半漏着，客户端（Claude Code、Cursor 都靠这个接口
+// 探测）看到的仍是全量，选中才被 403。
 func (s *Server) listModels(c *gin.Context) {
 	q := s.deps.Store.DB().Table("channel_models").
 		Distinct("channel_models.public_name").
@@ -43,6 +46,18 @@ func (s *Server) listModels(c *gin.Context) {
 		// 同样不能把原始 DB 错误回显出去（表名、列名、被拒数据都在里面）。
 		writeInternalError(c, err)
 		return
+	}
+	// 模型白名单在内存里过滤而不是拼进 SQL：判据必须与拦截请求的
+	// modelAllowed 完全同一份（relay_handler 里就是它在 403），
+	// 两处各写一个查询条件迟早漂移成「列表里有、一调就被拒」。
+	if key := apiKeyFromContext(c); key != nil && len(key.AllowedModels) > 0 {
+		filtered := make([]string, 0, len(names))
+		for _, n := range names {
+			if modelAllowed(key.AllowedModels, n) {
+				filtered = append(filtered, n)
+			}
+		}
+		names = filtered
 	}
 	now := time.Now().Unix()
 	data := make([]gin.H, 0, len(names))

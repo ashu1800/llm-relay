@@ -194,7 +194,7 @@ function confirmDelete(row: ChannelGroup) {
   Modal.confirm({
     centered: true,
     title: '确认删除分组',
-    content: '删除后不可恢复。若分组下仍有渠道或模板，后端会拒绝删除并说明原因。',
+    content: '删除后不可恢复。若分组下仍有渠道、或仍被密钥的分组白名单引用，后端会拒绝删除并说明原因。',
     okType: 'danger',
     async onOk() {
       try {

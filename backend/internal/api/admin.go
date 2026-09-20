@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -832,6 +833,60 @@ func (s *Server) resolveGroupWhitelist(list model.StringList) ([]uint, error) {
 	return ids, nil
 }
 
+// normalizeGroupRefs 把提交上来的密钥分组白名单归一化成**分组 ID 字符串**。
+//
+// 写入侧的统一出口。条目历史上存的是分组名（前端直接提交 g.name）：
+// 分组一改名，引用它的密钥就全体 403，界面上毫无征兆 —— 那正是这次改造
+// 要消灭的状态。从今往后库里只存 ID，与渠道的 group_id 同一待遇；
+// 名字条目仍被接受（老客户端、手工调用 API），但在保存前就换成 ID。
+//
+// 解析不了一条就报错而不是静默丢弃（与渠道接口的 checkGroupExists 对称）：
+// 保存时发现「分组不存在」，比调用时才发现 403 便宜得多。
+func (s *Server) normalizeGroupRefs(list model.StringList) (model.StringList, error) {
+	db := s.deps.Store.DB()
+	resolve := func(item string) (uint, error) {
+		var g model.ChannelGroup
+		if n, err := strconv.ParseUint(item, 10, 32); err == nil {
+			if err := db.First(&g, uint(n)).Error; err != nil {
+				return 0, fmt.Errorf("分组白名单里的 ID %s 不存在", item)
+			}
+			return g.ID, nil
+		}
+		if err := db.Where("name = ?", item).First(&g).Error; err != nil {
+			return 0, fmt.Errorf("分组白名单里的「%s」不是现有分组（可能已被删除）", item)
+		}
+		return g.ID, nil
+	}
+	return normalizeGroupRefList(list, resolve)
+}
+
+// normalizeGroupRefList 是归一化的纯函数核心（resolve 注入「条目 → 分组 ID」
+// 的解析，查库与测试替身各一份）。抽出来是因为本包测试没有 DB 环境，
+// 而这段规则（去空白、名字换 ID、去重、失败即报错）值得锁住不让人改漂。
+func normalizeGroupRefList(list model.StringList, resolve func(item string) (uint, error)) (model.StringList, error) {
+	if len(list) == 0 {
+		return list, nil
+	}
+	out := make(model.StringList, 0, len(list))
+	seen := map[uint]bool{}
+	for _, raw := range list {
+		item := strings.TrimSpace(raw)
+		if item == "" {
+			continue
+		}
+		id, err := resolve(item)
+		if err != nil {
+			return nil, err
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, strconv.FormatUint(uint64(id), 10))
+	}
+	return out, nil
+}
+
 // deleteByID 删除主表行，并按 RowsAffected 区分「删掉了」与「本来就没有」。
 //
 // 原来五个删除接口对不存在的 ID 一律返回 {"deleted":true}，调用方（含前端）
@@ -1434,6 +1489,14 @@ func (s *Server) deleteGroup(c *gin.Context) {
 	}
 	db := s.deps.Store.DB()
 
+	// 先把分组行取出来：密钥引用检查要用它的名字（老数据的白名单里存的
+	// 是名字），顺带在删除前就区分「分组不存在」
+	var gr model.ChannelGroup
+	if err := db.First(&gr, id).Error; err != nil {
+		writeUpstreamError(c, http.StatusNotFound, "分组不存在", "not_found_error")
+		return
+	}
+
 	// 原来写的是 err == nil && count > 0：查询失败时条件为假，
 	// 于是「查不出来」被当成「没有渠道占用」，直接把一个仍在使用的分组删掉。
 	// 查不出来就不该往下删。
@@ -1444,6 +1507,32 @@ func (s *Server) deleteGroup(c *gin.Context) {
 	}
 	if count > 0 {
 		writeUpstreamError(c, http.StatusConflict, "该分组下仍有渠道，请先迁移", "invalid_request_error")
+		return
+	}
+	// 密钥白名单里的引用同样要拦。曾经这里不查：删掉分组后，引用它的密钥
+	// 每次请求都 403（白名单解析失败），界面上却只显示「分组已删除」。
+	// 白名单条目现在统一存 ID，但老数据与导入的备份里可能还是名字，
+	// 两种形态都要匹配上 —— 漏掉名字形态的话，这个守卫对老库形同虚设。
+	//
+	// 用 jsonb 的 @> 而不是把整列读回内存过滤：名字里的引号由 json.Marshal
+	// 负责转义，参数化也顺带把 SQL 注入的路堵死。
+	var refKeys []model.APIKey
+	idJSON, _ := json.Marshal([]string{strconv.FormatUint(uint64(id), 10)})
+	nameJSON, _ := json.Marshal([]string{gr.Name})
+	if err := db.Where("allowed_groups @> ?::jsonb", string(idJSON)).
+		Or("allowed_groups @> ?::jsonb", string(nameJSON)).
+		Find(&refKeys).Error; err != nil {
+		writeInternalError(c, err)
+		return
+	}
+	if len(refKeys) > 0 {
+		names := make([]string, 0, len(refKeys))
+		for _, k := range refKeys {
+			names = append(names, k.Name)
+		}
+		writeUpstreamError(c, http.StatusConflict,
+			fmt.Sprintf("该分组仍被 %d 把密钥的分组白名单引用（%s），请先在「密钥信息」里清理",
+				len(refKeys), strings.Join(names, "、")), "invalid_request_error")
 		return
 	}
 	if s.deps.GroupLimit != nil {
@@ -1497,6 +1586,14 @@ func (s *Server) createKey(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, "name 必填", "invalid_request_error")
 		return
 	}
+	// 分组白名单在这里校验并归一化成 ID：这里不拦，打错的名字会静默入库，
+	// 直到某次调用 403 才暴露 —— 渠道接口的分组预检（checkGroupExists）
+	// 早就是这个待遇，密钥这边补齐
+	groupRefs, err := s.normalizeGroupRefs(p.AllowedGroups)
+	if err != nil {
+		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
+	}
 	plain, err := secure.GenerateAPIKey()
 	if err != nil {
 		writeInternalError(c, err)
@@ -1509,7 +1606,7 @@ func (s *Server) createKey(c *gin.Context) {
 	}
 	k := model.APIKey{
 		Name: p.Name, KeyHash: secure.HashKey(plain), KeyEnc: enc, KeyPrefix: plain[:11],
-		Enabled: true, AllowedModels: p.AllowedModels, AllowedGroups: p.AllowedGroups,
+		Enabled: true, AllowedModels: p.AllowedModels, AllowedGroups: groupRefs,
 	}
 	if p.Enabled != nil {
 		k.Enabled = *p.Enabled
@@ -1555,7 +1652,14 @@ func (s *Server) updateKey(c *gin.Context) {
 		updates["allowed_models"] = p.AllowedModels
 	}
 	if p.AllowedGroups != nil {
-		updates["allowed_groups"] = p.AllowedGroups
+		// 与创建同一条归一化路径：更新时换进来一个打错的名字，表现应该
+		// 与创建时一样当场被拦，而不是先收下、调用时再 403
+		groupRefs, err := s.normalizeGroupRefs(p.AllowedGroups)
+		if err != nil {
+			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+			return
+		}
+		updates["allowed_groups"] = groupRefs
 	}
 	if len(updates) == 0 {
 		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")

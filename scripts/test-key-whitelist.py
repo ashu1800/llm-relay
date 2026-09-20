@@ -105,21 +105,24 @@ def cleanup():
     # 模型不再有独立接口：删掉渠道时白名单会跟着级联清除
     _, gs = call("GET", "/groups")
     for g in gs.get("items", []):
-        if g["name"] == GROUP_B:
+        if g["name"] in (GROUP_A, GROUP_B):
             call("DELETE", "/groups/%d" % g["id"])
+
+
+# 分组A 提到 cleanup 之前定义：cleanup 一上来就要按名字清上一轮的残留
+GROUP_A = "分组A-测试"
 
 
 cleanup()
 
 print("=== 准备：两个分组各一个渠道，同一模型都绑上 ===")
-_, gs = call("GET", "/groups")
-# 白名单里要写**实际默认分组的名字**，不能写死 "默认分组"：
-# 默认分组是用户可以在界面上改的（实测把它改成 DeepSeek 之后，
-# 这条用例就以 502 失败，看起来像路由坏了，实际是探针假设过时了）。
-# 名字与 id 必须来自同一行记录，否则渠道建在 A 分组、白名单指向 B 分组。
-default_group = [g for g in gs["items"] if g.get("is_default")][0]
-default_gid = default_group["id"]
-default_name = default_group["name"]
+# 「分组A」也自建（GROUP_A 已在 cleanup 前定义）：库里可能根本没有
+# is_default 的分组 —— 用户删掉默认或取消标记之后，旧写法假设它
+# 一定存在，直接 IndexError 中断。
+# 白名单条目仍写名字 —— 保存时后端会归一化成分组 ID，正好顺路验证那条路径
+_, ga = call("POST", "/groups", {"name": GROUP_A})
+default_gid = ga["id"]
+default_name = GROUP_A
 _, gb = call("POST", "/groups", {"name": GROUP_B, "strategy": "weighted"})
 gb_id = gb["id"]
 # 两个分组各建一个测试渠道，都指向同一个可控上游。
@@ -127,12 +130,12 @@ gb_id = gb["id"]
 # 失败会与白名单无关地混进来，让结论不可信。
 _, ca = call("POST", "/channels", {
     "name": CHAN_A, "protocol": "openai-chat",
-    "base_url": "http://slow-upstream:9999/v1", "api_key": "k",
+    "base_url": "http://127.0.0.1:9997/v1", "api_key": "k",
     "group_id": default_gid, "weight": 100,
 })
 _, cb = call("POST", "/channels", {
     "name": CHAN_B, "protocol": "openai-chat",
-    "base_url": "http://slow-upstream:9999/v1", "api_key": "k",
+    "base_url": "http://127.0.0.1:9997/v1", "api_key": "k",
     "group_id": gb_id, "weight": 100,
 })
 ca_id, cb_id = ca["id"], cb["id"]
@@ -159,11 +162,12 @@ chk("限定分组B的密钥能调通", 200, code)
 chk("命中分组B的渠道", CHAN_B, last_channel())
 
 print()
-print("=== 2. 白名单解析不出来时必须拒绝，不能放行 ===")
+print("=== 2. 白名单解析不出来时必须在创建时就拒绝 ===")
+# 写入侧归一化（api.normalizeGroupRefs）之后，不存在的分组在保存瞬间
+# 就被拦下 —— 以前是先收下、调用时才 403，打错的名字静默入库
 _, c = call("POST", "/keys", {"name": "k-bad", "allowed_groups": ["这个分组不存在"]})
-code, body = chat(c["key"])
-chk("分组不存在时拒绝请求", 403, code)
-print("       说明: %s" % body.get("error", {}).get("message", body))
+chk("分组不存在时创建被拒", 400, c.get("error", {}).get("code", c))
+print("       说明: %s" % c.get("error", {}).get("message", c))
 
 print()
 print("=== 3. 模型白名单 ===")

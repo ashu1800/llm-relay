@@ -57,10 +57,14 @@ async function load() {
   }
 }
 
-// 分组白名单的候选项：用分组名作为值，用户也可以自己输入别的值
-/** 按分组名取颜色：密钥白名单存的是名字，不是 ID */
-function groupColorByName(name: string) {
-  return groups.value.find((g) => g.name === name)?.color
+// 分组白名单条目的解析：条目统一是分组 ID（保存时后端归一化），但老数据、
+// 导入的备份里可能还是名字 —— 数字先按 ID 找，找不到再按名字找一次，
+// 都找不到的就是悬空引用（分组已删），界面上要能看出来而不是显示一个裸 ID
+function groupRefInfo(ref: string): { label: string; color?: string; missing: boolean } {
+  const g =
+    groups.value.find((x) => String(x.id) === ref) ?? groups.value.find((x) => x.name === ref)
+  if (g) return { label: g.name, color: g.color, missing: false }
+  return { label: ref, missing: true }
 }
 
 // 密钥明文：按需从后端解密，取到后缓存在内存里。
@@ -153,7 +157,14 @@ function openEdit(row: APIKey) {
   form.rate_limit_rpm = row.rate_limit_rpm
   form.enabled = row.enabled
   form.allowed_models = [...(row.allowed_models || [])]
-  form.allowed_groups = [...(row.allowed_groups || [])]
+  // 白名单条目换成分组 ID（受控多选的值）：库里老条目可能是名字，
+  // 能解析就换，解析不了的（悬空引用）原样带着 —— 保存时后端会报错指出它
+  form.allowed_groups = (row.allowed_groups || []).map((ref) => {
+    const g =
+      groups.value.find((x) => String(x.id) === ref) ??
+      groups.value.find((x) => x.name === ref)
+    return g ? String(g.id) : ref
+  })
   createdKey.value = ''
   modalOpen.value = true
 }
@@ -386,14 +397,19 @@ onMounted(() => {
           <template #default="{ record }">
             <span v-if="!(record.allowed_groups || []).length" class="muted">不限</span>
             <span v-else class="group-tag-list">
-              <!-- 白名单存的是分组名，颜色要去分组表里按名字取，
-                   与分组管理、渠道列表用的是同一份颜色 -->
-              <GroupTag
-                v-for="g in record.allowed_groups"
-                :key="g"
-                :name="g"
-                :color="groupColorByName(g)"
-              />
+              <!-- 条目是分组 ID（颜色与名字去分组表里解析），与分组管理、
+                   渠道列表用的是同一份颜色。悬空引用（分组已删）单独标出来：
+                   那种条目会让这把密钥调用时 403，不能只显示一个裸 ID -->
+              <template v-for="ref in record.allowed_groups" :key="ref">
+                <GroupTag
+                  v-if="!groupRefInfo(ref).missing"
+                  :name="groupRefInfo(ref).label"
+                  :color="groupRefInfo(ref).color"
+                />
+                <a-tooltip v-else :key="ref + '-missing'" :title="'引用的分组已不存在：' + ref + '（这会让该密钥调用时被拒，请编辑密钥清掉它）'">
+                  <span class="group-ref-missing">{{ ref }}</span>
+                </a-tooltip>
+              </template>
             </span>
           </template>
         </a-table-column>
@@ -504,15 +520,17 @@ onMounted(() => {
           <div class="field-hint">留空表示不限制；填了则只有列表内的模型可以被这把密钥调用。</div>
         </a-form-item>
         <a-form-item label="允许使用的分组">
+          <!-- 受控多选而不是自由输入的 tags：值是分组 ID，选项就是现有分组。
+               以前存名字 + 允许任意输入，打错的名字静默入库，分组一改名
+               还会把引用它的密钥全体打断 —— 现在保存前就在这份选项里选 -->
           <a-select
             v-model:value="form.allowed_groups"
-            mode="tags"
-            :token-separators="[',', '，']"
-            placeholder="选择分组名，或直接输入分组名 / 分组 ID"
+            mode="multiple"
+            placeholder="选择允许使用的分组"
           >
-            <a-select-option v-for="g in groups" :key="g.id" :value="g.name">{{ g.name }}</a-select-option>
+            <a-select-option v-for="g in groups" :key="g.id" :value="String(g.id)">{{ g.name }}</a-select-option>
           </a-select>
-          <div class="field-hint">留空表示不限制；可选分组名或分组 ID，也支持下拉里没有的取值。</div>
+          <div class="field-hint">留空表示不限制。按分组记录、不受分组改名影响；引用的分组被删除时调用会被拒绝并提示。</div>
         </a-form-item>
         <a-form-item label="启用">
           <a-switch v-model:checked="form.enabled" />
@@ -597,6 +615,18 @@ onMounted(() => {
 .key-pill:hover .key-copy { opacity: 0.75; }
 
 .group-tag-list { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+/* 悬空的分组引用：分组已删、条目还在。用红字虚线框与正常胶囊区分 ——
+   它不是一种正常的白名单状态，留着它这把密钥调用时会被整体拒绝 */
+.group-ref-missing {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px dashed var(--color-red, #cf1322);
+  border-radius: var(--radius-control);
+  color: var(--color-red, #cf1322);
+  font-size: 12px;
+  line-height: 20px;
+  cursor: help;
+}
 .key-box {
   display: flex;
   align-items: center;

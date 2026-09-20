@@ -92,7 +92,7 @@ fi
 # 真的解析不到时，依赖它的用例（如 test-live.sh）自己会失败并给出原因。
 RESOLVED=no
 for i in $(seq 1 5); do
-  if docker exec llm-relay sh -c 'wget -qO- -T 3 http://slow-upstream:9999/stats' >/dev/null 2>&1; then
+  if docker exec llm-relay sh -c 'wget -qO- -T 3 http://127.0.0.1:9997/stats' >/dev/null 2>&1; then
     RESOLVED=yes
     break
   fi
@@ -105,7 +105,7 @@ echo "慢速上游就绪"
 echo
 
 # python 用例：统一以 ALL_PASS 作为通过标志
-for s in test-group-update.py test-key-whitelist.py test-delete-semantics.py \
+for s in test-group-update.py test-key-whitelist.py test-key-group-refs.py test-delete-semantics.py \
          test-accept-encoding.py test-log-filters.py test-stats-filters.py test-csrf.py; do
   echo "########## $s ##########"
   out=$(python3 "scripts/$s" 2>&1)

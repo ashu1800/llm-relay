@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -389,6 +390,41 @@ func (s *Server) importConfig(c *gin.Context) {
 			report.Warnings = append(report.Warnings,
 				"密钥 "+k.Name+" 缺少哈希无法恢复，需要重新签发")
 			continue
+		}
+		// 分组白名单必须跟着映射：条目存的是**备份库**的分组 ID（更老的备份
+		// 里是名字），与本机同名分组的 ID 几乎一定不同 —— 不映射的话，
+		// 恢复出来的白名单会指向本机的另一个分组（静默指错，比悬空更糟：
+		// 限制还在、限的是别人）或不存在的分组（一调用就 403）。
+		// 数字条目只认 groupIDMap：备份里的 ID 3 在本机往往是别的分组，
+		// 拿它直接查本库等于主动指错。名字条目（老备份）按名字查。
+		// 都映射不到的条目丢弃并写进报告 —— 限制虽然变宽，但报告点名了它，
+		// 比「看起来恢复成功、一调用就 403」可见得多。
+		if len(k.AllowedGroups) > 0 {
+			refs := model.StringList{}
+			for _, raw := range k.AllowedGroups {
+				item := strings.TrimSpace(raw)
+				if item == "" {
+					continue
+				}
+				mapped := false
+				if n, err := strconv.ParseUint(item, 10, 32); err == nil {
+					if nid, ok := groupIDMap[uint(n)]; ok {
+						refs = append(refs, strconv.FormatUint(uint64(nid), 10))
+						mapped = true
+					}
+				} else {
+					var g model.ChannelGroup
+					if err := db.Where("name = ?", item).First(&g).Error; err == nil {
+						refs = append(refs, strconv.FormatUint(uint64(g.ID), 10))
+						mapped = true
+					}
+				}
+				if !mapped {
+					report.Warnings = append(report.Warnings,
+						"密钥 "+k.Name+" 的分组白名单条目「"+item+"」在本机没有对应分组，该条限制已移除")
+				}
+			}
+			k.AllowedGroups = refs
 		}
 		var exist model.APIKey
 		if err := db.Where("key_hash = ?", k.KeyHash).First(&exist).Error; err == nil {

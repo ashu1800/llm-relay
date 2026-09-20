@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	"gorm.io/driver/postgres"
@@ -89,6 +91,12 @@ func (s *Store) Migrate() error {
 		&model.Setting{},
 	); err != nil {
 		return fmt.Errorf("数据库迁移失败: %w", err)
+	}
+	// 密钥的分组白名单从「存名字」收敛成「存 ID」：必须在 AutoMigrate 之后
+	// （keys 表得先存在），放在这里而不是 Seed 里，因为它是一次性的数据
+	// 修复，与种子数据无关
+	if err := s.normalizeKeyGroupRefs(); err != nil {
+		return err
 	}
 	slog.Info("数据库迁移完成")
 	return nil
@@ -356,6 +364,68 @@ func (s *Store) normalizeGroupStrategies() error {
 	}
 	if res.RowsAffected > 0 {
 		slog.Info("分组路由策略已从「加权随机」迁移为「顺序故障转移」", "分组数", res.RowsAffected)
+	}
+	return nil
+}
+
+// normalizeKeyGroupRefs 把密钥分组白名单里的**名字**条目归一化成分组 ID。
+//
+// 老版本的密钥白名单存分组名（前端直接提交 g.name）：分组一改名，引用它的
+// 密钥全体 403，界面上毫无征兆。写入侧现在统一走 api.normalizeGroupRefs
+// 只存 ID，这段一次性迁移把库里还剩的名字条目换成 ID —— 幂等：条目全是
+// 数字时什么都不做，跑多少遍都安全。
+//
+// 解析不了的名字（分组已删）**保留原样**：把它删掉等于静默放宽该密钥的
+// 权限（白名单少了一条限制），运行期 resolveGroupWhitelist 会继续把这种
+// 悬空引用如实报成 403。只留一条 Warn 日志，让问题在日志里可见。
+func (s *Store) normalizeKeyGroupRefs() error {
+	var keys []model.APIKey
+	if err := s.db.Find(&keys).Error; err != nil {
+		return fmt.Errorf("读取密钥失败: %w", err)
+	}
+	for _, k := range keys {
+		if len(k.AllowedGroups) == 0 {
+			continue
+		}
+		changed := false
+		out := make(model.StringList, 0, len(k.AllowedGroups))
+		seen := map[string]bool{}
+		keep := func(item string) {
+			if !seen[item] {
+				seen[item] = true
+				out = append(out, item)
+			}
+		}
+		for _, raw := range k.AllowedGroups {
+			item := strings.TrimSpace(raw)
+			if item == "" {
+				changed = true // 空条目顺手清掉
+				continue
+			}
+			// 已是 ID 形态：原样保留，存在性交给运行期解析去查
+			// （这里再查一遍库只会让启动多 N 次 SELECT，换不来新信息）
+			if _, err := strconv.ParseUint(item, 10, 32); err == nil {
+				keep(item)
+				continue
+			}
+			var g model.ChannelGroup
+			if err := s.db.Where("name = ?", item).First(&g).Error; err != nil {
+				slog.Warn("密钥分组白名单里的名字解析不了，保留原样（分组可能已删除或改名）",
+					"key_id", k.ID, "key", k.Name, "ref", item)
+				keep(item)
+				continue
+			}
+			changed = true
+			keep(strconv.FormatUint(uint64(g.ID), 10))
+		}
+		if !changed {
+			continue
+		}
+		if err := s.db.Model(&model.APIKey{}).Where("id = ?", k.ID).
+			Update("allowed_groups", out).Error; err != nil {
+			return fmt.Errorf("归一化密钥 %d 的分组白名单失败: %w", k.ID, err)
+		}
+		slog.Info("密钥分组白名单已归一化为分组 ID", "key_id", k.ID, "key", k.Name, "refs", out)
 	}
 	return nil
 }

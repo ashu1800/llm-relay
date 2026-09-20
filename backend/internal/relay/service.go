@@ -132,11 +132,15 @@ type RelayRequest struct {
 	InboundProto string
 	UpstreamPath string
 	PublicModel  string
-	// GroupID > 0 时只在该分组内选渠道，并用该分组的策略
-	GroupID uint
 	// AllowedGroups 是密钥上的分组白名单（已解析成分组 ID）。
-	// 非空时只在这些分组内选渠道；与 GroupID 是「与」的关系。
-	// 空表示不限制 —— 与没有配白名单是两种状态，不要混为一谈。
+	// 非空时只在这些分组内选渠道；空表示不限制 —— 与没有配白名单是
+	// 两种状态，不要混为一谈。
+	//
+	// 曾经还有一个 GroupID 字段（「请求级指定分组」），但它从没有任何
+	// 生产调用方设置过 —— relay_handler 构造 RelayRequest 时只填白名单，
+	// 于是 noChannelReason / 提示查询里那些 GroupID 分支全是死代码，
+	// 还让「分组策略到底归谁管」看起来比实际复杂。删掉了；真要暴露
+	// 请求级分组，届时连同策略归属一起设计，别再留半截。
 	AllowedGroups []uint
 	// Body 是归一化后发给上游的载荷；InboundBody 是客户端原始报文，仅用于留存排障
 	Body        []byte
@@ -217,15 +221,9 @@ var ErrRequestUnsupported = convert.ErrUnsupportedContent
 // 完全看不出是密钥限制导致的，而这种失败往往出现在改完密钥配置之后，
 // 排查时最容易怀疑到别处去。
 func (req *RelayRequest) noChannelReason() string {
-	switch {
-	case len(req.AllowedGroups) > 0 && req.GroupID > 0:
-		return fmt.Sprintf("模型 %s 在分组 %d 与限定分组 %v 的交集内没有可用渠道",
-			req.PublicModel, req.GroupID, req.AllowedGroups)
-	case len(req.AllowedGroups) > 0:
+	if len(req.AllowedGroups) > 0 {
 		return fmt.Sprintf("模型 %s 在密钥限定的分组 %v 内没有可用渠道",
 			req.PublicModel, req.AllowedGroups)
-	case req.GroupID > 0:
-		return fmt.Sprintf("模型 %s 在分组 %d 内没有可用渠道", req.PublicModel, req.GroupID)
 	}
 	return "模型 " + req.PublicModel
 }
@@ -243,9 +241,6 @@ func (s *Service) availableModelsHint(ctx context.Context, req *RelayRequest) st
 		Joins("JOIN channels ON channels.id = channel_models.channel_id AND channels.enabled = true").
 		Joins("JOIN channel_groups ON channel_groups.id = channels.group_id AND channel_groups.enabled = true").
 		Where("channel_models.enabled = true")
-	if req.GroupID > 0 {
-		q = q.Where("channels.group_id = ?", req.GroupID)
-	}
 	if len(req.AllowedGroups) > 0 {
 		q = q.Where("channels.group_id IN ?", req.AllowedGroups)
 	}
@@ -311,9 +306,6 @@ func (s *Service) fallbackChannelIDs(req *RelayRequest) []uint {
 		Where("lower(btrim(channels.extra_config->>'default_model_enabled')) = 'true'").
 		Where("channels.enabled = true").
 		Where("channel_groups.enabled = true")
-	if req.GroupID > 0 {
-		q = q.Where("channels.group_id = ?", req.GroupID)
-	}
 	if len(req.AllowedGroups) > 0 {
 		q = q.Where("channels.group_id IN ?", req.AllowedGroups)
 	}
@@ -336,9 +328,6 @@ func (s *Service) channelIDsForModel(req *RelayRequest) []uint {
 		Where("channel_models.public_name = ?", req.PublicModel).
 		Where("channels.enabled = true").
 		Where("channel_groups.enabled = true")
-	if req.GroupID > 0 {
-		q = q.Where("channels.group_id = ?", req.GroupID)
-	}
 	if len(req.AllowedGroups) > 0 {
 		q = q.Where("channels.group_id IN ?", req.AllowedGroups)
 	}
@@ -374,9 +363,6 @@ func (s *Service) brokenFallbackCount(ctx context.Context, req *RelayRequest) in
 			WHERE cm.channel_id = channels.id AND cm.enabled = true
 			  AND cm.public_name = channels.extra_config->>'default_model'
 		)`)
-	if req.GroupID > 0 {
-		q = q.Where("channels.group_id = ?", req.GroupID)
-	}
 	if len(req.AllowedGroups) > 0 {
 		q = q.Where("channels.group_id IN ?", req.AllowedGroups)
 	}
@@ -472,7 +458,6 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 	// 推一格，带 3 次重试的请求让游标跳 4 格，轮转分布被故障转移流量扭曲。
 	allCands, err := s.router.Candidates(ctx, CandidateQuery{
 		PublicModel:   req.PublicModel,
-		GroupID:       req.GroupID,
 		AllowedGroups: req.AllowedGroups,
 	})
 	if err != nil {

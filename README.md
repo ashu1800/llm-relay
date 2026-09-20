@@ -97,6 +97,12 @@
   不足 1 秒仍按毫秒显示（见 `docs/ui-spec.md` 第 6 条）
 - **限流与并发**：密钥级每分钟配额、渠道并发上限、全局在途闸门；上游 429 按
   `Retry-After` 自动冷却并切走，不再把已限流的上游打得更惨
+- **密钥 → 分组的强一致引用**：密钥白名单里存**分组 ID**（与渠道的 `group_id`
+  同一待遇），保存时逐条校验存在性 —— 分组改名不再打断任何密钥（曾经白名单
+  存分组名，改名即全体 403，界面上毫无征兆）；删除分组前检查密钥引用，仍被
+  引用时 409 并点名密钥。`/v1/models` 同时按密钥的**模型白名单**过滤 ——
+  客户端探测到的就是它能调的，不会选一个就被 403 一次。老数据在启动时
+  自动迁移（名字条目换算成 ID，幂等；解析不了的保留原样并在日志里点名）
 - **故障转移**：上游返回任何非 2xx 状态码都立即切到候选链的下一个渠道；
   客户端主动断开（手动结束推理）除外 —— 收件人已不在，换渠道重发没有意义，
   也不会把这种失败记到渠道头上。429 按 `Retry-After` 冷却、401/403 冷却 30 秒；
@@ -504,6 +510,7 @@ Harding 不含中文字形，会一路回退到 `--font-family-base`）。
 |---|---|
 | `test-regression.sh` | 全部管理接口 + 四种协议端点连通性 |
 | `test-ratelimit.sh` | 密钥级 RPM 放行/拒绝、`Retry-After` |
+| `test-key-group-refs.py` | 密钥分组白名单存 ID、不存在引用创建即 400、`/v1/models` 按模型白名单过滤、删分组检查密钥引用 |
 | `test-payload.sh` | 报文留存三档模式与凭据脱敏 |
 | `test-pricing-filter.sh` | 渠道列表的「未定价」计数 |
 | `test-pricing-rules.sh` | 时段倍率优先于固定倍率、跨午夜窗口、最后一条生效 |
@@ -521,8 +528,9 @@ Harding 不含中文字形，会一路回退到 `--font-family-base`）。
 | `purge-test-logs.sh` | 清掉验证脚本产生的请求日志（否则会污染看板的今日统计） |
 
 另有一批 python 用例（`test-group-update.py`、`test-key-whitelist.py`、
-`test-delete-semantics.py`、`test-accept-encoding.py`、`test-log-filters.py`、
-`test-csrf.py`），覆盖分组更新、密钥白名单、删除语义、压缩协商、
+`test-key-group-refs.py`、`test-delete-semantics.py`、`test-accept-encoding.py`、
+`test-log-filters.py`、`test-csrf.py`），覆盖分组更新、密钥白名单（分组引用
+形态与模型过滤）、删除语义、压缩协商、
 日志筛选与同源校验。
 
 ### 在 Windows 上跑这些脚本：`scripts/wsl-bash.psm1`
