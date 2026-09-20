@@ -45,6 +45,8 @@ func ShouldStorePayload(mode string, status int) bool {
 
 // Truncate 按上限截断报文。
 // 结尾会明确标注被截断，避免看到半截 JSON 误判成上游返回了非法内容。
+// 按 rune 截而不是字节：多字节字符被切一半会产生非法 UTF-8，
+// 写 Postgres 直接报错，这条报文就丢了（恰是排障最需要的那条）。
 func Truncate(b []byte, maxBytes int) string {
 	if maxBytes <= 0 {
 		maxBytes = DefaultPayloadMaxBytes
@@ -52,7 +54,7 @@ func Truncate(b []byte, maxBytes int) string {
 	if len(b) <= maxBytes {
 		return string(b)
 	}
-	return string(b[:maxBytes]) + "\n…（内容超过留存上限，已截断）"
+	return TruncateRunes(string(b), maxBytes) + "\n…（内容超过留存上限，已截断）"
 }
 
 // BuildPayload 组装一条待留存的报文；当前模式不需要留存时返回 nil。

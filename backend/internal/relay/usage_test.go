@@ -112,3 +112,18 @@ func TestSlotAvailableCrossMidnight(t *testing.T) {
 		t.Fatal("空时段配置应视为全天可用")
 	}
 }
+
+// Gemini 原生 usageMetadata 直达 NormalizeUsage（上游响应体转换失败、
+// 原样透传的回退路径）时，cachedContentTokenCount 必须按子集型扣减 ——
+// 漏认会让缓存读双计（一次含在 prompt 里、一次记在 cached 里）。
+func TestNormalizeUsageGeminiNativeIsSubset(t *testing.T) {
+	u := NormalizeUsage(map[string]any{
+		"promptTokenCount": 100, "candidatesTokenCount": 20, "cachedContentTokenCount": 60,
+	})
+	if u.PromptTokens != 40 {
+		t.Fatalf("prompt 应扣减缓存部分为 40，实际 %d（双计）", u.PromptTokens)
+	}
+	if u.CachedTokens != 60 {
+		t.Fatalf("cached 应为 60，实际 %d", u.CachedTokens)
+	}
+}

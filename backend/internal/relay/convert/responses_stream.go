@@ -2,6 +2,7 @@ package convert
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 )
@@ -44,6 +45,8 @@ type ResponsesStreamTranslator struct {
 	// stopReason 暂存上游最后一帧的 finish_reason：收尾要按它区分
 	// completed / incomplete —— 恒报 completed 会把截断伪装成完整回复
 	stopReason string
+	// aborted 保证错误事件只发一次（与 Anthropic 改写器同理）
+	aborted bool
 }
 
 // NewResponsesTranslator 按是否流式返回对应的改写器。
@@ -80,6 +83,14 @@ func (t *ResponsesStreamTranslator) handleChunk(payload []byte) error {
 	var chunk map[string]any
 	if err := json.Unmarshal(payload, &chunk); err != nil {
 		return nil // 无法解析的分片直接忽略，不要打断整个流
+	}
+	// 上游在流内主动报错：发 response.failed 型错误事件，
+	// 绝不补 response.completed 让截断伪装成完成
+	if msg, isErr := upstreamErrorOf(chunk); isErr {
+		if err := t.Abort(msg); err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: %s", ErrUpstreamReported, msg)
 	}
 	if !t.started {
 		if err := t.emitCreated(chunk); err != nil {
@@ -351,6 +362,10 @@ func (t *ResponsesStreamTranslator) emitCreated(chunk map[string]any) error {
 // 原来中断时走的是 Close，会补出 response.completed，
 // 客户端据此认为回复完整 —— 截断被伪装成成功。
 func (t *ResponsesStreamTranslator) Abort(reason string) error {
+	if t.aborted {
+		return nil
+	}
+	t.aborted = true
 	return writeSSE(t.w, "error", map[string]any{
 		"type":    "error",
 		"code":    "upstream_error",

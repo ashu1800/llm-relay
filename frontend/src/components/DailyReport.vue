@@ -26,7 +26,8 @@ type Report = {
     costs: Record<string, string>
   }
   top_model: { model: string; requests: number }
-  priciest: { model: string; channel: string; cost: string; currency: string }
+  /** 每币种一条：不同币种的金额不能比大小，各自选自己的最贵 */
+  priciest: { model: string; channel: string; cost: string; currency: string }[]
 }
 
 const SHOWN_KEY = 'llm-relay-daily-report-shown'
@@ -110,11 +111,15 @@ function fmtTokens(n: number) {
   return String(n ?? 0)
 }
 
-const priciestText = computed(() => {
-  const p = report.value?.priciest
-  if (!p || !p.model) return ''
-  const cur = p.currency || 'USD'
-  return `${symbolOf(cur)}${Number(p.cost).toFixed(4)} · ${p.model}${p.channel ? ' @ ' + p.channel : ''}`
+const priciestLines = computed(() => {
+  const list = report.value?.priciest || []
+  // 单币种站点保持原样一行；两种币各自一行，互不比较、不合成"全场最贵"
+  return list
+    .filter((p) => p.model)
+    .map((p) => {
+      const cur = p.currency || 'USD'
+      return `${symbolOf(cur)}${Number(p.cost).toFixed(4)} · ${p.model}${p.channel ? ' @ ' + p.channel : ''}`
+    })
 })
 </script>
 
@@ -158,9 +163,9 @@ const priciestText = computed(() => {
             {{ report.top_model.model }}（{{ report.top_model.requests }} 次）
           </span>
         </div>
-        <div v-if="priciestText" class="report-line">
-          最贵一单
-          <span class="report-strong">{{ priciestText }}</span>
+        <div v-if="priciestLines.length" class="report-line">
+          {{ priciestLines.length > 1 ? '最贵一单（按币种）' : '最贵一单' }}
+          <span class="report-strong">{{ priciestLines.join('　') }}</span>
         </div>
       </template>
 

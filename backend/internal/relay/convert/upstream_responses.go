@@ -207,20 +207,22 @@ func openAIMessagesToResponses(v any) (string, []any, error) {
 		}
 		// assistant 发起的工具调用要拆成 function_call 事件，紧跟在该消息之后
 		if calls, ok := m["tool_calls"].([]any); ok {
-			for _, c := range calls {
+			for i, c := range calls {
 				call := asMap(c)
 				if call == nil {
 					continue
 				}
 				fn := asMap(call["function"])
+				// call_id 为空时上游会拒，按调用序号造一个 ——
+				// 原来兜底取的还是同一个空 id，等于没兜
+				callID := asString(call["id"])
+				if callID == "" {
+					callID = fmt.Sprintf("call_%d", i)
+				}
 				item := map[string]any{
 					"type":    "function_call",
-					"call_id": asString(call["id"]),
+					"call_id": callID,
 					"name":    asString(fnName(fn)),
-				}
-				// call_id 为空时上游会拒，退回用 id 兜底
-				if asString(item["call_id"]) == "" {
-					item["call_id"] = asString(call["id"])
 				}
 				args := asString(fnArgs(fn))
 				if args == "" {

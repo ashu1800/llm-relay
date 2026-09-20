@@ -140,6 +140,55 @@ func openAICand(baseURL string) Candidate {
 	}
 }
 
+// 上游在错误响应体里回报 usage 时（如 context-length-exceeded 的 400），
+// Attempt 必须把它提取出来 —— 上游对这部分 token 是真收费的，
+// 失败路径全部记 0 会让成本统计与预算提醒系统性偏低。
+func TestErrorBodyUsageIsExtracted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"This model's maximum context length is 128000 tokens.","type":"invalid_request_error"},"usage":{"prompt_tokens":128563,"completion_tokens":0,"total_tokens":128563}}`))
+	}))
+	defer srv.Close()
+
+	fwd := NewForwarder(5*time.Second, 5*time.Second)
+	att, err := fwd.Do(context.Background(), openAICand(srv.URL), "/v1/chat/completions",
+		[]byte(`{"model":"public","messages":[{"role":"user","content":"hi"}]}`),
+		http.Header{}, false)
+	if err != nil {
+		t.Fatalf("4xx 应答不报错（由调用方决定转移），实际 %v", err)
+	}
+	if att.StatusCode != 400 {
+		t.Fatalf("状态码应为 400，实际 %d", att.StatusCode)
+	}
+	if !att.HasUsage {
+		t.Fatal("错误体里的 usage 应被提取（HasUsage）")
+	}
+	if att.Usage.PromptTokens != 128563 || att.Usage.TotalTokens != 128563 {
+		t.Fatalf("用量应为 128563，实际 %+v", att.Usage)
+	}
+}
+
+// 错误体里没有 usage 时维持零值 —— 不臆造消耗。
+func TestErrorBodyWithoutUsageStaysZero(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad key"}}`))
+	}))
+	defer srv.Close()
+
+	fwd := NewForwarder(5*time.Second, 5*time.Second)
+	att, err := fwd.Do(context.Background(), openAICand(srv.URL), "/v1/chat/completions",
+		[]byte(`{"model":"public","messages":[{"role":"user","content":"hi"}]}`),
+		http.Header{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if att.HasUsage {
+		t.Fatalf("无 usage 的错误体不应标记 HasUsage，实际 %+v", att.Usage)
+	}
+}
+
 // 客户端主动断开（手动结束推理）后，fwd.Do 以错误收场，且外层 ctx 已取消 ——
 // 这正是 Relay 里豁免故障转移的判定条件（ctx.Err() != nil）。
 // 钉住它：如果哪天取消不再传播到错误返回，豁免就会悄悄失效，

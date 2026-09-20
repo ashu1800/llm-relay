@@ -37,27 +37,27 @@ func TestLogWriterQueueStatsWater(t *testing.T) {
 
 // 满队投递：装不下的必须被计数（不是静默消失）。
 // 丢弃计数是看板「已丢 N 条」的来源，少计一条，统计就多一分没人知道的黑洞。
+//
+// 不启动消费协程（直接构造 LogWriter 而不是 newTestWriter）：
+// 曾经用 newTestWriter(2) 连投 10 条断言「至少丢 8」，依赖「投递期间
+// loop 来不及腾出队列位」的时序假设 —— 不带 -race 时成立，带上就偶发
+// 失败（实测连挂 6 次）：消费协程中途腾位后，成功入队可以远大于容量。
+// 没有消费者时队列行为才是确定的：容量 2、连投 10 条，恰好丢 8、
+// 水位恰为 2，断言因此从「至少」收紧到「恰好」。
+// 消费协程与丢弃计数互不相干（各条 Enqueue 独立原子计数），
+// 「有 loop 在跑」时的水位语义由上面的 Water 测试覆盖。
 func TestLogWriterQueueStatsDroppedWhenFull(t *testing.T) {
-	w := newTestWriter(2)
-	defer w.Close()
+	w := &LogWriter{queue: make(chan queuedLog, 2), capacity: 2}
 
-	// 先把队列灌满再投递溢出的：loop 可能并发消费，所以不用固定条数断言，
-	// 而是投到「必然溢出」为止 —— 队列容量 2，连投 10 条，至少 8 条入不了队。
-	// 每条入不了队的都会走 warnDropped → dropped + 1。
 	for i := 0; i < 10; i++ {
 		w.Enqueue(mustLog(i), nil)
 	}
-	// loop 消费（失败）需要一点时间；丢弃计数单调不减，等一轮再读，
-	// 避免「断言时还没投满」的竞态
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if w.QueueStats().Dropped >= 8 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("灌 10 条进容量 2 的队列，累计丢弃应至少 8，实际 %d", w.QueueStats().Dropped)
-		}
-		time.Sleep(10 * time.Millisecond)
+	st := w.QueueStats()
+	if st.Dropped != 8 {
+		t.Fatalf("灌 10 条进容量 2 的队列，累计丢弃应恰好 8，实际 %d", st.Dropped)
+	}
+	if st.Queued != 2 {
+		t.Fatalf("无人消费时队列水位应恰为容量 2，实际 %d", st.Queued)
 	}
 }
 

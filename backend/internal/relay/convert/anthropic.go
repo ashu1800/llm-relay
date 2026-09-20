@@ -73,6 +73,7 @@ func AnthropicRequestToOpenAIChat(body []byte) ([]byte, error) {
 		var textParts []any
 		var toolCalls []any
 		var toolResults []any
+		var privateBlocks []any
 
 		for _, b := range blocks {
 			blk := asMap(b)
@@ -112,6 +113,15 @@ func AnthropicRequestToOpenAIChat(body []byte) ([]byte, error) {
 				}
 				carryCacheControl(result, blk)
 				toolResults = append(toolResults, result)
+			default:
+				// thinking / redacted_thinking / document 以及未来的新块类型：
+				// OpenAI 通用语没有对应物，原样收进消息级私有容器（见
+				// anthropicBlocksKey），出站还是 Anthropic 时按原顺序还原。
+				//
+				// thinking 不能丢：Anthropic 要求带 tool_use 的 assistant 轮
+				// 回传思维链块（含 signature），丢了上游直接 400；
+				// redacted_thinking 的 data、document 的 source 同理原样保真。
+				privateBlocks = append(privateBlocks, blk)
 			}
 		}
 
@@ -120,12 +130,16 @@ func AnthropicRequestToOpenAIChat(body []byte) ([]byte, error) {
 		// 顺序反了上游会直接报「tool 消息必须回应前面的 tool_calls」。
 		messages = append(messages, toolResults...)
 
-		// 纯 tool_result 的回合不应再产生一条空的 user 消息
-		if len(textParts) == 0 && len(toolCalls) == 0 {
+		// 纯 tool_result 的回合不应再产生一条空的 user 消息；
+		// 带私有块（如整条 PDF document）的回合必须保留
+		if len(textParts) == 0 && len(toolCalls) == 0 && len(privateBlocks) == 0 {
 			continue
 		}
 
 		msg := map[string]any{"role": role}
+		if len(privateBlocks) > 0 {
+			msg[anthropicBlocksKey] = privateBlocks
+		}
 		// 只有一个 text 块时收成纯字符串，报文更简单、上游兼容性也更好。
 		// 但它带着 cache_control 时必须保留数组形态 —— 收成字符串就把
 		// 缓存断点丢了，而断点通常正好落在最后一条 user 消息上。
@@ -223,6 +237,22 @@ const cacheControlKey = "cache_control"
 // 发给其它上游前随 stripCacheControl 一起清掉。
 const anthropicParamsKey = "anthropic_params"
 
+// anthropicBlocksKey 是通用语里承载 Anthropic 私有**内容块**的消息级附加字段，
+// 与 anthropicParams 同一思路，但装的是消息里的块而非请求级配置：
+// thinking / redacted_thinking（assistant 轮的思维链与加密思维链）、
+// document（user 轮的 PDF 输入），以及 OpenAI 通用语没有对应物的其它新块。
+//
+// 为什么必须暂存而不是丢弃：
+//   - Anthropic 要求带 tool_use 的 assistant 轮回传 thinking 块（signature
+//     原样），丢了上游直接 400 —— Claude Code 在思考 + 工具调用场景每轮都在回传；
+//   - document 丢了等于 PDF 输入被「模型无视」，客户端毫无感知。
+//
+// 块内所有字段（含 signature / source / cache_control）原样保真，
+// 出站目标还是 Anthropic 时还原到该消息内容块的最前（thinking 必须在
+// tool_use 之前，见 upstream_anthropic.go 的 prependAnthropicBlocks）；
+// 发给其它上游前随 stripCacheControl 一起清掉。
+const anthropicBlocksKey = "anthropic_blocks"
+
 // carryAnthropicParams 把 Anthropic 特有顶层参数抄进通用语的私有字段。
 func carryAnthropicParams(dst, src map[string]any) {
 	if dst == nil || src == nil {
@@ -266,7 +296,7 @@ func takeCacheControl(blk map[string]any) map[string]any {
 }
 
 // stripCacheControl 递归移除通用语里的私有附加字段（cache_control 与
-// anthropic_params）。
+// anthropic_params、anthropic_blocks）。
 //
 // 用于出站目标是「非 Anthropic」协议的场景：那些上游不认识这些字段，
 // 严格校验的实现会直接 400。与其赌它被忽略，不如主动清掉。
@@ -275,6 +305,7 @@ func stripCacheControl(v any) any {
 	case map[string]any:
 		delete(t, cacheControlKey)
 		delete(t, anthropicParamsKey)
+		delete(t, anthropicBlocksKey)
 		for _, sub := range t {
 			stripCacheControl(sub)
 		}
@@ -289,21 +320,40 @@ func stripCacheControl(v any) any {
 	}
 }
 
-// flattenToolResult 把工具结果的内容块拍平成文本。
-func flattenToolResult(v any) string {
+// flattenToolResult 把工具结果的内容转换成 OpenAI 的 tool 消息 content。
+//
+// 纯文本（最常见）返回字符串，报文最简；含图片块时返回多模态数组
+// （text / image_url 与入站 image 块同一通用形态）—— 工具返回截图时
+// 拍平成空字符串会让模型按「空结果」继续推理，看起来正常、实际缺数据。
+func flattenToolResult(v any) any {
 	switch c := v.(type) {
 	case string:
 		return c
 	case []any:
-		var parts []string
+		var texts []string
+		var rich []any
+		hasImage := false
 		for _, item := range c {
-			if blk := asMap(item); blk != nil {
-				if asString(blk["type"]) == "text" {
-					parts = append(parts, asString(blk["text"]))
+			blk := asMap(item)
+			if blk == nil {
+				continue
+			}
+			switch asString(blk["type"]) {
+			case "text":
+				texts = append(texts, asString(blk["text"]))
+				rich = append(rich, map[string]any{"type": "text", "text": asString(blk["text"])})
+			case "image":
+				if part := anthropicImageToOpenAI(blk); part != nil {
+					rich = append(rich, part)
+					hasImage = true
 				}
 			}
 		}
-		return strings.Join(parts, "\n")
+		if !hasImage {
+			// 无图片时保持字符串形态：与旧行为逐字节一致，不放大报文
+			return strings.Join(texts, "\n")
+		}
+		return rich
 	default:
 		return ""
 	}

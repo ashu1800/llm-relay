@@ -322,11 +322,23 @@ func (t *UsageTee) mergeUsage(u Usage) {
 }
 
 // BuildClient 构造上游 HTTP 客户端。流式请求不能设整体超时，只能约束握手阶段。
+//
+// CheckRedirect 返回 ErrUseLastResponse：上游回 30x 时把响应**原样**交回
+// 故障转移链（3xx 属于异常，见 Attempt.Retryable 的对照表），而不是让
+// Go 默认行为接管 —— 默认跟随会把 POST 降级成 GET、丢掉请求体，
+// 上游若真把 POST 重定向到 GET 端点，客户端收到的是一次语义全错的
+// 「成功」。Proxy 显式为 nil：直连渠道必须真直连，HTTP_PROXY 之类的
+// 环境变量会静默接管出站路径 —— 与「代理不可用绝不静默回退直连」
+// 正好是反向的漏洞（配了直连却被环境变量带去走代理）。
+// 需要走代理的渠道由 clientFor 用渠道配置的代理单独构造，不经这里。
 func BuildClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout: 0,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 		Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
+			Proxy:                 nil,
 			MaxIdleConns:          100,
 			MaxIdleConnsPerHost:   20,
 			IdleConnTimeout:       90 * time.Second,

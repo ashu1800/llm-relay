@@ -133,6 +133,11 @@ func (s *Server) StartLive(ctx context.Context) {
 	statsKick := make(chan struct{}, 1)
 	go s.liveStatsLoop(ctx, statsKick)
 	go s.liveLogsLoop(ctx, statsKick)
+	// 预算检查独立成循环：它挂在 statsKick 上（花费只随新日志变化，
+	// 天然不空转），但**不看订阅者数** —— 预算是记账面告警，
+	// 不是看板附属品。没人开着看板时超支提醒迟到可以接受
+	//（下次连上看板就补喊），但整体静默不行。
+	go s.budgetLoop(ctx, statsKick)
 }
 
 // liveStatsLoop 每 2 秒算一次今日汇总，变了才推。
@@ -185,10 +190,6 @@ func (s *Server) liveStatsLoop(ctx context.Context, kick <-chan struct{}) {
 			}
 		}
 		start, end, _ := resolveRange("today")
-		// 预算检查与统计同一拍、同一份时间范围：有新日志才醒，
-		// 跨过 80%/100% 档位时广播 budget_alert（每天每档一次，
-		// 见 budget.go —— 只提醒不拦截是站主拍板的策略）
-		s.checkBudgets(ctx, start, end)
 		qctx, cancel := context.WithTimeout(ctx, liveQueryTimeout)
 		// 零值筛选 = 全站：推送的视角固定是「今天 + 未筛选」，
 		// 前端只在同样视角下才合并它（见 DashboardView 的 onLive）
@@ -205,6 +206,33 @@ func (s *Server) liveStatsLoop(ctx context.Context, kick <-chan struct{}) {
 		}
 		lastSent = string(encoded)
 		s.deps.Live.broadcast(mustJSON(liveMessage{Type: "stats", Data: data}))
+	}
+}
+
+// budgetLoop 独立跑预算检查：被 statsKick 叫醒（有新日志，花费才可能变），
+// 外加 60 秒兜底节拍（兜住跨天清零与 kick 被合并掉的时刻）。
+//
+// 与 liveStatsLoop 的关键区别：**不看订阅者数**。统计推送没人看就是纯浪费，
+// 可以跳过；但预算提醒「当天没人开看板就整体静默」是功能失效 ——
+// 提醒本身经 WebSocket 广播，没人连时它自然无处可去，可去重状态在内存里，
+// 有人连上看板后 liveSocket 的首帧补发机制会让他看到当前花费。
+//
+// 注意 statsKick 有**两个**消费者（liveStatsLoop 与本循环各在 select 里等
+// 同一个通道）：一个 kick 信号只会唤醒其中之一 —— 统计与预算各自最多隔
+// 一个节拍才轮到，这正是 60 秒兜底 ticker 存在的理由之一（另一个是
+// 跨天清零这类不随新日志发生的变化）。
+func (s *Server) budgetLoop(ctx context.Context, kick <-chan struct{}) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		case <-kick:
+		}
+		start, end, _ := resolveRange("today")
+		s.checkBudgets(ctx, start, end)
 	}
 }
 

@@ -86,6 +86,45 @@ const total = ref(0)
 const detailOpen = ref(false)
 const current = ref<RequestLog | null>(null)
 
+// ---- 模型列宽随内容自适应（站主 2026-09-20 要求：按当前页最宽的模型调）----
+//
+// 定宽的问题：240px 是「超长模型名 + 思考 + 兜底」三个胶囊齐飞的最坏预留，
+// 站里模型名都短（glm-5.3 一类），多出的大半是空白；收窄到 190 又会在
+// 换一批模型名更长的日志后重新出现截断。所以改成**量了再定**。
+//
+// 做法：rows 渲染完成后（nextTick）直接量表格里 .model-cell 的 scrollWidth，
+// 取最大值加内边距（antd 小表格单元格里左右各 8px，再留 6px 给省略号与
+// 边框的呼吸），clamp 到 [120, 300]：
+//   - 下限 120：模型列至少装得下表头两个字 + 一个短名（claude-3-5 一类），
+//     否则全是「gpt-5」这样的短名时列窄得像被压扁了；
+//   - 上限 300：极端长名（几十字符的内部代号）不值得让整行跟着横向变长，
+//     超出部分交给 ellipsis + 悬停 title。
+// 列宽在 rows 变化后重算（翻页/换筛选/首屏的整批替换，以及实时推送插行——
+// 后者也触发 watch，但 >=2px 阈值 + 内容只会单向变宽保证了无抖动，等于
+// 免费的增量修正）。列宽一抖所有行的扫光位置全要重排，所以阈值卡得较宽。
+const MODEL_COL_MIN = 120
+const MODEL_COL_MAX = 300
+const modelColWidth = ref(190)
+const modelColTotal = computed(() => 155 + 64 + modelColWidth.value + 130 + 150 + 120 + 90 + 100 + 64)
+
+function remeasureModelColumn() {
+  const wrap = tableWrap.value
+  if (!wrap) return
+  let max = 0
+  wrap.querySelectorAll('.ant-table-tbody .model-cell').forEach((el) => {
+    // 量的是内容（含胶囊），而单元格此刻可能因旧列宽更宽 —— scrollWidth
+    // 在 inline-flex + nowrap 下就是「装下全部内容需要的宽度」
+    const w = (el as HTMLElement).scrollWidth
+    if (w > max) max = w
+  })
+  if (max === 0) return
+  const want = max + 16 + 6
+  const clamped = Math.min(MODEL_COL_MAX, Math.max(MODEL_COL_MIN, want))
+  // 只在整数像素级变化时写：1px 的抖动不值得触发一次表格重排
+  if (Math.abs(clamped - modelColWidth.value) >= 2) modelColWidth.value = clamped
+}
+watch(rows, () => nextTick(remeasureModelColumn))
+
 // ---- 新日志的扫光（那条彩虹只为「刚插进来的行」而闪）----
 //
 // 存的是「正在做入场动画的行 id」，命中就给这一行加 is-new（一个纯标记的类，
@@ -713,11 +752,11 @@ onMounted(() => {
            操作列 72 -> 64 是「详情」文字链接改成图标按钮那一次
            （见模板里那一列上方的注释）。
            思考等级 2026-09-18 并入模型列（独立 80px 列删除）：胶囊贴在模型名
-           后面，「用什么模型、什么强度思考」一行读完；腾出的 80px 连同余量
-           给模型列（155 -> 240，要装下模型 tag + 胶囊），scroll.x 随之
-           1108 -> 1113。
-           改动列宽时这张表的总宽要一起看（模板里 scroll.x 的声明值 =
-           各列宽度之和，155+240+130+150+120+90+64+100+64 = 1113） -->
+           后面，「用什么模型、什么强度思考」一行读完。
+           2026-09-20 模型列改为**按当前页内容自适应**（站主要求以页内最长的
+           模型定宽）：初始 190，rows 渲染后量 .model-cell 的最宽内容并
+           clamp 到 [120, 300]（见 remeasureModelColumn），超出部分 ellipsis。
+           其余列保持定宽；scroll.x 由 modelColTotal 随之联动。 -->
       <!-- 外面这层只为扫光存在：亮带是这一层里的绝对定位元素，表格内部
            一个字节都不动（原因见脚本里 fxTargets 的注释 —— 往 tr 里加伪元素会让
            列宽塌回声明宽度）。overflow: hidden 是兜底：亮带永远不该撑出滚动条。
@@ -732,7 +771,7 @@ onMounted(() => {
           :row-class-name="rowClassName"
           row-key="id"
           size="small"
-          :scroll="{ x: 1113, y: TABLE_BODY_Y }"
+          :scroll="{ x: modelColTotal, y: TABLE_BODY_Y }"
         >
         <template #emptyText>
           <a-empty :description="emptyText" />
@@ -740,10 +779,18 @@ onMounted(() => {
         <a-table-column title="请求时间" :width="155" fixed="left">
           <template #default="{ record }">{{ fmtTime(record.created_at) }}</template>
         </a-table-column>
+        <!-- 状态列提到模型前（站主 2026-09-20 要求）：先看到「这单成没成」
+             再看「是哪个模型的单」，失败密集时视线不用横穿整行。
+             一个「200」仍是整行里最先被扫到的信号。 -->
+        <a-table-column title="状态" :width="64">
+          <template #default="{ record }">
+            <a-tag :color="statusColor(record.status_code)">{{ record.status_code }}</a-tag>
+          </template>
+        </a-table-column>
         <!-- 模型名带 ellipsis：不加的话长模型名会在这里折成两三行，
              把整行从 40px 顶到 98px（50 行就是 5000px 的页面）；
              完整名字悬停可见，详情里也有 -->
-        <a-table-column title="模型" :width="240" ellipsis>
+        <a-table-column title="模型" :width="modelColWidth" ellipsis>
           <template #default="{ record }">
             <!-- 模型、密钥两处用的是同一个组件与同一个颜色：
                  它们描述的是「这次请求属于哪个分组」，颜色因此必须一致。
@@ -876,16 +923,8 @@ onMounted(() => {
         <a-table-column title="费用" :width="90">
           <template #default="{ record }">{{ fmtCost(record.estimated_cost, record.cost_currency) }}</template>
         </a-table-column>
-        <!-- 状态与密钥排在最后：列表自左向右读下来是
-             「什么时候 → 哪个模型 → 哪条渠道 → 花了多少 → 结果如何」，
-             一个「200」夹在模型和渠道中间会打断这条线。
-             密钥特意跟着状态一起挪：它俩本来就是一问一答（哪把密钥、结果如何），
-             拆开放到两处反而要来回找 -->
-        <a-table-column title="状态" :width="64">
-          <template #default="{ record }">
-            <a-tag :color="statusColor(record.status_code)">{{ record.status_code }}</a-tag>
-          </template>
-        </a-table-column>
+        <!-- 密钥留在队尾（状态已提前到时间之后）：列表自左向右读下来是
+             「什么时候 → 结果如何 → 哪个模型 → 哪条渠道 → 花了多少 → 哪把密钥」 -->
         <a-table-column title="密钥" :width="100" ellipsis>
           <template #default="{ record }">
             <GroupTag v-if="record.api_key_name" :name="record.api_key_name" v-bind="tagColorOf(record.group_id)" />
@@ -981,6 +1020,23 @@ onMounted(() => {
         </a-descriptions-item>
         <a-descriptions-item label="重试">
           {{ current.retry_count > 0 ? '重试 ' + current.retry_count + ' 次' : '无' }}
+        </a-descriptions-item>
+        <!-- 故障转移链路：每次失败尝试的渠道、状态码与用量。
+             失败尝试的 token 上游可能照收（context-length-exceeded 的 400 就是
+             典型），但主词元只记最终那次成功/最终应答 —— 账面对不上上游账单
+             时先看这里，差额多半是这些失败尝试的消耗 -->
+        <a-descriptions-item v-if="(current.retry_trail?.steps?.length || 0) > 0" label="失败链路">
+          <div class="trail-list">
+            <div v-for="(s, i) in current.retry_trail!.steps" :key="i" class="trail-row">
+              <span class="trail-idx">{{ i + 1 }}</span>
+              <span class="trail-ch">{{ s.channel_name || '#' + s.channel_id }}</span>
+              <span v-if="s.status_code" class="trail-code">{{ s.status_code }}</span>
+              <span class="trail-err" :title="s.error">{{ s.error }}</span>
+              <span v-if="s.usage && s.usage.total_tokens" class="trail-tokens">
+                另耗 {{ fmtTokens(s.usage.total_tokens) }} tokens
+              </span>
+            </div>
+          </div>
         </a-descriptions-item>
         <a-descriptions-item label="耗时">
           首字 {{ fmtMs(current.first_byte_ms) }} · 上游握手 {{ fmtMs(current.upstream_ms) }} ·
@@ -1242,6 +1298,50 @@ onMounted(() => {
   border-radius: var(--radius-control);
   /* 错误详情是正文，用 --text-red（白底 5.44:1）而不是 --color-red（3.90:1） */
   color: var(--text-red);
+}
+
+/* 失败链路（retry_trail）：每次失败尝试一行 —— 渠道、状态码、错误摘要、
+   该次消耗。序号与状态码用次要色的小标签形态：它们是索引信息不是正文 */
+.trail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+.trail-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 20px;
+  min-width: 0;
+}
+.trail-idx {
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+.trail-ch {
+  font-weight: 500;
+  flex: 0 0 auto;
+}
+.trail-code {
+  color: var(--text-red);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+.trail-err {
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.trail-tokens {
+  color: var(--color-text-secondary);
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---- 入场动效所在的那一层 ----

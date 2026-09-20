@@ -52,7 +52,11 @@ func (p Price) Cost(u relay.Usage) decimal.Decimal {
 	total = total.Add(scale(p.InputPer1M, u.PromptTokens))
 	total = total.Add(scale(p.OutputPer1M, u.CompletionTokens))
 	total = total.Add(scale(p.CacheReadPer1M, u.CachedTokens))
-	// 缓存写入按输入价计费（Anthropic 的写入溢价较高，官方未统一口径，这里取输入价）
+	// 缓存写单价是**独立配置项**：Anthropic 官方对 cache_creation 收输入价的
+	// 1.25 倍（5m 档）/ 2 倍（1h 档），其它上游口径不一，所以不做隐式兜底 ——
+	// 未配置时按 0 计，渠道列表会点名「N 个缓存写未定价」提醒补配。
+	// （漏配的后果是这笔费用被记成 0，账面看不出异常；宁可显式为 0 + 提醒，
+	// 也不要悄悄替用户按某个倍率算 —— 倍率填错比漏配更难发现。）
 	total = total.Add(scale(p.CacheWritePer1M, u.CacheCreationTokens))
 	return total
 }

@@ -275,4 +275,11 @@ func (c *keyCache) invalidate() {
 }
 
 // invalidateKeyCache 供密钥管理接口在写操作后调用。
-func (s *Server) invalidateKeyCache() { s.keys.invalidate() }
+// lastTouch 一并清：它是 id -> 时间 的 map，密钥删掉后条目没有任何
+// 用途，只会让 map 随历史密钥数量缓慢增长（虽不泄漏敏感值，但没必要）。
+func (s *Server) invalidateKeyCache() {
+	s.keys.invalidate()
+	s.touchMu.Lock()
+	s.lastTouch = map[uint]time.Time{}
+	s.touchMu.Unlock()
+}

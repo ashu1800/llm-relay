@@ -191,6 +191,21 @@ type AttemptTrail struct {
 	ChannelName string
 	StatusCode  int
 	Error       string
+	// Usage 是该次失败尝试的用量（上游在错误体里回报过才有，见
+	// forward.go 对 4xx body 的提取）。失败尝试的 token 上游可能照收
+	// （context-length-exceeded 的 400 就是典型），不记的话重试密集时
+	// 账面与上游账单的偏差会越拉越大。只进日志详情展示，不并入主字段
+	// ——「同一请求的 token 变大」是账面语义变化，默认不做。
+	Usage *Usage
+}
+
+// attemptUsagePtr 把尝试的用量装进 trail（nil 指针 = 上游没回报，前端不展示）。
+func attemptUsagePtr(att *Attempt) *Usage {
+	if att == nil || !att.HasUsage {
+		return nil
+	}
+	u := att.Usage
+	return &u
 }
 
 // ErrNoChannel 表示该模型当前没有可用渠道。
@@ -546,6 +561,7 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 			}
 			res.Trail = append(res.Trail, AttemptTrail{
 				ChannelID: cand.Channel.ID, ChannelName: cand.Channel.Name, Error: err.Error(),
+				Usage: attemptUsagePtr(attempt),
 			})
 			lastErr = err
 			failures = append(failures, failRecord{channelID: cand.Channel.ID, msg: err.Error()})
@@ -575,6 +591,7 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 			res.Trail = append(res.Trail, AttemptTrail{
 				ChannelID: cand.Channel.ID, ChannelName: cand.Channel.Name,
 				StatusCode: attempt.StatusCode, Error: msg,
+				Usage: attemptUsagePtr(attempt),
 			})
 			lastErr = fmt.Errorf("上游返回 %d: %s", attempt.StatusCode, msg)
 			// 是否「请求形状类」状态码先记下，等试完候选做共识判定；
@@ -720,9 +737,9 @@ func (s *Service) recordFailures(failures []failRecord) {
 // 「任何非 2xx 都转移」意味着全挂时每个请求都要把候选链完整撞一遍，
 // 有了这道熔断，第一个请求付学费，后续请求在冷却期内直接绕开。
 func (s *Service) markChannelFailure(channelID uint, msg string) {
-	if len(msg) > 500 {
-		msg = msg[:500]
-	}
+	// 按 rune 截断：字节切半会产生非法 UTF-8，last_error 的 UPDATE
+	// 会因 PG 编码校验整条失败，渠道健康状态与熔断记账跟着丢
+	msg = TruncateRunes(msg, 500)
 	now := time.Now().UTC()
 	err := s.db.Model(&model.Channel{}).Where("id = ?", channelID).Updates(map[string]any{
 		"health_status":   "degraded",
@@ -773,11 +790,9 @@ func summarizeErrorBody(raw []byte) string {
 	if len(raw) == 0 {
 		return "上游未返回错误详情"
 	}
-	s := strings.TrimSpace(string(raw))
-	if len(s) > 300 {
-		s = s[:300]
-	}
-	return s
+	// 按 rune 截断（理由同 markChannelFailure）：切出非法 UTF-8 会让
+	// 这段摘要写不进任何 varchar 列，排障线索整条丢掉
+	return TruncateRunes(strings.TrimSpace(string(raw)), 300)
 }
 
 // NewTraceID 生成请求追踪 ID。

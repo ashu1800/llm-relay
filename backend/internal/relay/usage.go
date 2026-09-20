@@ -157,6 +157,10 @@ func NormalizeUsage(raw map[string]any) Usage {
 }
 
 // hasSubsetCacheField 判断 raw 是否含有「子集型」缓存字段。
+// cachedContentTokenCount 也在列：Gemini 原生报文里它是 promptTokenCount
+// 的子集 —— 正常链路已被 geminiUsageToOpenAI 预转成 OpenAI 形态，
+// 但上游响应体转换失败、原样透传时会直接进这里，漏认会把缓存读双计
+// （一次含在 prompt 里、一次记在 cached 里）。
 func hasSubsetCacheField(raw map[string]any) bool {
 	for _, k := range []string{"prompt_tokens_details", "input_tokens_details"} {
 		if d, ok := raw[k].(map[string]any); ok {
@@ -164,6 +168,9 @@ func hasSubsetCacheField(raw map[string]any) bool {
 				return true
 			}
 		}
+	}
+	if getInt(raw, "cachedContentTokenCount") > 0 {
+		return true
 	}
 	return false
 }

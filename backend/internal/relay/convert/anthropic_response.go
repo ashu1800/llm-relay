@@ -204,6 +204,9 @@ type AnthropicStreamTranslator struct {
 	toolBlocks map[int]int
 	stopReason string
 	usage      map[string]any
+	// aborted 保证错误事件只发一次：流内 error 分片与转发层的收尾
+	// 都可能调 Abort，重复的 error 事件只会让客户端的状态机更困惑
+	aborted bool
 }
 
 // NewAnthropicStreamTranslator 构造流式改写器。
@@ -237,6 +240,15 @@ func (t *AnthropicStreamTranslator) handleChunk(payload []byte) error {
 	var chunk map[string]any
 	if err := json.Unmarshal(payload, &chunk); err != nil {
 		return nil // 忽略无法解析的分片，不要打断整个流
+	}
+	// 上游在流内主动报错（如 overloaded_error）：按失败收尾。
+	// 吞掉它的话 Close 会补上 message_stop，客户端把半截回复当完整 ——
+	// 这正是 Abort 存在要防的事，只是这里错误来自上游而不是连接中断
+	if msg, isErr := upstreamErrorOf(chunk); isErr {
+		if err := t.Abort(msg); err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: %s", ErrUpstreamReported, msg)
 	}
 	if !t.started {
 		if err := t.emitMessageStart(chunk); err != nil {
@@ -418,6 +430,10 @@ func (t *AnthropicStreamTranslator) emitMessageStart(chunk map[string]any) error
 // 原来中断时走的是 Close，会补上 message_delta + message_stop，
 // 客户端（Claude Code 等）据此认为回复完整 —— 截断被伪装成成功。
 func (t *AnthropicStreamTranslator) Abort(reason string) error {
+	if t.aborted {
+		return nil
+	}
+	t.aborted = true
 	if t.started && t.blockOpen {
 		// 内容块没关就发 error，部分客户端的状态机会卡在块内
 		_ = writeSSE(t.w, "content_block_stop", map[string]any{

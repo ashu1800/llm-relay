@@ -42,6 +42,8 @@ type ChannelRow = Channel & {
   model_count?: number
   /** 白名单里还没配价的条数（由服务端按与计价引擎相同的判据算出） */
   unpriced_count?: number
+  /** 配了价但缓存写价为 0 的条数：Anthropic 按输入价的 1.25~2 倍收缓存写费，漏配的账面看不出来 */
+  cache_write_unpriced_count?: number
   /** 「默认模型映射」指定的模型名；空表示没开。由服务端按与路由相同的判据算出 */
   fallback_model?: string
 }
@@ -1032,6 +1034,16 @@ onBeforeUnmount(() => {
                    所以这里必须点名，而不是等用户自己去核对 -->
               <span v-if="record.unpriced_count" class="unpriced-hint">
                 {{ record.unpriced_count }} 个未定价
+              </span>
+              <!-- 缓存写为 0 的模型「看起来已定价」，漏配的费用（Anthropic 官方
+                   按输入价的 1.25~2 倍收缓存写费）在账面上无声消失 ——
+                   与完全未定价分开口径点名，悬停说明后果 -->
+              <span
+                v-if="record.cache_write_unpriced_count"
+                class="unpriced-hint"
+                title="这些模型配了价但缓存写价为 0：Anthropic 官方按输入价的 1.25 倍（5 分钟档）/ 2 倍（1 小时档）收缓存写费，留空按 0 计，账面看不出漏配"
+              >
+                {{ record.cache_write_unpriced_count }} 个缓存写未定价
               </span>
               <!-- 兜底标记：只写短名、映射放 title，与「名称」列的代理胶囊
                    同一处理 —— 具体兜到哪个模型是细节，这里先回答

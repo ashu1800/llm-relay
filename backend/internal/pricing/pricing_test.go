@@ -91,6 +91,36 @@ func TestMatchPeakCrossesMidnight(t *testing.T) {
 	}
 }
 
+// 跨午夜窗口配了星期时，尾段归属**起始日**的星期：
+// 「周五 22:00–02:00」（days=[5]）在周六凌晨必须仍然命中 ——
+// 修复前 inWindow 先按发生时刻的星期过滤，尾段永远不生效。
+func TestMatchPeakCrossMidnightWeekdayBelongsToStartDay(t *testing.T) {
+	// 2026-09-18 是周五，2026-09-19 是周六
+	rules := mustRules(t, `[{"days": [5], "start": "22:00", "end": "02:00", "multiplier": 2}]`)
+	for _, c := range []struct {
+		at     string
+		expect float64
+	}{
+		{"2026-09-18T23:00:00", 2}, // 周五午夜前：起始日本身
+		{"2026-09-19T00:30:00", 2}, // 周六凌晨：尾段仍属周五 —— 修复点
+		{"2026-09-19T01:30:00", 2}, // 尾段最后一刻仍命中
+		{"2026-09-19T02:30:00", 1}, // 窗口结束之后
+		{"2026-09-19T23:00:00", 1}, // 周六午夜前：星期不匹配
+		{"2026-09-20T00:30:00", 1}, // 周日凌晨：不匹配（属周六的尾段，周六没配）
+	} {
+		if got, _, _ := MatchPeak(rules, localTime(t, c.at)); got != c.expect {
+			t.Errorf("%s 倍率应为 %v，实际 %v", c.at, c.expect, got)
+		}
+	}
+
+	// 周一起始的窗口，尾段落在周二凌晨 —— 起始日判定与回绕无关（归属周一）
+	mondayRules := mustRules(t, `[{"days": [1], "start": "22:00", "end": "01:00", "multiplier": 2}]`)
+	// 2026-09-21 是周一，2026-09-22 是周二
+	if got, _, _ := MatchPeak(mondayRules, localTime(t, "2026-09-22T00:30:00")); got != 2 {
+		t.Errorf("周一起始窗口的周二凌晨尾段应命中，实际 %v", got)
+	}
+}
+
 // 规则写错必须当场报错，并指出是第几条 ——
 // 写错的窗口不会报错、只会永不命中，用户会以为已经配好了双倍计费。
 func TestNormalizeRulesRejectsBadInput(t *testing.T) {

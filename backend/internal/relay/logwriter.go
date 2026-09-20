@@ -179,6 +179,30 @@ func (w *LogWriter) CloseAndFlush(timeout time.Duration, logger *slog.Logger) bo
 	}
 }
 
+// trailToJSONMap 把故障转移链路转成可落 jsonb 的结构。
+// 用显式小写字段而不是直接序列化 AttemptTrail：结构体字段大写 JSON
+// 里也就是大写，前端与既有日志的命名风格（全小写下划线）会分叉。
+func trailToJSONMap(trail []AttemptTrail) model.JSONMap {
+	steps := make([]map[string]any, 0, len(trail))
+	for _, t := range trail {
+		step := map[string]any{
+			"channel_id":   t.ChannelID,
+			"channel_name": t.ChannelName,
+			"status_code":  t.StatusCode,
+			"error":        t.Error,
+		}
+		if t.Usage != nil {
+			step["usage"] = map[string]any{
+				"prompt_tokens":     t.Usage.PromptTokens,
+				"completion_tokens": t.Usage.CompletionTokens,
+				"total_tokens":      t.Usage.TotalTokens,
+			}
+		}
+		steps = append(steps, step)
+	}
+	return model.JSONMap{"steps": steps}
+}
+
 // TruncateRunes 按字符数截断，超出部分以省略号收尾。
 //
 // 为什么按 rune 而不是字节：Postgres varchar(n) 的 n 数的是**字符**，
@@ -251,6 +275,11 @@ func BuildLog(req *RelayRequest, res *RelayResult, usage Usage, status int, errM
 	}
 	if res != nil {
 		entry.RetryCount = res.Retries
+		// 故障转移链路的逐次尝试随日志快照：失败尝试的 token 上游可能照收，
+		// 详情里看得见它，账面对不上上游账单时才有线索
+		if len(res.Trail) > 0 {
+			entry.RetryTrail = trailToJSONMap(res.Trail)
+		}
 		if res.Attempt != nil {
 			entry.UpstreamProto = res.Candidate.Channel.Protocol
 			entry.ModelUpstream = res.Candidate.Binding.UpstreamName

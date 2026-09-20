@@ -370,6 +370,11 @@ type channelListItem struct {
 	// 判据（四个单价全 0 且没有倍率）必须与计价引擎一字不差，
 	// 两边各写一份迟早会不一致
 	UnpricedCount int `json:"unpriced_count"`
+	// CacheWriteUnpricedCount 是「配了价但缓存写价为 0」的条数。
+	// Anthropic 官方对缓存写收输入价的 1.25~2 倍，漏配时这笔费用
+	// 按时长记成 0 元 —— 这条模型「看起来已定价」，比完全未定价更隐蔽，
+	// 单独点名才能被发现
+	CacheWriteUnpricedCount int `json:"cache_write_unpriced_count"`
 	// FallbackModel 是这条渠道「默认模型映射」指定的模型名（没开则为空）。
 	//
 	// 由 relay.ChannelDefaultModel 算，与路由侧同一出口 —— 列表显示的和
@@ -410,6 +415,7 @@ func (s *Server) listChannels(c *gin.Context) {
 	}
 	names := map[uint][]string{}
 	unpriced := map[uint]int{}
+	cacheWriteUnpriced := map[uint]int{}
 	if len(ids) > 0 {
 		var rows []model.ChannelModel
 		if err := db.Where("channel_id IN ?", ids).Order("public_name").Find(&rows).Error; err != nil {
@@ -420,10 +426,18 @@ func (s *Server) listChannels(c *gin.Context) {
 			names[r.ChannelID] = append(names[r.ChannelID], r.PublicName)
 			// 「没配价」的判定与计价引擎一致：四个单价全 0 且没有倍率。
 			// 列表上要显式提示条数 —— 漏配价的后果是这笔调用被记成 0 元，
-			// 而账面上完全看不出异常，只能靠这里点名
-			if r.InputPer1M.IsZero() && r.OutputPer1M.IsZero() &&
-				r.CacheReadPer1M.IsZero() && r.CacheWritePer1M.IsZero() && r.Multiplier <= 1 {
+			// 账面上完全看不出异常，只能靠这里点名
+			fullyUnpriced := r.InputPer1M.IsZero() && r.OutputPer1M.IsZero() &&
+				r.CacheReadPer1M.IsZero() && r.CacheWritePer1M.IsZero() && r.Multiplier <= 1
+			if fullyUnpriced {
 				unpriced[r.ChannelID]++
+				continue
+			}
+			// 配了价但缓存写为 0 的单独点名：Anthropic 官方对缓存写收
+			// 输入价的 1.25~2 倍，漏配时这笔费用在账面上无声消失 ——
+			// 而这条模型「看起来已定价」，比完全未定价更隐蔽
+			if r.CacheWritePer1M.IsZero() {
+				cacheWriteUnpriced[r.ChannelID]++
 			}
 		}
 	}
@@ -469,7 +483,8 @@ func (s *Server) listChannels(c *gin.Context) {
 			rt = relay.ChannelRuntime{}
 		}
 		items = append(items, channelListItem{
-			Channel: ch, Models: list, ModelCount: len(list), UnpricedCount: unpriced[ch.ID],
+			Channel: ch, Models: list, ModelCount: len(list),
+			UnpricedCount: unpriced[ch.ID], CacheWriteUnpricedCount: cacheWriteUnpriced[ch.ID],
 			FallbackModel: fallbackModelOf(ch),
 			LastUsedAt:    lastUsed[ch.ID], Runtime: &rt,
 		})

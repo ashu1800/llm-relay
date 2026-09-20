@@ -44,6 +44,18 @@ pass_or_fail() {
 bash scripts/purge-test-logs.sh
 echo
 
+# 单元测试（含 race）先跑：它们快且不依赖部署形态。
+# store 的 PG 集成测试由 LLMRELAY_TEST_DSN 门控（未设置自动跳过），
+# 想全量跑就先 export 它再调本脚本。
+echo "########## go test（含 race）##########"
+if (cd backend && go test -race ./...); then
+  echo "GO_TEST ALL_PASS"
+else
+  fail=1
+  echo "  !! go test -race 存在失败"
+fi
+echo
+
 # 这两个脚本没有 ALL_PASS 标志：test-regression.sh 以 DONE 收尾，
 # test-foreign-keys.sh 只打印计数。它们按各自的标志判定。
 for s in test-regression.sh test-foreign-keys.sh; do

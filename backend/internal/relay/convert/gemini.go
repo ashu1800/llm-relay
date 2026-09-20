@@ -428,6 +428,8 @@ type GeminiStreamTranslator struct {
 	// 不能硬编码 STOP —— 撞 max_tokens 时客户端要靠 MAX_TOKENS 才知道
 	// 回复被截断了
 	stopReason string
+	// aborted 保证错误事件只发一次（与 Anthropic 改写器同理）
+	aborted bool
 }
 
 // pendingToolCall 是一个正在累积的工具调用。
@@ -474,6 +476,13 @@ func (t *GeminiStreamTranslator) handleChunk(payload []byte) error {
 	var chunk map[string]any
 	if err := json.Unmarshal(payload, &chunk); err != nil {
 		return nil
+	}
+	// 上游在流内主动报错：按失败收尾，绝不补 finishReason 让截断伪装成完成
+	if msg, isErr := upstreamErrorOf(chunk); isErr {
+		if err := t.Abort(msg); err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: %s", ErrUpstreamReported, msg)
 	}
 	if u := asMap(chunk["usage"]); u != nil {
 		t.usage = u
@@ -590,7 +599,18 @@ func (t *GeminiStreamTranslator) flushToolCalls() error {
 // Gemini 的流式协议没有专门的错误事件，官方在 HTTP 层用 {"error":{...}} 表达失败，
 // 这里沿用同一结构。原来中断时走的是 Close，会补一个带 finishReason 的终止分片，
 // 客户端据此认为生成正常结束 —— 截断被伪装成成功。
+//
+// 先补发已经攒齐的工具调用（如果有）：functionCall 是攒到收尾才发的
+// （见 toolCalls 的说明），中断时直接丢掉的话，模型已发出的完整调用
+// 也会消失 —— 客户端拿到的错误里看不出「本来要调什么」。
 func (t *GeminiStreamTranslator) Abort(reason string) error {
+	if t.aborted {
+		return nil
+	}
+	t.aborted = true
+	if err := t.flushToolCalls(); err != nil {
+		return err
+	}
 	return writeGeminiSSE(t.w, map[string]any{
 		"error": map[string]any{
 			"code": 502, "message": reason, "status": "UNAVAILABLE",

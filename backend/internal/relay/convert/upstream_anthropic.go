@@ -269,7 +269,7 @@ func openAIMessagesToAnthropic(v any) (any, []any, error) {
 			blk := map[string]any{
 				"type":        "tool_result",
 				"tool_use_id": asString(m["tool_call_id"]),
-				"content":     flattenTextContent(m["content"]),
+				"content":     toolResultToAnthropic(m["content"]),
 			}
 			// tool 消息上的断点也要带上：多轮工具调用的场景里，
 			// 断点通常就落在最后一条 tool_result 上
@@ -306,9 +306,9 @@ func openAIMessagesToAnthropic(v any) (any, []any, error) {
 			}
 		}
 		if role == "assistant" {
-			appendMessage("assistant", blocks)
+			appendMessage("assistant", prependAnthropicBlocks(m, blocks))
 		} else {
-			appendMessage("user", blocks)
+			appendMessage("user", prependAnthropicBlocks(m, blocks))
 		}
 	}
 	// 有断点时返回块数组，否则返回原来的纯文本
@@ -321,6 +321,27 @@ func openAIMessagesToAnthropic(v any) (any, []any, error) {
 		}
 	}
 	return strings.Join(systemTexts, "\n\n"), messages, nil
+}
+
+// prependAnthropicBlocks 把通用语消息里暂存的 Anthropic 私有块
+// （thinking / redacted_thinking / document 等，见 anthropicBlocksKey）
+// 还原到内容块最前。
+//
+// thinking 类块必须排在 tool_use 之前：Anthropic 要求带工具调用的
+// assistant 轮先回传思维链，顺序错了上游直接 400。块在入站方向原样
+// 暂存（所有字段含 signature / source 都在），这里只负责放回去。
+func prependAnthropicBlocks(m map[string]any, blocks []any) []any {
+	raw, ok := m[anthropicBlocksKey].([]any)
+	if !ok || len(raw) == 0 {
+		return blocks
+	}
+	out := make([]any, 0, len(raw)+len(blocks))
+	for _, b := range raw {
+		if blk := asMap(b); blk != nil {
+			out = append(out, blk)
+		}
+	}
+	return append(out, blocks...)
 }
 
 // contentHasCacheControl 判断内容块数组里是否带了缓存断点。
@@ -433,7 +454,7 @@ func openAIImageToAnthropic(img map[string]any) map[string]any {
 	}
 }
 
-// flattenTextContent 把字符串或内容块数组拍平成纯文本（system 与工具结果用）。
+// flattenTextContent 把字符串或内容块数组拍平成纯文本（system 用）。
 func flattenTextContent(v any) string {
 	switch c := v.(type) {
 	case string:
@@ -453,6 +474,67 @@ func flattenTextContent(v any) string {
 	default:
 		return ""
 	}
+}
+
+// toolResultToAnthropic 把通用语 tool 消息的 content 还原成 Anthropic 的
+// tool_result content：字符串原样；多模态数组则把 image_url（data URI 形态，
+// 入站方向由 anthropicImageToOpenAI 造出）拆回 source 块 —— 工具返回的
+// 截图在 Anthropic 侧是 tool_result 里的 image 块，拍平成文本会被当空结果。
+func toolResultToAnthropic(v any) any {
+	arr, ok := v.([]any)
+	if !ok {
+		return flattenTextContent(v)
+	}
+	var out []any
+	for _, item := range arr {
+		blk := asMap(item)
+		if blk == nil {
+			continue
+		}
+		switch asString(blk["type"]) {
+		case "text":
+			out = append(out, map[string]any{"type": "text", "text": asString(blk["text"])})
+		case "image_url":
+			if src := imageURLToAnthropicSource(asMap(blk["image_url"])); src != nil {
+				out = append(out, map[string]any{"type": "image", "source": src})
+			}
+		}
+	}
+	if len(out) == 1 {
+		if t, ok := out[0].(map[string]any); ok && asString(t["type"]) == "text" {
+			// 只有一段文本时收成字符串：与入站前的原始形态一致
+			return asString(t["text"])
+		}
+	}
+	if len(out) == 0 {
+		return flattenTextContent(v)
+	}
+	return out
+}
+
+// imageURLToAnthropicSource 把 OpenAI 的 image_url（data URI 或 http 链接）
+// 还原成 Anthropic 的 source 结构。
+func imageURLToAnthropicSource(iu map[string]any) map[string]any {
+	if iu == nil {
+		return nil
+	}
+	url := asString(iu["url"])
+	if url == "" {
+		return nil
+	}
+	// data:<media>;base64,<data> —— base64 图是工具截图的常态
+	if strings.HasPrefix(url, "data:") {
+		rest := url[len("data:"):]
+		if idx := strings.Index(rest, ";base64,"); idx >= 0 {
+			return map[string]any{
+				"type":       "base64",
+				"media_type": rest[:idx],
+				"data":       rest[idx+len(";base64,"):],
+			}
+		}
+		return nil
+	}
+	return map[string]any{"type": "url", "url": url}
 }
 
 // anthropicStopReasonToOpenAI 是 mapFinishReason 的逆映射。

@@ -265,6 +265,10 @@ func (f *Forwarder) Do(
 		// 错误体通常很小，直接读全便于落库与排障
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		att.Body = raw
+		// 错误响应里也可能带 usage（如 context-length-exceeded 的 400）——
+		// 上游对这部分 token 是真收费的。不提取的话这些请求一律记 0 token，
+		// 成本统计与预算提醒系统性偏低，而且看不出来偏低了
+		att.Usage, att.HasUsage = extractUsageFromJSON(raw)
 		return att, nil
 	}
 

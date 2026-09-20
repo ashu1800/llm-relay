@@ -203,12 +203,16 @@ function submit() {
           <a-input v-model:value="form.cache_read_per_1m" placeholder="0.003" />
         </a-form-item>
         <a-form-item label="缓存写价">
-          <a-input v-model:value="form.cache_write_per_1m" placeholder="0" />
+          <!-- placeholder 引导填输入价：Anthropic 官方对缓存写收输入价的
+               1.25 倍（5m 档）/ 2 倍（1h 档），留空按 0 计会让这笔费用
+               在账面上消失，而界面看起来一切正常 -->
+          <a-input v-model:value="form.cache_write_per_1m" :placeholder="form.input_per_1m || '0'" />
         </a-form-item>
       </div>
       <div class="field-hint currency-hint">
         单价按所属渠道的币种录入：{{ symbolOf(currency) || '原币' }}{{ currency ? '（' + currency + '）' : '' }}。
-        改渠道币种不会自动折算已有单价，需要自己重填。
+        改渠道币种不会自动折算已有单价，需要自己重填。缓存写价留空按 0 计 ——
+        Anthropic 渠道建议填输入价的 1.25 倍（5 分钟档）或 2 倍（1 小时档）。
       </div>
       <a-form-item label="固定倍率（1 = 原价，可以填 0.5 表示打折）">
         <a-input-number

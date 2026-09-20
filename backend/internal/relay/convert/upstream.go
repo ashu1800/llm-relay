@@ -83,23 +83,24 @@ func UpstreamRequest(protocol, path string, body []byte, upstreamModel string) (
 	}
 }
 
-// stripCacheControlFromJSON 解析 JSON、递归清掉 cache_control 后再序列化。
+// stripCacheControlFromJSON 解析 JSON、递归清掉 cache_control 等
+// Anthropic 私有附加字段后再序列化。
 //
-// 解析失败时原样返回：这个函数只负责去除一个附加字段，
+// 解析失败时原样返回：这个函数只负责去除附加字段，
 // 不该因为请求体不是合法 JSON 就让整次转发失败（上游会给出更准确的错误）。
 func stripCacheControlFromJSON(body []byte) []byte {
-	// 先做子串粗筛再解析：这个字段只可能来自 Anthropic 入站，绝大多数请求
-	// 根本没有它 —— 但下面那个 containsKey 的短路在 Unmarshal **之后**，
+	// 先做子串粗筛再解析：这些字段只可能来自 Anthropic 入站，绝大多数请求
+	// 根本没有它们 —— 但下面那个 containsKey 的短路在 Unmarshal **之后**，
 	// 全量解析的代价照样付了。数 MB 的长对话每个候选渠道都要再来一遍。
-	if !bytes.Contains(body, cacheControlNeedle) {
+	if !bytes.Contains(body, privateFieldNeedles[0]) && !bytes.Contains(body, privateFieldNeedles[1]) {
 		return body
 	}
 	var v any
 	if err := json.Unmarshal(body, &v); err != nil {
 		return body
 	}
-	if !containsKey(v, cacheControlKey) {
-		// 子串命中但不是该键（比如正文里恰好写了 "cache_control"）：
+	if !containsKey(v, cacheControlKey) && !containsKey(v, anthropicBlocksKey) {
+		// 子串命中但不是这两个键（比如正文里恰好写了 "cache_control"）：
 		// 直接返回原文避免无谓的重新序列化
 		return body
 	}
@@ -111,8 +112,13 @@ func stripCacheControlFromJSON(body []byte) []byte {
 	return out
 }
 
-// cacheControlNeedle 是子串粗筛用的 needle（见 stripCacheControlFromJSON 注释）。
-var cacheControlNeedle = []byte(cacheControlKey)
+// privateFieldNeedles 是子串粗筛用的 needle（见 stripCacheControlFromJSON 注释）。
+// cache_control 是块级断点，anthropic_blocks 是消息级私有块容器
+// （thinking / document 等），两者互不包含、都要筛。
+var privateFieldNeedles = [][]byte{
+	[]byte(cacheControlKey),
+	[]byte(anthropicBlocksKey),
+}
 
 // containsKey 递归判断结构里是否存在某个键。
 func containsKey(v any, key string) bool {

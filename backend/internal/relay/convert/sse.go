@@ -3,6 +3,7 @@ package convert
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"strconv"
 	"strings"
@@ -162,6 +163,33 @@ type Aborter interface {
 
 // StreamAbortedMessage 是上游中断时下发给客户端的说明。
 const StreamAbortedMessage = "上游连接在响应完成前中断，本次回复不完整"
+
+// ErrUpstreamReported 表示上游在流内主动发出了 error 分片。
+//
+// 通用语（OpenAI Chat SSE）里 2xx 响应的中途也可能出现
+// data: {"error":{...}} 分片 —— Anthropic 的 overloaded_error、各家网关的
+// 限流提示都长这样。入站改写器见到它必须把流按失败收尾（调用自己的
+// Abort 下发错误事件），再把这个哨兵错误从 Write 传出去，让转发层：
+//   - 与「客户端断开导致的写失败」区分开（后者不记 502）；
+//   - 日志按上游故障记 502，而不是把半截流当成功落账。
+//
+// 错误链上包着上游的原始 message（fmt.Errorf("%w: %s", ...)），
+// errors.Is 仍然命中。
+var ErrUpstreamReported = errors.New("上游在流内报出错误")
+
+// upstreamErrorOf 判断通用语分片是否是 error 分片，是则提取人话信息。
+// 各家 error.message 结构一致（OpenAI 形状），取不到字段时回落到通用提示，
+// 绝不因为字段缺失把 error 分片当成普通分片吞掉。
+func upstreamErrorOf(chunk map[string]any) (string, bool) {
+	e := asMap(chunk["error"])
+	if e == nil {
+		return "", false
+	}
+	if m := asString(e["message"]); m != "" {
+		return m, true
+	}
+	return StreamAbortedMessage, true
+}
 
 // writeSSE 以 Anthropic 的 event+data 形式写出一个事件。
 func writeSSE(w io.Writer, event string, payload any) error {

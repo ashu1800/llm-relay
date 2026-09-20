@@ -158,6 +158,16 @@ export interface APIKey {
   created_at: string
 }
 
+/** 故障转移链路里的一次失败尝试（后端 relay.AttemptTrail 的落库形态） */
+export interface RetryTrailStep {
+  channel_id: number
+  channel_name: string
+  status_code: number
+  error: string
+  /** 该次失败尝试上游回报的用量；上游没回报就没有这个字段 */
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
+}
+
 export interface RequestLog {
   id: number
   trace_id: string
@@ -181,6 +191,12 @@ export interface RequestLog {
   status_code: number
   error: string
   retry_count: number
+  /**
+   * 故障转移链路的逐次失败尝试（渠道/状态码/错误/用量），随日志快照。
+   * 失败尝试的 token 上游可能照收（context-length-exceeded 的 400 就是典型），
+   * 详情里看得见它，账面对不上上游账单时才有线索。没有失败尝试时为空。
+   */
+  retry_trail?: { steps?: RetryTrailStep[] } | null
   prompt_tokens: number
   completion_tokens: number
   total_tokens: number

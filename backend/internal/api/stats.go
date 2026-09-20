@@ -22,10 +22,11 @@ import (
 
 // totalTokensOf 是 interface{} 形态的 relay.UsageTotal，供聚合行使用。
 //
-// 聚合结果是 int64，而 relay.UsageTotal 收 int（TokenUsage 的字段类型），
-// 这里做一层转换，公式本身仍然只有 relay 包那一处定义。
+// 聚合结果是 int64。公式本体在 relay 包只有一处定义，这里用 int64 重算
+// 而不是转 int 再转回来 —— 巨量 token（>2^31）在 32 位平台上会溢出，
+// 虽然当前只发 64 位构建，口径先站稳不用留坑。
 func totalTokensOf(prompt, completion, cached, cacheCreation int64) int64 {
-	return int64(relay.UsageTotal(int(prompt), int(completion), int(cached), int(cacheCreation)))
+	return prompt + completion + cached + cacheCreation
 }
 
 // cacheHitRateOf 同上，是 relay.CacheHitRateOf 的 int64 版本。
@@ -419,7 +420,7 @@ func (s *Server) statsTimeseries(c *gin.Context) {
         GROUP BY bucket, cost_currency ORDER BY bucket`
 
 	var rows []seriesRow
-	if err := s.deps.Store.DB().Raw(sql,
+	if err := s.deps.Store.DB().WithContext(c.Request.Context()).Raw(sql,
 		append([]any{bucket, zoneArg, zoneArg, start, end}, filterArgs...)...).Scan(&rows).Error; err != nil {
 		writeInternalError(c, err)
 		return
@@ -527,7 +528,7 @@ func (s *Server) groupStats(c *gin.Context, column string) {
         GROUP BY ` + column + `, cost_currency`
 
 	var rows []groupRow
-	if err := s.deps.Store.DB().Raw(sql, append([]any{start, end}, filterArgs...)...).Scan(&rows).Error; err != nil {
+	if err := s.deps.Store.DB().WithContext(c.Request.Context()).Raw(sql, append([]any{start, end}, filterArgs...)...).Scan(&rows).Error; err != nil {
 		writeInternalError(c, err)
 		return
 	}
@@ -634,7 +635,7 @@ func (s *Server) statsHeatmap(c *gin.Context) {
 	// 上界与其它聚合保持一致：少了它，热力图会把「未来时间戳」的行也算进来
 	// （导入的历史数据或时钟偏斜都可能是这种行），而卡片上又看不到它们。
 	var rows []heatRow
-	if err := s.deps.Store.DB().Raw(q,
+	if err := s.deps.Store.DB().WithContext(c.Request.Context()).Raw(q,
 		append([]any{zoneArg, zoneArg, since, time.Now()}, filterArgs...)...).Scan(&rows).Error; err != nil {
 		writeInternalError(c, err)
 		return
@@ -730,31 +731,40 @@ func (s *Server) statsDailyReport(c *gin.Context) {
 		return
 	}
 
-	// 最贵一单：金额只做排序比较（同为 numeric 可比），展示时带着自己的币种
-	var priciest struct {
+	// 最贵一单：按币种各取一条。不同币种的金额不能直接比大小（100 CNY 会
+	// 压过 99 USD，README 的多币种铁律），DISTINCT ON 让每种币各自选出
+	// 自己的最贵，前端并列展示、不合成一个"全场最贵"
+	var priciest []struct {
 		Model       string
 		ChannelName string
 		Cost        decimal.Decimal
 		Currency    string
 	}
 	if err := s.deps.Store.DB().Model(&model.RequestLog{}).
-		Select("model_requested AS model, channel_name AS channel_name, estimated_cost AS cost, cost_currency AS currency").
+		Select("DISTINCT ON (cost_currency) model_requested AS model, channel_name AS channel_name, estimated_cost AS cost, cost_currency AS currency").
 		Where("created_at >= ? AND created_at <= ?", start, end).
-		Order("estimated_cost DESC").
-		Limit(1).
+		Order("cost_currency, estimated_cost DESC").
 		Scan(&priciest).Error; err != nil {
 		writeInternalError(c, err)
 		return
+	}
+	priciestOut := make([]gin.H, 0, len(priciest))
+	for _, p := range priciest {
+		if p.Currency == "" {
+			continue
+		}
+		priciestOut = append(priciestOut, gin.H{
+			"model": p.Model, "channel": p.ChannelName,
+			"cost": p.Cost.StringFixed(8), "currency": p.Currency,
+		})
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"day":       start.Format("2006-01-02"),
 		"summary":   summary,
 		"top_model": gin.H{"model": topModel.Model, "requests": topModel.Requests},
-		"priciest": gin.H{
-			"model": priciest.Model, "channel": priciest.ChannelName,
-			"cost": priciest.Cost.StringFixed(8), "currency": priciest.Currency,
-		},
+		// 每币种一条（单币种站点只有一条），前端并列展示
+		"priciest": priciestOut,
 		// 全表累计请求数：给前端的里程碑彩蛋当标尺（破 1 千/1 万/10 万）。
 		// 战报一天最多弹一次，这条 COUNT 也就一天跑一次 —— 单独开一个
 		// 每次进页面都要调的端点反而不划算

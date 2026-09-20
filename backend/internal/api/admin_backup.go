@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"gorm.io/gorm"
 
 	"llm-relay/internal/model"
+	"llm-relay/internal/pricing"
 )
 
 // maxImportBodyBytes 是配置导入的请求体上限。
@@ -199,6 +201,16 @@ func (s *Server) importConfig(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, "这不是 llm-relay 的备份文件", "invalid_request_error")
 		return
 	}
+	// 版本检查：当前导出的是 version 1。更大的版本说明备份来自**更新的程序**
+	//（比如降级部署后导入了升级时的备份），结构体字段对不上会静默丢字段 ——
+	// 按不认识的字段整体忽略的 Go 语义，丢的还是最关键的那些。
+	// 明确拒掉比「导入成功但缺了一半」可见得多。
+	if b.Version > 1 {
+		writeUpstreamError(c, http.StatusBadRequest,
+			fmt.Sprintf("备份版本（v%d）比当前程序（v1）新，请先把程序升级到导出该备份的版本再导入", b.Version),
+			"invalid_request_error")
+		return
+	}
 
 	report := importReport{Created: map[string]int{}, Skipped: map[string]int{}}
 	db := s.deps.Store.DB()
@@ -363,6 +375,15 @@ func (s *Server) importConfig(c *gin.Context) {
 		if strings.TrimSpace(bd.UpstreamName) == "" {
 			bd.UpstreamName = bd.PublicName
 		}
+		// 价格与倍率要过与 API 保存路径同一套校验：备份文件可以手工编辑，
+		// 负单价一旦进来就是负费用进统计；时段规则同理（永不命中的窗口
+		// 会让人以为配好了双倍计费）。校验不过的整条跳过并点名，不静默
+		if err := validateImportedPricing(&bd); err != nil {
+			report.Warnings = append(report.Warnings,
+				"模型 "+bd.PublicName+" 的价格配置不合法，已跳过导入: "+err.Error())
+			report.Skipped["模型白名单"]++
+			continue
+		}
 		// 模型级的出站代理同理：映射不到就回到「跟随渠道」
 		if bd.ProxyID != 0 {
 			if mapped, ok := proxyIDMap[bd.ProxyID]; ok {
@@ -482,4 +503,38 @@ func (s *Server) importConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"created": report.Created, "skipped": report.Skipped, "warnings": report.Warnings,
 	})
+}
+
+// validateImportedPricing 校验并规整备份导入的模型价格，与 API 保存路径
+// （applyPriceFields）同一套口径。
+//
+// 备份文件是 JSON，可以手工编辑：负单价一旦落库就是负费用进统计，
+// 看板上「省了钱」的假象比没有统计更糟。API 路径早有校验，导入路径此前
+// 绕过了它。校验之外还做两步归一（与 API 路径一致）：
+//   - 倍率 0 归一成 1 ——「没配」与「故意填 0」不做区分，引擎对 0 本就
+//     等价于没配，归一后库里不留歧义值；
+//   - 时段规则写回 NormalizeRules 规整后的结果 —— 手编辑过的脏规则
+//     （days 带小数、label 超长被截）落库前收干净，前端编辑器读到
+//     的与 API 保存的形态一致。
+func validateImportedPricing(bd *model.ChannelModel) error {
+	for name, d := range map[string]decimal.Decimal{
+		"输入单价": bd.InputPer1M, "输出单价": bd.OutputPer1M,
+		"缓存读单价": bd.CacheReadPer1M, "缓存写单价": bd.CacheWritePer1M,
+	} {
+		if d.IsNegative() {
+			return fmt.Errorf("%s为负数", name)
+		}
+	}
+	if bd.Multiplier < 0 || bd.Multiplier > pricing.MaxMultiplier {
+		return fmt.Errorf("固定倍率超出 0 到 %g 的范围", pricing.MaxMultiplier)
+	}
+	if bd.Multiplier == 0 {
+		bd.Multiplier = 1
+	}
+	rules, err := pricing.NormalizeRules(bd.PeakRules)
+	if err != nil {
+		return err
+	}
+	bd.PeakRules = rules
+	return nil
 }

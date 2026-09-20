@@ -222,7 +222,7 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 			// 也浪费流量；日志侧另由 BuildLog 兜底，丢不了记录
 			upMsg := relay.TruncateRunes(convert.UpstreamErrorMessage(res.Candidate.Channel.Protocol, att.Body), 800)
 			p.writeError(c, att.StatusCode, upMsg, "upstream_error")
-			s.finalizeLog(req, res, relay.Usage{}, att.StatusCode, upMsg,
+			s.finalizeLog(req, res, attemptUsage(res), att.StatusCode, upMsg,
 				att.HeaderMs, totalMs, att.Body, att.Headers)
 			return
 		}
@@ -260,7 +260,7 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 		// 超长错误体（HTML 错误页等）截到 800 字符，与上面失败链同一出口
 		upMsg := relay.TruncateRunes(convert.UpstreamErrorMessage(res.Candidate.Channel.Protocol, att.Body), 800)
 		p.writeError(c, att.StatusCode, upMsg, "upstream_error")
-		s.finalizeLog(req, res, relay.Usage{}, att.StatusCode,
+		s.finalizeLog(req, res, attemptUsage(res), att.StatusCode,
 			upMsg, att.HeaderMs, int(time.Since(started).Milliseconds()), att.Body, att.Headers)
 		return
 	}
@@ -288,6 +288,18 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 	}
 	s.finalizeLog(req, res, usage, att.StatusCode, "",
 		att.HeaderMs, int(time.Since(started).Milliseconds()), att.Body, att.Headers)
+}
+
+// attemptUsage 取最后一次上游尝试回报的用量，供失败路径落账。
+//
+// 上游在错误响应体里也可能带 usage（如 context-length-exceeded 的 400），
+// 这部分 token 上游是真收费的；一律记 0 会让成本统计与预算提醒系统性偏低，
+// 而且看不出来偏低了。没有应答（网络层失败）时仍是零值。
+func attemptUsage(res *relay.RelayResult) relay.Usage {
+	if res != nil && res.Attempt != nil && res.Attempt.HasUsage {
+		return res.Attempt.Usage
+	}
+	return relay.Usage{}
 }
 
 // streamToClient 边转发边旁路抓取用量。
@@ -339,8 +351,15 @@ func (s *Server) streamToClient(c *gin.Context, p *inboundProfile, req *relay.Re
 				streamCapture = append(streamCapture, buf[:room]...)
 			}
 			if _, writeErr := tr.Write(buf[:n]); writeErr != nil {
-				// 写不出去基本是客户端断开，不是上游的问题，不必再补错误事件
-				clientGone = true
+				if errors.Is(writeErr, convert.ErrUpstreamReported) {
+					// 上游在流内报了错，改写器已把该协议的错误事件发给客户端：
+					// 按上游故障收尾（记 502），不当作客户端断开。
+					// 哨兵里包着上游的原始 message，落日志时能看见
+					streamErr = writeErr
+				} else {
+					// 写不出去基本是客户端断开，不是上游的问题，不必再补错误事件
+					clientGone = true
+				}
 				break
 			}
 			c.Writer.Flush()
@@ -358,6 +377,15 @@ func (s *Server) streamToClient(c *gin.Context, p *inboundProfile, req *relay.Re
 	// 上游中断时不能补发「正常结束」标记：客户端会把截断的回复当成完整回复，
 	// 用户看到的是「模型答到一半停了」而系统显示成功。
 	// 改为下发错误型终止事件，既结束等待又明确说明不完整。
+	//
+	// 先补判客户端断开：读阻塞阶段断开的客户端没机会触发写失败 ——
+	// 客户端取消让 ctx 取消、上游 body 读报 context canceled，
+	// streamErr 置位但 clientGone 仍是 false。不补判的话，Claude Code
+	// 每次手动打断推理都会被记成一条 502（既写 Air，也污染失败统计），
+	// 而这里对已断开的客户端补发错误事件本来就是白费。
+	if streamErr != nil && !clientGone && c.Request.Context().Err() != nil {
+		clientGone = true
+	}
 	switch {
 	case clientGone:
 		// 客户端已断开，写什么都是白费
@@ -384,6 +412,7 @@ func (s *Server) streamToClient(c *gin.Context, p *inboundProfile, req *relay.Re
 	}
 
 	// 截断记进日志：状态码按失败记，否则仪表盘上看不出这次请求有问题
+	// （clientGone 的补判已在上面收尾前做过，这里只剩真正的上游中断）
 	logStatus, logErr := att.StatusCode, ""
 	if streamErr != nil && !clientGone {
 		logStatus = http.StatusBadGateway

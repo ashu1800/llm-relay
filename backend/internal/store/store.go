@@ -52,6 +52,19 @@ func Open(cfg *config.Config) (*Store, error) {
 // DB 暴露原始句柄，供各业务仓储使用。
 func (s *Store) DB() *gorm.DB { return s.db }
 
+// OpenByDSN 用现成的 DSN 连库（测试与命令行工具用；服务本身走 Open）。
+func OpenByDSN(dsn string) (*Store, error) {
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger:                 gormlogger.Default.LogMode(gormlogger.Warn),
+		SkipDefaultTransaction: true,
+		NowFunc:                func() time.Time { return time.Now().UTC() },
+	})
+	if err != nil {
+		return nil, fmt.Errorf("连接 PostgreSQL 失败: %w", err)
+	}
+	return &Store{db: db}, nil
+}
+
 // Ready 用于容器健康检查。
 func (s *Store) Ready() error {
 	sqlDB, err := s.db.DB()
@@ -119,8 +132,11 @@ func (s *Store) hasTable(table string) bool {
 
 func (s *Store) hasColumn(table, column string) bool {
 	var n int64
+	// 与 hasTable 同口径限定 current_schema：同库其它 schema 有同名表/列时
+	// 会误判「已有列」、迁移跳过补列，运行期 INSERT 报缺列 ——
+	// 那种错只会在别人的环境上出现，本地永远复现不了
 	if err := s.db.Raw(
-		"SELECT count(*) FROM information_schema.columns WHERE table_name = ? AND column_name = ?",
+		"SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?",
 		table, column).Scan(&n).Error; err != nil {
 		return false
 	}
@@ -321,26 +337,41 @@ func (s *Store) normalizeChannelWeights() error {
 	}
 
 	next := map[uint]int{} // 分组 ID -> 下一个序号
-	fixed := 0
+	type fixRow struct {
+		id   uint
+		want int
+	}
+	var pending []fixRow
 	for _, r := range rows {
 		next[r.GroupID]++
-		want := next[r.GroupID]
-		if r.Weight == want {
-			continue
+		if want := next[r.GroupID]; r.Weight != want {
+			pending = append(pending, fixRow{id: r.ID, want: want})
 		}
-		// 唯一索引已存在时这里会中途撞车（把 1 改成 2，而 2 还没让位），
-		// 所以逐行改成负数先全部让开，最后统一翻正 —— 负数不会与任何正序号冲突
-		if err := s.db.Exec("UPDATE channels SET weight = ? WHERE id = ?", -want, r.ID).Error; err != nil {
-			return fmt.Errorf("重排渠道权重失败（id=%d）: %w", r.ID, err)
-		}
-		fixed++
 	}
-	if fixed > 0 {
-		if err := s.db.Exec("UPDATE channels SET weight = -weight WHERE weight < 0").Error; err != nil {
+	if len(pending) == 0 {
+		return nil
+	}
+	// 「先改负、后翻正」必须在一个事务里：中途崩溃会留下负权重，
+	// 而 weight ASC 排序时负值排最前 —— 组内优先级被静默重排。
+	fixed := 0
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		for _, f := range pending {
+			// 唯一索引已存在时会中途撞车（把 1 改成 2，而 2 还没让位），
+			// 负数不会与任何正序号冲突
+			if err := tx.Exec("UPDATE channels SET weight = ? WHERE id = ?", -f.want, f.id).Error; err != nil {
+				return fmt.Errorf("重排渠道权重失败（id=%d）: %w", f.id, err)
+			}
+			fixed++
+		}
+		if err := tx.Exec("UPDATE channels SET weight = -weight WHERE weight < 0").Error; err != nil {
 			return fmt.Errorf("渠道权重翻正失败: %w", err)
 		}
-		slog.Info("渠道权重已重排为组内优先级序号", "调整条数", fixed)
+		return nil
+	})
+	if err != nil {
+		return err
 	}
+	slog.Info("渠道权重已重排为组内优先级序号", "调整条数", fixed)
 	return nil
 }
 

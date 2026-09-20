@@ -22,10 +22,13 @@ func TestNormalizeUsageTotalTokens(t *testing.T) {
 		},
 		{
 			name: "原生 Gemini 无 totalTokenCount",
+			// cachedContentTokenCount 是 promptTokenCount 的子集（60 含在 100 里）：
+			// 归一化成并列语义后 Prompt=40、Cached=60，总量 120 而不是 180 ——
+			// 旧的 180 把缓存读双计了一次
 			raw: map[string]any{
 				"promptTokenCount": 100, "candidatesTokenCount": 20, "cachedContentTokenCount": 60,
 			},
-			want: 180,
+			want: 120,
 		},
 		{
 			name: "OpenAI 形状 + 缓存写入",

@@ -302,6 +302,11 @@ type RequestLog struct {
 	UpstreamMs  int       `json:"upstream_ms"`
 	ClientIP    string    `gorm:"size:64" json:"client_ip"`
 	CreatedAt   time.Time `gorm:"index:idx_log_created,priority:1" json:"created_at"`
+	// RetryTrail 是故障转移链路的逐次尝试摘要（渠道/状态码/错误/用量），
+	// 与 PricingSnapshot 同理存快照。失败尝试的 token 上游可能照收
+	// （context-length-exceeded 的 400 就是典型），详情里看得见，
+	// 账面对不上上游账单时才有线索。没有失败尝试时为空。
+	RetryTrail JSONMap `gorm:"type:jsonb" json:"retry_trail"`
 }
 
 // RequestPayload 请求/响应原始报文，按策略留存。
