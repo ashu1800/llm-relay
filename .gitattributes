@@ -25,6 +25,8 @@ go.sum text eol=lf
 .dockerignore text eol=lf
 .gitattributes text eol=lf
 .gitignore text eol=lf
+# deploy/.env.example 同理（.env 本体不入库，不需要声明）
+.env.example text eol=lf
 
 # 其余文本文件统一走 LF。
 #
