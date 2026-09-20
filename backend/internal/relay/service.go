@@ -254,7 +254,60 @@ func (s *Service) availableModelsHint(ctx context.Context, req *RelayRequest) st
 	if err := q.Order("channel_models.public_name").Limit(12).Pluck("channel_models.public_name", &names).Error; err != nil {
 		return ""
 	}
-	return modelsHintText(names, s.brokenFallbackCount(ctx, req))
+	return modelsHintText(names, s.brokenFallbackCount(ctx, req), s.coolingCount(req))
+}
+
+// coolingCount 数出「能接这个模型、但此刻正在冷却」的渠道。
+//
+// 冷却状态在内存里（ChannelState），**数据库查不到** —— 而上面那段可用模型
+// 提示是查库得来的。两者拼在一起就会出现自相矛盾的报错，2026-09-20 实测踩到：
+//
+//	没有可用的渠道: 模型 deepseek-v4.1-flash … 没有可用渠道；
+//	当前范围内可用的模型有 deepseek-v4.1-flash、glm-5.3-flash
+//
+// 请求的模型名就在「可用」列表里，却说没有渠道。真相是那条渠道连续失败 6 次、
+// 正在退避 30 秒 —— 提示里一个字都没提，用户只能对着渠道列表发呆。
+//
+// 判据必须与路由一致：同一个 InCooldown、同一份候选范围（启用渠道 + 启用分组 +
+// 启用白名单行 + 密钥/分组白名单）。两边各查各的迟早漂移成
+// 「提示说没冷却、路由说有」。
+func (s *Service) coolingCount(req *RelayRequest) int {
+	if s.state == nil || s.router == nil {
+		return 0
+	}
+	now := time.Now()
+	n := 0
+	for _, id := range s.channelIDsForModel(req) {
+		if _, cooling := s.state.InCooldown(id, now); cooling {
+			n++
+		}
+	}
+	return n
+}
+
+// channelIDsForModel 取「这个模型名在范围内、会被路由考虑到的渠道 ID」。
+//
+// 注意这里**不能**复用 Router.Candidates：它会把冷却中的渠道直接剔掉，
+// 而本函数要回答的恰恰是「剔掉了几个」。
+func (s *Service) channelIDsForModel(req *RelayRequest) []uint {
+	q := s.router.db.WithContext(context.Background()).
+		Table("channels").
+		Joins("JOIN channel_models ON channel_models.channel_id = channels.id AND channel_models.enabled = true").
+		Joins("JOIN channel_groups ON channel_groups.id = channels.group_id").
+		Where("channel_models.public_name = ?", req.PublicModel).
+		Where("channels.enabled = true").
+		Where("channel_groups.enabled = true")
+	if req.GroupID > 0 {
+		q = q.Where("channels.group_id = ?", req.GroupID)
+	}
+	if len(req.AllowedGroups) > 0 {
+		q = q.Where("channels.group_id IN ?", req.AllowedGroups)
+	}
+	var ids []uint
+	if err := q.Pluck("channels.id", &ids).Error; err != nil {
+		return nil
+	}
+	return ids
 }
 
 // brokenFallbackCount 数出范围内「开了默认模型映射但不会生效」的渠道。
@@ -298,12 +351,26 @@ func (s *Service) brokenFallbackCount(ctx context.Context, req *RelayRequest) in
 // modelsHintText 拼装「没有可用渠道」时的补充说明。
 //
 // 抽成纯函数是为了能直接断言文案（这个包没有 DB 测试环境）。
-func modelsHintText(names []string, brokenFallback int) string {
+//
+// 三个数字各自对应一种「看着配好了、实际用不了」的状态，缺一个都会让
+// 用户对着渠道列表找不出差在哪：
+//   - names 为空      → 压根没配白名单
+//   - cooling > 0     → 有渠道、但连续失败后正在退避（内存态，查库查不到）
+//   - brokenFallback  → 开了默认模型映射但模型名没填 / 不在自己白名单里
+func modelsHintText(names []string, brokenFallback, cooling int) string {
 	var b strings.Builder
 	if len(names) == 0 {
 		b.WriteString("；当前范围内没有任何渠道配置模型白名单，请到「渠道管理」里给渠道加上模型")
 	} else {
 		b.WriteString("；当前范围内可用的模型有 " + strings.Join(names, "、"))
+	}
+	if cooling > 0 {
+		// 这一句专门消解那个自相矛盾的提示：上面刚说「可用的模型有 X」，
+		// 用户请求的正是 X，却被告知没有渠道 —— 原因是那些渠道在冷却中。
+		// 点名它们，并顺带给出下一步（等退避结束，或去渠道页看失败原因）
+		b.WriteString("。注意：此刻有 " + strconv.Itoa(cooling) +
+			" 条渠道能接这个模型，但它们刚失败过、正在冷却中（退避几十秒后自动恢复；" +
+			"若反复出现，去「渠道管理」看该渠道最近的错误）")
 	}
 	if brokenFallback > 0 {
 		// 与上面那句并置而不替换：半残渠道可能与正常渠道同时存在，

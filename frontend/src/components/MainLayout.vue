@@ -66,6 +66,17 @@ onLive('budget_alert', (a: BudgetAlert) => {
 // 这种事必须持续可见，所以放在界面上。
 const usingDefaultSecret = ref(false)
 
+// 后端版本号，显示在侧栏底部。
+//
+// 它的用途很具体：**判断界面上看到的这个版本，是不是正在跑的那份代码**。
+// README 里写过「改了前端或后端必须重新部署才会在 8888 上生效」，
+// 但先前没有任何办法在界面上确认这件事 —— 改了代码、部署失败、还以为看到了新版。
+// 版本号由构建时经 -ldflags 编进二进制（见 Dockerfile 与 install.sh），
+// 所以它回的一定是真正跑着的那份，不是某个配置文件里的声明。
+//
+// 取不到就整个不显示：空着一格版本号比不显示更容易让人以为哪里坏了。
+const appVersion = ref('')
+
 // 侧边栏菜单：对齐参考站 console-menu-list 的项目与顺序，
 // 剔除其面向多用户的登录/工单/订单/兑换/礼品/邮件/公告模块。
 //
@@ -113,11 +124,15 @@ onMounted(() => {
   // MainLayout 常驻，这里启动一次就覆盖整个会话
   startTabPulse()
   // 系统信息与窄屏初始化合在同一个 onMounted：原来有两个，各自请求一次
-  // /system/info —— 每次进页面白打一个重复请求（窄屏适配改造时留下的）
+  // /system/info —— 每次进页面白打一个重复请求（窄屏适配改造时留下的）。
+  // 版本号搭这个请求顺路带回来，不额外发一次。
   api
-    .get<{ using_default_secret?: boolean }>('/system/info')
+    .get<{ using_default_secret?: boolean; version?: string }>('/system/info')
     .then((info) => {
       usingDefaultSecret.value = !!info.using_default_secret
+      // 构建时没传 VERSION 会是 "dev"，照常显示 —— 它本身就是一个有用的信号
+      // （说明这次构建是本地随手构建的，不是 install.sh 产出的）
+      appVersion.value = (info.version || '').trim()
     })
     .catch(() => {
       // 拿不到系统信息不影响正常使用，静默即可
@@ -145,6 +160,14 @@ onUnmounted(() => {
             <div class="brand" :title="collapsed ? 'LLM Relay' : ''" @click="go('/console/dashboard')">
               <span class="brand-mark">LR</span>
               <span v-if="!collapsed" class="brand-text">LLM Relay</span>
+            </div>
+
+            <!-- 版本号紧随品牌：它是这个应用的身份信息，与品牌同属一组。
+                收起侧栏时不显示（那一列只有 40px 宽，塞不下）；
+                窄屏下侧栏默认收起，所以它在窄屏是不可见的 —— 这是有意的，
+                窄屏空间该留给内容，查版本可以用 deploy/install.sh --verify。 -->
+            <div v-if="!collapsed && appVersion" class="brand-version" :title="'后端版本：' + appVersion">
+              {{ appVersion }}
             </div>
 
             <nav class="console-menu-list">
@@ -277,6 +300,25 @@ onUnmounted(() => {
   color: var(--text-primary-ink);
   white-space: nowrap;
   overflow: hidden;
+}
+
+/* 版本号：紧跟在品牌下方，表明「这个界面是哪个版本的后端在支撑」。
+   用等宽字体而不是品牌字体 —— 版本号是标识符（v1.2.0-7-g3f9a1c），
+   逐字比对是它唯一的用途，比例字体下 0/O、1/l 分不清。
+   字号与颜色都压到次级：它不该和品牌名抢注意力。 */
+.brand-version {
+  margin-top: -6px; /* 抵掉 .brand 的 margin-bottom，避免与菜单之间空出两倍间距 */
+  margin-bottom: var(--gap);
+  padding: 0 4px;
+  font-family: var(--font-family-mono);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+  /* 长版本号（v1.2.0-7-g3f9a1c-dirty 有 22 字符）在 224px 侧栏里会超宽，
+     省略号截断 + 悬停看全 —— 与全站其它长文本同一处理 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .nav-icon-btn {

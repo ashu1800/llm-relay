@@ -17,6 +17,7 @@ func TestModelsHintText(t *testing.T) {
 		name           string
 		names          []string
 		brokenFallback int
+		cooling        int
 		wantContains   []string
 		wantAbsent     []string
 	}{
@@ -26,13 +27,13 @@ func TestModelsHintText(t *testing.T) {
 			wantContains: []string{
 				"当前范围内可用的模型有 deepseek-chat、deepseek-reasoner",
 			},
-			wantAbsent: []string{"默认模型映射"},
+			wantAbsent: []string{"默认模型映射", "冷却"},
 		},
 		{
 			name:         "一条白名单都没有",
 			names:        nil,
 			wantContains: []string{"没有任何渠道配置模型白名单"},
-			wantAbsent:   []string{"默认模型映射"},
+			wantAbsent:   []string{"默认模型映射", "冷却"},
 		},
 		{
 			name:           "有半残的兜底配置要点名",
@@ -61,10 +62,42 @@ func TestModelsHintText(t *testing.T) {
 			wantContains:   []string{"当前范围内可用的模型有"},
 			wantAbsent:     []string{"但不会生效"},
 		},
+		{
+			// 2026-09-20 实测踩到：提示说「没有可用渠道」，紧接着又列出
+			// 「可用的模型有 deepseek-v4.1-flash」—— 请求的就是那个模型。
+			// 两者都没说谎，但读者只会更困惑。真相是那条渠道正在冷却
+			// （连续失败 6 次、退避 30 秒），而冷却状态在内存里，
+			// 下面这条 SQL 查不到它。必须由调用方把冷却数传进来点名。
+			name:    "渠道都在冷却时必须说明白",
+			names:   []string{"deepseek-v4.1-flash", "glm-5.3-flash"},
+			cooling: 2,
+			wantContains: []string{
+				"当前范围内可用的模型有 deepseek-v4.1-flash、glm-5.3-flash",
+				"2 条渠道能接这个模型",
+				"冷却",
+			},
+		},
+		{
+			name:         "冷却数为 0 时不该出现冷却那句",
+			names:        []string{"deepseek-chat"},
+			cooling:      0,
+			wantContains: []string{"当前范围内可用的模型有"},
+			wantAbsent:   []string{"冷却"},
+		},
+		{
+			name:           "冷却与半残同时存在，两句都要有",
+			names:          []string{"deepseek-chat"},
+			cooling:        1,
+			brokenFallback: 1,
+			wantContains: []string{
+				"1 条渠道能接这个模型",
+				"另有 1 条渠道开了「默认模型映射」但不会生效",
+			},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := modelsHintText(c.names, c.brokenFallback)
+			got := modelsHintText(c.names, c.brokenFallback, c.cooling)
 			for _, want := range c.wantContains {
 				if !strings.Contains(got, want) {
 					t.Errorf("提示里应包含 %q，实际 %q", want, got)

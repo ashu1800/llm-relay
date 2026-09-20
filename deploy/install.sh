@@ -97,6 +97,17 @@ if [[ "${1:-}" == "--verify" || "${1:-}" == "-v" ]]; then
   docker inspect -f '{{.Created}}' llm-relay:local 2>/dev/null || echo '(镜像不存在)'
   printf ' systemd    : '
   systemctl is-enabled llm-relay.service 2>/dev/null || echo '未注册（开机不会自启）'
+  # 版本号取自**运行中的服务**而不是 .env —— .env 里那个是「上次构建时用的值」，
+  # 而这个接口回的是真正跑着的二进制里编进去的版本（见 Dockerfile 的 -ldflags）。
+  # 两者不一致本身就是个信号：说明构建之后有人改过 .env 但没重新部署。
+  printf ' 服务版本   : '
+  SYSINFO="$(curl -fsS -m 5 "http://127.0.0.1:8888/api/admin/system/info" 2>/dev/null || true)"
+  if [[ -n "$SYSINFO" ]]; then
+    echo "$SYSINFO" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("version") or "?")' 2>/dev/null \
+      || echo "(响应解析失败)"
+  else
+    echo "(服务未响应，拿不到)"
+  fi
   # 源码与镜像的时间对比：镜像比源码旧 ⇒ 改了代码但没重新部署。
   # README 明确写过「改了前端或后端必须重新部署才会在 8888 上生效」，
   # 这条判断把它变成可自动核对的，而不是靠人记住。
@@ -357,6 +368,60 @@ if docker ps --format '{{.Names}}' | grep -qx "${APP_NAME}-postgres"; then
   fi
 else
   log "没有正在运行的数据库容器，跳过备份（首次安装）"
+fi
+
+# ---------- 5.8 计算版本号并写进 .env ----------
+#
+# 版本号的单一来源是 **git**，不是手写常量 —— 手写的那个迟早会和实际代码
+# 对不上，而「界面上显示的版本是不是正在跑的那份代码」正是它唯一要回答的问题。
+#
+# 为什么必须在这里算：源码 tar 到安装目录时排除了 .git（见第 4 步），
+# 到了 docker build 阶段已经读不到 git 了。所以趁源码目录还在手边算好，
+# 经 .env → docker-compose 的 build arg → Dockerfile 的 -ldflags 传进去。
+#
+# 格式：v 前缀 + 最近 tag（没有 tag 就退化成一串短哈希）+ 提交数 + 短哈希 +
+# 脏标记。带提交数与哈希是为了让「同一个 tag 下的两次构建」也能区分开 ——
+# 否则改了代码但没打新 tag 时，界面上的版本号会一动不动，看着像没部署成功。
+#
+#   v1.2.0-7-g3f9a1c        基于 tag v1.2.0，之后 7 个提交
+#   v1.2.0-7-g3f9a1c-dirty  工作区有未提交改动
+#   g3f9a1c                 从没有 tag 的历史上构建
+#   unknown                 不是 git 仓库（例如拿一份导出源码去部署）
+compute_version() {
+  if ! command -v git >/dev/null 2>&1; then
+    echo "unknown"; return
+  fi
+  # -C 指定目录而不是 cd：调用方的当前目录不该被这个函数改掉
+  if ! git -C "$SRC_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "unknown"; return
+  fi
+  local desc
+  desc="$(git -C "$SRC_DIR" describe --tags --always --dirty 2>/dev/null || true)"
+  if [[ -z "$desc" ]]; then
+    echo "unknown"; return
+  fi
+  # describe 在没有 tag 时只给短哈希；补个 v 前缀让两种形状一致，
+  # 前端展示时就不必再判断「该不该加 v」
+  if [[ "$desc" != v* ]]; then
+    echo "v$desc"
+  else
+    echo "$desc"
+  fi
+}
+
+APP_VERSION="$(compute_version)"
+log "版本号：$APP_VERSION（来自 git describe，经 .env 的 VERSION 传入构建）"
+
+# 幂等更新 .env 里的 VERSION。**只改这一个键**，其余内容原样保留 ——
+# 这个文件里有数据库密码与加密主密钥，任何「整体重写」都是在拿线上数据冒险。
+# 用临时文件 + mv 而不是原地 sed -i：mv 是原子的，中途失败不会留下半个 .env。
+if grep -q '^VERSION=' "$ENV_FILE" 2>/dev/null; then
+  grep -v '^VERSION=' "$ENV_FILE" > "${ENV_FILE}.tmp"
+  printf 'VERSION=%s\n' "$APP_VERSION" >> "${ENV_FILE}.tmp"
+  chmod 600 "${ENV_FILE}.tmp"
+  mv "${ENV_FILE}.tmp" "$ENV_FILE"
+else
+  printf 'VERSION=%s\n' "$APP_VERSION" >> "$ENV_FILE"
 fi
 
 # ---------- 6. 构建镜像 ----------
