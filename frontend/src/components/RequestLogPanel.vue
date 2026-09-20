@@ -105,7 +105,11 @@ const current = ref<RequestLog | null>(null)
 const MODEL_COL_MIN = 120
 const MODEL_COL_MAX = 300
 const modelColWidth = ref(190)
-const modelColTotal = computed(() => 155 + 64 + modelColWidth.value + 130 + 150 + 120 + 90 + 100 + 64)
+// 列序（2026-09-20 站主调整）：时间 155 / 模型（动态）/ 渠道 130 / 词元 150 /
+// 耗时 120 / 费用 90 / 状态 64 / 密钥 100 / 操作 64。
+// 加法与列序一一对应；模板里各列的 :width 改动时要同步这里（第二份手抄，
+// 两处不一致时表格会出现非预期的横向滚动）。
+const modelColTotal = computed(() => 155 + modelColWidth.value + 130 + 150 + 120 + 90 + 64 + 100 + 64)
 
 function remeasureModelColumn() {
   const wrap = tableWrap.value
@@ -779,14 +783,6 @@ onMounted(() => {
         <a-table-column title="请求时间" :width="155" fixed="left">
           <template #default="{ record }">{{ fmtTime(record.created_at) }}</template>
         </a-table-column>
-        <!-- 状态列提到模型前（站主 2026-09-20 要求）：先看到「这单成没成」
-             再看「是哪个模型的单」，失败密集时视线不用横穿整行。
-             一个「200」仍是整行里最先被扫到的信号。 -->
-        <a-table-column title="状态" :width="64">
-          <template #default="{ record }">
-            <a-tag :color="statusColor(record.status_code)">{{ record.status_code }}</a-tag>
-          </template>
-        </a-table-column>
         <!-- 模型名带 ellipsis：不加的话长模型名会在这里折成两三行，
              把整行从 40px 顶到 98px（50 行就是 5000px 的页面）；
              完整名字悬停可见，详情里也有 -->
@@ -923,8 +919,14 @@ onMounted(() => {
         <a-table-column title="费用" :width="90">
           <template #default="{ record }">{{ fmtCost(record.estimated_cost, record.cost_currency) }}</template>
         </a-table-column>
-        <!-- 密钥留在队尾（状态已提前到时间之后）：列表自左向右读下来是
-             「什么时候 → 结果如何 → 哪个模型 → 哪条渠道 → 花了多少 → 哪把密钥」 -->
+        <!-- 状态列移到费用之后（站主 2026-09-20 要求）：数字区（词元/耗时/费用）
+             读完后，「成没成」与「哪把密钥」两个结果性信息收尾 -->
+        <a-table-column title="状态" :width="64">
+          <template #default="{ record }">
+            <a-tag :color="statusColor(record.status_code)">{{ record.status_code }}</a-tag>
+          </template>
+        </a-table-column>
+        <!-- 密钥跟着状态收尾：它们本来就是一问一答（哪把密钥、结果如何） -->
         <a-table-column title="密钥" :width="100" ellipsis>
           <template #default="{ record }">
             <GroupTag v-if="record.api_key_name" :name="record.api_key_name" v-bind="tagColorOf(record.group_id)" />
