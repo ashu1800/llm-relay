@@ -56,7 +56,7 @@ echo "=== 1. 建临时渠道并配价：输入 1 / 输出 2 / 缓存读 0.5 / �
 GID=$(curl -s -X POST "$API/groups" -H 'Content-Type: application/json' -d "{\"name\":\"$GNAME\"}" | jqg "d['id']")
 CID=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
   \"name\": \"$CNAME\", \"group_id\": $GID, \"protocol\": \"anthropic-messages\",
-  \"base_url\": \"http://proto-upstream:9998\", \"api_key\": \"mock-anthropic-key\", \"weight\": 1,
+  \"base_url\": \"http://127.0.0.1:9998\", \"api_key\": \"mock-anthropic-key\", \"weight\": 1,
   \"models\": [{
     \"public_name\": \"$MODEL\", \"upstream_name\": \"claude-mock\",
     \"input_per_1m\": \"1\", \"output_per_1m\": \"2\",

@@ -58,7 +58,7 @@ cleanup()
 print("=== 准备：渠道 max_concurrency=1，绑定测试模型 ===")
 _, ch = call("POST", "/channels", {
     "name": CHANNEL, "protocol": "openai-chat",
-    "base_url": "http://slow-upstream:9999/v1",
+    "base_url": "http://127.0.0.1:9997/v1",
     "api_key": "test-key", "group_id": 1, "weight": 100,
     "extra_config": {"max_concurrency": 1},
 })

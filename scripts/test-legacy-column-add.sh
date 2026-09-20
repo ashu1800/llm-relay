@@ -100,8 +100,20 @@ chk "表里还有数据（正是 AutoMigrate 会翻车的场景）" "$ROWS_BEFOR
 echo
 echo "=== 3. 重新部署（install.sh：同步源码 + 重建镜像 + 重启）==="
 echo "  这一步要几分钟，期间服务不可用"
+# 记下容器启动时刻：install.sh 的零中断设计在「镜像内容未变」时不会动容器
+# （compose up -d 判断一致就保持 Running），而连续跑两轮验证时第二轮恰好
+# 就是这种情形。本用例要验证的恰恰是「应用启动时迁移补列」—— 容器没换，
+# Migrate 就没跑，第 4 节会全灭（2026-09-21 实测：列删了没补回，
+# 白名单 INSERT 全部 42703，连带别的用例一起挂）。所以部署后核对启动时刻，
+# 没变就显式重启一次应用 —— 这不是绕过产品行为，是用例自身的前提
+STARTED_BEFORE=$(docker inspect -f '{{.State.StartedAt}}' llm-relay 2>/dev/null || echo none)
 bash "$ROOT/deploy/install.sh" > /tmp/__col-deploy.log 2>&1
 DEPLOY_RC=$?
+STARTED_AFTER=$(docker inspect -f '{{.State.StartedAt}}' llm-relay 2>/dev/null || echo none)
+if [ "$STARTED_BEFORE" = "$STARTED_AFTER" ]; then
+  echo "  镜像未变、容器未重启 —— 显式重启应用以触发迁移补列"
+  systemctl restart llm-relay
+fi
 chk "install.sh 退出码 0（构建/启动没报错）" "0" "$DEPLOY_RC"
 HEALTH=""
 for i in $(seq 1 45); do

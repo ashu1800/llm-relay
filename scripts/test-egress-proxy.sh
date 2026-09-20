@@ -33,6 +33,9 @@ cleanup() {
   for id in $($PG "SELECT id FROM proxies WHERE starts_with(name, '__egress_')"); do
     curl -s -o /dev/null -X DELETE "$API/proxies/$id"
   done
+  for id in $($PG "SELECT id FROM channel_groups WHERE starts_with(name, '__egress_')"); do
+    curl -s -o /dev/null -X DELETE "$API/groups/$id"
+  done
   pkill -f mini-proxy.py 2>/dev/null
 }
 trap cleanup EXIT
@@ -49,11 +52,17 @@ sleep 1
 
 echo
 echo "=== 准备：渠道指向假域名 + 一个可用代理 ==="
+# 分组也自建并显式挂上：库里可能没有默认分组（用户删掉或取消标记后，
+# 后端对「不带 group_id 且无默认分组」的创建回 400）—— 那是另一个
+# 用例的事（test-default-group.sh 第 5 节），别让它混进来
+EGID=$(curl -s -X POST "$API/groups" -H 'Content-Type: application/json' \
+  -d '{"name":"__egress_group__"}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 PID=$(curl -s -X POST "$API/proxies" -H 'Content-Type: application/json' \
   -d "{\"name\":\"__egress_proxy__\",\"protocol\":\"http\",\"host\":\"$GW\",\"port\":$PROXY_PORT}" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 CID=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"__egress_channel__\",\"protocol\":\"openai-chat\",\"base_url\":\"http://$FAKE_HOST:9999/v1\",\"api_key\":\"k\",\"proxy_id\":$PID,\"models\":[{\"public_name\":\"$MODEL\",\"upstream_name\":\"$MODEL\"}]}" \
+  -d "{\"name\":\"__egress_channel__\",\"protocol\":\"openai-chat\",\"base_url\":\"http://$FAKE_HOST:9999/v1\",\"api_key\":\"k\",\"group_id\":$EGID,\"proxy_id\":$PID,\"models\":[{\"public_name\":\"$MODEL\",\"upstream_name\":\"$MODEL\"}]}" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 KEY=$(curl -s -X POST "$API/keys" -H 'Content-Type: application/json' -d '{"name":"__egress_key__"}' \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["key"])')

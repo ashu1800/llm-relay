@@ -84,7 +84,7 @@ echo "=== 0. 准备：临时渠道（上游 mock 的用量固定 10 进 5 出）
 GID=$(curl -s -X POST "$API/groups" -H 'Content-Type: application/json' -d "{\"name\":\"$GNAME\"}" | jqg "d['id']")
 CID=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
   \"name\": \"$CNAME\", \"group_id\": $GID, \"protocol\": \"openai-chat\",
-  \"base_url\": \"http://slow-upstream:9999\", \"api_key\": \"mock-key\", \"weight\": 1,
+  \"base_url\": \"http://127.0.0.1:9997\", \"api_key\": \"mock-key\", \"weight\": 1,
   \"models\": [{\"public_name\": \"$MODEL\", \"upstream_name\": \"$MODEL\"}]
 }" | jqg "d['id']")
 SK=$(curl -s -X POST "$API/keys" -H 'Content-Type: application/json' \
@@ -236,14 +236,18 @@ chk "被调用过的渠道有最近调用时间" "yes" \
 # 调用都显示点东西」，看不出渠道到底是死的还是活的
 UNUSED=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
   \"name\": \"${CNAME}-unused\", \"group_id\": $GID, \"protocol\": \"openai-chat\",
-  \"base_url\": \"http://slow-upstream:9999\", \"api_key\": \"mock-key\"
+  \"base_url\": \"http://127.0.0.1:9997\", \"api_key\": \"mock-key\"
 }" | jqg "d['id']")
 chk "没被调用过的渠道没有最近调用时间" "" "$(last_used_of "$UNUSED")"
 curl -s -X DELETE "$API/channels/$UNUSED" >/dev/null
-# 报出来的时刻必须就是日志里的最大时刻（用纪元秒比，绕开时区与毫秒格式）
-chk "时刻与日志里的最大时刻一致" \
-  "$(P "SELECT EXTRACT(EPOCH FROM MAX(created_at))::bigint FROM request_logs WHERE channel_id=$CID")" \
-  "$(printf '%s' "$(last_used_of "$CID")" | python3 -c "import sys,datetime;print(int(datetime.datetime.fromisoformat(sys.stdin.read().strip()).timestamp()))")"
+# 报出来的时刻必须就是日志里的最大时刻（用纪元秒比，绕开时区与毫秒格式）。
+# 容忍 ±1 秒：PG 的 EXTRACT::bigint 与列表侧 ISO 串的取整方向在毫秒落在
+# .5s 上下时会差一秒（实测 1789878512 vs 1789878511），严格相等让这个
+# 断言变成掷硬币；±1s 不损害「报的就是日志里的时刻」这层意图
+PGMAX=$(P "SELECT EXTRACT(EPOCH FROM MAX(created_at))::bigint FROM request_logs WHERE channel_id=$CID")
+LISTTS=$(printf '%s' "$(last_used_of "$CID")" | python3 -c "import sys,datetime;print(int(datetime.datetime.fromisoformat(sys.stdin.read().strip()).timestamp()))")
+chk "时刻与日志里的最大时刻一致（±1s）" "yes" \
+  "$(case $((PGMAX - LISTTS)) in -1|0|1) echo yes;; *) echo "no（pg=$PGMAX list=$LISTTS）";; esac)"
 
 echo
 echo "=== 11. 清理探测数据 ==="

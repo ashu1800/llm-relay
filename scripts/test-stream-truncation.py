@@ -76,7 +76,7 @@ cleanup()
 print("=== 准备：渠道指向会掐断连接的上游 ===")
 _, ch = call("POST", "/channels", {
     "name": CHANNEL, "protocol": "openai-chat",
-    "base_url": "http://slow-upstream:9999/v1",
+    "base_url": "http://127.0.0.1:9997/v1",
     "api_key": "k", "group_id": 1, "weight": 100,
 })
 cid = ch["id"]

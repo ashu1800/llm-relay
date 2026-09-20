@@ -62,11 +62,13 @@ except Exception as e:
 
 print()
 print("=== 2. 分组编辑的布尔字段必须落库 ===")
-_, gs = call("GET", "/groups")
-g = [x for x in gs["items"] if x.get("is_default")][0]
-gid = g["id"]
-orig_strategy = g["strategy"]
-print("  默认分组 id=%d 原策略=%s 原启用=%s" % (gid, orig_strategy, g["enabled"]))
+# 编辑对象自建临时分组，不借线上的：库里可能根本没有 is_default 的分组
+# （用户删掉默认或取消标记后，旧写法 [x for x in ... if is_default][0]
+# 直接 IndexError 中断），而编辑落库的语义与分组身份无关
+_, tg = call("POST", "/groups", {"name": "分组编辑落库测试"})
+gid = tg["id"]
+orig_strategy = "failover"
+print("  临时分组 id=%d（原策略=%s）" % (gid, orig_strategy))
 
 code, _ = call("PUT", "/groups/%d" % gid, {"strategy": "round_robin", "enabled": False})
 chk("更新请求被接受", 200, code)
@@ -100,10 +102,14 @@ print("=== 4. name 传空串应被拒（不能把分组改成无名）===")
 code, _ = call("PUT", "/groups/%d" % gid, {"name": "   "})
 chk("空名字被拒", 400, code)
 _, gs6 = call("GET", "/groups")
-chk("名字未被改坏", g["name"], [x for x in gs6["items"] if x["id"] == gid][0]["name"])
+chk("名字未被改坏", tg["name"], [x for x in gs6["items"] if x["id"] == gid][0]["name"])
 
 print()
 print("=== 5. 默认分组必须唯一 ===")
+# 进入本节前记录谁是默认（可能一个都没有），测完按原样恢复 ——
+# 原来的写法无条件把 gid 设回默认，脚本跑完会凭空造出一个默认分组
+_, gs0 = call("GET", "/groups")
+orig_defaults = [x["id"] for x in gs0["items"] if x.get("is_default")]
 _, ng = call("POST", "/groups", {"name": "默认分组唯一性测试"})
 ngid = ng["id"]
 call("PUT", "/groups/%d" % ngid, {"is_default": True})
@@ -111,11 +117,12 @@ _, gs7 = call("GET", "/groups")
 defaults = [x for x in gs7["items"] if x.get("is_default")]
 chk("设为默认后只有一个默认分组", 1, len(defaults))
 chk("默认分组就是刚设的那个", ngid, defaults[0]["id"] if defaults else None)
-# 恢复原状
 call("PUT", "/groups/%d" % ngid, {"is_default": False})
-call("PUT", "/groups/%d" % gid, {"is_default": True})
+for oid in orig_defaults:
+    call("PUT", "/groups/%d" % oid, {"is_default": True})
 _, gs8 = call("GET", "/groups")
-chk("恢复后仍只有一个默认分组", 1, len([x for x in gs8["items"] if x.get("is_default")]))
+chk("恢复后默认分组数量与开始时一致", len(orig_defaults),
+    len([x for x in gs8["items"] if x.get("is_default")]))
 call("DELETE", "/groups/%d" % ngid)
 
 print()
@@ -125,7 +132,7 @@ _, gb = call("POST", "/groups", {"name": "停用测试分组"})
 gbid = gb["id"]
 _, ch = call("POST", "/channels", {
     "name": "group-enabled-chan", "protocol": "openai-chat",
-    "base_url": "http://slow-upstream:9999/v1", "api_key": "k",
+    "base_url": "http://127.0.0.1:9997/v1", "api_key": "k",
     "group_id": gbid, "weight": 100,
 })
 call("POST", "/channels/%d/models" % ch["id"], {"public_name": MODEL, "upstream_name": MODEL})
@@ -169,6 +176,7 @@ for m in ms.get("items", []):
     if m["public_name"] == MODEL:
         call("DELETE", "/models/%d" % m["id"])
 call("DELETE", "/groups/%d" % gbid)
+call("DELETE", "/groups/%d" % gid)
 
 print()
 print("通过 %d 项，失败 %d 项" % (ok, bad))

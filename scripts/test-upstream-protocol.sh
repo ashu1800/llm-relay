@@ -48,7 +48,7 @@ CH=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
   \"name\": \"$CNAME\",
   \"group_id\": $GID,
   \"protocol\": \"anthropic-messages\",
-  \"base_url\": \"http://proto-upstream:9998\",
+  \"base_url\": \"http://127.0.0.1:9998\",
   \"api_key\": \"mock-anthropic-key\",
   \"weight\": 1,
   \"models\": [

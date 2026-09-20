@@ -33,7 +33,7 @@ C1 = "__dash-c1-cny"
 C2 = "__dash-c2-usd"
 M1 = "__dash-m1"
 M2 = "__dash-m2"
-UPSTREAM = "http://slow-upstream:9999/v1"
+UPSTREAM = "http://127.0.0.1:9997/v1"
 
 ok = 0
 bad = 0

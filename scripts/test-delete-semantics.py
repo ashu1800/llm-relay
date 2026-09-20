@@ -104,7 +104,7 @@ if default_gid is None:
     raise SystemExit(0 if bad == 0 else 1)
 _, ch = call("POST", "/channels", {
     "name": "delete-semantics-chan", "protocol": "openai-chat",
-    "base_url": "http://slow-upstream:9999/v1", "api_key": "k",
+    "base_url": "http://127.0.0.1:9997/v1", "api_key": "k",
     "group_id": default_gid,
 })
 cid = ch["id"]
