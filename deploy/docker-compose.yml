@@ -1,6 +1,7 @@
 # LLM Relay 本地部署编排
-# 说明：postgres 仅在内部网络暴露，不映射到宿主端口，
-#       以避免与宿主机上已有的 5432 / 6379（sub2api 在用）冲突。
+# 说明：app 用 host 网络模式（见 app 段的注释），postgres 在宿主回环上
+# 发布 15432 专用端口供它连接 —— 不用 5432，那个端口已被宿主上原有的
+# postgres（sub2api 在用）占用。
 name: llm-relay
 
 services:
@@ -8,6 +9,13 @@ services:
     image: postgres:16-alpine
     container_name: llm-relay-postgres
     restart: unless-stopped
+    ports:
+      # host 模式的 app 要经 127.0.0.1 连数据库，而 postgres 原先只在内部
+      # 网络暴露。发布到 15432（不是 5432：宿主上已有原生 postgres）。
+      # 这个映射只在 postgres 容器自身重建时才会重新发布 —— 那是几个月
+      # 一次的事，不像 app 那样每次部署都动，所以不会反复触发
+      # Windows↔WSL localhost 转发断连的问题。
+      - "127.0.0.1:${DB_HOST_PORT:-15432}:5432"
     environment:
       POSTGRES_USER: ${DB_USER:-llmrelay}
       POSTGRES_PASSWORD: ${DB_PASSWORD:?请在 .env 中设置 DB_PASSWORD}
@@ -54,6 +62,27 @@ services:
     image: llm-relay:local
     container_name: llm-relay
     restart: unless-stopped
+    # host 网络模式 —— 这是为了根治「每次部署后浏览器打不开 localhost:8888」。
+    #
+    # 桥接模式下 ports: 发布宿主端口这个动作本身会打断 Windows↔WSL 的
+    # localhost 转发（wslrelay.exe）：每次部署重建 app 容器，8888 的
+    # docker-proxy 就跟着重建，转发随之失效 —— 表现是服务其实健康
+    # （WSL 里 curl 通），但 Windows 浏览器一直转圈。2026-09-20 两天里
+    # 实测触发两次，第二次把用户逼得 wsl --shutdown（服务真停 30 秒）。
+    # 预检端口（8899）已因此移除，但重建 app 本身仍会触发 —— 治本只能
+    # 让 app 的宿主端口发布动作彻底消失。
+    #
+    # host 模式下进程直接监听宿主的 8888，没有 docker-proxy、没有端口
+    # 发布，容器随便重建，转发不再被动到。代价与对策：
+    #   · 隔离性：进程看到的是宿主网络栈 —— 本地个人部署，可接受；
+    #     「只绑回环」的安全限制改由 SERVER_HOST 承担（见 environment）
+    #   · 端口冲突：8888 被占会导致容器反复重启 —— docker logs 一眼可见
+    #   · 数据库地址：不再是服务名 postgres，改成 127.0.0.1:15432
+    #     （postgres 现在把 5432 发布到宿主回环的 15432）
+    #   · 依赖排序：depends_on 的 service_healthy 仍有效（同机 compose），
+    #     但 app 连的是 127.0.0.1 而非容器 DNS —— 启动竞态由 postgres 的
+    #     健康检查 + app 自己的重连兜住
+    network_mode: host
     # 停机宽限期。这个值必须**大于**进程自己的退出预算，否则容器会被 SIGKILL，
     # 那时连「已退出」那行日志和队列里最后几条请求日志都留不下来。
     # 进程侧预算是（见 backend/cmd/server/main.go 顶部的常量）：
@@ -69,14 +98,21 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      SERVER_HOST: 0.0.0.0
+      # host 模式下这就是**宿主侧**的实际绑定地址（没有 docker-proxy 转译了）。
+      # 安全默认保持与原 ports 的「127.0.0.1:8888:8888」同义：只绑回环 ——
+      # 管理接口没有登录鉴权，绑 0.0.0.0 会把渠道密钥与调用日志暴露给局域网。
+      # 确需局域网访问（手机/别的机器）时，在 .env 设 SERVER_HOST=0.0.0.0
+      # 并自行加防火墙。
+      SERVER_HOST: ${SERVER_HOST:-127.0.0.1}
       SERVER_PORT: 8888
       # 渠道密钥的加密主密钥。缺失会退回内置默认值（公开可知），
       # 因此这里不给默认值，让配置缺失在安装阶段就暴露出来。
       RELAY_SECRET: ${RELAY_SECRET:?请在 .env 中设置 RELAY_SECRET}
       GIN_MODE: release
-      DB_HOST: postgres
-      DB_PORT: 5432
+      # host 模式下没有容器 DNS，数据库走宿主回环的 15432
+      # （postgres 把 5432 发布在那里，见 postgres 段的注释）
+      DB_HOST: 127.0.0.1
+      DB_PORT: ${DB_HOST_PORT:-15432}
       DB_USER: ${DB_USER:-llmrelay}
       DB_PASSWORD: ${DB_PASSWORD:?请在 .env 中设置 DB_PASSWORD}
       DB_NAME: ${DB_NAME:-llm_relay}
@@ -88,10 +124,9 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_FORMAT: ${LOG_FORMAT:-text}
       TZ: ${TZ:-Asia/Shanghai}
-    ports:
-      # 默认只绑宿主机回环（原因与改法见 .env.example 的 BIND_ADDR 注释）
-      # 容器内 SERVER_HOST 始终是 0.0.0.0，这里限制的是宿主机侧的端口发布
-      - "${BIND_ADDR:-127.0.0.1}:8888:8888"
+    # 注意：host 模式下**没有 ports 段** —— 进程直接监听宿主 8888。
+    # 「只绑回环、不暴露局域网」的限制改由 SERVER_HOST 承担（见 environment），
+    # 默认 127.0.0.1 与原先 ports 的回环绑定同义。
     volumes:
       - ./data/relay:/data
     # 同 postgres：不限的话 json-file 会无限增长
@@ -111,7 +146,8 @@ services:
       retries: 3
       # 启动时要跑迁移，给足时间再开始判失败
       start_period: 40s
-    networks: [relay]
+    # 注意：network_mode: host 与 networks 互斥（compose 会拒绝），
+    # app 不声明网络 —— 数据库走宿主回环 15432，不再走 compose 内部 DNS
 
 networks:
   relay:

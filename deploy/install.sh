@@ -38,12 +38,11 @@ DOCKER_RESTART_NEEDED=0
 
 APP_NAME="llm-relay"
 INSTALL_DIR="${INSTALL_DIR:-/opt/llm-relay}"
-# PORT 只用于最后打印的访问地址与端口。真正生效的是 compose 里的
-# 宿主端口映射 —— 容器内固定 8888，宿主侧由 deploy/.env 的 BIND_ADDR
-# 决定绑定地址，端口号本身在 docker-compose.yml 里写死为 8888:8888。
-# 所以这里不再提供 PORT 覆盖：允许它和实际映射不一致时，脚本会打印一个
-# 根本连不上的地址（例如 PORT=9000 而实际发布的是 8888），
-# 那种「装好了但打不开、且提示里的地址是错的」最难排查。
+# PORT 只用于最后打印的访问地址与端口。真正生效的是 app 进程的监听地址：
+# host 网络模式下进程直接监听宿主，SERVER_PORT 固定 8888，绑定地址由
+# deploy/.env 的 SERVER_HOST 决定（默认 127.0.0.1，只绑回环）。
+# 所以这里不再提供 PORT 覆盖：允许它和实际监听不一致时，脚本会打印一个
+# 根本连不上的地址 —— 那种「装好了但打不开、且提示里的地址是错的」最难排查。
 PORT=8888
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -424,6 +423,22 @@ else
   printf 'VERSION=%s\n' "$APP_VERSION" >> "$ENV_FILE"
 fi
 
+# ---------- 5.9 迁移 BIND_ADDR → SERVER_HOST（host 网络模式） ----------
+#
+# app 改为 host 网络模式后，宿主侧绑定地址不再由 compose ports 的
+# 「127.0.0.1:8888:8888」前缀控制，而是进程自己的 SERVER_HOST。
+# 老安装的 .env 里记的是 BIND_ADDR —— 语义相同（回环 / 0.0.0.0），
+# 直接改名迁移，用户的手动配置不丢。新值不存在时 compose 的默认值
+# （127.0.0.1）兜底，与老默认 BIND_ADDR=127.0.0.1 同义。
+if grep -q '^BIND_ADDR=' "$ENV_FILE" 2>/dev/null && ! grep -q '^SERVER_HOST=' "$ENV_FILE" 2>/dev/null; then
+  OLD_BIND="$(grep '^BIND_ADDR=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
+  grep -v '^BIND_ADDR=' "$ENV_FILE" > "${ENV_FILE}.tmp"
+  printf 'SERVER_HOST=%s\n' "$OLD_BIND" >> "${ENV_FILE}.tmp"
+  chmod 600 "${ENV_FILE}.tmp"
+  mv "${ENV_FILE}.tmp" "$ENV_FILE"
+  log "已把 .env 的 BIND_ADDR=$OLD_BIND 迁移为 SERVER_HOST（host 网络模式改用此键）"
+fi
+
 # ---------- 6. 构建镜像 ----------
 # 只构建，不在这里启动 —— 启动交给第 7 步注册的 systemd 单元，
 # 让「谁负责守护」只有一个答案。原来这里先 up -d 起容器、第 7 步只 enable 单元，
@@ -460,30 +475,44 @@ SMOKE_DB_USER="$(env_get DB_USER)"; SMOKE_DB_USER="${SMOKE_DB_USER:-llmrelay}"
 SMOKE_DB_NAME="$(env_get DB_NAME)"; SMOKE_DB_NAME="${SMOKE_DB_NAME:-llm_relay}"
 
 smoke_image() {
-  local net="$1"
   local db="llm-relay-smoke-db" app="llm-relay-smoke-app"
+  # host 网络模式下端口就是**宿主**端口，预检的 app 若也用 8888 会与线上撞车。
+  # 用 18088：只在本机回环上临时听几十秒，用完即删。
+  local smoke_port=18088
   docker rm -f "$db" "$app" >/dev/null 2>&1 || true
-  log "预检新镜像：临时数据库 + 容器内探针试跑（不发布宿主端口）"
-  docker run -d --name "$db" --network "$net" \
+  log "预检新镜像：临时数据库 + host 模式试跑（监听 ${smoke_port}，不发布宿主端口）"
+  # host 模式下容器间不能再走 compose 内部 DNS，数据库对 app 暴露为
+  # 宿主回环的一个端口。smoke 的 postgres **也跑 host 网络**，用 postgres
+  # 自己的参数监听 127.0.0.1:25432（线上 postgres 用 15432，不冲突）——
+  # 刻意不用 -p 端口发布：那正是本功能要消灭的动作（发布端口会打断
+  # Windows↔WSL 的 localhost 转发），预检自己不能带头违反。
+  docker run -d --name "$db" --network host \
     -e POSTGRES_PASSWORD="$SMOKE_DB_PASSWORD" -e POSTGRES_USER="$SMOKE_DB_USER" \
-    -e POSTGRES_DB="$SMOKE_DB_NAME" postgres:16-alpine >/dev/null || return 1
-  # 等临时库能接受连接（最多 30s）
+    -e POSTGRES_DB="$SMOKE_DB_NAME" \
+    postgres:16-alpine \
+    postgres -c listen_addresses=127.0.0.1 -p 25432 >/dev/null || return 1
+  # 等临时库能接受连接（最多 30s；host 模式下它监听在宿主 25432）
   local i
   for i in $(seq 1 30); do
-    docker exec "$db" pg_isready -h 127.0.0.1 -p 5432 >/dev/null 2>&1 && break
+    docker exec "$db" pg_isready -h 127.0.0.1 -p 25432 >/dev/null 2>&1 && break
     sleep 1
   done
-  docker run -d --name "$app" --network "$net" \
+  # app 与线上**同一种网络形态**（host 模式）：预检才真的预演了生产形态 ——
+  # 迁移在 host 模式下连库、监听、健康检查，任何一项不兼容都会在这里暴露，
+  # 而不是切换之后。--env-file 会带上 .env 里的 SERVER_HOST/DB_* 等，
+  # 显式 -e 覆盖掉端口与库地址：预检绝不能碰线上 8888 与线上数据库。
+  docker run -d --name "$app" --network host \
     --env-file "$ENV_FILE" \
-    -e SERVER_HOST=0.0.0.0 -e SERVER_PORT=8888 -e GIN_MODE=release \
-    -e DB_HOST="$db" -e DB_PORT=5432 -e DB_SSLMODE=disable \
+    -e SERVER_HOST=127.0.0.1 -e SERVER_PORT="$smoke_port" -e GIN_MODE=release \
+    -e DB_HOST=127.0.0.1 -e DB_PORT=25432 -e DB_SSLMODE=disable \
     -e RELAY_PAYLOAD_STORAGE_MODE="${RELAY_PAYLOAD_STORAGE_MODE:-errors}" \
     -e LOG_LEVEL=warn -e TZ="${TZ:-Asia/Shanghai}" \
     llm-relay:local >/dev/null || return 1
   # /readyz 会实际探一次数据库，迁移失败时它不会通过 —— 这才是「能不能接请求」。
-  # 探针在容器内跑（镜像里有 wget），命令的退出码直接代表探测结果
+  # host 模式下进程就监听在宿主回环上，宿主侧直接 curl；
+  # 不发探针进容器也行，但保持与切前检查同一姿势（wget 进容器）更直观
   for i in $(seq 1 40); do
-    if docker exec "$app" wget -qO- -T 3 http://127.0.0.1:8888/readyz >/dev/null 2>&1; then
+    if curl -fsS -m 2 "http://127.0.0.1:${smoke_port}/readyz" >/dev/null 2>&1; then
       log "预检通过：新镜像能启动、迁移跑通、/readyz 正常"
       return 0
     fi
@@ -499,12 +528,12 @@ smoke_image() {
   return 1
 }
 
-# 网络名从正在运行的 app 容器上取（compose 项目名变了也能跟上）；取不到就跳过预检
-SMOKE_NET="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}' "$APP_NAME" 2>/dev/null || true)"
+# host 模式下 app 不再连接 compose 网络，网络名无从取也不需要 ——
+# 预检只看「线上是否健康」来决定跑不跑（首次安装或服务未启动时没有对照意义）
 if [[ -z "$SMOKE_DB_PASSWORD" ]]; then
   log "读不到 DB_PASSWORD，跳过镜像预检（只在 .env 缺失时会发生）"
-elif [[ -n "$SMOKE_NET" ]] && curl -fsS -o /dev/null -m 3 "http://127.0.0.1:$PORT/healthz" 2>/dev/null; then
-  if smoke_image "$SMOKE_NET"; then
+elif curl -fsS -o /dev/null -m 3 "http://127.0.0.1:$PORT/healthz" 2>/dev/null; then
+  if smoke_image; then
     :
   else
     docker rm -f llm-relay-smoke-db llm-relay-smoke-app >/dev/null 2>&1 || true
@@ -733,13 +762,14 @@ if [[ -n "${DOWNTIME_MS:-}" && "$DOWNTIME_MS" != "0" ]]; then
 elif [[ "${DOWNTIME_MS:-}" == "0" ]]; then
   echo " 本次切换   : 探测期间未观察到中断（100ms 粒度）"
 fi
-# 不手工解析 .env 来推断绑定（env 优先级/引号/重复键与 compose 语义处处分歧），
-# 直接回读 Docker 实际发布的地址 —— 容器没起来时回退到回环提示，宁可不报
-PUB_BIND="$(cd "$INSTALL_DIR/deploy" && docker compose port app 8888 2>/dev/null | head -1 | cut -d: -f1 || true)"
+# host 模式下没有 docker-proxy 的端口发布可查（docker compose port 输出为空），
+# 绑定地址直接看进程实际监听 —— 比 .env 的声明更权威（.env 改了没重启时，
+# 声明与实际会不一致，如实报实际的）
+PUB_BIND="$(ss -ltn 2>/dev/null | awk -v p=":$PORT" '$4 ~ p {print $4}' | head -1 | sed 's/^[^:]*://')"
 case "$PUB_BIND" in
   ""|127.0.0.1|"::1"|localhost)
-    echo " 局域网访问 : 在 deploy/.env 设 BIND_ADDR=0.0.0.0 后重启（管理接口无鉴权，自行加防火墙）" ;;
-  0.0.0.0|"::")
+    echo " 局域网访问 : 在 deploy/.env 设 SERVER_HOST=0.0.0.0 后重启（管理接口无鉴权，自行加防火墙）" ;;
+  0.0.0.0|"::*")
     [[ -n "$WSL_IP" ]] && echo " 局域网地址 : http://$WSL_IP:$PORT" ;;
   *)
     echo " 局域网地址 : http://$PUB_BIND:$PORT" ;;
@@ -749,20 +779,17 @@ echo " 端口       : $PORT"
 echo
 # 部署本身成功、但浏览器打不开时，先看这一条：服务在 WSL 里是好的，
 # 断的是 Windows↔WSL 的 localhost 转发（wslrelay.exe 会接受连接却不转发数据，
-# 表现为浏览器一直转圈）。
+# 浏览器打不开时的排查指引。
 #
-# 预检原先会在 WSL 内新建一个宿主监听端口（8899），那正是这个转发的常见触发点，
-# 2026-09-20 已去掉（改为容器内探针）。剩下仍会新建端口的是**重建 app 容器**本身
-# （8888 重新发布），所以这段提示仍然保留。
+# host 网络模式下，部署不再做任何宿主端口发布/重发布动作（app 直接监听、
+# 没有 docker-proxy），Windows↔WSL localhost 转发被部署打断的主因已消除。
+# 这段提示保留给真正的边缘情况（如 wslrelay.exe 因其它原因失效）。
 if [[ -n "$WSL_IP" ]]; then
   echo " 打不开？   : 先在 WSL 里自测（返回 200 就说明服务本身没问题）："
   echo "              curl -I http://127.0.0.1:$PORT/healthz"
-  echo "              断的若是 Windows↔WSL 的转发，可用 wsl --shutdown 重建。"
-  # 明确写出代价：从前这里只写「会自己回来」，没写要多久，于是重启期间
-  # 看起来像服务挂了。实测（2026-09-20）整机重启后约 27 秒恢复。
-  echo "              ⚠ 注意：wsl --shutdown 会让中转服务**真的停掉约 30 秒**"
-  echo "                （容器要等 docker 与数据库重新就绪）。数据不丢，但这段时间"
-  echo "                所有请求都会失败 —— 不是必须重启，就先别重启。"
+  echo "              host 网络模式下部署已不再触发转发断连；若仍打不开且上面"
+  echo "              返回 200，可用 wsl --shutdown 重建转发 —— 但注意那会让"
+  echo "              服务真停约 30 秒，不是必须就先别重启。"
   echo
 fi
 echo " 常用命令:"
