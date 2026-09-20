@@ -203,6 +203,13 @@ function openCreate() {
 }
 
 async function openEdit(row: ChannelRow) {
+  // 先按传入的 row 立刻把表单填上（弹窗不能等网络），再用刚拉到的数据校正。
+  //
+  // 为什么要校正：extra_config 是**整块覆盖**提交的，而 row 是 rows.value 里的
+  // 快照 —— 它可能是几分钟前 load() 拿到的。用过期快照回填，保存时就会把
+  // 期间由别处写进去的键（自定义请求头、默认模型映射…）静默删掉。
+  // 2026-09-20 实测踩到：配好的默认模型映射「过一会儿自己没了」，
+  // 根因就是打开弹窗时用的还是「那条渠道还没配兜底」的旧快照。
   editing.value = row
   Object.assign(form, {
     name: row.name,
@@ -226,11 +233,26 @@ async function openEdit(row: ChannelRow) {
     models: [] as WhitelistRow[]
   })
   modalOpen.value = true
-  // 编辑时把已有白名单读出来一起改：白名单是渠道的一部分，
-  // 分开两个入口改很容易出现「改了渠道没改模型」的错觉
+
+  // 拉最新数据校正表单：渠道整行 + 白名单一次拿全。
+  // 原来只拉白名单、extra_config 沿用快照，于是快照一过期就会误删配置。
   try {
-    const res = await api.get<{ items: ChannelBinding[] }>('/channels/' + row.id + '/models')
-    form.models = (res.items || []).map((b) => ({
+    const [listRes, modelsRes] = await Promise.all([
+      api.get<{ items: ChannelRow[] }>('/channels'),
+      api.get<{ items: ChannelBinding[] }>('/channels/' + row.id + '/models')
+    ])
+    const fresh = (listRes.items || []).find((c) => c.id === row.id)
+    if (fresh) {
+      // 只校正 extra_config 相关的三项：其余字段用户在弹窗里的输入不该被
+      // 这次异步回填冲掉（拉取期间他可能已经改了名字）。extra_config 这三项
+      // 在弹窗里是独立控件，用户来不及在几百毫秒内改完再被冲掉
+      editing.value = fresh
+      const ec: any = fresh.extra_config || {}
+      form.max_concurrency = Number(ec.max_concurrency) || 0
+      form.default_model_enabled = ec.default_model_enabled === true
+      form.default_model = String(ec.default_model || '')
+    }
+    form.models = (modelsRes.items || []).map((b) => ({
       public_name: b.public_name,
       upstream_name: b.upstream_name === b.public_name ? '' : b.upstream_name,
       enabled: b.enabled,
@@ -240,7 +262,7 @@ async function openEdit(row: ChannelRow) {
       ...pickPrice(b)
     }))
   } catch (e: any) {
-    message.error('读取模型白名单失败：' + e.message)
+    message.error('读取渠道最新配置失败：' + e.message + '（保存前会再试一次）')
   }
 }
 
@@ -274,8 +296,15 @@ function whitelistPayload(): WhitelistRow[] | null {
 //
 // 单独提交一个 { max_concurrency } 会把 headers 等键整体覆盖掉 ——
 // 「改个并发把自定义请求头弄没了」是那种当场看不出、过几天才发作的问题。
-function nextExtraConfig(): Record<string, unknown> {
-  const extra: Record<string, unknown> = { ...((editing.value?.extra_config as any) || {}) }
+//
+// **base 必须传「刚拉下来的最新值」，不能沿用编辑弹窗打开时的快照。**
+// 用快照就出过事（2026-09-20 实测）：用户打开页面后，我在弹窗里配好兜底映射，
+// 用户在别处改了白名单、回来编辑渠道并保存 —— 那一保存用的是**旧快照**，
+// 里面没有 default_model，nextExtraConfig 于是把库里刚配好的兜底配置
+// 整个覆盖掉了（服务端只看到 extra_config 里没有那几个键，如实照写）。
+// 表现是「配好的兜底过一会儿自己没了」，而且每次编辑别的渠道都可能重演。
+function buildExtraConfig(base: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  const extra: Record<string, unknown> = { ...(base || {}) }
   if (form.max_concurrency > 0) {
     extra.max_concurrency = form.max_concurrency
   } else {
@@ -331,6 +360,10 @@ async function save() {
   }
   saving.value = true
   try {
+    // extra_config 的基底用 editing.value 上的那一份 —— 它在 openEdit 时
+    // 已经被**最新的**渠道数据校正过（见那里的注释），不是过期快照。
+    // 保存前不再重复拉一次：那次拉取与本函数是同一个事件循环里的两个动作，
+    // 中间没有用户操作窗口，多打一次请求换不来更新的数据
     const payload: Record<string, unknown> = {
       name: form.name.trim(),
       protocol: form.protocol,
@@ -345,7 +378,7 @@ async function save() {
       icon: form.icon.trim(),
       // extra_config 里有别的键（自定义请求头等），必须整个带着走，
       // 否则改一次并发就把它们抹掉了
-      extra_config: nextExtraConfig(),
+      extra_config: buildExtraConfig((editing.value?.extra_config as any) || {}),
       models
     }
     if (form.api_key) payload.api_key = form.api_key

@@ -254,10 +254,11 @@ func (s *Service) availableModelsHint(ctx context.Context, req *RelayRequest) st
 	if err := q.Order("channel_models.public_name").Limit(12).Pluck("channel_models.public_name", &names).Error; err != nil {
 		return ""
 	}
-	return modelsHintText(names, s.brokenFallbackCount(ctx, req), s.coolingCount(req))
+	coolingTotal, coolingFallback := s.coolingCount(req)
+	return modelsHintText(names, s.brokenFallbackCount(ctx, req), coolingTotal, coolingFallback)
 }
 
-// coolingCount 数出「能接这个模型、但此刻正在冷却」的渠道。
+// coolingCount 数出「能接这个模型、但此刻正在冷却」的渠道，返回 (总数, 其中兜底渠道数)。
 //
 // 冷却状态在内存里（ChannelState），**数据库查不到** —— 而上面那段可用模型
 // 提示是查库得来的。两者拼在一起就会出现自相矛盾的报错，2026-09-20 实测踩到：
@@ -268,21 +269,59 @@ func (s *Service) availableModelsHint(ctx context.Context, req *RelayRequest) st
 // 请求的模型名就在「可用」列表里，却说没有渠道。真相是那条渠道连续失败 6 次、
 // 正在退避 30 秒 —— 提示里一个字都没提，用户只能对着渠道列表发呆。
 //
+// **兜底候选也要数进去**：配了默认模型映射的渠道本可以接住这个请求，
+// 但它同样被冷却过滤剔除（buildCandidates 对两轮查询共用那段过滤）。
+// 不数它的话，用户会以为「兜底没生效」，而真相是「兜底生效了、也被挡住了」——
+// 这两件事的排查方向完全不同（查配置 vs 查上游）。
+//
 // 判据必须与路由一致：同一个 InCooldown、同一份候选范围（启用渠道 + 启用分组 +
 // 启用白名单行 + 密钥/分组白名单）。两边各查各的迟早漂移成
 // 「提示说没冷却、路由说有」。
-func (s *Service) coolingCount(req *RelayRequest) int {
+func (s *Service) coolingCount(req *RelayRequest) (total, fallback int) {
 	if s.state == nil || s.router == nil {
-		return 0
+		return 0, 0
 	}
 	now := time.Now()
-	n := 0
+	fallbackSet := make(map[uint]bool)
+	for _, id := range s.fallbackChannelIDs(req) {
+		fallbackSet[id] = true
+	}
 	for _, id := range s.channelIDsForModel(req) {
 		if _, cooling := s.state.InCooldown(id, now); cooling {
-			n++
+			total++
+			if fallbackSet[id] {
+				fallback++
+			}
 		}
 	}
-	return n
+	return total, fallback
+}
+
+// fallbackChannelIDs 取「开了默认模型映射、且兜底目标匹配得上白名单」的渠道 ID。
+//
+// 条件与 Router.queryCandidates 的 fallback 分支保持一致：开关真的开着
+// （lower(btrim(...))='true'，与 Go 侧 truthyFlag 对齐）、兜底目标在同渠道
+// 启用的白名单里、渠道与分组都启用。
+func (s *Service) fallbackChannelIDs(req *RelayRequest) []uint {
+	q := s.router.db.WithContext(context.Background()).
+		Table("channels").
+		Joins("JOIN channel_models ON channel_models.channel_id = channels.id AND channel_models.enabled = true").
+		Joins("JOIN channel_groups ON channel_groups.id = channels.group_id").
+		Where("channel_models.public_name = channels.extra_config->>'default_model'").
+		Where("lower(btrim(channels.extra_config->>'default_model_enabled')) = 'true'").
+		Where("channels.enabled = true").
+		Where("channel_groups.enabled = true")
+	if req.GroupID > 0 {
+		q = q.Where("channels.group_id = ?", req.GroupID)
+	}
+	if len(req.AllowedGroups) > 0 {
+		q = q.Where("channels.group_id IN ?", req.AllowedGroups)
+	}
+	var ids []uint
+	if err := q.Pluck("channels.id", &ids).Error; err != nil {
+		return nil
+	}
+	return ids
 }
 
 // channelIDsForModel 取「这个模型名在范围内、会被路由考虑到的渠道 ID」。
@@ -352,12 +391,13 @@ func (s *Service) brokenFallbackCount(ctx context.Context, req *RelayRequest) in
 //
 // 抽成纯函数是为了能直接断言文案（这个包没有 DB 测试环境）。
 //
-// 三个数字各自对应一种「看着配好了、实际用不了」的状态，缺一个都会让
+// 四个数字各自对应一种「看着配好了、实际用不了」的状态，缺一个都会让
 // 用户对着渠道列表找不出差在哪：
-//   - names 为空      → 压根没配白名单
-//   - cooling > 0     → 有渠道、但连续失败后正在退避（内存态，查库查不到）
-//   - brokenFallback  → 开了默认模型映射但模型名没填 / 不在自己白名单里
-func modelsHintText(names []string, brokenFallback, cooling int) string {
+//   - names 为空          → 压根没配白名单
+//   - cooling > 0         → 有渠道、但连续失败后正在退避（内存态，查库查不到）
+//   - fallbackCooling > 0 → 其中还有开了默认模型映射的兜底渠道，它也没能顶上
+//   - brokenFallback > 0  → 开了默认模型映射但模型名没填 / 不在自己白名单里
+func modelsHintText(names []string, brokenFallback, cooling, fallbackCooling int) string {
 	var b strings.Builder
 	if len(names) == 0 {
 		b.WriteString("；当前范围内没有任何渠道配置模型白名单，请到「渠道管理」里给渠道加上模型")
@@ -371,6 +411,13 @@ func modelsHintText(names []string, brokenFallback, cooling int) string {
 		b.WriteString("。注意：此刻有 " + strconv.Itoa(cooling) +
 			" 条渠道能接这个模型，但它们刚失败过、正在冷却中（退避几十秒后自动恢复；" +
 			"若反复出现，去「渠道管理」看该渠道最近的错误）")
+		// 兜底渠道也在冷却里，要说清楚 —— 否则配了兜底的人会以为兜底没生效，
+		// 而真相是它**生效了但同样被冷却挡住了**（2026-09-20 实测）。
+		// 这两件事的排查方向完全不同：前者去查配置，后者去查上游。
+		if fallbackCooling > 0 {
+			b.WriteString("；其中 " + strconv.Itoa(fallbackCooling) +
+				" 条是开了「默认模型映射」的兜底渠道，它们本该接住这个请求，但同样在冷却中")
+		}
 	}
 	if brokenFallback > 0 {
 		// 与上面那句并置而不替换：半残渠道可能与正常渠道同时存在，

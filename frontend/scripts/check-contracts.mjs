@@ -606,6 +606,52 @@ console.log('=== 看板工具栏不吃弹性压缩 ===')
 }
 
 console.log('')
+console.log('=== 渠道表单不拿过期快照覆盖 extra_config ===')
+
+// extra_config 在保存时是**整块覆盖**写的（后端只看到你提交的那份 JSON）。
+// 于是「基底从哪来」就成了正确性问题：拿编辑弹窗打开时的快照当基底，
+// 期间由别处写进去的键就会在保存时被静默删掉。
+//
+// 2026-09-20 实测踩到：用户配好的默认模型映射「过一会儿自己没了」，
+// 根因是 openEdit 用的还是「那条渠道还没配兜底」的旧快照，保存时
+// buildExtraConfig 的 else 分支把 default_model 两个键 delete 了。
+// 而且它**不是一次性**的：每次编辑任何渠道都可能重演，因为快照一直在过期。
+//
+// 静态检查量不到运行时的新旧，但能钉住「有没有做校正」这个结构性要求：
+// openEdit 里必须有一次拉取最新渠道数据的动作。
+{
+  const src = stripComments(readFileSync(join(SRC, 'views/ChannelsView.vue'), 'utf8'))
+
+  // 抽出 openEdit 的函数体（从它声明到下一個顶层函数声明之间）
+  const start = src.indexOf('async function openEdit')
+  const body = start >= 0 ? src.slice(start, src.indexOf('\nasync function', start + 10)) : ''
+
+  check(
+    'openEdit 找得到',
+    start >= 0,
+    '改过函数名就要同步改这里，否则下面两条会静默失效（空字符串永远不匹配）',
+  )
+  check(
+    'openEdit 会拉取最新渠道数据校正表单',
+    /api\.get<\{[^}]*items:\s*ChannelRow\[\][^}]*\}>\('\/channels'\)/.test(body),
+    'extra_config 是整块覆盖写的，用过期的 row 当基底会静默删掉期间新增的键',
+  )
+  check(
+    'openEdit 用拉到的结果校正 extra_config 相关字段',
+    /form\.default_model(_enabled)?\s*=/.test(body) && /form\.max_concurrency\s*=/.test(body),
+    '拉到了却不回填，慢性的键照样会在保存时被删掉',
+  )
+  // buildExtraConfig 必须是「接收基底」的纯函数，而不是自己去读 editing.value ——
+  // 后者就是这次缺陷的形状（它悄悄依赖一个可能过期的 ref）
+  check(
+    'buildExtraConfig 的基底由参数传入，不自己读 editing.value',
+    /function buildExtraConfig\(\s*base\s*:/.test(src) &&
+      !/function buildExtraConfig[\s\S]{0,400}editing\.value/.test(src),
+    '从 editing.value 里取基底等于依赖一个可能过期的 ref，正是这次缺陷的根因',
+  )
+}
+
+console.log('')
 if (failed > 0) {
   console.log(`${failed} 项未通过`)
   process.exit(1)

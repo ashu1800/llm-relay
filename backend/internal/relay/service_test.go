@@ -14,12 +14,13 @@ import (
 // 但直接改库、导入旧备份都可能留下它。
 func TestModelsHintText(t *testing.T) {
 	cases := []struct {
-		name           string
-		names          []string
-		brokenFallback int
-		cooling        int
-		wantContains   []string
-		wantAbsent     []string
+		name            string
+		names           []string
+		brokenFallback  int
+		cooling         int
+		fallbackCooling int
+		wantContains    []string
+		wantAbsent      []string
 	}{
 		{
 			name:  "有可用模型",
@@ -94,10 +95,33 @@ func TestModelsHintText(t *testing.T) {
 				"另有 1 条渠道开了「默认模型映射」但不会生效",
 			},
 		},
+		{
+			// 2026-09-20 实测：用户配了兜底，仍报「没有可用渠道」，而提示
+			// 只说「1 条渠道能接这个模型」—— 那句数的是**精确命中**的渠道，
+			// 完全没提兜底那条也因为冷却没能顶上。用户据此无法判断
+			// 「是兜底没生效，还是兜底也被挡住了」。
+			// 开兜底的渠道一起冷却时必须单独说一句。
+			name:             "兜底渠道也冷却时要单独说明",
+			names:            []string{"claude-sonnet-4-6"},
+			cooling:          2,
+			fallbackCooling:  1,
+			wantContains: []string{
+				"2 条渠道能接这个模型",
+				"其中 1 条是开了「默认模型映射」的兜底渠道",
+			},
+		},
+		{
+			name:            "没有兜底冷却时不提那句",
+			names:           []string{"claude-sonnet-4-6"},
+			cooling:         1,
+			fallbackCooling: 0,
+			wantContains:    []string{"1 条渠道能接这个模型"},
+			wantAbsent:      []string{"兜底渠道"},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := modelsHintText(c.names, c.brokenFallback, c.cooling)
+			got := modelsHintText(c.names, c.brokenFallback, c.cooling, c.fallbackCooling)
 			for _, want := range c.wantContains {
 				if !strings.Contains(got, want) {
 					t.Errorf("提示里应包含 %q，实际 %q", want, got)
