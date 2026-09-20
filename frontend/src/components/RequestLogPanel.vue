@@ -105,11 +105,7 @@ const current = ref<RequestLog | null>(null)
 const MODEL_COL_MIN = 120
 const MODEL_COL_MAX = 300
 const modelColWidth = ref(190)
-// 列序（2026-09-20 站主调整）：时间 155 / 状态 64 / 渠道 130 / 词元 150 /
-// 耗时 120 / 费用 90 / 模型（动态）/ 密钥 100 / 操作 64。
-// 加法与列序一一对应；模板里各列的 :width 改动时要同步这里（第二份手抄，
-// 两处不一致时表格会出现非预期的横向滚动）。
-const modelColTotal = computed(() => 155 + 64 + 130 + 150 + 120 + 90 + modelColWidth.value + 100 + 64)
+const modelColTotal = computed(() => 155 + 64 + modelColWidth.value + 130 + 150 + 120 + 90 + 100 + 64)
 
 function remeasureModelColumn() {
   const wrap = tableWrap.value
@@ -783,11 +779,48 @@ onMounted(() => {
         <a-table-column title="请求时间" :width="155" fixed="left">
           <template #default="{ record }">{{ fmtTime(record.created_at) }}</template>
         </a-table-column>
-        <!-- 状态列提到时间后（站主 2026-09-20 要求）：先看到「这单成没成」，
-             失败密集时视线不用横穿整行。一个「200」仍是整行里最先被扫到的信号。 -->
+        <!-- 状态列提到模型前（站主 2026-09-20 要求）：先看到「这单成没成」
+             再看「是哪个模型的单」，失败密集时视线不用横穿整行。
+             一个「200」仍是整行里最先被扫到的信号。 -->
         <a-table-column title="状态" :width="64">
           <template #default="{ record }">
             <a-tag :color="statusColor(record.status_code)">{{ record.status_code }}</a-tag>
+          </template>
+        </a-table-column>
+        <!-- 模型名带 ellipsis：不加的话长模型名会在这里折成两三行，
+             把整行从 40px 顶到 98px（50 行就是 5000px 的页面）；
+             完整名字悬停可见，详情里也有 -->
+        <a-table-column title="模型" :width="modelColWidth" ellipsis>
+          <template #default="{ record }">
+            <!-- 模型、密钥两处用的是同一个组件与同一个颜色：
+                 它们描述的是「这次请求属于哪个分组」，颜色因此必须一致。
+                 原来还有第三个「分组」列，后来删掉了：它写的就是这两个
+                 胶囊颜色所指的那件事，却占着 110px；分组名在详情抽屉里。
+                 （当初还有一条理由「按分组看整批请求时，工具栏的分组筛选更好用」，
+                 它随列表不再吃筛选而失效 —— 现在列表只回答「最新发生了什么」。） -->
+            <span class="model-cell">
+              <GroupTag :name="record.model_requested" v-bind="tagColorOf(record.group_id)" />
+              <!-- 思考胶囊：档位色由 CSS 变量 --pill-color 注入（一套底/字/边框
+                   规则覆盖全部档位），分层样式与动效见 .think-pill 的注释。
+                   没带思考参数的请求不渲染胶囊 —— 「没有」不需要占位。 -->
+              <span
+                v-if="record.thinking_level"
+                class="think-pill"
+                :style="{ '--pill-color': thinkingColor(record.thinking_level) }"
+              >{{ record.thinking_level }}</span>
+              <!-- 兜底胶囊：这条请求的模型名没命中白名单，是渠道的默认模型映射
+                   接下的（真正发给上游的是 model_upstream）。
+                   必须显眼 —— 开了兜底之后客户端写错模型名也不再报错，
+                   这个标记是发现「其实没命中」的唯一途径。
+                   颜色借用思考档位里最低调的那一档同款（灰），不抢主信息，
+                   但形状与位置让它在扫列表时能被一眼扫到。 -->
+              <span
+                v-if="record.fallback_mapped"
+                class="think-pill"
+                :style="{ '--pill-color': FALLBACK_COLOR }"
+                :title="'模型名没命中白名单，已改用 ' + (record.model_upstream || '默认模型') + ' 请求上游'"
+              >兜底</span>
+            </span>
           </template>
         </a-table-column>
         <!-- 渠道列当初是随「按渠道筛选」一起加的，那个筛选现在不再作用于列表；
@@ -890,45 +923,8 @@ onMounted(() => {
         <a-table-column title="费用" :width="90">
           <template #default="{ record }">{{ fmtCost(record.estimated_cost, record.cost_currency) }}</template>
         </a-table-column>
-        <!-- 模型列在费用之后、密钥之前（站主 2026-09-20 要求）：数字区
-             （词元/耗时/费用）连成一片读完，模型与密钥两个胶囊属性列收尾。
-             模型名带 ellipsis：不加的话长模型名会在这里折成两三行，
-             把整行从 40px 顶到 98px（50 行就是 5000px 的页面）；
-             完整名字悬停可见，详情里也有 -->
-        <a-table-column title="模型" :width="modelColWidth" ellipsis>
-          <template #default="{ record }">
-            <!-- 模型、密钥两处用的是同一个组件与同一个颜色：
-                 它们描述的是「这次请求属于哪个分组」，颜色因此必须一致。
-                 原来还有第三个「分组」列，后来删掉了：它写的就是这两个
-                 胶囊颜色所指的那件事，却占着 110px；分组名在详情抽屉里。 -->
-            <span class="model-cell">
-              <GroupTag :name="record.model_requested" v-bind="tagColorOf(record.group_id)" />
-              <!-- 思考胶囊：档位色由 CSS 变量 --pill-color 注入（一套底/字/边框
-                   规则覆盖全部档位），分层样式与动效见 .think-pill 的注释。
-                   没带思考参数的请求不渲染胶囊 —— 「没有」不需要占位。 -->
-              <span
-                v-if="record.thinking_level"
-                class="think-pill"
-                :style="{ '--pill-color': thinkingColor(record.thinking_level) }"
-              >{{ record.thinking_level }}</span>
-              <!-- 兜底胶囊：这条请求的模型名没命中白名单，是渠道的默认模型映射
-                   接下的（真正发给上游的是 model_upstream）。
-                   必须显眼 —— 开了兜底之后客户端写错模型名也不再报错，
-                   这个标记是发现「其实没命中」的唯一途径。
-                   颜色借用思考档位里最低调的那一档同款（灰），不抢主信息，
-                   但形状与位置让它在扫列表时能被一眼扫到。 -->
-              <span
-                v-if="record.fallback_mapped"
-                class="think-pill"
-                :style="{ '--pill-color': FALLBACK_COLOR }"
-                :title="'模型名没命中白名单，已改用 ' + (record.model_upstream || '默认模型') + ' 请求上游'"
-              >兜底</span>
-            </span>
-          </template>
-        </a-table-column>
-        <!-- 密钥跟着模型收尾（站主 2026-09-20 调整后队列为
-             「时间 → 状态 → 渠道 → 词元 → 耗时 → 费用 → 模型 → 密钥」）：
-             数字读完，两个分组着色的属性胶囊并排在尾部互为对照 -->
+        <!-- 密钥留在队尾（状态已提前到时间之后）：列表自左向右读下来是
+             「什么时候 → 结果如何 → 哪个模型 → 哪条渠道 → 花了多少 → 哪把密钥」 -->
         <a-table-column title="密钥" :width="100" ellipsis>
           <template #default="{ record }">
             <GroupTag v-if="record.api_key_name" :name="record.api_key_name" v-bind="tagColorOf(record.group_id)" />
