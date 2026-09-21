@@ -177,6 +177,10 @@ onUnmounted(() => {
               {{ appVersionShort }}
             </div>
 
+            <!-- 品牌区（身份信息）与菜单区（导航）的分界。收起态不显示：
+                 那时上下都是纯图标，一条线反而显得挤 -->
+            <div v-if="!collapsed" class="sidebar-divider" aria-hidden="true"></div>
+
             <nav class="console-menu-list">
               <button
                 v-for="m in menus"
@@ -332,6 +336,15 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 分隔线：品牌区（身份信息）与菜单区（导航）的分界。
+   1px 通栏细线用边框色，不再发明新的灰 —— 和输入框、卡片描边同源；
+   上方间距来自 .brand-version 的 margin-bottom，这里只管下方。 */
+.sidebar-divider {
+  height: 1px;
+  margin-bottom: var(--gap);
+  background: var(--color-border);
 }
 
 .nav-icon-btn {
