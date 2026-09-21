@@ -105,8 +105,8 @@ const current = ref<RequestLog | null>(null)
 const MODEL_COL_MIN = 120
 const MODEL_COL_MAX = 300
 const modelColWidth = ref(190)
-// 列宽表 —— 列序（2026-09-20 站主调整）：
-// 时间 / 模型（动态）/ 渠道 / 词元 / 耗时 / 费用 / 状态 / 密钥 / 操作。
+// 列宽表 —— 列序（2026-09-21 在费用与状态之间增加速度列）：
+// 时间 / 模型（动态）/ 渠道 / 词元 / 耗时 / 费用 / 速度 / 状态 / 密钥 / 操作。
 //
 // 模板里各列的 :width 与下面 scroll.x 的求和都从这里取，是**唯一一份**宽度
 // 定义。此前两处各写一遍（模板写 155、求和再抄一次 155），改一列就要同步改
@@ -118,6 +118,7 @@ const COL_W = {
   tokens: 150,
   elapsed: 120,
   cost: 90,
+  speed: 118,
   status: 64,
   key: 100,
   action: 64
@@ -570,6 +571,33 @@ function tokenTitle(row: RequestLog) {
   )
 }
 
+// 输出速度（词元/秒）。分母按输出方式分两套口径：
+//   - 流式：首字之后才是生成时段，用「总耗时 − 首字」；
+//   - 非流式：响应头与完整正文一起到达（后端非流式的 first_byte_ms 记的
+//     是响应头到达时刻，那时生成已经完成），生成时长只能用总耗时近似。
+// 口径不同的分叉必须让用户看得见 —— 列表里流式行带「流」胶囊就是这里
+// 的可视标记，悬停说明写明用的是哪个分母。
+// 返回空串表示算不出（没有输出词元、没量到耗时、流式缺首字），单元格显示 —，
+// 不猜数 —— 估出来的速度比没有速度更误导。
+function tokPerSec(row: RequestLog): string {
+  const out = row.completion_tokens
+  if (!out || out <= 0 || !row.total_ms) return ''
+  const ms = row.stream ? row.total_ms - (row.first_byte_ms || 0) : row.total_ms
+  if (ms <= 0) return ''
+  const v = out / (ms / 1000)
+  // 一律取整（站主 2026-09-21 要求）：速度只是个量级参考，小数位是假精度，
+  // 取整后同列位数也天然一致
+  return v.toFixed(0)
+}
+
+// 速度的悬停说明：把分子分母摊开，速成的数怎么来的一眼可查。
+// 分母带「（流式）/（非流式）」后缀 —— 两种口径的差别就藏在这个词里。
+function speedTitle(row: RequestLog) {
+  const ms = row.stream ? row.total_ms - (row.first_byte_ms || 0) : row.total_ms
+  const denom = row.stream ? '首字后生成 ' + fmtMs(ms) : '总耗时 ' + fmtMs(ms)
+  return '输出 ' + fmtTokens(row.completion_tokens) + ' 词元 ÷ ' + denom
+}
+
 // 计价时刻：快照里存的是 RFC3339（如 2026-09-14T09:58:08+08:00），原样摆出来是给机器看的
 // —— T 分隔、带秒级以上的偏移量，和同一行里的其他文案不是一种语气。
 // 这里把它改成与日志列表列一致的 YYYY-MM-DD HH:mm:ss，但**不做时区换算**：
@@ -934,6 +962,19 @@ onMounted(() => {
         <a-table-column title="费用" :width="COL_W.cost">
           <template #default="{ record }">{{ fmtCost(record.estimated_cost, record.cost_currency) }}</template>
         </a-table-column>
+        <!-- 速度列：每秒词元输出速度。流式请求在数值前带「流」胶囊（同一行）——
+             输出速度必须结合输出方式才读得懂：流式的分母是首字之后的生成时段，
+             非流式只能用总耗时近似（口径见 tokPerSec 注释），胶囊就是那个分叉的
+             可视标记。失败请求通常没有输出词元，显示 — -->
+        <a-table-column title="速度" :width="COL_W.speed">
+          <template #default="{ record }">
+            <span v-if="tokPerSec(record)" class="spd-cell" :title="speedTitle(record)">
+              <span v-if="record.stream" class="stream-pill">流</span>
+              <span class="spd">{{ tokPerSec(record) }} tok/s</span>
+            </span>
+            <span v-else class="muted">—</span>
+          </template>
+        </a-table-column>
         <!-- 状态列移到费用之后（站主 2026-09-20 要求）：数字区（词元/耗时/费用）
              读完后，「成没成」与「哪把密钥」两个结果性信息收尾 -->
         <a-table-column title="状态" :width="COL_W.status">
@@ -1064,6 +1105,10 @@ onMounted(() => {
         <a-descriptions-item label="耗时">
           首字 {{ fmtMs(current.first_byte_ms) }} · 上游握手 {{ fmtMs(current.upstream_ms) }} ·
           总共 {{ fmtMs(current.total_ms) }}
+          <!-- 速度口径与列表一致（见 tokPerSec）：算不出就不显示这一段 -->
+          <span v-if="tokPerSec(current)">
+            · 速度 <span :title="speedTitle(current)">{{ tokPerSec(current) }} tok/s</span>
+          </span>
         </a-descriptions-item>
         <a-descriptions-item label="费用">
           {{ symbolOf(current.cost_currency) }}{{ Number(current.estimated_cost).toFixed(8) }}
@@ -1294,6 +1339,38 @@ onMounted(() => {
 }
 :root[data-theme='dark'] .think-pill {
   color: color-mix(in oklab, var(--tp) 55%, white);
+}
+
+/* 速度列（2026-09-21）：每秒词元输出速度，流式行在数值前带「流」胶囊。
+   胶囊与 think-pill 同一套视觉语言（描边 + 淡底 + 圆角 + 12px），
+   颜色取输出紫 var(--token-output) —— 与词元格「↓ 输出」同色同族：
+   速度本来就是输出词元的导数，颜色跟着语义走。深浅主题的混黑/混白
+   比例沿用 think-pill 验证过的对比度处理。
+   数值用等宽数字（tabular-nums）：同列上下扫的时候数位对齐。 */
+.spd-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.stream-pill {
+  --tp: var(--token-output);
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: var(--radius-control);
+  border: 1px solid color-mix(in oklab, var(--tp) 32%, transparent);
+  background: color-mix(in oklab, var(--tp) 13%, transparent);
+  color: color-mix(in oklab, var(--tp) 60%, black);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+  white-space: nowrap;
+}
+:root[data-theme='dark'] .stream-pill {
+  color: color-mix(in oklab, var(--tp) 55%, white);
+}
+.spd {
+  font-variant-numeric: tabular-nums;
 }
 
 /* 兜底说明：跟在上游模型那一项下面的一行解释。
