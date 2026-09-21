@@ -5,9 +5,10 @@ BASE="http://127.0.0.1:8888/api/admin"
 echo "=== 管理接口回归 ==="
 fail=0
 total=0
-# 模型管理（/models）与定价同步历史（/pricing/history）已随「模型商 / 模型表 / 自动同步」
-# 一起删除：模型目录现在由渠道白名单派生，定价全部手工录入
-for ep in "stats/summary?range=30d" "stats/timeseries?range=30d" "stats/models?range=30d" "stats/channels?range=30d" "stats/heatmap?range=30d" "settings" "pricing?page_size=2" "logs?page_size=2" "channels" "groups" "keys" "system/info"; do
+# 模型管理（/models）与定价同步历史（/pricing 及 /pricing/history）已随
+# 「模型商 / 模型表 / 自动同步」一起删除：模型目录现在由渠道白名单派生，
+# 定价全部手工录入 —— 列表里的 pricing 一项当时漏删，一直报一个假异常
+for ep in "stats/summary?range=30d" "stats/timeseries?range=30d" "stats/models?range=30d" "stats/channels?range=30d" "stats/heatmap?range=30d" "settings" "logs?page_size=2" "channels" "groups" "keys" "system/info"; do
   total=$((total+1))
   code=$(curl -s -o /dev/null -w "%{http_code}" -m 10 "$BASE/$ep")
   if [ "$code" != "200" ]; then
