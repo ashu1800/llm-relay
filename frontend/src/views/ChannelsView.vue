@@ -105,6 +105,12 @@ const modalOpen = ref(false)
 const editing = ref<Channel | null>(null)
 const saving = ref(false)
 
+// 白名单回填是否还欠着：openEdit 的异步拉取失败时置位，save() 保存前据此重拉。
+// 不做这一步的话，失败后 form.models 是空表 —— 直接保存会被
+// 「请至少填一个模型」拦住，用户在空表上手工补模型名再保存，
+// 则会把库里已有的模型和价格整个覆盖丢
+const modelsStale = ref(false)
+
 const bindOpen = ref(false)
 const bindChannel = ref<ChannelRow | null>(null)
 // 抽屉里编辑的是整张白名单，点保存时整表提交
@@ -202,6 +208,19 @@ function openCreate() {
   modalOpen.value = true
 }
 
+// bindingRows 把接口返回的白名单行转成表单行。
+// 价格必须一起带上：编辑一次渠道再保存，提交的就是这张表，
+// 漏掉价格等于把用户配好的价全部清零
+function bindingRows(items: ChannelBinding[]): WhitelistRow[] {
+  return items.map((b) => ({
+    public_name: b.public_name,
+    upstream_name: b.upstream_name === b.public_name ? '' : b.upstream_name,
+    enabled: b.enabled,
+    proxy_id: b.proxy_id || 0,
+    ...pickPrice(b)
+  }))
+}
+
 async function openEdit(row: ChannelRow) {
   // 先按传入的 row 立刻把表单填上（弹窗不能等网络），再用刚拉到的数据校正。
   //
@@ -232,6 +251,7 @@ async function openEdit(row: ChannelRow) {
     default_model: String((row.extra_config as any)?.default_model || ''),
     models: [] as WhitelistRow[]
   })
+  modelsStale.value = false
   modalOpen.value = true
 
   // 拉最新数据校正表单：渠道整行 + 白名单一次拿全。
@@ -252,17 +272,14 @@ async function openEdit(row: ChannelRow) {
       form.default_model_enabled = ec.default_model_enabled === true
       form.default_model = String(ec.default_model || '')
     }
-    form.models = (modelsRes.items || []).map((b) => ({
-      public_name: b.public_name,
-      upstream_name: b.upstream_name === b.public_name ? '' : b.upstream_name,
-      enabled: b.enabled,
-      proxy_id: b.proxy_id || 0,
-      // 价格必须一起带上：编辑一次渠道再保存，提交的就是这张表，
-      // 漏掉价格等于把用户配好的价全部清零
-      ...pickPrice(b)
-    }))
+    form.models = bindingRows(modelsRes.items || [])
+    modelsStale.value = false
   } catch (e: any) {
-    message.error('读取渠道最新配置失败：' + e.message + '（保存前会再试一次）')
+    // 回填失败不能只弹个提示：form.models 此刻是空表，用户直接保存会被
+    // 「请至少填一个模型」拦住；在空表上手工补模型名再保存则覆盖丢全部配置。
+    // 置 stale 标记，由 save() 在保存前重拉一次 —— 文案说的重试是真的会做
+    modelsStale.value = true
+    message.error('读取渠道最新配置失败：' + e.message + '（保存时会自动重试一次）')
   }
 }
 
@@ -339,6 +356,20 @@ async function save() {
   if (!form.name.trim() || !form.base_url.trim()) {
     message.warning('渠道名称与地址必填')
     return
+  }
+  // 上次回填失败过的，保存前重拉一次白名单（必须先于 whitelistPayload：
+  // 重拉会改写 form.models）。重拉再失败就拦下保存 —— 用一张没读到内容
+  // 的表去覆盖库里完整的白名单，比「晚点再保存」糟糕得多
+  if (editing.value && modelsStale.value) {
+    try {
+      const res = await api.get<{ items: ChannelBinding[] }>('/channels/' + editing.value.id + '/models')
+      form.models = bindingRows(res.items || [])
+      modelsStale.value = false
+      message.info('白名单已重新读取，请核对面板中的内容')
+    } catch (e: any) {
+      message.error('白名单此前读取失败，保存前重试仍失败：' + e.message + '；为避免覆盖丢已有配置，本次未保存')
+      return
+    }
   }
   const models = whitelistPayload()
   if (!models) return

@@ -90,7 +90,7 @@ export function priceSummary(p?: PriceConfig | null, currency?: string): string 
 import { computed, ref, watch } from 'vue'
 import { symbolOf } from '@/utils/money'
 import { writeClipboard } from '@/utils/clipboard'
-import { message } from 'ant-design-vue'
+import { message, Modal } from 'ant-design-vue'
 import { PlusOutlined, DeleteOutlined, CopyOutlined, ImportOutlined } from '@ant-design/icons-vue'
 
 const props = defineProps<{
@@ -107,10 +107,18 @@ const emit = defineEmits<{
 
 const form = ref<PriceConfig>(emptyPrice())
 
+// 打开弹窗那一刻的表单快照。保存时拿它对比：原有单价「有值 → 空」
+// 属于几乎必然是误操作的形态（空串提交后端按 0 落库，调用被记 0 元），
+// 值得用一次确认弹窗拦一下 —— 2026-09-20 的输入价清零事故正是这个形态。
+const openedWith = ref<PriceConfig | null>(null)
+
 watch(
   () => props.open,
   (open) => {
-    if (open) form.value = { ...emptyPrice(), ...(props.value || {}), peak_rules: (props.value?.peak_rules || []).map((r) => ({ ...r, days: [...(r.days || [])] })) }
+    if (open) {
+      form.value = { ...emptyPrice(), ...(props.value || {}), peak_rules: (props.value?.peak_rules || []).map((r) => ({ ...r, days: [...(r.days || [])] })) }
+      openedWith.value = JSON.parse(JSON.stringify(form.value))
+    }
   }
 )
 
@@ -207,9 +215,22 @@ function applyImport() {
     return
   }
 
+  // 以**当前表单**为基底合并，而不是从空白表单起步：JSON 里没出现的字段必须
+  // 保留原值。从 emptyPrice() 起步的旧写法，只要导入内容不含 input_per_1m，
+  // 打开时回填的输入价就被静默清成空 —— 点保存提交空串，后端按 0 落库，
+  // 表现为「输入价格莫名其妙变成 0」（2026-09-20 实测事故）。
+  // 显式传 null 仍是「清空该字段」：null 是明示意图，undefined 才是「没提」。
+  const out: PriceConfig = {
+    input_per_1m: form.value.input_per_1m,
+    output_per_1m: form.value.output_per_1m,
+    cache_read_per_1m: form.value.cache_read_per_1m,
+    cache_write_per_1m: form.value.cache_write_per_1m,
+    multiplier: form.value.multiplier,
+    peak_rules: (form.value.peak_rules || []).map((r) => ({ ...r, days: [...(r.days || [])] }))
+  }
+
   // 白名单拣字段：粘贴手编辑过的 JSON 多出来的键直接忽略，
   // 拣不出任何已知键时如实报错（贴错东西最常见的样子）
-  const out = emptyPrice()
   const prices: [string, string][] = [
     ['输入单价', 'input_per_1m'],
     ['输出单价', 'output_per_1m'],
@@ -279,9 +300,27 @@ function applyImport() {
     return
   }
 
+  // 导入内容没包含、且表单里已有值的字段要点名「保留了」：
+  // 否则用户会以为整张表都来自粘贴的内容，核对时把这些格子漏过去
+  const kept: string[] = []
+  for (const [label, key] of prices) {
+    const cur = String(form.value[key as keyof PriceConfig] ?? '').trim()
+    if (raw[key] === undefined && cur !== '') kept.push(label + ' ' + cur)
+  }
+  if (raw.multiplier === undefined && form.value.multiplier && form.value.multiplier !== 1) {
+    kept.push('固定倍率 ×' + form.value.multiplier)
+  }
+  if (raw.peak_rules === undefined && (form.value.peak_rules || []).length > 0) {
+    kept.push('时段倍率 ' + (form.value.peak_rules || []).length + ' 条')
+  }
+
   form.value = out
   importOpen.value = false
-  message.success('已导入，请核对后保存')
+  if (kept.length) {
+    message.success('已导入；' + kept.join('、') + ' 不在导入内容里，已保留原值，请核对后保存')
+  } else {
+    message.success('已导入，请核对后保存')
+  }
 }
 
 function submit() {
@@ -300,17 +339,46 @@ function submit() {
       return
     }
   }
-  for (const [label, v] of [
-    ['输入单价', form.value.input_per_1m],
-    ['输出单价', form.value.output_per_1m],
-    ['缓存读单价', form.value.cache_read_per_1m],
-    ['缓存写单价', form.value.cache_write_per_1m]
-  ] as [string, string][]) {
+  const priceFields: [string, string][] = [
+    ['输入单价', form.value.input_per_1m ?? ''],
+    ['输出单价', form.value.output_per_1m ?? ''],
+    ['缓存读单价', form.value.cache_read_per_1m ?? ''],
+    ['缓存写单价', form.value.cache_write_per_1m ?? '']
+  ]
+  for (const [label, v] of priceFields) {
     if (v !== '' && !(Number(v) >= 0)) {
       message.error(label + '要填一个不小于 0 的数字')
       return
     }
   }
+  // 防呆：原有单价「有值 → 空」必须二次确认。空值落库就是 0 元计费，
+  // 而这个变化只体现在一个小输入框里，几乎没有可见性 ——
+  // 明确确认过的不算事故，没确认就清零的才是要拦的
+  const before = openedWith.value
+  if (before) {
+    const pairs: [string, string, string][] = [
+      ['输入单价', before.input_per_1m ?? '', form.value.input_per_1m ?? ''],
+      ['输出单价', before.output_per_1m ?? '', form.value.output_per_1m ?? ''],
+      ['缓存读单价', before.cache_read_per_1m ?? '', form.value.cache_read_per_1m ?? ''],
+      ['缓存写单价', before.cache_write_per_1m ?? '', form.value.cache_write_per_1m ?? '']
+    ]
+    const wiped = pairs.filter(([, was, now]) => was.trim() !== '' && now.trim() === '').map(([label]) => label)
+    if (wiped.length) {
+      Modal.confirm({
+        centered: true,
+        title: '确认清空' + wiped.join('、') + '？',
+        content: '清空后按 0 计费，这条模型的对应费用会被记成 0 元。',
+        okText: '确认保存',
+        cancelText: '返回修改',
+        onOk: doSave
+      })
+      return
+    }
+  }
+  doSave()
+}
+
+function doSave() {
   emit('save', JSON.parse(JSON.stringify(form.value)))
   emit('update:open', false)
 }

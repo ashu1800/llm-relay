@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 
 	"llm-relay/internal/model"
@@ -337,10 +338,46 @@ func (s *Server) invalidatePricing() {
 	}
 }
 
+// wipedPrices 找出 next 相对 old 被清零（非 0 → 0）的单价字段，返回人话描述。
+//
+// 刻意做成纯函数：它直接决定 WARN 日志的内容，误报（原值就是 0）与漏报
+// （改值没清零）都会毁掉这条排查线索，所以拉出来单独测。
+func wipedPrices(oldRow, next model.ChannelModel) []string {
+	fields := []struct {
+		name     string
+		was, now decimal.Decimal
+	}{
+		{"输入单价", oldRow.InputPer1M, next.InputPer1M},
+		{"输出单价", oldRow.OutputPer1M, next.OutputPer1M},
+		{"缓存读单价", oldRow.CacheReadPer1M, next.CacheReadPer1M},
+		{"缓存写单价", oldRow.CacheWritePer1M, next.CacheWritePer1M},
+	}
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if !f.was.IsZero() && f.now.IsZero() {
+			out = append(out, f.name+" "+f.was.String()+"→0")
+		}
+	}
+	return out
+}
+
 // replaceChannelModels 用给定白名单整体替换某个渠道的条目。
 // 整体替换而不是逐条 diff：白名单在界面上就是一张表，一次提交一整张表，
 // 不会出现「删了两条、加了一条，结果只生效一半」的中间状态。
 func replaceChannelModels(tx *gorm.DB, channelID uint, items []model.ChannelModel) error {
+	// DELETE 会把旧行连同价格一起带走，所以替换前先读一遍旧价：
+	// 「原来有价、这次提交变 0」的都要点名 —— 清空价格是合法操作，不拦，
+	// 但这类变化曾以「输入价莫名变 0」的事故形态出现过（2026-09-20），
+	// 当时只能去请求日志的定价快照里逐条倒查，有这行日志一眼定位
+	var old []model.ChannelModel
+	if err := tx.Where("channel_id = ?", channelID).Find(&old).Error; err != nil {
+		return err
+	}
+	oldBy := make(map[string]model.ChannelModel, len(old))
+	for _, r := range old {
+		oldBy[r.PublicName] = r
+	}
+
 	if err := tx.Where("channel_id = ?", channelID).Delete(&model.ChannelModel{}).Error; err != nil {
 		return err
 	}
@@ -353,6 +390,25 @@ func replaceChannelModels(tx *gorm.DB, channelID uint, items []model.ChannelMode
 	if len(items) > 0 {
 		if err := tx.CreateInBatches(items, 100).Error; err != nil {
 			return err
+		}
+	}
+
+	// 清零日志放在写库成功之后：事务回滚时没有变化，报「被清零」是误报。
+	// 渠道名拿不到就退化成只带 id，不为它让保存失败
+	var chName string
+	if err := tx.Model(&model.Channel{}).Select("name").Where("id = ?", channelID).
+		Scan(&chName).Error; err != nil {
+		chName = ""
+	}
+	for i := range items {
+		o, ok := oldBy[items[i].PublicName]
+		if !ok {
+			continue
+		}
+		if wiped := wipedPrices(o, items[i]); len(wiped) > 0 {
+			slog.Warn("渠道模型单价被清零，请确认是否有意操作",
+				"channel", chName, "channel_id", channelID,
+				"model", items[i].PublicName, "cleared", strings.Join(wiped, "、"))
 		}
 	}
 	return nil

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/shopspring/decimal"
+
 	"llm-relay/internal/model"
 )
 
@@ -120,6 +122,50 @@ func TestNormalizeWhitelistRejectsEmptyName(t *testing.T) {
 	if _, err := normalizeWhitelist([]whitelistItem{{PublicName: "   "}}); err == nil {
 		t.Fatal("空白的对外名应该报错")
 	}
+}
+
+// 清零检测是「输入价莫名变 0」事故的服务端留痕（见 replaceChannelModels），
+// 误报（原值就是 0）与漏报（改值没清零）都会毁掉这条排查线索。
+func TestWipedPrices(t *testing.T) {
+	oldRow := model.ChannelModel{
+		InputPer1M:      decimal.NewFromFloat(8),
+		OutputPer1M:     decimal.NewFromFloat(28),
+		CacheReadPer1M:  decimal.NewFromFloat(2),
+		CacheWritePer1M: decimal.Zero, // 原本就没配，合法
+	}
+
+	t.Run("被清零的字段逐个点名并带旧值", func(t *testing.T) {
+		next := oldRow
+		next.InputPer1M = decimal.Zero
+		wiped := wipedPrices(oldRow, next)
+		if len(wiped) != 1 || !strings.Contains(wiped[0], "输入单价") || !strings.Contains(wiped[0], "8") {
+			t.Fatalf("应只点名「输入单价 8→0」，实际 %v", wiped)
+		}
+	})
+
+	t.Run("原值就是 0 的不算清零", func(t *testing.T) {
+		next := oldRow
+		next.CacheWritePer1M = decimal.Zero
+		if wiped := wipedPrices(oldRow, next); len(wiped) != 0 {
+			t.Fatalf("缓存写价原本就是 0，不该报，实际 %v", wiped)
+		}
+	})
+
+	t.Run("改值但不清零的不报", func(t *testing.T) {
+		next := oldRow
+		next.OutputPer1M = decimal.NewFromFloat(30)
+		if wiped := wipedPrices(oldRow, next); len(wiped) != 0 {
+			t.Fatalf("正常改价不该报，实际 %v", wiped)
+		}
+	})
+
+	t.Run("全部归零时只点名原本有价的字段", func(t *testing.T) {
+		next := model.ChannelModel{PublicName: oldRow.PublicName}
+		wiped := wipedPrices(oldRow, next)
+		if len(wiped) != 3 {
+			t.Fatalf("应点名 3 个原本非零的字段，实际 %v", wiped)
+		}
+	})
 }
 
 // 默认模型映射的保存校验。
