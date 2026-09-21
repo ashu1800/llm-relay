@@ -25,8 +25,12 @@ type Options struct {
 	FirstByteTimeout time.Duration
 	// UpstreamTimeout 是非流式调用的总时长上限（连接 + 响应头 + 响应体），
 	// 防止上游返回响应头之后挂住正文、把请求无限期拖住。0 表示不设上限。
-	UpstreamTimeout   time.Duration
-	InjectStreamUsage bool
+	UpstreamTimeout time.Duration
+	// RetrySameUpstreamDelay 是「下一次尝试会打到同一台上游」时的等待时长，
+	// 见 backoff.go 的说明。0 表示不等待（本功能引入前的行为）——
+	// 用 Options{} 构造的调用方与测试因此完全不受影响。
+	RetrySameUpstreamDelay time.Duration
+	InjectStreamUsage      bool
 }
 
 // 渠道名额等待上限。等不到也照发：并发是软约束，
@@ -191,6 +195,12 @@ type AttemptTrail struct {
 	ChannelName string
 	StatusCode  int
 	Error       string
+	// WaitBeforeMs 是「在这一次失败之后、换到下一个渠道之前」等待的毫秒数。
+	//
+	// 它让「上游以为在攻击他」这件事变得可见：链路里能直接读到
+	// 「在渠道 X 上等了 500ms 才换到 Y」，而不是只能翻容器日志。
+	// 0 表示没有等待（换到了不同上游，或功能关闭）。
+	WaitBeforeMs int
 	// Usage 是该次失败尝试的用量（上游在错误体里回报过才有，见
 	// forward.go 对 4xx body 的提取）。失败尝试的 token 上游可能照收
 	// （context-length-exceeded 的 400 就是典型），不记的话重试密集时
@@ -449,6 +459,14 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 	var lastAttempt *Attempt
 	var lastCand Candidate
 
+	// prevHop 记录「刚失败的那一次」，供下一轮开始前的退避判定（见 backoff.go）。
+	//
+	// 不能复用上面的 lastCand：它的语义是「最后一次**拿到上游应答**的失败」，
+	// 网络层失败时刻意不更新它（那正是 :449 注释说的用途）。而退避判定需要
+	// 的恰恰是包含网络层失败在内的「刚失败的那一次」——混用会让失败响应里的
+	// 候选与应答对不上（候选来自刚断连的渠道、应答却是更早那个 429 的）。
+	var prevHop retryHop
+
 	// failures 收集本次转发中的渠道失败，函数返回时统一记账。
 	// 不在循环里立即记，是为了等「多渠道共识」判定（见 recordFailures）：
 	// 单次失败看不出是渠道的问题还是请求的问题，试完才知道。
@@ -516,6 +534,46 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 		}
 
 		cand := cands[0]
+
+		// 故障转移前的退避：下一次尝试若仍打在同一台上游，先等一会儿。
+		//
+		// 位置刻意选在这里（候选已定、还没记账、还没抢名额）：
+		//   · 候选已定 —— 「下一个是谁」要经过 filterTried（它会跳过刚进冷却
+		//     的渠道）与上面的分组额度裁剪才确定，两处 continue 那里还算不出来；
+		//   · 在 :s.groupLimit.Record 之前 —— RPM 口径保持「真正发往上游的
+		//     请求数」，等待不算一次请求；
+		//   · 在 AcquireWait 之前 —— 等待期间不占着渠道并发名额；
+		//   · 候选耗尽时走上面的 break/return，最后一次尝试之后不会白等。
+		//
+		// 代价要知道：这段等待期间**全局并发闸门的名额仍被占着**
+		// （relay_handler 在整个请求期间持有）。这正是「换到不同上游不等」
+		// 的理由 —— 上游大面积故障时让一批请求同时睡下，会把闸门睡满，
+		// 把「上游慢」放大成「本地 429」。
+		if d := retryDelayFor(prevHop, cand, s.opts); d > 0 {
+			s.logger.Info("故障转移前退避",
+				"trace_id", req.TraceID,
+				"delay", d.String(),
+				"from_channel", prevHop.ChannelID,
+				"to_channel", cand.Channel.ID,
+				"last_status", prevHop.Status)
+			// 客户端在等待期间断开：与「刚发出去就断开」同一处置 ——
+			// 收件人已经不在了，换渠道重发毫无意义。这一次尝试根本没发生，
+			// 所以不记 Trail、也不记渠道失败。
+			if !waitBeforeRetry(ctx, d) {
+				return res, ctx.Err()
+			}
+			// 等待时长记到**刚才那条失败记录**上（链路语义是
+			// 「在渠道 X 上失败后等了 N 毫秒才换走」）。
+			//
+			// 越界保护：d > 0 说明 prevHop 非零，而 prevHop 只在两处
+			// 「已经 append 过 Trail」的失败分支里被设置，所以这里必然
+			// 至少有一条记录。仍然判一下 —— 转发是热路径，一次 panic
+			// 的代价远大于一行边界检查。
+			if n := len(res.Trail); n > 0 {
+				res.Trail[n-1].WaitBeforeMs = int(d.Milliseconds())
+			}
+		}
+
 		tried = append(tried, cand.Channel.ID)
 		// 计数放在「确定要发」这一刻：RPM 统计的是发往上游的请求数，重试也计入
 		s.groupLimit.Record(cand.Channel.GroupID, time.Now())
@@ -565,6 +623,8 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 			})
 			lastErr = err
 			failures = append(failures, failRecord{channelID: cand.Channel.ID, msg: err.Error()})
+			// attempt 为 nil：网络层失败，没有上游应答可供退避判定参考
+			prevHop = hopOf(cand, nil)
 			continue
 		}
 
@@ -604,6 +664,7 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 				_ = attempt.Stream.Close()
 			}
 			lastAttempt, lastCand = attempt, cand
+			prevHop = hopOf(cand, attempt)
 			continue
 		}
 

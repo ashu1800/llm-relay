@@ -21,6 +21,13 @@ relay:
   max_request_body_mb: 64
   log_retention_days: 30
   payload_storage_mode: errors
+  # 故障转移到**同一台上游**时的等待。
+  #
+  # 两条渠道共用同一个 base_url 时，「换渠道」在上游看来就是同一个端点
+  # 又被连打一次，那是上游判定我们攻击、直接熔断的形态。切到别的上游
+  # 则不等 —— 那不会给谁造成压力，白等只是让用户多等。
+  # 0 表示关闭（回到「零间隔重试」的旧行为）。
+  retry_same_upstream_delay: 500ms
 
 log:
   level: info

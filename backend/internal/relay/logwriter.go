@@ -191,6 +191,11 @@ func trailToJSONMap(trail []AttemptTrail) model.JSONMap {
 			"status_code":  t.StatusCode,
 			"error":        t.Error,
 		}
+		// 只在真的等过时才写：0 是绝大多数情况（换到了不同上游），
+		// 省略能让详情 JSON 保持精简
+		if t.WaitBeforeMs > 0 {
+			step["wait_before_ms"] = t.WaitBeforeMs
+		}
 		if t.Usage != nil {
 			step["usage"] = map[string]any{
 				"prompt_tokens":     t.Usage.PromptTokens,

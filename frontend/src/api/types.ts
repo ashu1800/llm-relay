@@ -164,6 +164,13 @@ export interface RetryTrailStep {
   channel_name: string
   status_code: number
   error: string
+  /**
+   * 在这一次失败之后、换到下一个渠道之前等待的毫秒数。
+   *
+   * 只有「下一个候选打在同一台上游」时才会有等待（避免对同一端点连打，
+   * 那会被上游当成攻击）。0 或缺失表示没等过 —— 换到了不同上游。
+   */
+  wait_before_ms?: number
   /** 该次失败尝试上游回报的用量；上游没回报就没有这个字段 */
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
 }

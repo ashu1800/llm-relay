@@ -93,10 +93,12 @@ func run() error {
 	router.SetLogger(logger)
 	router.SetChannelState(state)
 	svc := relay.NewService(st.DB(), router, relay.Options{
-		MaxRetries:        cfg.Relay.MaxRetries,
-		FirstByteTimeout:  cfg.Relay.FirstByteTimeout,
-		UpstreamTimeout:   cfg.Relay.UpstreamTimeout,
-		InjectStreamUsage: true,
+		MaxRetries:       cfg.Relay.MaxRetries,
+		FirstByteTimeout: cfg.Relay.FirstByteTimeout,
+		UpstreamTimeout:  cfg.Relay.UpstreamTimeout,
+		// 故障转移到同一台上游时的等待（见 relay/backoff.go）
+		RetrySameUpstreamDelay: cfg.Relay.RetrySameUpstreamDelay,
+		InjectStreamUsage:      true,
 	}, logger)
 	svc.SetChannelState(state)
 	// 分组级每分钟额度：分组上配的 RPM / TPM 由它生效。

@@ -1052,6 +1052,12 @@ onMounted(() => {
               <span v-if="s.usage && s.usage.total_tokens" class="trail-tokens">
                 另耗 {{ fmtTokens(s.usage.total_tokens) }} tokens
               </span>
+              <!-- 换渠道前的等待：只有「下一个候选打在同一台上游」才会有。
+                   显示出来是为了让「有没有对同一上游连打」这件事可查 ——
+                   那正是上游会判我们攻击的形态 -->
+              <span v-if="s.wait_before_ms" class="trail-wait" title="换到下一个渠道前的等待，避免对同一台上游连打">
+                等 {{ s.wait_before_ms }}ms 后换渠道
+              </span>
             </div>
           </div>
         </a-descriptions-item>
@@ -1357,6 +1363,15 @@ onMounted(() => {
 }
 .trail-tokens {
   color: var(--color-text-secondary);
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 换渠道前的等待。用橙色而不是次要色：它出现就说明这次请求打在了
+   与上一次相同的上游上 —— 值得看一眼，而不是被当作常规信息划过。
+   橙色与同文件里「用量为估算值」等提示标签同一套语义色 */
+.trail-wait {
+  color: var(--color-orange);
   flex: 0 0 auto;
   font-variant-numeric: tabular-nums;
 }

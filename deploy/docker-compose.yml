@@ -121,6 +121,8 @@ services:
       RELAY_PAYLOAD_MAX_KB: ${RELAY_PAYLOAD_MAX_KB:-256}
       RELAY_MAX_CONCURRENCY: ${RELAY_MAX_CONCURRENCY:-64}
       RELAY_DEFAULT_RPM: ${RELAY_DEFAULT_RPM:-0}
+      # 故障转移到同一台上游时的等待（详见 .env.example 的说明）
+      RELAY_RETRY_SAME_UPSTREAM_DELAY: ${RELAY_RETRY_SAME_UPSTREAM_DELAY:-500ms}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_FORMAT: ${LOG_FORMAT:-text}
       TZ: ${TZ:-Asia/Shanghai}

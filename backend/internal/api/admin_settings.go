@@ -76,8 +76,11 @@ func (s *Server) getSettings(c *gin.Context) {
 			"payload_max_kb":         cfg.Relay.PayloadMaxKB,
 			"max_concurrency":        cfg.Relay.MaxConcurrency,
 			"default_rpm":            cfg.Relay.DefaultRPM,
-			"database_ok":            dbVersion != "",
-			"database_version":       dbVersion,
+			// 毫秒而非秒：默认值 500ms 换算成整秒是 0，界面上会显示成
+			// 「已关闭」——那是与实际相反的误导。
+			"retry_same_upstream_delay_ms": int(cfg.Relay.RetrySameUpstreamDelay.Milliseconds()),
+			"database_ok":                  dbVersion != "",
+			"database_version":             dbVersion,
 		},
 		"counts": gin.H{
 			"logs": counts.Logs, "payloads": counts.Payloads, "priced": counts.Priced,

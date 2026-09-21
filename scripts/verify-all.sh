@@ -118,7 +118,8 @@ echo
 
 # python 用例：统一以 ALL_PASS 作为通过标志
 for s in test-group-update.py test-key-whitelist.py test-key-group-refs.py test-delete-semantics.py \
-         test-accept-encoding.py test-log-filters.py test-stats-filters.py test-csrf.py; do
+         test-accept-encoding.py test-log-filters.py test-stats-filters.py test-csrf.py \
+         test-retry-delay.py; do
   echo "########## $s ##########"
   out=$(python3 "scripts/$s" 2>&1)
   printf '%s\n' "$out" | tail -1
@@ -128,7 +129,8 @@ done
 
 # bash 用例：同样以 ALL_PASS 为唯一通过标志。
 # 依赖 mock 上游的用例自己会拉起它（test-pricing-rules.sh → slow-upstream，
-# test-cost.sh → proto-upstream），所以上面那次网络重建不会让它们变 502。
+# test-cost.sh → proto-upstream，test-retry-delay.py → flaky-upstream），
+# 所以上面那次网络重建不会让它们变 502。
 # test-default-group.sh 用同一个镜像另起一个容器、另建一个空库跑（要验的正是
 # 启动时的种子行为），不碰线上库，也不会重建 compose 项目。
 # test-legacy-column-add.sh 会删价格列并跑 install.sh 重新部署（几分钟不可用），放在最后跑

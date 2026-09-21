@@ -64,6 +64,15 @@ type RelayConfig struct {
 	PayloadMaxKB       int           `yaml:"payload_max_kb"`       // 单条报文留存上限
 	MaxConcurrency     int           `yaml:"max_concurrency"`      // 同时进行的上游请求数上限
 	DefaultRPM         int           `yaml:"default_rpm"`          // 每个密钥默认的每分钟请求上限
+
+	// RetrySameUpstreamDelay 是故障转移时、**下一次尝试仍会打到同一台上游**
+	// 时的等待时长（0 表示不等待，即本功能引入前的行为）。
+	//
+	// 为什么只对「同一台上游」生效：两条渠道共用同一个 base_url 时，
+	// 「换渠道」在上游看来就是同一个端点又被连打了一次 —— 那是上游判定
+	// 我们攻击、直接熔断的形态（详见 relay/backoff.go）。而切到另一个
+	// 上游时立刻重试不会给任何一方造成压力，白等只是让用户多等。
+	RetrySameUpstreamDelay time.Duration `yaml:"retry_same_upstream_delay"`
 }
 
 type LogConfig struct {
@@ -90,6 +99,10 @@ func Default() *Config {
 			PayloadMaxKB:       256,
 			MaxConcurrency:     64,
 			DefaultRPM:         0,
+			// 500ms 对齐 sub2api 的同账号重试基线（见 relay/backoff.go）。
+			// 不是 0：默认要能护住「两条渠道共用同一上游」的配置，
+			// 否则这个功能等于没开。
+			RetrySameUpstreamDelay: 500 * time.Millisecond,
 		},
 		Log: LogConfig{Level: "info", Format: "text"},
 	}
@@ -145,6 +158,7 @@ func applyEnv(c *Config) {
 	setInt(&c.Relay.PayloadMaxKB, "RELAY_PAYLOAD_MAX_KB")
 	setInt(&c.Relay.MaxConcurrency, "RELAY_MAX_CONCURRENCY")
 	setInt(&c.Relay.DefaultRPM, "RELAY_DEFAULT_RPM")
+	setDuration(&c.Relay.RetrySameUpstreamDelay, "RELAY_RETRY_SAME_UPSTREAM_DELAY")
 
 	setStr(&c.Security.Secret, "RELAY_SECRET")
 
@@ -160,22 +174,23 @@ func applyEnv(c *Config) {
 // 也不会报错。清单放在这里就不会再漂移。
 func envKeys() map[string]string {
 	return map[string]string{
-		"host":                   "SERVER_HOST",
-		"port":                   "SERVER_PORT",
-		"mode":                   "GIN_MODE",
-		"log_level":              "LOG_LEVEL",
-		"log_format":             "LOG_FORMAT",
-		"upstream_timeout_sec":   "RELAY_UPSTREAM_TIMEOUT",
-		"first_byte_timeout_sec": "RELAY_FIRST_BYTE_TIMEOUT",
-		"max_retries":            "RELAY_MAX_RETRIES",
-		"max_request_body_mb":    "RELAY_MAX_REQUEST_BODY_MB",
-		"log_retention_days":     "RELAY_LOG_RETENTION_DAYS",
-		"payload_storage_mode":   "RELAY_PAYLOAD_STORAGE_MODE",
-		"payload_max_kb":         "RELAY_PAYLOAD_MAX_KB",
-		"max_concurrency":        "RELAY_MAX_CONCURRENCY",
-		"default_rpm":            "RELAY_DEFAULT_RPM",
-		"secret":                 "RELAY_SECRET",
-		"database":               "DB_HOST / DB_PORT / DB_USER / DB_PASSWORD / DB_NAME / DB_SSLMODE / DB_TIMEZONE",
+		"host":                         "SERVER_HOST",
+		"port":                         "SERVER_PORT",
+		"mode":                         "GIN_MODE",
+		"log_level":                    "LOG_LEVEL",
+		"log_format":                   "LOG_FORMAT",
+		"upstream_timeout_sec":         "RELAY_UPSTREAM_TIMEOUT",
+		"first_byte_timeout_sec":       "RELAY_FIRST_BYTE_TIMEOUT",
+		"max_retries":                  "RELAY_MAX_RETRIES",
+		"max_request_body_mb":          "RELAY_MAX_REQUEST_BODY_MB",
+		"log_retention_days":           "RELAY_LOG_RETENTION_DAYS",
+		"payload_storage_mode":         "RELAY_PAYLOAD_STORAGE_MODE",
+		"payload_max_kb":               "RELAY_PAYLOAD_MAX_KB",
+		"max_concurrency":              "RELAY_MAX_CONCURRENCY",
+		"default_rpm":                  "RELAY_DEFAULT_RPM",
+		"retry_same_upstream_delay_ms": "RELAY_RETRY_SAME_UPSTREAM_DELAY",
+		"secret":                       "RELAY_SECRET",
+		"database":                     "DB_HOST / DB_PORT / DB_USER / DB_PASSWORD / DB_NAME / DB_SSLMODE / DB_TIMEZONE",
 	}
 }
 
@@ -190,6 +205,14 @@ func (c *Config) validate() error {
 	case "all", "errors", "none":
 	default:
 		return fmt.Errorf("relay.payload_storage_mode 必须是 all|errors|none，当前: %q", c.Relay.PayloadStorageMode)
+	}
+	// 负值会让退避变成「立即返回」而不是报错，静默违背配置意图；
+	// 上限也拦一下，避免一次请求被拖进分钟级（与 relay 包的封顶同口径）
+	if c.Relay.RetrySameUpstreamDelay < 0 {
+		return fmt.Errorf("relay.retry_same_upstream_delay 不能为负: %s", c.Relay.RetrySameUpstreamDelay)
+	}
+	if c.Relay.RetrySameUpstreamDelay > 30*time.Second {
+		return fmt.Errorf("relay.retry_same_upstream_delay 不应超过 30s: %s", c.Relay.RetrySameUpstreamDelay)
 	}
 	return nil
 }
