@@ -76,6 +76,10 @@ const usingDefaultSecret = ref(false)
 //
 // 取不到就整个不显示：空着一格版本号比不显示更容易让人以为哪里坏了。
 const appVersion = ref('')
+// 界面显示用的短版本号：去掉 git describe 的短 hash 段（v0.1.0-20-gfcf3e02 →
+// v0.1.0-20）。hash 只在「对照部署」时有用，常驻侧栏太吵；完整版本号仍在
+// 悬停 title 里。dirty 标记保留 —— 它说明代码有未提交改动。
+const appVersionShort = ref('')
 
 // 侧边栏菜单：对齐参考站 console-menu-list 的项目与顺序，
 // 剔除其面向多用户的登录/工单/订单/兑换/礼品/邮件/公告模块。
@@ -98,7 +102,7 @@ const go = (key: string) => router.push(key)
 
 // ---- 窄屏自动收起侧栏 ----
 //
-// 侧栏固定 224px。窗口一窄，它就要占掉一大半宽度，内容区被压成一条缝 ——
+// 侧栏固定 192px。窗口一窄，它就要占掉一大半宽度，内容区被压成一条缝 ——
 // 表格虽然有横向滚动（各页都配了 :scroll="{ x }"），但连「一屏能看见两列」
 // 都做不到时，滚动也救不回来。
 //
@@ -133,6 +137,8 @@ onMounted(() => {
       // 构建时没传 VERSION 会是 "dev"，照常显示 —— 它本身就是一个有用的信号
       // （说明这次构建是本地随手构建的，不是 install.sh 产出的）
       appVersion.value = (info.version || '').trim()
+      // hash 段（-gfcf3e02）不进侧栏，理由见 appVersionShort 的声明注释
+      appVersionShort.value = appVersion.value.replace(/-g[0-9a-f]+/i, '')
     })
     .catch(() => {
       // 拿不到系统信息不影响正常使用，静默即可
@@ -154,7 +160,7 @@ onUnmounted(() => {
          右侧内容直接顶到最上面。 -->
     <div class="main-layout-body">
       <div class="console-layout">
-        <!-- 侧边栏：实测宽 224px，内边距 8px -->
+        <!-- 侧边栏：实测宽 192px，内边距 8px -->
         <aside class="console-sidebar" :class="{ 'is-collapsed': collapsed }">
           <div class="sidebar-top">
             <div class="brand" :title="collapsed ? 'LLM Relay' : ''" @click="go('/console/dashboard')">
@@ -167,7 +173,7 @@ onUnmounted(() => {
                 窄屏下侧栏默认收起，所以它在窄屏是不可见的 —— 这是有意的，
                 窄屏空间该留给内容，查版本可以用 deploy/install.sh --verify。 -->
             <div v-if="!collapsed && appVersion" class="brand-version" :title="'后端版本：' + appVersion">
-              {{ appVersion }}
+              {{ appVersionShort }}
             </div>
 
             <nav class="console-menu-list">
@@ -314,7 +320,7 @@ onUnmounted(() => {
   font-size: 12px;
   line-height: 1.4;
   color: var(--color-text-secondary);
-  /* 长版本号（v1.2.0-7-g3f9a1c-dirty 有 22 字符）在 224px 侧栏里会超宽，
+  /* 长版本号（v1.2.0-7-g3f9a1c-dirty 有 22 字符）在 192px 侧栏里会超宽，
      省略号截断 + 悬停看全 —— 与全站其它长文本同一处理 */
   overflow: hidden;
   text-overflow: ellipsis;

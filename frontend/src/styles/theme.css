@@ -124,7 +124,7 @@
   /* ---- 布局尺寸（实测）---- */
   /* 参考站的顶栏是 64px（记录见 docs/ui-spec.md），我们这边没有顶栏：
      品牌与主题切换都在侧栏里，右侧内容直接顶到最上面 */
-  --size-sidebar-width: 224px;
+  --size-sidebar-width: 192px;
   --size-menu-item-height: 32px;
   --size-control-height: 24px;
   --size-table-row: 39px;

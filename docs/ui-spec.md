@@ -41,15 +41,15 @@ main-layout            flex, bg #f8f5ee, 全屏
 │   └── nav-actions    nav, flex, gap 8, 高 32（控制台 / 模型 / 文档 / 头像）
 └── main-layout-body   position: relative
     └── console-layout flex
-        ├── console-sidebar  aside 宽 224, padding 8, bg #f8f5ee, flex
+        ├── console-sidebar  aside 宽 192, padding 8, bg #f8f5ee, flex
         │   └── console-menu-list  nav, flex, gap 4
-        │       └── console-menu-item  button 208x32, 圆角 999,
+        │       └── console-menu-item  button 176x32, 圆角 999,
         │                              padding 0 8, gap 8, font-size 14.4
         └── console-content  section flex:1
             └── *-container  padding 8
 ```
 
-**关键数字**：顶栏 64、侧边栏 224、菜单项高 32 圆角 999、内容区 padding 8。
+**关键数字**：顶栏 64、侧边栏 192、菜单项高 32 圆角 999、内容区 padding 8。
 
 ## 三、卡片 / 面板（全站统一）
 
