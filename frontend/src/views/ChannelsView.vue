@@ -377,9 +377,11 @@ async function save() {
     message.warning('请至少填一个模型：没有白名单的渠道不会参与任何路由')
     return
   }
-  // 默认模型映射的两个必填关系（后端也会拦，但等一个来回再报错体验差得多）：
-  // 开关开着必须有模型名；指定的模型必须在白名单里 —— 兜底请求靠它去匹配
-  // 白名单行，配不上就不会生效，那正是本功能要消灭的「配了没反应」
+  // 默认模型映射的三个必填关系（后端也会拦，但等一个来回再报错体验差得多）：
+  // 开关开着必须有模型名；指定的模型必须在白名单里且**启用中** ——
+  // 兜底请求靠它去匹配白名单行（路由还要求那一行启用），配不上就不会生效，
+  // 那正是本功能要消灭的「配了没反应」。「选好兜底目标、再回白名单把那一行
+  // 停用」在同一张表单里就会发生，下拉框只列启用行防不住这一步
   const defaultModel = form.default_model.trim()
   if (form.default_model_enabled && !defaultModel) {
     message.warning('开了「默认模型映射」就要选一个默认模型：不选的话这个开关不会生效')
@@ -387,6 +389,10 @@ async function save() {
   }
   if (defaultModel && !models.some((m) => m.public_name === defaultModel)) {
     message.warning('默认模型「' + defaultModel + '」不在白名单里：请先把它加进白名单')
+    return
+  }
+  if (defaultModel && !models.some((m) => m.public_name === defaultModel && m.enabled)) {
+    message.warning('默认模型「' + defaultModel + '」在白名单里但已停用：停用的模型不参与兜底，请启用那一行或另选')
     return
   }
   saving.value = true

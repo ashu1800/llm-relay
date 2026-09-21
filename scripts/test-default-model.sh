@@ -180,6 +180,11 @@ R5b=$(curl -s -m 30 -o "$TMP/r5b.json" -w '%{http_code}' "$BASE/v1/messages" -H 
   -d "{\"model\":\"$CLIENT_MODEL\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}")
 chk "半残状态下仍是 502" "502" "$R5b"
 chkcontains "提示里点名半残的兜底配置" "$(cat "$TMP/r5b.json")" "默认模型映射"
+# 列表的「兜底」胶囊必须按与路由同一判据回显：半残状态亮着胶囊，
+# 用户会以为兜底在工作（它永远不会生效）。修复前这里回显 DEF_MODEL
+LIST2=$(curl -s "$API/channels")
+chk "半残状态下列表不亮兜底胶囊" "" \
+  "$(echo "$LIST2" | jqg "next(c for c in d['items'] if c['name']=='$CNAME')['fallback_model']")"
 # 恢复：开关归位、白名单重新启用，供最后一组用
 P "UPDATE channel_models SET enabled=true WHERE channel_id=$CID AND public_name='$DEF_MODEL'" >/dev/null
 P "UPDATE channels SET extra_config = jsonb_set(extra_config, '{default_model_enabled}', 'true'::jsonb) WHERE id=$CID" >/dev/null
@@ -200,6 +205,18 @@ chk "指向白名单外的模型被 400 拦住" "400" "$R7"
 chkcontains "说明原因" "$(cat "$TMP/r7.json")" "不在"
 
 echo
+echo "=== 8b. 保存校验：兜底目标行在白名单里但停用（同一张表单就能造出这种状态）==="
+# 「先选好兜底目标、再回白名单把那一行停用」是一次提交就能带进来的状态：
+# 路由 JOIN 要求 enabled = true，放行保存就是「配了不生效」。
+# 修复前这里 200 通过，兜底静默失效（2026-09-21 评审发现的缺口）
+R7B=$(curl -s -m 30 -o "$TMP/r7b.json" -w '%{http_code}' -X PUT "$API/channels/$CID" \
+  -H 'Content-Type: application/json' \
+  -d "{\"extra_config\": {\"default_model_enabled\": true, \"default_model\": \"$DEF_MODEL\"},
+      \"models\": [{\"public_name\": \"$DEF_MODEL\", \"upstream_name\": \"$DEF_MODEL\", \"enabled\": false}]}")
+chk "兜底目标行停用被 400 拦住" "400" "$R7B"
+chkcontains "说明是停用问题" "$(cat "$TMP/r7b.json")" "停用"
+
+echo
 echo "=== 9. 兜底请求按「指定模型」的单价计费 ==="
 curl -s -X PUT "$API/channels/$CID" -H 'Content-Type: application/json' -d "{
   \"extra_config\": {\"default_model_enabled\": true, \"default_model\": \"$DEF_MODEL\"},
@@ -215,6 +232,32 @@ COST=$(P "SELECT pricing_snapshot->>'model_key' FROM request_logs WHERE channel_
 # 计费键是兜底目标那条白名单行的对外名 —— 客户端的模型名在渠道里没配价，
 # 按它查只会得到 0 元
 chk "按兜底模型的单价定价" "$DEF_MODEL" "$COST"
+
+echo
+echo "=== 10. 兜底目标行配了「对外名 → 上游名」映射：映射必须照常生效 ==="
+# 修复前（2026-09-21 评审实证）：兜底候选的 UpstreamName 被硬写成对外名，
+# 该行配置的上游名映射被忽略 —— 上游收到它不认识的名字，复现本功能
+# 要消灭的 2ms 502。端到端此前测不到：所有 DEF_MODEL 行的 upstream_name
+# 都恰好等于 public_name
+MAPPED_UPSTREAM="dm-mapped-upstream"
+curl -s -X PUT "$API/channels/$CID" -H 'Content-Type: application/json' -d "{
+  \"extra_config\": {\"default_model_enabled\": true, \"default_model\": \"$DEF_MODEL\"},
+  \"models\": [
+    {\"public_name\": \"$DEF_MODEL\", \"upstream_name\": \"$MAPPED_UPSTREAM\",
+     \"input_per_1m\": \"10\", \"output_per_1m\": \"20\"}
+  ]
+}" >/dev/null
+curl -s "$MOCK/reset" >/dev/null
+R8=$(curl -s -m 30 -o "$TMP/r8.json" -w '%{http_code}' "$BASE/v1/messages" -H "x-api-key: $SK" \
+  -H 'Content-Type: application/json' \
+  -d "{\"model\":\"$CLIENT_MODEL\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}")
+chk "映射行的兜底请求成功" "200" "$R8"
+chk "上游收到的是映射后的上游名，不是对外名" "$MAPPED_UPSTREAM" \
+  "$(curl -s "$MOCK/stats" | jqg "d['last_request']['model']")"
+LOG8=$(P "SELECT model_requested || '|' || model_upstream || '|' || fallback_mapped FROM request_logs WHERE channel_id=$CID ORDER BY id DESC LIMIT 1")
+chk "日志记映射名且带兜底标记" "$CLIENT_MODEL|$MAPPED_UPSTREAM|true" "$LOG8"
+COST8=$(P "SELECT pricing_snapshot->>'model_key' FROM request_logs WHERE channel_id=$CID ORDER BY id DESC LIMIT 1")
+chk "计费键仍是对外名（计价按白名单行，映射不影响费用归属）" "$DEF_MODEL" "$COST8"
 
 purge
 echo

@@ -246,12 +246,15 @@ func (r *Router) buildCandidates(rows []candidateRow, q CandidateQuery, now time
 		}
 		binding := model.ChannelModel{ID: rw.BindingID, ChannelID: rw.ID, PublicName: rw.PublicName, UpstreamName: rw.UpstreamName, Enabled: true, ProxyID: rw.BindingProxyID}
 		if fallback {
-			// 兜底候选的对外名就是默认模型名（计费键），上游名也用它。
-			// 上游名留空是绝不允许的：那会让请求带着客户端的原名发出去，
-			// 又变成那个 2ms 的 502 —— 正是本功能要消灭的东西。
-			// 查询的 JOIN 保证了它非空且在该渠道白名单里。
+			// 兜底候选的 Binding 指向默认模型那一行：PublicName 是计费键
+			// （计价引擎按白名单行的对外名查价），UpstreamName 用那一行
+			// **配置的上游名** —— 与精确命中同一语义。这一行可能配了
+			// 「对外名 → 上游名」映射：若忽略映射、直接拿对外名发上游，
+			// 上游会收到一个它不认识的名字，复现本功能要消灭的 2ms 502。
+			// （UpstreamName 非空由 normalizeWhitelist 保证：留空即归一成对外名；
+			// 行存在由查询的 JOIN 保证。）
 			binding.PublicName = rw.DefaultModel
-			binding.UpstreamName = rw.DefaultModel
+			binding.UpstreamName = rw.UpstreamName
 		}
 		maxConc := ChannelMaxConcurrency(rw.ExtraConfig)
 		c := Candidate{

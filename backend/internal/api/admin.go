@@ -175,17 +175,21 @@ type channelPayload struct {
 // validateDefaultModel 校验「默认模型映射」的配置配得上套。
 //
 // 前端也会拦（保存前 message.warning），但后端必须也拦：接口不是只有界面在用，
-// 脚本与备份导入都在打。拦的是两种「配了但不会生效」的状态：
+// 脚本与备份导入都在打。拦的是三种「配了但不会生效」的状态：
 //
 //  1. 开关开着但模型名空 —— 路由侧把它等同于没开（见 relay.ChannelDefaultModel），
 //     保存成功等于给用户一个假象，而表现又是那个 2ms 的 502。
 //  2. 指定的模型不在该渠道白名单里 —— 候选查询按
 //     channel_models.public_name = extra_config->>'default_model' 做 JOIN 匹配，
 //     匹配不到就不成为兜底候选。这条更隐蔽：白名单看着是配好的，只是没配这个名字。
+//  3. 指定的模型在白名单里但那一行停用了 —— 候选查询的 JOIN 还要求
+//     channel_models.enabled = true。同一张表单里「先选好兜底目标、再回白名单
+//     把那一行停用」完全可能发生，前端下拉框只列启用行，但那只防住选择的
+//     那一刻，防不住之后停用，所以必须在保存时按整表状态再拦一次。
 //
-// 判据复用 relay 侧的两个读取函数，与路由一字不差 —— 两边各写一份迟早漂移，
+// 判据复用 relay 侧的读取函数，与路由一字不差 —— 两边各写一份迟早漂移，
 // 而漂移的表现正是「保存时说没问题、路由里不生效」。
-func validateDefaultModel(extra map[string]any, publicNames []string) error {
+func validateDefaultModel(extra map[string]any, whitelist []model.ChannelModel) error {
 	if !relay.ChannelDefaultModelEnabled(extra) {
 		// 开关关着（或压根没配）：这时 default_model 里残留什么都不影响路由，
 		// ChannelDefaultModel 不会认它，不必拦住保存
@@ -195,21 +199,16 @@ func validateDefaultModel(extra map[string]any, publicNames []string) error {
 	if !on {
 		return errors.New("开了「默认模型映射」但没填默认模型名；不填的话这个开关不会生效")
 	}
-	for _, n := range publicNames {
-		if strings.TrimSpace(n) == name {
+	for _, it := range whitelist {
+		if strings.TrimSpace(it.PublicName) != name {
+			continue
+		}
+		if it.Enabled {
 			return nil
 		}
+		return errors.New("默认模型 " + name + " 在白名单里但处于停用状态：停用的行不参与兜底，请启用那一行或另选模型")
 	}
 	return fmt.Errorf("默认模型 %s 不在这条渠道的白名单里；兜底请求靠它去匹配白名单行，配不上就不会生效", name)
-}
-
-// publicNamesOf 抽出白名单的对外名，供默认模型映射的校验比对。
-func publicNamesOf(items []model.ChannelModel) []string {
-	names := make([]string, 0, len(items))
-	for _, it := range items {
-		names = append(names, it.PublicName)
-	}
-	return names
 }
 
 // validateDefaultModelOnUpdate 用「更新之后」的状态校验默认模型映射。
@@ -220,7 +219,7 @@ func publicNamesOf(items []model.ChannelModel) []string {
 func (s *Server) validateDefaultModelOnUpdate(id uint, p channelPayload, whitelist []model.ChannelModel) error {
 	// 两边都传了就不必查库 —— 绝大多数保存走这条，省一次往返
 	if p.Models != nil && p.ExtraConf != nil {
-		return validateDefaultModel(p.ExtraConf, publicNamesOf(whitelist))
+		return validateDefaultModel(p.ExtraConf, whitelist)
 	}
 
 	var existing model.Channel
@@ -230,18 +229,17 @@ func (s *Server) validateDefaultModelOnUpdate(id uint, p channelPayload, whiteli
 	}
 	extra := effectiveDefaultModelExtra(existing.ExtraConfig, p.ExtraConf)
 
-	// 本次没交白名单就取库里现有的对外名。注意只取 PublicName：
-	// 校验只关心「名字在不在」，价格、代理这些与它无关
-	names := publicNamesOf(whitelist)
+	// 校验要用**更新之后**的白名单整行（含启用状态，见 validateDefaultModel
+	// 对停用行的拦截）。本次没交白名单就取库里现有的
 	if p.Models == nil {
 		var rows []model.ChannelModel
 		if err := s.deps.Store.DB().Model(&model.ChannelModel{}).
 			Where("channel_id = ?", id).Find(&rows).Error; err != nil {
 			return nil
 		}
-		names = publicNamesOf(rows)
+		whitelist = rows
 	}
-	return validateDefaultModel(extra, names)
+	return validateDefaultModel(extra, whitelist)
 }
 
 // effectiveDefaultModelExtra 算出这条渠道在本次更新**之后**的 extra_config。
@@ -465,6 +463,7 @@ func (s *Server) listChannels(c *gin.Context) {
 		ids = append(ids, ch.ID)
 	}
 	names := map[uint][]string{}
+	enabledNames := map[uint]map[string]bool{}
 	unpriced := map[uint]int{}
 	if len(ids) > 0 {
 		var rows []model.ChannelModel
@@ -474,6 +473,12 @@ func (s *Server) listChannels(c *gin.Context) {
 		}
 		for _, r := range rows {
 			names[r.ChannelID] = append(names[r.ChannelID], r.PublicName)
+			if r.Enabled {
+				if enabledNames[r.ChannelID] == nil {
+					enabledNames[r.ChannelID] = map[string]bool{}
+				}
+				enabledNames[r.ChannelID][r.PublicName] = true
+			}
 			// 「没配价」的判定与计价引擎一致：四个单价全 0 且没有倍率。
 			// 列表上要显式提示条数 —— 漏配价的后果是这笔调用被记成 0 元，
 			// 账面上完全看不出异常，只能靠这里点名
@@ -527,7 +532,7 @@ func (s *Server) listChannels(c *gin.Context) {
 		items = append(items, channelListItem{
 			Channel: ch, Models: list, ModelCount: len(list),
 			UnpricedCount: unpriced[ch.ID],
-			FallbackModel: fallbackModelOf(ch),
+			FallbackModel: fallbackModelOf(ch, enabledNames[ch.ID]),
 			LastUsedAt:    lastUsed[ch.ID], Runtime: &rt,
 		})
 	}
@@ -536,12 +541,19 @@ func (s *Server) listChannels(c *gin.Context) {
 
 // fallbackModelOf 取这条渠道实际生效的默认模型名（没开则为空串）。
 //
-// 只回答「开没开」，不回答「开了但配错」—— 指定的模型不在白名单里时
-// 候选查询匹配不到它、兜底不会生效，但那种状态在保存时就被
-// validateDefaultModel 拦下了，不会进库。这里如实回显用户配了什么。
-func fallbackModelOf(ch model.Channel) string {
+// enabledNames 是该渠道白名单里**启用中**的对外名集合（与路由 JOIN 的
+// public_name + enabled 条件同口径）。目标行不在其中时返回空串 ——
+// 那是「开了但配不上」的半残状态，兜底不会生效，亮着「兜底」胶囊
+// 只会让人以为它在工作。半残状态可能来自备份导入（导入路径不走
+// validateDefaultModel，靠事后剥离兜底，见 admin_backup.go）或直接改库，
+// 「保存时拦住了、库里不可能有」这个假设并不成立；真出现时，
+// 失败提示里的 brokenFallbackCount 会点名。
+func fallbackModelOf(ch model.Channel, enabledNames map[string]bool) string {
 	name, on := relay.ChannelDefaultModel(ch.ExtraConfig)
 	if !on {
+		return ""
+	}
+	if !enabledNames[name] {
 		return ""
 	}
 	return name
@@ -612,9 +624,9 @@ func (s *Server) createChannel(c *gin.Context) {
 		}
 		whitelist = items
 	}
-	// 默认模型映射要对着**本次提交的白名单**校验：指定的模型必须在白名单里，
-	// 否则候选查询的 JOIN 匹配不到它，兜底不会生效（见 validateDefaultModel）
-	if verr := validateDefaultModel(p.ExtraConf, publicNamesOf(whitelist)); verr != nil {
+	// 默认模型映射要对着**本次提交的白名单**校验：指定的模型必须在白名单里
+	// 且启用，否则候选查询的 JOIN 匹配不到它，兜底不会生效（见 validateDefaultModel）
+	if verr := validateDefaultModel(p.ExtraConf, whitelist); verr != nil {
 		writeUpstreamError(c, http.StatusBadRequest, verr.Error(), "invalid_request_error")
 		return
 	}

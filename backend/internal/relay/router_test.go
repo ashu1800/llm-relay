@@ -386,10 +386,15 @@ func TestBuildCandidatesExactMatchNotMisjudgedAsFallback(t *testing.T) {
 	}
 }
 
-// 兜底轮里，Binding 要指向默认模型那一行（计费键与上游名都用它）。
+// 兜底轮里，Binding 要指向默认模型那一行：PublicName 是计费键（对外名），
+// UpstreamName 是那一行**配置的上游名** —— 映射照常生效，与精确命中同一语义。
 //
 // 这是「按指定模型单价计费」的落地点：计价引擎按 (渠道, 对外名) 查白名单行，
 // 把 PublicName 设成默认模型名才能命中那条真实存在的价。
+//
+// 测试数据特意让上游名与对外名不同：两者相同时，断言区分不了
+// 「用行的上游名」与「拿对外名硬发」两种实现 —— 后者会让配了映射的行
+// 收到上游不认识的名字（2026-09-21 评审实证的缺陷）。
 func TestBuildCandidatesFallbackUsesDefaultModelAsBinding(t *testing.T) {
 	r := mustRouter(t)
 	rows := []candidateRow{{
@@ -398,7 +403,7 @@ func TestBuildCandidatesFallbackUsesDefaultModelAsBinding(t *testing.T) {
 			ExtraConfig: model.JSONMap{"default_model_enabled": true, "default_model": "deepseek-chat"},
 		},
 		PublicName:   "deepseek-chat",
-		UpstreamName: "deepseek-chat",
+		UpstreamName: "deepseek-v4.1-flash", // 该行配了对外名 → 上游名映射
 		BindingID:    11,
 		DefaultModel: "deepseek-chat",
 	}}
@@ -411,9 +416,12 @@ func TestBuildCandidatesFallbackUsesDefaultModelAsBinding(t *testing.T) {
 	if !got[0].Fallback {
 		t.Fatal("兜底轮取回的行必须标成兜底")
 	}
-	if got[0].Binding.PublicName != "deepseek-chat" || got[0].Binding.UpstreamName != "deepseek-chat" {
-		t.Errorf("Binding 应指向默认模型，实际 public=%q upstream=%q",
-			got[0].Binding.PublicName, got[0].Binding.UpstreamName)
+	if got[0].Binding.PublicName != "deepseek-chat" {
+		t.Errorf("计费键应是对外名 deepseek-chat，实际 %q", got[0].Binding.PublicName)
+	}
+	if got[0].Binding.UpstreamName != "deepseek-v4.1-flash" {
+		t.Errorf("上游名应是该行映射的 deepseek-v4.1-flash，实际 %q（映射被忽略，上游会收到它不认识的名字）",
+			got[0].Binding.UpstreamName)
 	}
 	if got[0].Binding.ID != 11 {
 		t.Errorf("Binding.ID 应是默认模型那条白名单行，实际 %d", got[0].Binding.ID)

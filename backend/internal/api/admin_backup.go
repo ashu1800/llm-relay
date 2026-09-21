@@ -15,6 +15,7 @@ import (
 
 	"llm-relay/internal/model"
 	"llm-relay/internal/pricing"
+	"llm-relay/internal/relay"
 )
 
 // maxImportBodyBytes 是配置导入的请求体上限。
@@ -276,6 +277,9 @@ func (s *Server) importConfig(c *gin.Context) {
 	}
 
 	channelIDMap := map[uint]uint{}
+	// createdChannelIDs 记录本次**新建**的渠道（同名跳过的不算），白名单全部
+	// 落库后用于兜底配置终审（见 stripBrokenFallbackConfigs）
+	createdChannelIDs := make([]uint, 0, len(b.Channels))
 	for i := range b.Channels {
 		ch := b.Channels[i].Channel
 		// 密文被 json:"-" 挡住过，导入时必须显式写回，否则渠道没有密钥
@@ -346,6 +350,7 @@ func (s *Server) importConfig(c *gin.Context) {
 			continue
 		}
 		channelIDMap[oldID] = ch.ID
+		createdChannelIDs = append(createdChannelIDs, ch.ID)
 		report.Created["渠道"]++
 	}
 
@@ -400,6 +405,12 @@ func (s *Server) importConfig(c *gin.Context) {
 		}
 		report.Created["模型白名单"]++
 	}
+
+	// 兜底配置终审：备份导入不走 validateDefaultModel（渠道先建、白名单后插，
+	// 建渠道那一刻白名单还没进来，无处校验；白名单行还可能被价格校验
+	// 拦下，让兜底目标悬空）。半残配置留着，渠道列表的「兜底」胶囊
+	// 会照常亮起而路由永远不生效 —— 剥掉并点名。
+	stripBrokenFallbackConfigs(db, createdChannelIDs, &report)
 
 	// 鉴权只认哈希，所以没有明文也能用；密文一并带回去是为了
 	// 「查看密钥」在恢复后依然可用（老备份里没有这个字段，导入后就是看不到明文）
@@ -503,6 +514,54 @@ func (s *Server) importConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"created": report.Created, "skipped": report.Skipped, "warnings": report.Warnings,
 	})
+}
+
+// stripBrokenFallbackConfigs 在备份导入的渠道与白名单全部落库后，
+// 对**本次新建**的渠道做「默认模型映射」终审，剥掉配不上的半残配置。
+//
+// 导入路径不经过 validateDefaultModel：渠道先建、白名单后插，建渠道那一刻
+// 白名单还没进来，无处校验；白名单行还可能被 validateImportedPricing 拦下，
+// 让兜底目标悬空。判据与路由 JOIN 同口径（目标行存在且启用）。
+//
+// 半残配置留着的话，渠道列表的「兜底」胶囊会照常亮起而路由永远不生效
+// —— 剥掉两个键（与前端 buildExtraConfig「不生效就一起删」的语义一致）
+// 并写进报告；同名跳过的渠道不动，它们的 extra_config 是本机自己的、
+// 走的是正常保存路径。
+func stripBrokenFallbackConfigs(db *gorm.DB, channelIDs []uint, report *importReport) {
+	for _, cid := range channelIDs {
+		var ch model.Channel
+		if err := db.Select("id", "name", "extra_config").First(&ch, cid).Error; err != nil {
+			continue
+		}
+		name, on := relay.ChannelDefaultModel(ch.ExtraConfig)
+		if !on {
+			continue
+		}
+		var cnt int64
+		if err := db.Model(&model.ChannelModel{}).
+			Where("channel_id = ? AND public_name = ? AND enabled = true", cid, name).
+			Count(&cnt).Error; err != nil {
+			continue
+		}
+		if cnt > 0 {
+			continue
+		}
+		extra := model.JSONMap{}
+		for k, v := range ch.ExtraConfig {
+			extra[k] = v
+		}
+		delete(extra, "default_model_enabled")
+		delete(extra, "default_model")
+		if err := db.Model(&model.Channel{}).Where("id = ?", cid).
+			Update("extra_config", extra).Error; err != nil {
+			report.Warnings = append(report.Warnings,
+				"渠道 "+ch.Name+" 的默认模型映射指向 "+name+"，未随备份配齐，但剥离失败: "+err.Error())
+			continue
+		}
+		report.Warnings = append(report.Warnings,
+			"渠道 "+ch.Name+" 的默认模型映射指向 "+name+"（不在导入后的白名单里或已停用），"+
+				"不会生效，已剥离；需要兜底的话请到渠道页重新选择")
+	}
 }
 
 // validateImportedPricing 校验并规整备份导入的模型价格，与 API 保存路径

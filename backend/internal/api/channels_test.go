@@ -180,22 +180,32 @@ func TestWipedPrices(t *testing.T) {
 //
 // 注意「开关关着且没填模型名」是合法状态（大多数渠道就是如此），不能拦。
 func TestValidateDefaultModel(t *testing.T) {
+	// mk 快速造白名单行：默认启用，传 false 造停用行
+	mk := func(enabled bool, names ...string) []model.ChannelModel {
+		out := make([]model.ChannelModel, 0, len(names))
+		for _, n := range names {
+			out = append(out, model.ChannelModel{PublicName: n, UpstreamName: n, Enabled: enabled})
+		}
+		return out
+	}
 	cases := []struct {
 		name    string
 		extra   map[string]any
-		models  []string
+		models  []model.ChannelModel
 		wantErr bool
 	}{
-		{"没配（合法）", nil, []string{"deepseek-chat"}, false},
-		{"开关关着（合法）", map[string]any{"default_model_enabled": false}, []string{"deepseek-chat"}, false},
-		{"开关关着且没填模型名（合法）", map[string]any{"default_model_enabled": false, "default_model": ""}, []string{"deepseek-chat"}, false},
-		{"配齐且在白名单里（合法）", map[string]any{"default_model_enabled": true, "default_model": "deepseek-chat"}, []string{"deepseek-chat", "deepseek-reasoner"}, false},
-		{"开关开着但没填模型名", map[string]any{"default_model_enabled": true}, []string{"deepseek-chat"}, true},
-		{"开关开着但模型名为空串", map[string]any{"default_model_enabled": true, "default_model": ""}, []string{"deepseek-chat"}, true},
-		{"开关开着但模型名只有空白", map[string]any{"default_model_enabled": true, "default_model": "  "}, []string{"deepseek-chat"}, true},
-		{"模型名不在白名单里", map[string]any{"default_model_enabled": true, "default_model": "gpt-4o"}, []string{"deepseek-chat"}, true},
+		{"没配（合法）", nil, mk(true, "deepseek-chat"), false},
+		{"开关关着（合法）", map[string]any{"default_model_enabled": false}, mk(true, "deepseek-chat"), false},
+		{"开关关着且没填模型名（合法）", map[string]any{"default_model_enabled": false, "default_model": ""}, mk(true, "deepseek-chat"), false},
+		{"配齐且在白名单里（合法）", map[string]any{"default_model_enabled": true, "default_model": "deepseek-chat"}, mk(true, "deepseek-chat", "deepseek-reasoner"), false},
+		{"开关开着但没填模型名", map[string]any{"default_model_enabled": true}, mk(true, "deepseek-chat"), true},
+		{"开关开着但模型名为空串", map[string]any{"default_model_enabled": true, "default_model": ""}, mk(true, "deepseek-chat"), true},
+		{"开关开着但模型名只有空白", map[string]any{"default_model_enabled": true, "default_model": "  "}, mk(true, "deepseek-chat"), true},
+		{"模型名不在白名单里", map[string]any{"default_model_enabled": true, "default_model": "gpt-4o"}, mk(true, "deepseek-chat"), true},
 		{"白名单为空但开了开关", map[string]any{"default_model_enabled": true, "default_model": "deepseek-chat"}, nil, true},
-		{"模型名两侧空白应剪掉再比", map[string]any{"default_model_enabled": true, "default_model": " deepseek-chat "}, []string{"deepseek-chat"}, false},
+		{"模型名两侧空白应剪掉再比", map[string]any{"default_model_enabled": true, "default_model": " deepseek-chat "}, mk(true, "deepseek-chat"), false},
+		// 兜底目标行停用：路由 JOIN 要求 enabled = true，保存放行就是「配了不生效」
+		{"目标行在白名单里但停用", map[string]any{"default_model_enabled": true, "default_model": "deepseek-chat"}, mk(false, "deepseek-chat"), true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
