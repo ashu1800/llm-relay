@@ -321,6 +321,10 @@ onUnmounted(() => {
    比例字体下 0/O、1/l 分不清。 */
 .brand-version {
   align-self: flex-start; /* 侧栏是 flex 列，默认会拉通栏：改回贴内容宽 */
+  /* 与品牌名「LLM Relay」的左缘对齐，而不是与 LR 圆标对齐：
+     .brand 的内边距 4px + 圆标 32px + 列间距 8px = 44px。
+     改 .brand 的任何几何尺寸都要同步这两个 44px。 */
+  margin-left: 44px;
   margin-top: -6px;       /* 抵掉 .brand 的 margin-bottom，避免双倍间距 */
   margin-bottom: var(--gap);
   padding: 2px 8px;
@@ -330,9 +334,8 @@ onUnmounted(() => {
   color: var(--color-text-secondary);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-pill);
-  /* 界面显示的是短版本（v0.1.0-23，10 字符上下），max-width 只是兜底：
-     万一后端返回异常长串就截断省略，悬停 title 里仍是完整版本 */
-  max-width: 100%;
+  /* 与 margin-left 配对：异常长串在这里截断省略，不会溢出侧栏 */
+  max-width: calc(100% - 44px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
