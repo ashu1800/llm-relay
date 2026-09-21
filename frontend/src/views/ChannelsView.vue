@@ -716,14 +716,7 @@ async function loadBindings() {
   if (!bindChannel.value) return
   try {
     const res = await api.get<{ items: ChannelBinding[] }>('/channels/' + bindChannel.value.id + '/models')
-    bindItems.value = (res.items || []).map((b) => ({
-      public_name: b.public_name,
-      // 上游名与对外名相同时留空显示，避免满屏重复的模型名
-      upstream_name: b.upstream_name === b.public_name ? '' : b.upstream_name,
-      enabled: b.enabled,
-      proxy_id: b.proxy_id || 0,
-      ...pickPrice(b)
-    }))
+    bindItems.value = bindingRows(res.items || [])
   } catch (e: any) {
     message.error(e.message)
   }

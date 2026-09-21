@@ -424,34 +424,15 @@ func openAIContentToAnthropic(v any) ([]any, error) {
 }
 
 // openAIImageToAnthropic 把 image_url（data URI 或普通 URL）转成 Anthropic 的图片块。
+//
+// 只是给 imageURLToAnthropicSource 套一层 image 信封：source 的解析
+// （data URI 拆分、http 链接）只有一处实现。
 func openAIImageToAnthropic(img map[string]any) map[string]any {
-	if img == nil {
+	src := imageURLToAnthropicSource(img)
+	if src == nil {
 		return nil
 	}
-	url := asString(img["url"])
-	if url == "" {
-		return nil
-	}
-	// data:image/png;base64,xxxx
-	if strings.HasPrefix(url, "data:") {
-		rest := strings.TrimPrefix(url, "data:")
-		semi := strings.Index(rest, ";base64,")
-		if semi < 0 {
-			return nil
-		}
-		return map[string]any{
-			"type": "image",
-			"source": map[string]any{
-				"type":       "base64",
-				"media_type": rest[:semi],
-				"data":       rest[semi+len(";base64,"):],
-			},
-		}
-	}
-	return map[string]any{
-		"type":   "image",
-		"source": map[string]any{"type": "url", "url": url},
-	}
+	return map[string]any{"type": "image", "source": src}
 }
 
 // flattenTextContent 把字符串或内容块数组拍平成纯文本（system 用）。
@@ -514,6 +495,9 @@ func toolResultToAnthropic(v any) any {
 
 // imageURLToAnthropicSource 把 OpenAI 的 image_url（data URI 或 http 链接）
 // 还原成 Anthropic 的 source 结构。
+//
+// 这是 source 解析的唯一实现：openAIImageToAnthropic 在它外面套 image 信封，
+// 工具结果的 tool_result 块直接用它的裸 source。
 func imageURLToAnthropicSource(iu map[string]any) map[string]any {
 	if iu == nil {
 		return nil
@@ -524,15 +508,16 @@ func imageURLToAnthropicSource(iu map[string]any) map[string]any {
 	}
 	// data:<media>;base64,<data> —— base64 图是工具截图的常态
 	if strings.HasPrefix(url, "data:") {
-		rest := url[len("data:"):]
-		if idx := strings.Index(rest, ";base64,"); idx >= 0 {
-			return map[string]any{
-				"type":       "base64",
-				"media_type": rest[:idx],
-				"data":       rest[idx+len(";base64,"):],
-			}
+		rest := strings.TrimPrefix(url, "data:")
+		semi := strings.Index(rest, ";base64,")
+		if semi < 0 {
+			return nil
 		}
-		return nil
+		return map[string]any{
+			"type":       "base64",
+			"media_type": rest[:semi],
+			"data":       rest[semi+len(";base64,"):],
+		}
 	}
 	return map[string]any{"type": "url", "url": url}
 }

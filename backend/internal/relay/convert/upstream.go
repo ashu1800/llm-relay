@@ -92,14 +92,14 @@ func stripCacheControlFromJSON(body []byte) []byte {
 	// 先做子串粗筛再解析：这些字段只可能来自 Anthropic 入站，绝大多数请求
 	// 根本没有它们 —— 但下面那个 containsKey 的短路在 Unmarshal **之后**，
 	// 全量解析的代价照样付了。数 MB 的长对话每个候选渠道都要再来一遍。
-	if !bytes.Contains(body, privateFieldNeedles[0]) && !bytes.Contains(body, privateFieldNeedles[1]) {
+	if !containsPrivateFieldShard(body) {
 		return body
 	}
 	var v any
 	if err := json.Unmarshal(body, &v); err != nil {
 		return body
 	}
-	if !containsKey(v, cacheControlKey) && !containsKey(v, anthropicBlocksKey) {
+	if !containsAnyKey(v, privateFieldKeys) {
 		// 子串命中但不是这两个键（比如正文里恰好写了 "cache_control"）：
 		// 直接返回原文避免无谓的重新序列化
 		return body
@@ -112,12 +112,42 @@ func stripCacheControlFromJSON(body []byte) []byte {
 	return out
 }
 
-// privateFieldNeedles 是子串粗筛用的 needle（见 stripCacheControlFromJSON 注释）。
+// privateFieldKeys 是需要粗筛的私有字段名。
+//
 // cache_control 是块级断点，anthropic_blocks 是消息级私有块容器
 // （thinking / document 等），两者互不包含、都要筛。
-var privateFieldNeedles = [][]byte{
-	[]byte(cacheControlKey),
-	[]byte(anthropicBlocksKey),
+//
+// 键名与子串 needle 同源（needle 在 init 里由它派生）：加第三个私有字段时
+// 只往这里加一个名字，粗筛与精确判断不会失配。
+var privateFieldKeys = []string{cacheControlKey, anthropicBlocksKey}
+
+// privateFieldNeedles 是粗筛用的子串，由 privateFieldKeys 派生。
+var privateFieldNeedles = func() [][]byte {
+	out := make([][]byte, 0, len(privateFieldKeys))
+	for _, k := range privateFieldKeys {
+		out = append(out, []byte(k))
+	}
+	return out
+}()
+
+// containsPrivateFieldShard 判断 body 里是否含有任意一个私有字段的子串。
+func containsPrivateFieldShard(body []byte) bool {
+	for _, n := range privateFieldNeedles {
+		if bytes.Contains(body, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsAnyKey 递归判断结构里是否存在任意一个键。
+func containsAnyKey(v any, keys []string) bool {
+	for _, k := range keys {
+		if containsKey(v, k) {
+			return true
+		}
+	}
+	return false
 }
 
 // containsKey 递归判断结构里是否存在某个键。

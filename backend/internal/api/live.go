@@ -121,6 +121,12 @@ const liveWriteTimeout = 10 * time.Second
 // 否则循环会一个接一个地堆积查询。
 const liveQueryTimeout = 3 * time.Second
 
+// 预算检查的节拍。比统计慢得多是刻意的：预算的输入是「当天累计花费」，
+// 由请求量驱动、变化缓慢，而每次检查都要为每个配了预算的分组扫一遍
+// 当天日志；一分钟一拍既够及时，又不让它在空闲站点上成为唯一的常态负载。
+// 它不挂在 statsKick 上（见 budgetLoop）。
+const budgetCheckInterval = time.Minute
+
 // StartLive 启动实时推送循环，直到 ctx 结束。
 func (s *Server) StartLive(ctx context.Context) {
 	if s.deps.Live == nil {
@@ -133,11 +139,10 @@ func (s *Server) StartLive(ctx context.Context) {
 	statsKick := make(chan struct{}, 1)
 	go s.liveStatsLoop(ctx, statsKick)
 	go s.liveLogsLoop(ctx, statsKick)
-	// 预算检查独立成循环：它挂在 statsKick 上（花费只随新日志变化，
-	// 天然不空转），但**不看订阅者数** —— 预算是记账面告警，
-	// 不是看板附属品。没人开着看板时超支提醒迟到可以接受
-	//（下次连上看板就补喊），但整体静默不行。
-	go s.budgetLoop(ctx, statsKick)
+	// 预算检查独立成循环，且**不共享 statsKick**：预算不看订阅者数
+	//（记账面告警不能因为没人开看板就整体静默），而 statsKick 是容量 1 的
+	// 合并信号，多一个消费者就会把统计推送的唤醒抢走一半 —— 详见 budgetLoop。
+	go s.budgetLoop(ctx)
 }
 
 // liveStatsLoop 每 2 秒算一次今日汇总，变了才推。
@@ -209,30 +214,34 @@ func (s *Server) liveStatsLoop(ctx context.Context, kick <-chan struct{}) {
 	}
 }
 
-// budgetLoop 独立跑预算检查：被 statsKick 叫醒（有新日志，花费才可能变），
-// 外加 60 秒兜底节拍（兜住跨天清零与 kick 被合并掉的时刻）。
+// budgetLoop 独立跑预算检查：**不看订阅者数**（统计推送没人看就是纯浪费，
+// 可以跳过；但「当天没人开看板就整体静默」是功能失效），也**不共享 statsKick**。
 //
-// 与 liveStatsLoop 的关键区别：**不看订阅者数**。统计推送没人看就是纯浪费，
-// 可以跳过；但预算提醒「当天没人开看板就整体静默」是功能失效 ——
-// 提醒本身经 WebSocket 广播，没人连时它自然无处可去，可去重状态在内存里，
-// 有人连上看板后 liveSocket 的首帧补发机制会让他看到当前花费。
+// 为什么不挂 statsKick（曾经挂过）：那个通道是容量 1 的合并信号，本意是让
+// 「新日志入库」立刻触发一次统计计算，从而消掉日志循环（1s 一拍）与统计循环
+// （2s 一拍）之间的相位差 —— 见 liveStatsLoop 的长注释，那是站主反馈过的
+// 「新行已经入场、卡片数字还要等一秒才动」。多一个消费者之后，一次 kick 只会
+// 唤醒其中任意一个，统计推送有一半概率退回定时器，恰好抵消了 kick 存在的理由。
 //
-// 注意 statsKick 有**两个**消费者（liveStatsLoop 与本循环各在 select 里等
-// 同一个通道）：一个 kick 信号只会唤醒其中之一 —— 统计与预算各自最多隔
-// 一个节拍才轮到，这正是 60 秒兜底 ticker 存在的理由之一（另一个是
-// 跨天清零这类不随新日志发生的变化）。
-func (s *Server) budgetLoop(ctx context.Context, kick <-chan struct{}) {
-	ticker := time.NewTicker(time.Minute)
+// 而预算检查本来就不需要这种即时性：作者注释明说超支提醒迟到可以接受
+// （下次连上看板就补喊），且跨天清零这类变化压根不随新日志发生 ——
+// 挂在 kick 上换不来任何东西，却要拿统计的准时性去换。
+//
+// 一分钟一拍也足够：daily_budget 的输入是「当天累计花费」，变化速度受限于
+// 请求量，而超支提醒是记账面告警、不是实时风控。
+func (s *Server) budgetLoop(ctx context.Context) {
+	ticker := time.NewTicker(budgetCheckInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-		case <-kick:
 		}
 		start, end, _ := resolveRange("today")
-		s.checkBudgets(ctx, start, end)
+		qctx, cancel := context.WithTimeout(ctx, liveQueryTimeout)
+		s.checkBudgets(qctx, start, end)
+		cancel()
 	}
 }
 

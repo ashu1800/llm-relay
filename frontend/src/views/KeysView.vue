@@ -60,11 +60,24 @@ async function load() {
 // 分组白名单条目的解析：条目统一是分组 ID（保存时后端归一化），但老数据、
 // 导入的备份里可能还是名字 —— 数字先按 ID 找，找不到再按名字找一次，
 // 都找不到的就是悬空引用（分组已删），界面上要能看出来而不是显示一个裸 ID
-function groupRefInfo(ref: string): { label: string; color?: string; missing: boolean } {
+interface GroupRefInfo {
+  ref: string
+  id?: number
+  label: string
+  color?: string
+  missing: boolean
+}
+function groupRefInfo(ref: string): GroupRefInfo {
   const g =
     groups.value.find((x) => String(x.id) === ref) ?? groups.value.find((x) => x.name === ref)
-  if (g) return { label: g.name, color: g.color, missing: false }
-  return { label: ref, missing: true }
+  if (g) return { ref, id: g.id, label: g.name, color: g.color, missing: false }
+  return { ref, label: ref, missing: true }
+}
+
+// 列表渲染用：一次解析整条记录的分组引用。
+// 不要在模板里对同一个 ref 反复调 groupRefInfo —— 每次调用都要扫两遍 groups
+function resolvedGroups(refs: string[] | null): GroupRefInfo[] {
+  return (refs || []).map(groupRefInfo)
 }
 
 // 密钥明文：按需从后端解密，取到后缓存在内存里。
@@ -160,10 +173,8 @@ function openEdit(row: APIKey) {
   // 白名单条目换成分组 ID（受控多选的值）：库里老条目可能是名字，
   // 能解析就换，解析不了的（悬空引用）原样带着 —— 保存时后端会报错指出它
   form.allowed_groups = (row.allowed_groups || []).map((ref) => {
-    const g =
-      groups.value.find((x) => String(x.id) === ref) ??
-      groups.value.find((x) => x.name === ref)
-    return g ? String(g.id) : ref
+    const info = groupRefInfo(ref)
+    return info.id !== undefined ? String(info.id) : ref
   })
   createdKey.value = ''
   modalOpen.value = true
@@ -182,7 +193,8 @@ function whitelistText(v: string[] | null) {
   return v.join('、')
 }
 
-// tags 模式可以自由输入，提交前去空白、去重
+// 模型白名单是 tags 模式，可以自由输入，提交前去空白、去重
+//（分组白名单是 multiple 模式，值只能来自选项、且是分组 ID，无需这一步）
 function cleanList(v: string[]) {
   return Array.from(new Set((v || []).map((s) => String(s).trim()).filter(Boolean)))
 }
@@ -266,7 +278,7 @@ async function save() {
       name: form.name.trim(),
       rate_limit_rpm: form.rate_limit_rpm,
       allowed_models: cleanList(form.allowed_models),
-      allowed_groups: cleanList(form.allowed_groups)
+      allowed_groups: form.allowed_groups
     }
     if (editing.value) {
       await api.put('/keys/' + editing.value.id, { ...body, enabled: form.enabled })
@@ -400,14 +412,10 @@ onMounted(() => {
               <!-- 条目是分组 ID（颜色与名字去分组表里解析），与分组管理、
                    渠道列表用的是同一份颜色。悬空引用（分组已删）单独标出来：
                    那种条目会让这把密钥调用时 403，不能只显示一个裸 ID -->
-              <template v-for="ref in record.allowed_groups" :key="ref">
-                <GroupTag
-                  v-if="!groupRefInfo(ref).missing"
-                  :name="groupRefInfo(ref).label"
-                  :color="groupRefInfo(ref).color"
-                />
-                <a-tooltip v-else :key="ref + '-missing'" :title="'引用的分组已不存在：' + ref + '（这会让该密钥调用时被拒，请编辑密钥清掉它）'">
-                  <span class="group-ref-missing">{{ ref }}</span>
+              <template v-for="info in resolvedGroups(record.allowed_groups)" :key="info.ref">
+                <GroupTag v-if="!info.missing" :name="info.label" :color="info.color" />
+                <a-tooltip v-else :key="info.ref + '-missing'" :title="'引用的分组已不存在：' + info.ref + '（这会让该密钥调用时被拒，请编辑密钥清掉它）'">
+                  <span class="group-ref-missing">{{ info.ref }}</span>
                 </a-tooltip>
               </template>
             </span>

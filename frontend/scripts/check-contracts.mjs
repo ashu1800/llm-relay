@@ -652,6 +652,42 @@ console.log('=== 渠道表单不拿过期快照覆盖 extra_config ===')
 }
 
 console.log('')
+console.log('=== 定价边界前后端同口径 ===')
+
+// 倍率上限在前端（ModelPricingEditor 的 MAX_MULTIPLIER）与后端
+// （pricing.MaxMultiplier）各存一份 —— 数量级参数没法自然共享，但可以锁住
+// 它们相等：前端放行而后端拒绝，用户看到的是「填得进去、保存报错」，
+// 而且报错指向的是别的格子，很难自查。
+//
+// 这里是静态比对源码常量，不依赖构建产物；后端文件缺失（只 checkout 了
+// frontend 的场合）时跳过而不是判失败。
+const pricingGo = join(SRC, '..', '..', 'backend', 'internal', 'pricing', 'peak.go')
+let priceBoundChecked = false
+try {
+  const goSrc = readFileSync(pricingGo, 'utf8')
+  const goMax = goSrc.match(/const\s+MaxMultiplier\s*=\s*([\d.]+)/)
+  const editorSrc = readFileSync(join(SRC, 'components/ModelPricingEditor.vue'), 'utf8')
+  const tsMax = editorSrc.match(/export\s+const\s+MAX_MULTIPLIER\s*=\s*([\d.]+)/)
+  if (goMax && tsMax) {
+    priceBoundChecked = true
+    check(
+      `倍率上限前后端一致（${goMax[1]}）`,
+      Number(goMax[1]) === Number(tsMax[1]),
+      `后端 pricing.MaxMultiplier=${goMax[1]}，前端 MAX_MULTIPLIER=${tsMax[1]}`,
+    )
+    // 编辑器里不应再出现裸的 100 当倍率上限（集中在 MAX_MULTIPLIER 一处）
+    check(
+      '倍率上限没有散落在编辑器里硬编码',
+      !/m\s*>\s*100|倍率[^"'`]*100/.test(stripComments(editorSrc)),
+      '写死的 100 会在上限调整时被漏改，表现为前后端口径不一致',
+    )
+  }
+} catch {
+  // 后端源码不在本地：跳过这段（CI 里前后端一起 checkout，会真正跑到）
+}
+if (!priceBoundChecked) console.log('  SKIP  未找到后端 pricing/peak.go，跳过')
+
+console.log('')
 if (failed > 0) {
   console.log(`${failed} 项未通过`)
   process.exit(1)

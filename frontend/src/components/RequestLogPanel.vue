@@ -105,11 +105,26 @@ const current = ref<RequestLog | null>(null)
 const MODEL_COL_MIN = 120
 const MODEL_COL_MAX = 300
 const modelColWidth = ref(190)
-// 列序（2026-09-20 站主调整）：时间 155 / 模型（动态）/ 渠道 130 / 词元 150 /
-// 耗时 120 / 费用 90 / 状态 64 / 密钥 100 / 操作 64。
-// 加法与列序一一对应；模板里各列的 :width 改动时要同步这里（第二份手抄，
-// 两处不一致时表格会出现非预期的横向滚动）。
-const modelColTotal = computed(() => 155 + modelColWidth.value + 130 + 150 + 120 + 90 + 64 + 100 + 64)
+// 列宽表 —— 列序（2026-09-20 站主调整）：
+// 时间 / 模型（动态）/ 渠道 / 词元 / 耗时 / 费用 / 状态 / 密钥 / 操作。
+//
+// 模板里各列的 :width 与下面 scroll.x 的求和都从这里取，是**唯一一份**宽度
+// 定义。此前两处各写一遍（模板写 155、求和再抄一次 155），改一列就要同步改
+// 两个地方，漏改的表现是表格出现非预期的横向滚动 —— 而且看不出是哪一列错。
+// 模型列不需要在这里出现：它由上面的动态测量决定。
+const COL_W = {
+  time: 155,
+  channel: 130,
+  tokens: 150,
+  elapsed: 120,
+  cost: 90,
+  status: 64,
+  key: 100,
+  action: 64
+}
+const modelColTotal = computed(
+  () => Object.values(COL_W).reduce((a, b) => a + b, 0) + modelColWidth.value
+)
 
 function remeasureModelColumn() {
   const wrap = tableWrap.value
@@ -780,7 +795,7 @@ onMounted(() => {
         <template #emptyText>
           <a-empty :description="emptyText" />
         </template>
-        <a-table-column title="请求时间" :width="155" fixed="left">
+        <a-table-column title="请求时间" :width="COL_W.time" fixed="left">
           <template #default="{ record }">{{ fmtTime(record.created_at) }}</template>
         </a-table-column>
         <!-- 模型名带 ellipsis：不加的话长模型名会在这里折成两三行，
@@ -824,7 +839,7 @@ onMounted(() => {
              排障时正是要看这个，而且一屏里的渠道名往往只差几个字。
              名称前带渠道图标（与渠道页那张表同一个组件、同一套规则）。
              失败请求没走到渠道（channel_id=0）、渠道事后被删都会是空值，显示 — -->
-        <a-table-column title="渠道" :width="130" ellipsis>
+        <a-table-column title="渠道" :width="COL_W.channel" ellipsis>
           <template #default="{ record }">
             <span v-if="record.channel_name" class="chan-cell">
               <ChannelIcon :name="record.channel_name" :icon="channelIconOf(record.channel_id)" :size="18" />
@@ -849,7 +864,7 @@ onMounted(() => {
              颜色沿用 theme.css 那套语义色（输入陶土 / 输出紫 / 缓存绿），
              命中率与缓存同色 —— 它就是缓存那个数的比值。
              悬停给出一行汇总：图标只表达「这是哪一类词元」，具体数字看悬停。 -->
-        <a-table-column title="词元" :width="150">
+        <a-table-column title="词元" :width="COL_W.tokens">
           <template #default="{ record }">
             <div class="token-cell" :title="tokenTitle(record)">
               <div class="tk-line">
@@ -888,7 +903,7 @@ onMounted(() => {
              标签只留两个字（截图就是这样）：`总耗时` 三个字在 36px 的标签轨里
              会把数值列推远，而这一格的宽度是按最窄列倒推出来的，一寸都不富余。
              数值按同一档位着色，悬停说明这一行是什么、以及这一档的判据。 -->
-        <a-table-column title="任务耗时" :width="120">
+        <a-table-column title="任务耗时" :width="COL_W.elapsed">
           <template #default="{ record }">
             <div class="dur">
               <!-- 一条竖条、两段。两段各挂自己那一行的档位类，
@@ -916,18 +931,18 @@ onMounted(() => {
             </div>
           </template>
         </a-table-column>
-        <a-table-column title="费用" :width="90">
+        <a-table-column title="费用" :width="COL_W.cost">
           <template #default="{ record }">{{ fmtCost(record.estimated_cost, record.cost_currency) }}</template>
         </a-table-column>
         <!-- 状态列移到费用之后（站主 2026-09-20 要求）：数字区（词元/耗时/费用）
              读完后，「成没成」与「哪把密钥」两个结果性信息收尾 -->
-        <a-table-column title="状态" :width="64">
+        <a-table-column title="状态" :width="COL_W.status">
           <template #default="{ record }">
             <a-tag :color="statusColor(record.status_code)">{{ record.status_code }}</a-tag>
           </template>
         </a-table-column>
         <!-- 密钥跟着状态收尾：它们本来就是一问一答（哪把密钥、结果如何） -->
-        <a-table-column title="密钥" :width="100" ellipsis>
+        <a-table-column title="密钥" :width="COL_W.key" ellipsis>
           <template #default="{ record }">
             <GroupTag v-if="record.api_key_name" :name="record.api_key_name" v-bind="tagColorOf(record.group_id)" />
             <span v-else class="muted">—</span>
@@ -938,7 +953,7 @@ onMounted(() => {
              换成图标后列收到 64px，表格总宽跟着从 1036 降到 1028。
              图标按钮没有可见文字，tooltip 与 aria-label 是它的动作名 ——
              少了这两样，读屏用户只会听到一个没有名字的按钮。 -->
-        <a-table-column title="操作" :width="64" fixed="right">
+        <a-table-column title="操作" :width="COL_W.action" fixed="right">
           <template #default="{ record }">
             <a-tooltip title="调用详情：报文、错误原文与链路">
               <a-button

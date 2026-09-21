@@ -84,6 +84,50 @@ export function priceSummary(p?: PriceConfig | null, currency?: string): string 
   }
   return s
 }
+
+// ---- 定价规则的唯一落点 ----
+//
+// 下面这些常量与判据被三处消费：submit（保存前）、applyImport（导入时）、
+// 以及模板上的受控输入上限。此前每处各写一份数字与文案，加一个价格字段或
+// 调一次上限就要改三处 —— 漏一处就是「界面放行、后端报错」或者反过来的
+// 静默失真。集中在这里，改一处即全生效。
+
+// MAX_MULTIPLIER 与后端 pricing.MaxMultiplier 必须一致：
+// 前端放行而后端拒绝，用户会看到「填得进去、保存报错」。
+export const MAX_MULTIPLIER = 100
+
+// PRICE_FIELDS 是四个单价的规范清单（展示名 + 字段名）。
+// 校验、清零确认、导入拣字段都从它派生，加字段只改这一处。
+export const PRICE_FIELDS: [
+  label: string,
+  key: 'input_per_1m' | 'output_per_1m' | 'cache_read_per_1m' | 'cache_write_per_1m'
+][] = [
+  ['输入单价', 'input_per_1m'],
+  ['输出单价', 'output_per_1m'],
+  ['缓存读单价', 'cache_read_per_1m'],
+  ['缓存写单价', 'cache_write_per_1m']
+]
+
+const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/
+
+// validatePeakRules 校验时段规则，返回错误文案（无错返回 null）。
+// idx 非空时在文案前加「第 N 条」——导入路径要指出是数组里哪一条。
+export function validatePeakRules(rules: RateRule[], idx?: number): string | null {
+  const at = idx === undefined ? '' : `第 ${idx + 1} 条`
+  for (const r of rules) {
+    if (!timeRe.test(r.start || '') || !timeRe.test(r.end || '')) {
+      return `${at}时段的时间格式应为 HH:MM`
+    }
+    if (r.start === r.end) {
+      // 起止相同意味着窗口长度为零，永远不会命中
+      return `${at}时段的开始与结束时间相同，这条规则永远不会生效`
+    }
+    if (!(Number(r.multiplier) > 0)) {
+      return `${at}时段的倍率要大于 0`
+    }
+  }
+  return null
+}
 </script>
 
 <script setup lang="ts">
@@ -104,6 +148,10 @@ const emit = defineEmits<{
   (e: 'update:open', v: boolean): void
   (e: 'save', v: PriceConfig): void
 }>()
+
+// 模板只能看到 <script setup> 作用域里的绑定，模块级 script 块的声明要在这里
+// 重新绑定一次才能被模板引用（脚本内部则可以直接用模块级的那个）
+const maxMultiplier = MAX_MULTIPLIER
 
 const form = ref<PriceConfig>(emptyPrice())
 
@@ -158,7 +206,11 @@ function presetNightDiscount() {
   form.value.peak_rules = [{ days: [], start: '22:00', end: '06:00', multiplier: 0.5, label: '夜间五折' }]
 }
 
-const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/
+// validatePrice 单价格式：空串（未配）或 ≥0 的数字
+function validPrice(v: unknown): boolean {
+  if (v === '' || v === null || v === undefined) return true
+  return typeof v === 'string' && Number(v) >= 0 && !Number.isNaN(Number(v))
+}
 
 // ---- 复制 / 导入定价参数（站主 2026-09-20 要求）----
 //
@@ -196,12 +248,6 @@ function openImport() {
   importOpen.value = true
 }
 
-// 单价格式与 submit 同判据：空串（未配）或 ≥0 的数字
-function validPrice(v: unknown): boolean {
-  if (v === '' || v === null || v === undefined) return true
-  return typeof v === 'string' && Number(v) >= 0 && !Number.isNaN(Number(v))
-}
-
 function applyImport() {
   let raw: any
   try {
@@ -231,29 +277,23 @@ function applyImport() {
 
   // 白名单拣字段：粘贴手编辑过的 JSON 多出来的键直接忽略，
   // 拣不出任何已知键时如实报错（贴错东西最常见的样子）
-  const prices: [string, string][] = [
-    ['输入单价', 'input_per_1m'],
-    ['输出单价', 'output_per_1m'],
-    ['缓存读单价', 'cache_read_per_1m'],
-    ['缓存写单价', 'cache_write_per_1m']
-  ]
   let gotAny = false
-  for (const [label, key] of prices) {
-    const v = raw[key as keyof PriceConfig]
+  for (const [label, key] of PRICE_FIELDS) {
+    const v = raw[key]
     if (v === undefined) continue
     if (!validPrice(v)) {
       message.error(`${label}要填一个不小于 0 的数字`)
       return
     }
-    ;(out[key as keyof PriceConfig] as string) = v === null ? '' : String(v)
+    ;(out[key] as string) = v === null ? '' : String(v)
     gotAny = true
   }
   if (raw.multiplier !== undefined) {
     const m = Number(raw.multiplier)
     // 与保存/后端同口径：0 视为「没配」归一成 1（「故意填 0」不成立，
     // 免费模型用单价 0 表达）
-    if (!(m >= 0) || m > 100) {
-      message.error('固定倍率需要在 0 到 100 之间')
+    if (!(m >= 0) || m > MAX_MULTIPLIER) {
+      message.error(`固定倍率需要在 0 到 ${MAX_MULTIPLIER} 之间`)
       return
     }
     out.multiplier = m === 0 ? 1 : m
@@ -272,17 +312,13 @@ function applyImport() {
       }
       const start = String(r.start ?? '')
       const end = String(r.end ?? '')
-      // 三条判据与 submit 完全一致，报错文案也带上序号
-      if (!timeRe.test(start) || !timeRe.test(end)) {
-        message.error(`第 ${i + 1} 条时段的时间格式应为 HH:MM`)
-        return
-      }
-      if (start === end) {
-        message.error(`第 ${i + 1} 条时段的开始与结束时间相同，这条规则永远不会生效`)
-        return
-      }
-      if (!(Number(r.multiplier) > 0)) {
-        message.error(`第 ${i + 1} 条时段的倍率要大于 0`)
+      // 判据与 submit 同一份（validatePeakRules），报错带上序号
+      const ruleErr = validatePeakRules(
+        [{ days: [], start, end, multiplier: Number(r.multiplier) }],
+        i
+      )
+      if (ruleErr) {
+        message.error(ruleErr)
         return
       }
       // days 是 0-6（0=周日，与表单 day-chip 同一套索引）；脏值剔掉而不是报错，
@@ -303,8 +339,8 @@ function applyImport() {
   // 导入内容没包含、且表单里已有值的字段要点名「保留了」：
   // 否则用户会以为整张表都来自粘贴的内容，核对时把这些格子漏过去
   const kept: string[] = []
-  for (const [label, key] of prices) {
-    const cur = String(form.value[key as keyof PriceConfig] ?? '').trim()
+  for (const [label, key] of PRICE_FIELDS) {
+    const cur = String(form.value[key] ?? '').trim()
     if (raw[key] === undefined && cur !== '') kept.push(label + ' ' + cur)
   }
   if (raw.multiplier === undefined && form.value.multiplier && form.value.multiplier !== 1) {
@@ -324,28 +360,13 @@ function applyImport() {
 }
 
 function submit() {
-  for (const [i, r] of rules().entries()) {
-    if (!timeRe.test(r.start) || !timeRe.test(r.end)) {
-      message.error(`第 ${i + 1} 条时段的时间格式应为 HH:MM`)
-      return
-    }
-    if (r.start === r.end) {
-      // 起止相同意味着窗口长度为零，永远不会命中
-      message.error(`第 ${i + 1} 条时段的开始与结束时间相同，这条规则永远不会生效`)
-      return
-    }
-    if (!(r.multiplier > 0)) {
-      message.error(`第 ${i + 1} 条时段的倍率要大于 0`)
-      return
-    }
+  const ruleErr = validatePeakRules(rules())
+  if (ruleErr) {
+    message.error(ruleErr)
+    return
   }
-  const priceFields: [string, string][] = [
-    ['输入单价', form.value.input_per_1m ?? ''],
-    ['输出单价', form.value.output_per_1m ?? ''],
-    ['缓存读单价', form.value.cache_read_per_1m ?? ''],
-    ['缓存写单价', form.value.cache_write_per_1m ?? '']
-  ]
-  for (const [label, v] of priceFields) {
+  for (const [label, key] of PRICE_FIELDS) {
+    const v = form.value[key] ?? ''
     if (v !== '' && !(Number(v) >= 0)) {
       message.error(label + '要填一个不小于 0 的数字')
       return
@@ -356,13 +377,11 @@ function submit() {
   // 明确确认过的不算事故，没确认就清零的才是要拦的
   const before = openedWith.value
   if (before) {
-    const pairs: [string, string, string][] = [
-      ['输入单价', before.input_per_1m ?? '', form.value.input_per_1m ?? ''],
-      ['输出单价', before.output_per_1m ?? '', form.value.output_per_1m ?? ''],
-      ['缓存读单价', before.cache_read_per_1m ?? '', form.value.cache_read_per_1m ?? ''],
-      ['缓存写单价', before.cache_write_per_1m ?? '', form.value.cache_write_per_1m ?? '']
-    ]
-    const wiped = pairs.filter(([, was, now]) => was.trim() !== '' && now.trim() === '').map(([label]) => label)
+    const wiped = PRICE_FIELDS.filter(([, key]) => {
+      const was = String(before[key] ?? '').trim()
+      const now = String(form.value[key] ?? '').trim()
+      return was !== '' && now === ''
+    }).map(([label]) => label)
     if (wiped.length) {
       Modal.confirm({
         centered: true,
@@ -415,6 +434,7 @@ function doSave() {
         <a-input-number
           :value="form.multiplier ?? 1"
           :min="0"
+          :max="maxMultiplier"
           :step="0.1"
           :precision="2"
           style="width: 160px"

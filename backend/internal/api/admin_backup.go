@@ -14,7 +14,6 @@ import (
 	"gorm.io/gorm"
 
 	"llm-relay/internal/model"
-	"llm-relay/internal/pricing"
 	"llm-relay/internal/relay"
 )
 
@@ -564,36 +563,12 @@ func stripBrokenFallbackConfigs(db *gorm.DB, channelIDs []uint, report *importRe
 	}
 }
 
-// validateImportedPricing 校验并规整备份导入的模型价格，与 API 保存路径
-// （applyPriceFields）同一套口径。
+// validateImportedPricing 校验并规整备份导入的模型价格。
 //
-// 备份文件是 JSON，可以手工编辑：负单价一旦落库就是负费用进统计，
-// 看板上「省了钱」的假象比没有统计更糟。API 路径早有校验，导入路径此前
-// 绕过了它。校验之外还做两步归一（与 API 路径一致）：
-//   - 倍率 0 归一成 1 ——「没配」与「故意填 0」不做区分，引擎对 0 本就
-//     等价于没配，归一后库里不留歧义值；
-//   - 时段规则写回 NormalizeRules 规整后的结果 —— 手编辑过的脏规则
-//     （days 带小数、label 超长被截）落库前收干净，前端编辑器读到
-//     的与 API 保存的形态一致。
+// 规则本体在 validatePricingRow（与 API 保存路径 applyPriceFields 同一份），
+// 这里只是它的一个入口别名：备份文件可以手工编辑，负单价一旦落库就是负费用
+// 进统计，看板上「省了钱」的假象比没有统计更糟。此前导入路径另抄了一份校验，
+// 两处文案已经开始漂移，现在统一收口。
 func validateImportedPricing(bd *model.ChannelModel) error {
-	for name, d := range map[string]decimal.Decimal{
-		"输入单价": bd.InputPer1M, "输出单价": bd.OutputPer1M,
-		"缓存读单价": bd.CacheReadPer1M, "缓存写单价": bd.CacheWritePer1M,
-	} {
-		if d.IsNegative() {
-			return fmt.Errorf("%s为负数", name)
-		}
-	}
-	if bd.Multiplier < 0 || bd.Multiplier > pricing.MaxMultiplier {
-		return fmt.Errorf("固定倍率超出 0 到 %g 的范围", pricing.MaxMultiplier)
-	}
-	if bd.Multiplier == 0 {
-		bd.Multiplier = 1
-	}
-	rules, err := pricing.NormalizeRules(bd.PeakRules)
-	if err != nil {
-		return err
-	}
-	bd.PeakRules = rules
-	return nil
+	return validatePricingRow(bd)
 }

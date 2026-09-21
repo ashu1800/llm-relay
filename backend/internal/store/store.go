@@ -414,6 +414,21 @@ func (s *Store) normalizeKeyGroupRefs() error {
 	if err := s.db.Find(&keys).Error; err != nil {
 		return fmt.Errorf("读取密钥失败: %w", err)
 	}
+	// 先把分组建一次内存索引，再逐条解析：这段迁移在每次进程启动时都会跑，
+	// 逐条 WHERE name = ? 会让启动付出 O(密钥数 × 条目数) 次查询 ——
+	// 而分组表很小，一次读全 + map 查找是两次查询的事。
+	// 同名分组取 id 最小的一个，与原来 First()（默认按主键升序）一致。
+	byName := map[string]uint{}
+	var groups []model.ChannelGroup
+	if err := s.db.Select("id", "name").Order("id").Find(&groups).Error; err != nil {
+		return fmt.Errorf("读取分组失败: %w", err)
+	}
+	for _, g := range groups {
+		if _, ok := byName[g.Name]; !ok {
+			byName[g.Name] = g.ID
+		}
+	}
+
 	for _, k := range keys {
 		if len(k.AllowedGroups) == 0 {
 			continue
@@ -439,15 +454,15 @@ func (s *Store) normalizeKeyGroupRefs() error {
 				keep(item)
 				continue
 			}
-			var g model.ChannelGroup
-			if err := s.db.Where("name = ?", item).First(&g).Error; err != nil {
+			id, ok := byName[item]
+			if !ok {
 				slog.Warn("密钥分组白名单里的名字解析不了，保留原样（分组可能已删除或改名）",
 					"key_id", k.ID, "key", k.Name, "ref", item)
 				keep(item)
 				continue
 			}
 			changed = true
-			keep(strconv.FormatUint(uint64(g.ID), 10))
+			keep(strconv.FormatUint(uint64(id), 10))
 		}
 		if !changed {
 			continue

@@ -61,15 +61,64 @@ func applyPriceFields(row *model.ChannelModel, in whitelistItem) error {
 	if in.Multiplier != nil {
 		m = *in.Multiplier
 	}
-	if m < 0 || m > pricing.MaxMultiplier {
+	row.Multiplier = m
+	// 时段规则先原样落到实体，再交给 validatePricingRow 统一规整 ——
+	// 共享核只认实体，不认识载荷形态
+	row.PeakRules = in.PeakRules
+
+	return validatePricingRow(row)
+}
+
+// priceFields 是四个单价字段的规范清单（展示名 + 读取器）。
+//
+// 校验（validatePricingRow）与清零告警（wipedPrices）都从这里取字段与文案：
+// 加第五个价格字段时只改这一处 —— 漏改任何一处都表现为静默失真
+// （「界面填了、库里是 0」，或者「清零了但 WARN 没点名」）。
+var priceFields = []struct {
+	label string
+	read  func(*model.ChannelModel) decimal.Decimal
+}{
+	{"输入单价", func(m *model.ChannelModel) decimal.Decimal { return m.InputPer1M }},
+	{"输出单价", func(m *model.ChannelModel) decimal.Decimal { return m.OutputPer1M }},
+	{"缓存读单价", func(m *model.ChannelModel) decimal.Decimal { return m.CacheReadPer1M }},
+	{"缓存写单价", func(m *model.ChannelModel) decimal.Decimal { return m.CacheWritePer1M }},
+}
+
+// validatePricingRow 校验并规整**已经落到实体上**的价格字段。
+//
+// 这是价格不变式的唯一落点，两条写入路径共用：
+//   - API 保存路径（applyPriceFields）：字符串载荷先解析到实体，再走这里；
+//   - 备份导入路径（validateImportedPricing）：JSON 直接给出 decimal，也走这里。
+//
+// 抽出来是因为导入路径此前另抄了一份，两处的错误文案已经开始漂移
+// （「为负数」vs「不是合法数字」），而这段规则要拦的是「负单价进统计」
+// 这种账面失真 —— 两套口径迟早会漏掉同一个边界。
+//
+// 做了四件事，缺一不可：
+//   - 单价非负：负费用进统计比没有统计更糟，看板上「省了钱」的假象看不出异常；
+//   - 倍率上界：超过 pricing.MaxMultiplier 直接拦下，不做夹取；
+//   - 倍率 0 归一成 1：「没配」与「故意填 0」不做区分，引擎对 0 本就等价于
+//     没配，归一后库里不留歧义值（免费模型用单价 0 表达）；
+//   - 时段规则写回 NormalizeRules 规整后的结果：手编辑过的脏规则（days 带小数、
+//     label 超长被截）落库前收干净，前端编辑器读到的与 API 保存的形态一致。
+//
+// 时段窗口写错（起止相同、格式不对）必须在这里报错而不是放行：它不会报错、
+// 只会永不命中，用户会以为「配了双倍计费却没生效」，那是最难查的一类问题。
+func validatePricingRow(row *model.ChannelModel) error {
+	for _, f := range priceFields {
+		if f.read(row).IsNegative() {
+			return fmt.Errorf("%s不能为负", f.label)
+		}
+	}
+
+	if row.Multiplier < 0 || row.Multiplier > pricing.MaxMultiplier {
 		return fmt.Errorf("固定倍率需要在 0 到 %g 之间（1 表示原价）", pricing.MaxMultiplier)
 	}
-	if m == 0 {
-		m = 1
+	if row.Multiplier == 0 {
+		row.Multiplier = 1
 	}
-	row.Multiplier = m
 
-	rules, err := pricing.NormalizeRules(in.PeakRules)
+	rules, err := pricing.NormalizeRules(row.PeakRules)
 	if err != nil {
 		return err
 	}

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 
 	"llm-relay/internal/model"
@@ -340,20 +339,13 @@ func (s *Server) invalidatePricing() {
 //
 // 刻意做成纯函数：它直接决定 WARN 日志的内容，误报（原值就是 0）与漏报
 // （改值没清零）都会毁掉这条排查线索，所以拉出来单独测。
+// 字段与文案取自 priceFields，与校验路径同一份清单。
 func wipedPrices(oldRow, next model.ChannelModel) []string {
-	fields := []struct {
-		name     string
-		was, now decimal.Decimal
-	}{
-		{"输入单价", oldRow.InputPer1M, next.InputPer1M},
-		{"输出单价", oldRow.OutputPer1M, next.OutputPer1M},
-		{"缓存读单价", oldRow.CacheReadPer1M, next.CacheReadPer1M},
-		{"缓存写单价", oldRow.CacheWritePer1M, next.CacheWritePer1M},
-	}
-	out := make([]string, 0, len(fields))
-	for _, f := range fields {
-		if !f.was.IsZero() && f.now.IsZero() {
-			out = append(out, f.name+" "+f.was.String()+"→0")
+	out := make([]string, 0, len(priceFields))
+	for _, f := range priceFields {
+		was, now := f.read(&oldRow), f.read(&next)
+		if !was.IsZero() && now.IsZero() {
+			out = append(out, f.label+" "+was.String()+"→0")
 		}
 	}
 	return out
@@ -877,20 +869,13 @@ func (s *Server) resolveGroupWhitelist(list model.StringList) ([]uint, error) {
 		if item == "" {
 			continue
 		}
-		var g model.ChannelGroup
-		if n, err := strconv.ParseUint(item, 10, 32); err == nil {
-			if err := db.First(&g, uint(n)).Error; err != nil {
-				unresolved = append(unresolved, item+" (ID 不存在)")
-				continue
-			}
-			ids = append(ids, g.ID)
+		id, err := resolveGroupRef(db, item)
+		if err != nil {
+			// 带上原因（ID 不存在 / 名字查不到），两者的排查动作不同
+			unresolved = append(unresolved, err.Error())
 			continue
 		}
-		if err := db.Where("name = ?", item).First(&g).Error; err != nil {
-			unresolved = append(unresolved, item)
-			continue
-		}
-		ids = append(ids, g.ID)
+		ids = append(ids, id)
 	}
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("密钥的分组白名单 %v 无法解析（分组可能已被删除或改名）", unresolved)
@@ -900,6 +885,30 @@ func (s *Server) resolveGroupWhitelist(list model.StringList) ([]uint, error) {
 		return nil, fmt.Errorf("密钥的分组白名单里有 %v 无法解析（分组可能已被删除或改名）", unresolved)
 	}
 	return ids, nil
+}
+
+// resolveGroupRef 把一条分组引用解析成分组 ID：纯数字按 ID 查，否则按名字查。
+//
+// 「ID 优先、名字兜底」这条规则在本包有三处使用（写路径的 normalizeGroupRefs、
+// 读路径的 resolveGroupWhitelist），各处的**失败策略不同**（写路径 fail-fast、
+// 读路径要收集全部悬空项报给用户），所以只有这一层查表被共享 —— 循环与错误
+// 措辞仍归各调用方，避免为了统一而让某一处的报错质量变差。
+//
+// ID 形态也要查库确认存在：只做 ParseUint 就收下的话，一个手滑多打一位的
+// 不存在的 ID 会被当成「解析成功」，调用方那道「一条都没解析出来就报错」的
+// 保护随之失效 —— 白名单静默匹配不到任何渠道，请求全部 403 却看不出原因。
+func resolveGroupRef(db *gorm.DB, item string) (uint, error) {
+	var g model.ChannelGroup
+	if n, err := strconv.ParseUint(item, 10, 32); err == nil {
+		if err := db.First(&g, uint(n)).Error; err != nil {
+			return 0, fmt.Errorf("ID %s 不存在", item)
+		}
+		return g.ID, nil
+	}
+	if err := db.Where("name = ?", item).First(&g).Error; err != nil {
+		return 0, fmt.Errorf("「%s」不是现有分组（可能已被删除或改名）", item)
+	}
+	return g.ID, nil
 }
 
 // normalizeGroupRefs 把提交上来的密钥分组白名单归一化成**分组 ID 字符串**。
@@ -913,20 +922,13 @@ func (s *Server) resolveGroupWhitelist(list model.StringList) ([]uint, error) {
 // 保存时发现「分组不存在」，比调用时才发现 403 便宜得多。
 func (s *Server) normalizeGroupRefs(list model.StringList) (model.StringList, error) {
 	db := s.deps.Store.DB()
-	resolve := func(item string) (uint, error) {
-		var g model.ChannelGroup
-		if n, err := strconv.ParseUint(item, 10, 32); err == nil {
-			if err := db.First(&g, uint(n)).Error; err != nil {
-				return 0, fmt.Errorf("分组白名单里的 ID %s 不存在", item)
-			}
-			return g.ID, nil
+	return normalizeGroupRefList(list, func(item string) (uint, error) {
+		id, err := resolveGroupRef(db, item)
+		if err != nil {
+			return 0, fmt.Errorf("分组白名单里的%s", err)
 		}
-		if err := db.Where("name = ?", item).First(&g).Error; err != nil {
-			return 0, fmt.Errorf("分组白名单里的「%s」不是现有分组（可能已被删除）", item)
-		}
-		return g.ID, nil
-	}
-	return normalizeGroupRefList(list, resolve)
+		return id, nil
+	})
 }
 
 // normalizeGroupRefList 是归一化的纯函数核心（resolve 注入「条目 → 分组 ID」
