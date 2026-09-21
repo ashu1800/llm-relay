@@ -76,9 +76,10 @@ const usingDefaultSecret = ref(false)
 //
 // 取不到就整个不显示：空着一格版本号比不显示更容易让人以为哪里坏了。
 const appVersion = ref('')
-// 界面显示用的短版本号：去掉 git describe 的短 hash 段（v0.1.0-20-gfcf3e02 →
-// v0.1.0-20）。hash 只在「对照部署」时有用，常驻侧栏太吵；完整版本号仍在
-// 悬停 title 里。dirty 标记保留 —— 它说明代码有未提交改动。
+// 界面显示用的短版本号：v0.1.0-22-g6a7afa9-dirty → v0.1.0-22。
+// git describe 的尾巴都剥掉：短 hash 段（-g6a7afa9）与 -dirty（有未跟踪/
+// 未提交内容时部署脚本就会带上，界面不需要知道）。完整版本号仍在悬停
+// title 里，对照部署时够用。
 const appVersionShort = ref('')
 
 // 侧边栏菜单：对齐参考站 console-menu-list 的项目与顺序，
@@ -137,8 +138,8 @@ onMounted(() => {
       // 构建时没传 VERSION 会是 "dev"，照常显示 —— 它本身就是一个有用的信号
       // （说明这次构建是本地随手构建的，不是 install.sh 产出的）
       appVersion.value = (info.version || '').trim()
-      // hash 段（-gfcf3e02）不进侧栏，理由见 appVersionShort 的声明注释
-      appVersionShort.value = appVersion.value.replace(/-g[0-9a-f]+/i, '')
+      // hash 段与 -dirty 都不进侧栏，理由见 appVersionShort 的声明注释
+      appVersionShort.value = appVersion.value.replace(/-g[0-9a-f]+/i, '').replace(/-dirty$/i, '')
     })
     .catch(() => {
       // 拿不到系统信息不影响正常使用，静默即可
