@@ -309,20 +309,26 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* 版本号：紧跟在品牌下方，表明「这个界面是哪个版本的后端在支撑」。
-   用等宽字体而不是品牌字体 —— 版本号是标识符（v1.2.0-7-g3f9a1c），
-   逐字比对是它唯一的用途，比例字体下 0/O、1/l 分不清。
-   字号与颜色都压到次级：它不该和品牌名抢注意力。 */
+/* 版本号：品牌下方的一枚小徽标，不是一行裸文本。
+   全站的语言是「胶囊」——菜单项圆角 999，参考站的导航条也是圆角 999
+   + 1px 边框 + 次级文字色。版本号沿用同一语言才有归属感：
+   通栏的裸灰字悬在品牌和菜单之间，看着像漏了样式的残渣。
+   等宽字体的理由不变：版本号是标识符，逐字比对是它唯一的用途，
+   比例字体下 0/O、1/l 分不清。 */
 .brand-version {
-  margin-top: -6px; /* 抵掉 .brand 的 margin-bottom，避免与菜单之间空出两倍间距 */
+  align-self: flex-start; /* 侧栏是 flex 列，默认会拉通栏：改回贴内容宽 */
+  margin-top: -6px;       /* 抵掉 .brand 的 margin-bottom，避免双倍间距 */
   margin-bottom: var(--gap);
-  padding: 0 4px;
+  padding: 2px 8px;
   font-family: var(--font-family-mono);
-  font-size: 12px;
-  line-height: 1.4;
+  font-size: 11px;
+  line-height: 1.3;
   color: var(--color-text-secondary);
-  /* 长版本号（v1.2.0-7-g3f9a1c-dirty 有 22 字符）在 192px 侧栏里会超宽，
-     省略号截断 + 悬停看全 —— 与全站其它长文本同一处理 */
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  /* 界面显示的是短版本（v0.1.0-23，10 字符上下），max-width 只是兜底：
+     万一后端返回异常长串就截断省略，悬停 title 里仍是完整版本 */
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
