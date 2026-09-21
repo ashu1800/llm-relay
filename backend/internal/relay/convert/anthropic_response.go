@@ -39,7 +39,14 @@ func usageToAnthropic(usage map[string]any) map[string]any {
 	if d := asMap(usage["prompt_tokens_details"]); d != nil {
 		cached = asInt(d["cached_tokens"])
 	}
-	cached += asInt(usage["cache_read_input_tokens"])
+	// 中转站可能把 OpenAI 方言（子集）与 Anthropic 方言（并列 cache_read）
+	// 同时给出，且描述的是**同一个**命中数（智谱 GLM 实测会双方言同发，
+	// 见 relay.NormalizeUsage 的同款处理）—— 两者相加会把命中数翻倍。
+	// 子集字段缺位时才认并列字段；都非零时以子集为准，它与 prompt_tokens
+	// 自洽，下面的 prompt - cached 拆分才站得住。
+	if parallel := asInt(usage["cache_read_input_tokens"]); parallel > 0 && cached == 0 {
+		cached = parallel
+	}
 
 	nonCached := prompt
 	if cached > 0 && cached <= prompt {

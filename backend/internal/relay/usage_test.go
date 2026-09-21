@@ -84,6 +84,56 @@ func TestNormalizeUsageDeepSeekNativeCache(t *testing.T) {
 	}
 }
 
+// 双方言报文：智谱 GLM（实测 2026-09）在同一段 usage 里同时给出 DeepSeek
+// 方言与 OpenAI 方言的缓存命中字段，且值相同 —— 它们描述的是**同一个**
+// 命中数，绝不能相加。修复前 cached 被记成 2×59712=119424（翻倍），
+// 用户看到的缓存命中直接比上游面板高出一倍。
+func TestNormalizeUsageDualDialectCache(t *testing.T) {
+	// 2026-09 从智谱（D1 渠道）真实报文原样摘录：hit 与 cached_tokens 同值，
+	// prompt_tokens = hit + miss，total_tokens 自洽。
+	u := NormalizeUsage(mustJSON(t, `{
+		"cache_creation_input_tokens": 0,
+		"cache_read_input_tokens": 0,
+		"cached_tokens": 0,
+		"completion_tokens": 89,
+		"prompt_cache_hit_tokens": 59712,
+		"prompt_cache_miss_tokens": 819,
+		"prompt_tokens": 60531,
+		"prompt_tokens_details": {"cached_tokens": 59712},
+		"total_tokens": 60620
+	}`))
+
+	if u.CachedTokens != 59712 {
+		t.Fatalf("命中应为 59712（只认一套口径），实际 %d（双方言相加会翻倍）", u.CachedTokens)
+	}
+	if u.PromptTokens != 819 {
+		t.Fatalf("未命中输入应为 819，实际 %d", u.PromptTokens)
+	}
+	if u.TotalTokens != 60620 {
+		t.Fatalf("总量应为 60620，实际 %d", u.TotalTokens)
+	}
+}
+
+// 中转站混用方言：子集字段与 Anthropic 的并列 cache_read 并存且同值 ——
+// 同一命中的两种描述，只认与 prompt_tokens 自洽的子集口径。
+func TestNormalizeUsageMixedDialectCache(t *testing.T) {
+	u := NormalizeUsage(mustJSON(t, `{
+		"prompt_tokens": 1000, "completion_tokens": 50, "total_tokens": 1050,
+		"prompt_tokens_details": {"cached_tokens": 800},
+		"cache_read_input_tokens": 800
+	}`))
+
+	if u.CachedTokens != 800 {
+		t.Fatalf("命中应为 800（子集与并列同值时取子集），实际 %d", u.CachedTokens)
+	}
+	if u.PromptTokens != 200 {
+		t.Fatalf("未命中输入应为 200（1000-800），实际 %d", u.PromptTokens)
+	}
+	if u.TotalTokens != 1050 {
+		t.Fatalf("总量应为 1050，实际 %d", u.TotalTokens)
+	}
+}
+
 func TestCacheHitRate(t *testing.T) {
 	u := Usage{PromptTokens: 66, CachedTokens: 294}
 	got := u.CacheHitRate()

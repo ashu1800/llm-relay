@@ -96,18 +96,66 @@ func NormalizeUsage(raw map[string]any) Usage {
 		u.PromptTokens+u.CompletionTokens,
 	)
 
-	// ---- 缓存读取（子集型字段）----
+	// ---- 收集缓存命中的来源字段 ----
+	//
+	// 必须先收集、再决定认哪一套。有些上游（智谱 GLM 实测，2026-09）在
+	// 同一段 usage 里同时给出多套方言字段，且描述的是**同一个**命中数：
+	// prompt_cache_hit_tokens = prompt_tokens_details.cached_tokens = 59712。
+	// 两套字段是同一个数的两种写法，无脑累加会把命中数翻倍（59712 记成
+	// 119424），命中率虚高一倍。见 TestNormalizeUsageDualDialectCache。
+	subsetSum := 0 // 子集型字段之和：cached 已含在 prompt_tokens 里
+	subsetN := 0   // 非零的子集型字段个数
 	if d, ok := raw["prompt_tokens_details"].(map[string]any); ok {
-		u.CachedTokens += getInt(d, "cached_tokens")
+		if v := getInt(d, "cached_tokens"); v > 0 {
+			subsetSum += v
+			subsetN++
+		}
 	}
 	if d, ok := raw["input_tokens_details"].(map[string]any); ok {
-		u.CachedTokens += getInt(d, "cached_tokens")
+		if v := getInt(d, "cached_tokens"); v > 0 {
+			subsetSum += v
+			subsetN++
+		}
+	}
+	if v := getInt(raw, "cachedContentTokenCount"); v > 0 {
+		subsetSum += v
+		subsetN++
 	}
 
-	// ---- 缓存读取（并列型字段）----
-	u.CachedTokens += getInt(raw, "cache_read_input_tokens")
-	u.CachedTokens += getInt(raw, "prompt_cache_hit_tokens")
-	u.CachedTokens += getInt(raw, "cachedContentTokenCount")
+	parallelSum := 0 // 并列型字段之和：与 input_tokens 平行、不重叠
+	parallelN := 0
+	if v := getInt(raw, "cache_read_input_tokens"); v > 0 {
+		parallelSum += v
+		parallelN++
+	}
+	if v := getInt(raw, "prompt_cache_hit_tokens"); v > 0 {
+		parallelSum += v
+		parallelN++
+	}
+
+	// ---- 缓存读取 ----
+	//
+	// 原则：命中数只认**一套**口径，绝不把描述同一个命中的多套方言相加。
+	// 同一套内多个字段仍相加（它们描述互不重叠的命中段）。
+	// 方言并存时（并行字段与子集字段同时非零）的取舍：
+	//   1. 优先 DeepSeek 拆分对 —— 它与 prompt_cache_miss_tokens 自洽
+	//      （hit+miss 恰为 prompt_tokens），是唯一自带校验的口径；
+	//   2. 否则取子集字段 —— 它与 prompt_tokens 自洽，可被安全扣减，
+	//      并列字段（如中转站附加的 cache_read）按重复描述舍弃。
+	// 代价：若某上游真用两套字段描述**两段不同的**命中，这里会少记一段
+	// —— 相比翻倍虚报，宁可保守。
+	switch {
+	case parallelN > 0 && subsetN > 0:
+		if v := getInt(raw, "prompt_cache_hit_tokens"); v > 0 {
+			u.CachedTokens = v
+		} else {
+			u.CachedTokens = subsetSum
+		}
+	case parallelN > 0:
+		u.CachedTokens = parallelSum
+	default:
+		u.CachedTokens = subsetSum
+	}
 
 	// ---- 缓存写入 ----
 	u.CacheCreationTokens += getInt(raw, "cache_creation_input_tokens")
@@ -139,8 +187,8 @@ func NormalizeUsage(raw map[string]any) Usage {
 	// ---- 总量 ----
 	//
 	// 必须在上面所有调整**做完之后**才算。归一化会把「子集型」缓存字段换算成
-	// 并列语义（:106-110 的扣减、:113-115 的 DeepSeek miss 覆盖），总量只有在这
-	// 之后才反映真实的四项之和。原来的写法在调整之前就取好了值，于是
+	// 并列语义（上面的扣减与 DeepSeek miss 覆盖），总量只有在这之后才反映
+	// 真实的四项之和。原来的写法在调整之前就取好了值，于是
 	// Anthropic 原生并列报文 {input:100, output:50, cache_read:1000, cache_creation:200}
 	// 被记成 150（正确是 1350）；而末尾那句「总量为 0 时兜底」永远轮不到。
 	//
