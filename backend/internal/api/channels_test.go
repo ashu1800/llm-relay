@@ -219,3 +219,78 @@ func TestValidateDefaultModel(t *testing.T) {
 		})
 	}
 }
+
+// 三个白名单独立端点（整表 PUT / 单条 POST / 单条 DELETE）的兜底校验。
+//
+// 上面那组测的是判据本身，这组测的是「判据喂进去的是改动**之后**的形态」：
+// 库里现状完全合规，这次改动才把它改坏，也必须拦得住。
+// 单条 POST 停用兜底目标那一行、DELETE 删掉它，是两份独立入口，与表单
+// （createChannel/updateChannel 已有校验）各走各的路，所以各钉一条。
+func TestWhitelistChangeKeepsDefaultModelValid(t *testing.T) {
+	extra := map[string]any{"default_model_enabled": true, "default_model": "deepseek-chat"}
+	row := func(id uint, name string, enabled bool) model.ChannelModel {
+		return model.ChannelModel{ID: id, PublicName: name, UpstreamName: name, Enabled: enabled}
+	}
+	// 库里现状：兜底目标那一行启用着，另有一行无关模型
+	cur := func() []model.ChannelModel {
+		return []model.ChannelModel{row(1, "deepseek-chat", true), row(2, "deepseek-reasoner", true)}
+	}
+
+	t.Run("单条 POST 停用兜底目标要拦", func(t *testing.T) {
+		next := whitelistAfterBind(cur(), model.ChannelModel{PublicName: "deepseek-chat", Enabled: false})
+		if len(next) != 2 {
+			t.Fatalf("同对外名是改这一条而非新增，实际 %d 条", len(next))
+		}
+		if err := validateDefaultModel(extra, next); err == nil {
+			t.Fatal("把兜底目标停用应当报错")
+		}
+	})
+
+	t.Run("单条 POST 重新启用兜底目标放行", func(t *testing.T) {
+		rows := []model.ChannelModel{row(1, "deepseek-chat", false), row(2, "deepseek-reasoner", true)}
+		next := whitelistAfterBind(rows, model.ChannelModel{PublicName: "deepseek-chat", Enabled: true})
+		if err := validateDefaultModel(extra, next); err != nil {
+			t.Fatalf("重新启用不该报错，实际 %v", err)
+		}
+	})
+
+	t.Run("单条 POST 新增无关模型放行", func(t *testing.T) {
+		next := whitelistAfterBind(cur(), model.ChannelModel{PublicName: "deepseek-coder", Enabled: true})
+		if len(next) != 3 {
+			t.Fatalf("新对外名应当追加，实际 %d 条", len(next))
+		}
+		if err := validateDefaultModel(extra, next); err != nil {
+			t.Fatalf("新增无关模型不该报错，实际 %v", err)
+		}
+	})
+
+	t.Run("单条 DELETE 删掉兜底目标要拦", func(t *testing.T) {
+		next := whitelistAfterUnbind(cur(), 1)
+		if len(next) != 1 {
+			t.Fatalf("应当只剩一条，实际 %d 条", len(next))
+		}
+		if err := validateDefaultModel(extra, next); err == nil {
+			t.Fatal("删掉兜底目标应当报错")
+		}
+	})
+
+	t.Run("单条 DELETE 删无关行放行", func(t *testing.T) {
+		if err := validateDefaultModel(extra, whitelistAfterUnbind(cur(), 2)); err != nil {
+			t.Fatalf("删无关行不该报错，实际 %v", err)
+		}
+	})
+
+	t.Run("整表 PUT 里兜底目标缺席要拦", func(t *testing.T) {
+		items := []model.ChannelModel{row(0, "deepseek-reasoner", true)}
+		if err := validateDefaultModel(extra, items); err == nil {
+			t.Fatal("整表替换后兜底目标缺席应当报错")
+		}
+	})
+
+	t.Run("开关关着的渠道不受影响", func(t *testing.T) {
+		off := map[string]any{"default_model_enabled": false, "default_model": "deepseek-chat"}
+		if err := validateDefaultModel(off, whitelistAfterUnbind(cur(), 1)); err != nil {
+			t.Fatalf("开关关着时删任何行都不该拦，实际 %v", err)
+		}
+	})
+}

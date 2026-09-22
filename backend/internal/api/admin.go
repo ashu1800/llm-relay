@@ -1128,6 +1128,15 @@ func (s *Server) replaceChannelModelsAPI(c *gin.Context) {
 		writeUpstreamError(c, http.StatusNotFound, "渠道不存在", "not_found_error")
 		return
 	}
+	// 兜底目标校验：这里是「整表替换」那条路，也是渠道列表那个白名单编辑器
+	// 实际提交的端点（frontend 的 PUT /channels/:id/models）。在这一路上把兜底
+	// 目标删掉或停用，与在渠道表单里做同一件事同因同果 —— 兜底的候选查询按
+	// public_name JOIN 白名单，匹配不到就不生效。只在表单那条路拦，等于把
+	// 刚修好的兜底又从侧门打开一次（第三轮审查 B-中1）。
+	if verr := validateDefaultModel(ch.ExtraConfig, items); verr != nil {
+		writeUpstreamError(c, http.StatusBadRequest, verr.Error(), "invalid_request_error")
+		return
+	}
 	if err := db.Transaction(func(tx *gorm.DB) error {
 		return replaceChannelModels(tx, id, items)
 	}); err != nil {
@@ -1167,6 +1176,20 @@ func (s *Server) bindChannelModel(c *gin.Context) {
 	var ch model.Channel
 	if err := db.First(&ch, id).Error; err != nil {
 		writeUpstreamError(c, http.StatusNotFound, "渠道不存在", "not_found_error")
+		return
+	}
+
+	// 兜底目标校验，按「这次绑定之后」的整表算（第三轮审查 B-中1）：
+	// 单条 POST 是唯一能把某行 enabled 从 true 改成 false 的入口（见下面的零值注释），
+	// 把兜底目标那一行停用同样会让兜底静默失效，所以判据必须用改动后的形态，
+	// 不能拿库里的现状糊弄过去
+	var rows []model.ChannelModel
+	if err := db.Where("channel_id = ?", id).Find(&rows).Error; err != nil {
+		writeInternalError(c, err)
+		return
+	}
+	if verr := validateDefaultModel(ch.ExtraConfig, whitelistAfterBind(rows, item)); verr != nil {
+		writeUpstreamError(c, http.StatusBadRequest, verr.Error(), "invalid_request_error")
 		return
 	}
 
@@ -1229,13 +1252,77 @@ func (s *Server) unbindChannelModel(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, "非法的绑定 ID", "invalid_request_error")
 		return
 	}
-	if err := s.deps.Store.DB().Where("id = ? AND channel_id = ?", bid, id).
+	db := s.deps.Store.DB()
+	// 删之前先按「删完之后」的整表校验兜底目标（第三轮审查 B-中1）：白名单是
+	// 兜底目标的唯一登记处，从这儿删掉那一行，与在渠道表单里删掉同因同果 ——
+	// 候选查询 JOIN 不上就不再兜底。
+	//
+	// 这里刻意不「顺手把 extra_config 里的兜底配置剥掉」：静默改用户的配置正是
+	// 这轮修复要根除的那类毛病（与导入路径不同，导入必须放行才剥键，见
+	// stripBrokenFallbackConfigs）。删不掉时把话说明白，让用户自己改兜底或关开关。
+	var ch model.Channel
+	switch err := db.First(&ch, id).Error; {
+	case err == nil:
+		var rows []model.ChannelModel
+		if err := db.Where("channel_id = ?", id).Find(&rows).Error; err != nil {
+			writeInternalError(c, err)
+			return
+		}
+		if verr := validateDefaultModel(ch.ExtraConfig, whitelistAfterUnbind(rows, uint(bid))); verr != nil {
+			writeUpstreamError(c, http.StatusBadRequest, verr.Error(), "invalid_request_error")
+			return
+		}
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		// 渠道不存在：下面那条 DELETE 本来也删不到东西，保持既有的宽容语义（200）
+	default:
+		writeInternalError(c, err)
+		return
+	}
+
+	if err := db.Where("id = ? AND channel_id = ?", bid, id).
 		Delete(&model.ChannelModel{}).Error; err != nil {
 		writeInternalError(c, err)
 		return
 	}
 	s.invalidatePricing()
 	c.JSON(http.StatusOK, gin.H{"deleted": true})
+}
+
+// whitelistAfterBind 算出「这条绑定写进去之后」的白名单整表（只在内存里，不落库）。
+//
+// 单条 POST 对已存在的对外名是「改这一条」，对新的对外名是「加一条」，
+// 与落库那段的两分支同一语义；这里只要形态对得上，validateDefaultModel
+// 就能拿它当判据 —— 判据本身不在这里重写一遍。
+func whitelistAfterBind(rows []model.ChannelModel, item model.ChannelModel) []model.ChannelModel {
+	out := make([]model.ChannelModel, 0, len(rows)+1)
+	replaced := false
+	for _, r := range rows {
+		if r.PublicName == item.PublicName {
+			// 同渠道内对外名唯一，所以就地改启用状态即可（上游名/价格不影响兜底判定）
+			r.Enabled = item.Enabled
+			replaced = true
+		}
+		out = append(out, r)
+	}
+	if !replaced {
+		out = append(out, item)
+	}
+	return out
+}
+
+// whitelistAfterUnbind 算出「这条绑定删掉之后」的白名单整表。
+//
+// 只按主键剔除，不判断它是不是兜底目标：「谁是兜底目标、删了还配不配得上套」
+// 全交给 validateDefaultModel，免得这个判据在文件里长出第二份、日后各改各的。
+func whitelistAfterUnbind(rows []model.ChannelModel, bindingID uint) []model.ChannelModel {
+	out := make([]model.ChannelModel, 0, len(rows))
+	for _, r := range rows {
+		if r.ID == bindingID {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // ============================ 分组 ============================

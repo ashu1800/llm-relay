@@ -259,6 +259,69 @@ chk "日志记映射名且带兜底标记" "$CLIENT_MODEL|$MAPPED_UPSTREAM|true"
 COST8=$(P "SELECT pricing_snapshot->>'model_key' FROM request_logs WHERE channel_id=$CID ORDER BY id DESC LIMIT 1")
 chk "计费键仍是对外名（计价按白名单行，映射不影响费用归属）" "$DEF_MODEL" "$COST8"
 
+echo
+echo "=== 11. 白名单子端点（整表 PUT / 单条 POST / 单条 DELETE）也不能让兜底失效 ==="
+# 渠道表单那条路已由 ec30029 堵上（第 8b 组测的就是它），但白名单还有三个
+# 自己的端点：整表替换、单条绑定、单条解绑 —— 它们才是脚本与「渠道列表那个
+# 白名单编辑器」实际提交的地方（前端只走 GET + 整表 PUT）。从这一侧把兜底目标
+# 删掉或停用，与在表单里做同一件事同因同果：兜底候选按 public_name JOIN 白名单，
+# 配不上就不生效。只在表单那条路拦，等于把刚堵上的洞从侧门重开一次
+# （2026-09-21 第三轮评审 B-中1，修复前这三条侧门全部放行，且保存成功、无提示）。
+OTHER="dm-probe-other"
+
+# 11a 整表替换里兜底目标缺席
+R9=$(curl -s -m 30 -o "$TMP/r9.json" -w '%{http_code}' -X PUT "$API/channels/$CID/models" \
+  -H 'Content-Type: application/json' \
+  -d "{\"items\": [{\"public_name\": \"$OTHER\", \"upstream_name\": \"$OTHER\"}]}")
+chk "整表替换丢掉兜底目标被 400 拦住" "400" "$R9"
+chkcontains "说明是白名单里配不上" "$(cat "$TMP/r9.json")" "不在"
+# 拦下之后白名单必须原样不动：先校验后写，不能拦完还留一地半成品
+chk "被拦下时白名单没被改掉" "$DEF_MODEL" \
+  "$(P "SELECT public_name FROM channel_models WHERE channel_id=$CID ORDER BY id LIMIT 1")"
+
+# 11b 带着兜底目标的整表替换照常放行（别把正常保存一起拦掉）
+R10=$(curl -s -m 30 -o "$TMP/r10.json" -w '%{http_code}' -X PUT "$API/channels/$CID/models" \
+  -H 'Content-Type: application/json' \
+  -d "{\"items\": [{\"public_name\": \"$DEF_MODEL\", \"upstream_name\": \"$MAPPED_UPSTREAM\"},
+                  {\"public_name\": \"$OTHER\", \"upstream_name\": \"$OTHER\"}]}")
+chk "带着兜底目标的整表替换放行" "200" "$R10"
+
+# 11c 单条 POST 把兜底目标那一行停用（同渠道内重复对外名 = 改上游名/启用状态）
+R11=$(curl -s -m 30 -o "$TMP/r11.json" -w '%{http_code}' -X POST "$API/channels/$CID/models" \
+  -H 'Content-Type: application/json' \
+  -d "{\"public_name\": \"$DEF_MODEL\", \"upstream_name\": \"$MAPPED_UPSTREAM\", \"enabled\": false}")
+chk "单条停用兜底目标被 400 拦住" "400" "$R11"
+chkcontains "说明是停用问题" "$(cat "$TMP/r11.json")" "停用"
+chk "被拦下时那一行仍是启用的" "t" \
+  "$(P "SELECT enabled FROM channel_models WHERE channel_id=$CID AND public_name='$DEF_MODEL'")"
+
+# 11d 单条 POST 加一个无关模型放行
+OTHER2="${OTHER}-2"
+R12=$(curl -s -m 30 -o "$TMP/r12.json" -w '%{http_code}' -X POST "$API/channels/$CID/models" \
+  -H 'Content-Type: application/json' \
+  -d "{\"public_name\": \"$OTHER2\", \"upstream_name\": \"$OTHER2\"}")
+chk "单条新增无关模型放行" "200" "$R12"
+
+# 11e 单条 DELETE 删掉兜底目标那一行
+DEF_BID=$(P "SELECT id FROM channel_models WHERE channel_id=$CID AND public_name='$DEF_MODEL'")
+R13=$(curl -s -m 30 -o "$TMP/r13.json" -w '%{http_code}' -X DELETE "$API/channels/$CID/models/$DEF_BID")
+chk "单条解绑兜底目标被 400 拦住" "400" "$R13"
+chkcontains "说明是白名单里配不上" "$(cat "$TMP/r13.json")" "不在"
+chk "被拦下时那一行还在" "$DEF_BID" \
+  "$(P "SELECT id FROM channel_models WHERE channel_id=$CID AND public_name='$DEF_MODEL'")"
+
+# 11f 单条 DELETE 删无关行放行
+OTHER_BID=$(P "SELECT id FROM channel_models WHERE channel_id=$CID AND public_name='$OTHER2'")
+R14=$(curl -s -m 30 -o "$TMP/r14.json" -w '%{http_code}' -X DELETE "$API/channels/$CID/models/$OTHER_BID")
+chk "单条解绑无关行放行" "200" "$R14"
+
+# 最后：侧门堵上之后兜底本身要照旧工作（别把功能一起拦死）
+curl -s "$MOCK/reset" >/dev/null
+R15=$(curl -s -m 30 -o "$TMP/r15.json" -w '%{http_code}' "$BASE/v1/messages" -H "x-api-key: $SK" \
+  -H 'Content-Type: application/json' \
+  -d "{\"model\":\"$CLIENT_MODEL\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}")
+chk "侧门封堵后兜底请求照旧成功" "200" "$R15"
+
 purge
 echo
 echo "============================================"
