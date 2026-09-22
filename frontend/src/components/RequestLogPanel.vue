@@ -474,7 +474,12 @@ async function load(opts: { silent?: boolean } = {}) {
     loadError.value = e.message || '加载失败'
     message.error(e.message)
   } finally {
-    if (!silent && seq === loadSeq) loading.value = false
+    // 熄灯的责任跟着「谁点的灯」走，不跟着「谁最新」走（第三轮审查 F-中2）：
+    // 非静默的这次请求可能已经被随后的静默重取顶掉（seq 不再最新），数据
+    // 该作废，但 loading 是它点亮的 —— 它要是也放手，就没有人再熄这盏灯，
+    // 按钮会一直转下去（antd 的 loading 按钮还会把点击吃掉，刷新都点不动）。
+    // 静默那条路则完全不碰 loading：它本来就不该让屏幕闪骨架。
+    if (!silent) loading.value = false
   }
 }
 

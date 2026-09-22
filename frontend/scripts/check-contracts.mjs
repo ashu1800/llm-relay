@@ -606,6 +606,28 @@ console.log('=== 看板工具栏不吃弹性压缩 ===')
 }
 
 console.log('')
+console.log('=== 加载态不会被静默重取卡死 ===')
+
+// loading 只由非静默请求开关（第三轮审查 F-中2）。
+//
+// 这两个 load 都带「只有最后一次请求作数」的序号守卫，而静默重取（实时推送
+// 那一路）会把序号顶掉。熄灯条件若也写成 `!silent && seq === loadSeq`，被顶掉的
+// 那次非静默请求就既不落数据、也不熄灯 —— 屏幕永远停在加载态，而且 antd 的
+// loading 按钮会把点击一起吃掉，用户连「刷新」都按不动，只能刷新整个页面。
+//
+// 静态检查不还原时序，只钉住这个结构性要求：非静默请求无条件收自己的尾，
+// 静默那一路完全不碰 loading。
+for (const rel of ['components/RequestLogPanel.vue', 'views/DashboardView.vue']) {
+  const src = stripComments(readFileSync(join(SRC, rel), 'utf8'))
+  check(
+    rel + ' 的 loading 只由非静默请求收尾',
+    /if \(!silent\) loading\.value = false/.test(src) &&
+      !/!silent && seq === loadSeq\) loading\.value = false/.test(src),
+    '被静默重取顶掉的那次非静默请求不熄灯，加载态就永远停着（loading 按钮还会吃掉点击）',
+  )
+}
+
+console.log('')
 console.log('=== 渠道表单不拿过期快照覆盖 extra_config ===')
 
 // extra_config 在保存时是**整块覆盖**写的（后端只看到你提交的那份 JSON）。
@@ -640,6 +662,20 @@ console.log('=== 渠道表单不拿过期快照覆盖 extra_config ===')
     'openEdit 用拉到的结果校正 extra_config 相关字段',
     /form\.default_model(_enabled)?\s*=/.test(body) && /form\.max_concurrency\s*=/.test(body),
     '拉到了却不回填，慢性的键照样会在保存时被删掉',
+  )
+  // 竞态防护（第三轮审查 F-中1）：静态检查量不到时序，但能钉住「异步回填之前
+  // 有没有先判断这次结果是否已过期」这个结构。快点点两条渠道时，先发出的响应
+  // 会把后一条的 editing/form.models 覆盖掉 —— 用户对着 B 编辑，保存下去的是
+  // A 的白名单与兜底设置，而且保存成功、表面上毫无异样
+  check(
+    'openEdit 的异步回填带序号守卫',
+    /const seq = \+\+openSeq/.test(body) && /if \(seq !== openSeq\) return/.test(body),
+    '少了作废判断，先发出的响应会盖掉后打开的渠道，保存即用错的白名单覆盖',
+  )
+  check(
+    'openCreate 也会作废路上未返回的回填',
+    /openSeq\+\+/.test(src.slice(src.indexOf('function openCreate'), src.indexOf('async function openEdit'))),
+    '新建表单被上一个渠道的回填填上，等于用旧渠道的白名单去建新渠道',
   )
   // buildExtraConfig 必须是「接收基底」的纯函数，而不是自己去读 editing.value ——
   // 后者就是这次缺陷的形状（它悄悄依赖一个可能过期的 ref）

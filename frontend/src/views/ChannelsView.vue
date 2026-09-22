@@ -189,6 +189,9 @@ async function load() {
 }
 
 function openCreate() {
+  // 作废路上还没回来的回填请求：新建表单此刻是一张空表，被上一个渠道的
+  // 数据填上就变成「顶着新渠道的名字、用着旧渠道的白名单」去建渠道
+  openSeq++
   editing.value = null
   Object.assign(form, {
     name: '',
@@ -221,7 +224,20 @@ function bindingRows(items: ChannelBinding[]): WhitelistRow[] {
   }))
 }
 
+// openSeq 是「表单被打开的次数」计数器：异步回填只认最后一次，更早的一律作废。
+//
+// 竞态形状（第三轮审查 F-中1）：点渠道 A 打开弹窗，趁请求没回来又点渠道 B。
+// A 的响应晚到，把 editing 与 form.models 覆盖成 A 的配置，而弹窗上显示的是
+// B 的名字 —— 用户对着 B 编辑，保存下去的内容是「B 的名称 + A 的白名单与
+// 兜底设置」，等于用 A 的模型配置整表替换掉 B 的。列表长、网络慢、或者只是
+// 手快连点两下都会触发，而且保存成功、看不出异常。
+//
+// 判据用自增序号而不是 `editing.value?.id !== row.id`：后者挡不住
+// 「A → B → 再点回 A」——A 的两次请求乱序返回时，先发的那次也能通过 id 比对。
+let openSeq = 0
+
 async function openEdit(row: ChannelRow) {
+  const seq = ++openSeq
   // 先按传入的 row 立刻把表单填上（弹窗不能等网络），再用刚拉到的数据校正。
   //
   // 为什么要校正：extra_config 是**整块覆盖**提交的，而 row 是 rows.value 里的
@@ -261,6 +277,9 @@ async function openEdit(row: ChannelRow) {
       api.get<{ items: ChannelRow[] }>('/channels'),
       api.get<{ items: ChannelBinding[] }>('/channels/' + row.id + '/models')
     ])
+    // 等这一趟的工夫里用户可能已经切到别的渠道（或点了新建）：这次的结果
+    // 已经过期，写回去就是把 A 的配置盖在 B 的表单上（见 openSeq 的注释）
+    if (seq !== openSeq) return
     const fresh = (listRes.items || []).find((c) => c.id === row.id)
     if (fresh) {
       // 只校正 extra_config 相关的三项：其余字段用户在弹窗里的输入不该被
@@ -275,6 +294,9 @@ async function openEdit(row: ChannelRow) {
     form.models = bindingRows(modelsRes.items || [])
     modelsStale.value = false
   } catch (e: any) {
+    // 过期请求的失败也一并咽掉：为一次早已作废的读取弹报错、还把 stale 标记
+    // 打到当前这张表上，会把用户从正在编辑的渠道里带偏
+    if (seq !== openSeq) return
     // 回填失败不能只弹个提示：form.models 此刻是空表，用户直接保存会被
     // 「请至少填一个模型」拦住；在空表上手工补模型名再保存则覆盖丢全部配置。
     // 置 stale 标记，由 save() 在保存前重拉一次 —— 文案说的重试是真的会做

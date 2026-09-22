@@ -352,7 +352,10 @@ async function load(opts: { silent?: boolean } = {}) {
     if (silent || seq !== loadSeq) return
     loadError.value = e.message || '加载失败'
   } finally {
-    if (!silent && seq === loadSeq) loading.value = false
+    // 与 RequestLogPanel.load 同款（那边有完整说明）：loading 只由非静默请求
+    // 开关。写成 `!silent && seq === loadSeq` 时，被静默重取顶掉的那次非静默
+    // 请求就既不落数据、也不熄灯 —— 整屏数字永远停在加载态（第三轮 F-中2）。
+    if (!silent) loading.value = false
   }
 }
 
