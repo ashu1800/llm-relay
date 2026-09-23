@@ -1,11 +1,18 @@
 // 逐个列表页实测：表格内容宽 vs 容器宽。
 // 溢出时 antd 会横向滚动，固定在右侧的列就会盖住左边最后一列。
+//
+// 2026-09-23 修：列表里原来有「模型定价 /console/pricing」—— 那条路由**不存在**
+// （模型定价是系统设置里的一块，组件是 ModelPricingEditor），导航过去会落到
+// catch-all 再重定向到看板，于是它一直在量**看板**的数据，而报告里那一行写着
+// 「模型定价」。「没报错」又一次被读成「没问题」，所以现在列表照 router/index.ts
+// 抄，并且每次导航后核对实际落点。
 const pages = [
   ['渠道管理', '/console/channels'],
   ['分组管理', '/console/groups'],
   ['密钥信息', '/console/keys'],
-  ['请求日志（看板页）', '/console/dashboard'],
-  ['模型定价', '/console/pricing']
+  ['代理管理', '/console/proxies'],
+  ['系统设置', '/console/system'],
+  ['请求日志（看板页）', '/console/dashboard']
 ]
 const ver = await (await fetch('http://127.0.0.1:9222/json/version')).json()
 const ws = new WebSocket(ver.webSocketDebuggerUrl)
@@ -49,6 +56,13 @@ const expr = `(() => {
 for (const [name, p] of pages) {
   await send('Page.navigate', { url: 'http://127.0.0.1:8888' + p }, sessionId)
   await new Promise((r) => setTimeout(r, 4200))
+  // 落点核对：URL 被重定向说明这个路径不存在（或已改名），那时量到的是**别的
+  // 页面**的数据 —— 报告里却写着这一页的名字，等于谎报
+  const landed = await send('Runtime.evaluate', { expression: 'location.pathname', returnByValue: true }, sessionId)
+  if (landed.result.value !== p) {
+    console.log(name.padEnd(10) + ' 被重定向到 ' + landed.result.value + '（路由不存在或已改名），跳过')
+    continue
+  }
   const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true }, sessionId)
   if (!r.result.value) { console.log(name.padEnd(10) + ' 没有表格'); continue }
   const d = JSON.parse(r.result.value)

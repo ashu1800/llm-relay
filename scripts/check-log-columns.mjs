@@ -146,12 +146,29 @@ const PROBE = `(() => {
     [...wrap.querySelectorAll('.ant-table-tbody .spd-cell:has(.stream-pill) .spd')].map((el) => el.getBoundingClientRect().left),
   )
   const pillCount = wrap.querySelectorAll('.ant-table-tbody .stream-pill').length
+  // 状态码那一格：a-tag 在单元格里要**真的居中**。
+  // 量的是「标签到单元格内容区左缘」与「到右缘」两段留白 —— 只看标签宽没用，
+  // 偏移恰恰来自标签自己带的边距：antd 给 .ant-tag 默认加了 margin-inline-end: 8px
+  // （那是给多个标签并排用的），而这一格只有一个标签、又要居中，那 8px 会被算进
+  // 内容宽度，胶囊因此偏左 4px（站主 2026-09-23 反馈「200 的状态码轻微向左偏移」）。
+  const tagCells = [...wrap.querySelectorAll('.ant-table-tbody tr[data-row-key] td')].filter((td) => td.querySelector('.ant-tag'))
+  const tagOffsets = tagCells.map((td) => {
+    const t = td.querySelector('.ant-tag').getBoundingClientRect()
+    const c = td.getBoundingClientRect()
+    const cs = getComputedStyle(td)
+    const padL = parseFloat(cs.paddingLeft || 0)
+    const padR = parseFloat(cs.paddingRight || 0)
+    return {
+      左: Math.round((t.left - (c.left + padL)) * 10) / 10,
+      右: Math.round((c.right - padR - t.right) * 10) / 10,
+    }
+  })
   // 诊断用：每页条数是存在 localStorage 里的，读回来确认这轮真的切过去了 ——
   // 否则整套矩阵测的都是同一个 pageSize（第一版就踩了：9 组全是 20 行）
   let stored = 'N/A'
   try { stored = String(localStorage.getItem('${sizeKey}')) } catch (e) { stored = 'ERR' }
   const pagerText = (document.querySelector('.ant-pagination-options') || {}).textContent || ''
-  return JSON.stringify({ rows, cells: cells.length, cw, tw, overflow: overflow.slice(0, 8), overflowN: overflow.length, cellOver, cellOverList: cellOverList.slice(0, 6), cover, colW, stored, pagerText: pagerText.trim(), pillLefts, spdLefts, pillCount })
+  return JSON.stringify({ rows, cells: cells.length, cw, tw, overflow: overflow.slice(0, 8), overflowN: overflow.length, cellOver, cellOverList: cellOverList.slice(0, 6), cover, colW, stored, pagerText: pagerText.trim(), pillLefts, spdLefts, pillCount, tagOffsets })
 })()`
 
 let failed = 0
@@ -206,6 +223,15 @@ for (const w of widths) {
       '速度列流式行的数值起点也一致',
       d.spdLefts.length <= 1,
       `数值左缘 ${d.spdLefts.length} 个取值：${d.spdLefts.slice(0, 6).join(' / ')}`,
+    )
+    // 状态码标签左右留白必须相等（差 1px 以内算相等：亚像素舍入）
+    const tagBad = d.tagOffsets.filter((o) => Math.abs(o.左 - o.右) > 1)
+    check(
+      '状态码标签在单元格里居中',
+      tagBad.length === 0,
+      tagBad.length
+        ? `${tagBad.length}/${d.tagOffsets.length} 格偏移，例如 左 ${tagBad[0].左}px / 右 ${tagBad[0].右}px`
+        : `${d.tagOffsets.length} 格，例如 左 ${d.tagOffsets[0] ? d.tagOffsets[0].左 : '-'}px / 右 ${d.tagOffsets[0] ? d.tagOffsets[0].右 : '-'}px`,
     )
   }
 }

@@ -405,6 +405,20 @@ a:hover { opacity: 0.85; }
   white-space: nowrap;
 }
 
+/* 表格单元格里的标签去掉 antd 默认的右侧外边距。
+   .ant-tag 的 margin-inline-end: 8px 是给「多个标签并排」留的间距，而表格里
+   每个格只有一个标签、靠 td 的 text-align: center 居中 —— 那 8px 会被算进行盒
+   宽度，胶囊整体偏左 4px（实测请求日志的状态码格：左留白 0.8px、右留白 8.8px；
+   站主 2026-09-23 反馈「200 轻微向左偏移」）。
+   只写进 td 里：工具栏那些可关闭的筛选标签（DashboardView 的 trace / 状态）
+   是并排的，间距要留着。这条影响的是全站表格里所有单标签格 —— 渠道页的
+   协议 / 状态 / 启用、分组页的策略 / 默认 / 启用、密钥页的启用、设置页的
+   数据库状态，都是同一个偏移。
+   权重够：antd 那条是 0-1-0（.ant-tag），这条是 0-3-1，不必上 !important。 */
+.ant-table-tbody > tr > td .ant-tag {
+  margin-inline-end: 0;
+}
+
 /* 「操作」列里的图标按钮（.table-icon-btn）。
    动作名不在图标上，所以每个按钮都必须自带 tooltip 与 :aria-label ——
    悬停看得到、读屏念得出，这是图标按钮可访问性的下限（见 ChannelsView 的模板）。

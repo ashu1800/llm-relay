@@ -635,6 +635,16 @@ node .shots/verify-reliability.mjs          # 可靠性三件套端到端：队�
                                             # 日预算告警（会临时设一个必超支的预算，跑完自动清除）
 node .shots/verify-delight.mjs              # 观感增强端到端：脉搏条、页签心跳、昨日战报、
                                             # 里程碑彩带、渠道生命灯、主题扩散
+
+# 量「差几像素」的那几处对齐（ui-spec 第 18 条）。这类问题肉眼看得见、说清很难，
+# 所以脚本直接把盒模型摊开：左右留白各是多少、中心线落在哪
+node .shots/measure-sidebar.mjs             # 收起态侧栏：图标 / 圆标 / 底部两枚按钮的中心线
+                                            # 是否都落在中轴（窄视口下侧栏默认收起，脚本先看状态）
+node .shots/measure-think-pill.mjs max      # 思考档位胶囊**真正渲染出去**的颜色与对比度
+                                            # （三处 color-mix 都从基色算出来，只看基色看不出结果），
+                                            # 浅深两个主题各截一张图
+node .shots/check-table-tags.mjs            # 各列表页 td 里的标签是否居中 —— antd 给 .ant-tag
+                                            # 默认带了 8px 右边距，单标签格会因此偏左 4px
 ```
 
 三者都会往 `request_logs` 插探针行（trace_id 前缀 `logfx-probe` /
