@@ -724,6 +724,56 @@ try {
 if (!priceBoundChecked) console.log('  SKIP  未找到后端 pricing/peak.go，跳过')
 
 console.log('')
+console.log('=== 请求日志列宽：测量锚点与模板必须对得上 ===')
+
+// 列宽现在由脚本按内容量出来（RequestLogPanel 的 remeasureColumns），量的对象是
+// 每列一个固定的锚点元素（CONTENT_MEASURE 里的选择器）。
+//
+// 锚点选择器与模板是**两份靠字符串耦合的代码**：模板里改了类名、或者元素被删掉，
+// querySelectorAll 就返回空集，代码走 `if (max === 0) continue` 那条「本页该列
+// 没有锚点」的正常分支 —— 那一列的宽度于是永远停在下限，长内容照旧被截断，
+// 而没有任何报错。这正是契约检查该管的一类事。
+{
+  const panelSrc = readFileSync(join(SRC, 'components/RequestLogPanel.vue'), 'utf8')
+  const measureBlock = panelSrc.match(/const CONTENT_MEASURE[\s\S]*?\n\}/)
+  check('CONTENT_MEASURE 声明找得到', !!measureBlock)
+  if (measureBlock) {
+    const sels = [...measureBlock[0].matchAll(/sel:\s*'([^']+)'/g)].map((m) => m[1])
+    check('锚点选择器不是空的', sels.length >= 6, `读到 ${sels.length} 个`)
+    const tpl = panelSrc.slice(panelSrc.indexOf('<template>'))
+    // .group-tag 是子组件 GroupTag.vue 的根类名，不在本文件的模板里 ——
+    // 对它改为断言那个组件确实被用上了
+    const external = { '.group-tag': /<GroupTag\b/ }
+    for (const sel of sels) {
+      const ok = external[sel]
+        ? external[sel].test(tpl)
+        : new RegExp(`class="[^"]*\\b${sel.replace(/^\./, '')}\\b`).test(tpl)
+      check(`锚点 ${sel} 能对应到真实元素`, ok, '选择器与模板对不上时测量会静默跳过，那一列永远停在下限')
+    }
+  }
+  // 每一列都要绑运行时列宽：漏一列，那一列就还是定宽（长内容照旧截断），
+  // 而 check-table-widths.mjs 只看「有没有裸数字」，看不出漏绑
+  const boundsBlock = panelSrc.match(/const COL_BOUNDS[\s\S]*?\n\}/)
+  check('COL_BOUNDS 声明找得到', !!boundsBlock)
+  if (boundsBlock) {
+    const keys = [...boundsBlock[0].matchAll(/^\s{2}(\w+):\s*\[/gm)].map((m) => m[1])
+    const bound = [...panelSrc.matchAll(/:width="colW\.(\w+)"/g)].map((m) => m[1])
+    check('COL_BOUNDS 覆盖全部 10 列', keys.length === 10, `读到 ${keys.length} 个：${keys.join(', ')}`)
+    check(
+      '模板里每一列都绑了 colW（没有写死的 :width）',
+      bound.length === keys.length && [...bound].sort().join(',') === [...keys].sort().join(','),
+      `模板绑了 ${bound.sort().join(', ')}；COL_BOUNDS 声明了 ${keys.join(', ')}`,
+    )
+    // scroll.x 必须跟着列宽联动，否则声明总宽与实际不符
+    check(
+      'scroll.x 由各列宽之和给出',
+      /:scroll="\{\s*x:\s*columnsTotal/.test(panelSrc),
+      'scroll.x 与列宽来自两份定义时，横向滚动的边界会与实际不符',
+    )
+  }
+}
+
+console.log('')
 if (failed > 0) {
   console.log(`${failed} 项未通过`)
   process.exit(1)

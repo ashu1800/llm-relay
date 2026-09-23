@@ -86,34 +86,57 @@ const total = ref(0)
 const detailOpen = ref(false)
 const current = ref<RequestLog | null>(null)
 
-// ---- 模型列宽随内容自适应（站主 2026-09-20 要求：按当前页最宽的模型调）----
+// ---- 列宽随内容自适应 ----
 //
-// 定宽的问题：240px 是「超长模型名 + 思考 + 兜底」三个胶囊齐飞的最坏预留，
-// 站里模型名都短（glm-5.3 一类），多出的大半是空白；收窄到 190 又会在
-// 换一批模型名更长的日志后重新出现截断。所以改成**量了再定**。
+// 站主 2026-09-20 先要求「模型列按当前页最宽的内容调」，2026-09-23 推广到
+// **每一列**：每列宽度由该列实际显示的内容决定，至少要把内容显示完整。
 //
-// 做法：rows 渲染完成后（nextTick）直接量表格里 .model-cell 的 scrollWidth，
-// 取最大值加内边距（antd 小表格单元格里左右各 8px，再留 6px 给省略号与
-// 边框的呼吸），clamp 到 [120, 300]：
-//   - 下限 120：模型列至少装得下表头两个字 + 一个短名（claude-3-5 一类），
-//     否则全是「gpt-5」这样的短名时列窄得像被压扁了；
-//   - 上限 300：极端长名（几十字符的内部代号）不值得让整行跟着横向变长，
-//     超出部分交给 ellipsis + 悬停 title。
-// 列宽在 rows 变化后重算（翻页/换筛选/首屏的整批替换，以及实时推送插行——
-// 后者也触发 watch，但 >=2px 阈值 + 内容只会单向变宽保证了无抖动，等于
-// 免费的增量修正）。列宽一抖所有行的扫光位置全要重排，所以阈值卡得较宽。
-const MODEL_COL_MIN = 120
-const MODEL_COL_MAX = 300
-const modelColWidth = ref(190)
-// 列宽表 —— 列序（2026-09-21 在费用与状态之间增加速度列）：
-// 时间 / 模型（动态）/ 渠道 / 词元 / 耗时 / 费用 / 速度 / 状态 / 密钥 / 操作。
+// 定宽的问题：原来那组常量是当初按「最坏情况」人工拍的（每个数的实测出处见
+// 模板上方那段注释），数据一换长度就截断 —— 站里模型名都短（glm-5.3 一类）时
+// 多出大半空白，换一批更长的渠道名/密钥名又重新出现截断。所以改成**量了再定**。
 //
-// 模板里各列的 :width 与下面 scroll.x 的求和都从这里取，是**唯一一份**宽度
-// 定义。此前两处各写一遍（模板写 155、求和再抄一次 155），改一列就要同步改
-// 两个地方，漏改的表现是表格出现非预期的横向滚动 —— 而且看不出是哪一列错。
-// 模型列不需要在这里出现：它由上面的动态测量决定。
-const COL_W = {
+// 为什么「声明宽度 ≥ 内容所需宽度」就能保证内容完整：表格是
+// table-layout: fixed，声明宽就是列宽的下界；而声明总宽小于容器宽时 antd 还会
+// 把余量**按比例分给各列**（ui-spec 第 10 条有实测：声明 155/155/130…
+// 渲染成 200/200/167…）。所以只要声明宽够，内容就不会被 ellipsis 截断 ——
+// 这正是本机制要保证的那条不变量。
+//
+// 量的对象有硬性要求：必须是**不被列宽压缩**的元素，scrollWidth 才等于
+// 「装下全部内容需要的宽度」；对普通块级元素它等于 clientWidth，量不到内容。
+// 又因为不能把内容块改成 inline-block / inline-flex —— ui-spec 第 10 条实测过，
+// inline 级原子盒会把单元格行高从 41px 顶到 49px —— 块级 flex/grid 的列一律量
+// **内部已 nowrap 的子元素**，再把固定前缀（图标、竖条、gap）加回去。
+const COL_KEYS = [
+  'time', 'model', 'channel', 'tokens', 'elapsed', 'cost', 'speed', 'status', 'key', 'action'
+] as const
+type ColKey = (typeof COL_KEYS)[number]
+
+/**
+ * 每列的 [下限, 上限]。
+ *
+ * 下限 =「再窄就放不下表头、或被压得不像话」的值，也就是原来那组定宽常量。
+ * 上限是**软上限**：超出部分交给 ellipsis + 悬停 title。不设上限的话，一个
+ * 60 字符的内部模型代号能把整行撑到看不见别的列，而那种值在真实数据里几乎
+ * 不存在 —— 为它牺牲整张表的可读性不划算。
+ */
+const COL_BOUNDS: Record<ColKey, [number, number]> = {
+  time: [155, 155], // fmtTime 输出定长（19 字符），不需要量
+  model: [120, 300],
+  channel: [130, 240],
+  tokens: [150, 180],
+  elapsed: [120, 150],
+  cost: [90, 140],
+  speed: [118, 150],
+  status: [64, 64], // 三位状态码 + a-tag，宽度固定
+  key: [100, 200],
+  action: [64, 64] // 一个 28px 图标按钮，宽度固定
+}
+
+/** 运行时列宽。初值取原来那组定宽常量（模型列的 190 是它的常规值），
+ *  首屏先按它们渲染、测量结果随后覆盖 —— 避免「先窄后宽」闪一下。 */
+const colW = ref<Record<ColKey, number>>({
   time: 155,
+  model: 190,
   channel: 130,
   tokens: 150,
   elapsed: 120,
@@ -122,28 +145,80 @@ const COL_W = {
   status: 64,
   key: 100,
   action: 64
-}
-const modelColTotal = computed(
-  () => Object.values(COL_W).reduce((a, b) => a + b, 0) + modelColWidth.value
-)
+})
 
-function remeasureModelColumn() {
+/**
+ * 每列的内容锚点与固定前缀宽（px）。
+ *
+ * 没列出的（time / status / action）不参与测量：它们的内容宽度恒定，下限即
+ * 所需宽度。pad 是内容之外必须一起算进去的部分：渠道的图标与间距、
+ * 耗时的竖条与间距。
+ */
+const CONTENT_MEASURE: Partial<Record<ColKey, { sel: string; pad: number }>> = {
+  model: { sel: '.model-cell', pad: 0 }, // inline-flex + nowrap
+  channel: { sel: '.chan-name', pad: 24 }, // 18 图标 + 6 间距
+  tokens: { sel: '.tk-line', pad: 0 }, // 两行取最大
+  elapsed: { sel: '.dur-line', pad: 9 }, // 3 竖条 + 6 间距
+  cost: { sel: '.txt-cell', pad: 0 },
+  speed: { sel: '.spd-cell', pad: 0 }, // inline-flex + nowrap
+  key: { sel: '.group-tag', pad: 0 } // inline-block + ellipsis，溢出量真实
+}
+
+/** 各列宽之和。模板里每列的 :width 与表格 scroll.x 都取这里 ——
+ *  宽度只有这一份定义。此前模板写一遍、求和再抄一遍，漏改的表现是表格出现
+ *  非预期的横向滚动，而且看不出是哪一列错。 */
+const columnsTotal = computed(() => COL_KEYS.reduce((sum, k) => sum + colW.value[k], 0))
+
+/** 单元格左右内边距（antd 小表格 8+8）与右侧呼吸余量（给省略号与边框） */
+const CELL_PAD = 16
+const CELL_BREATH = 6
+
+/**
+ * 按当前页内容重算各列宽度。
+ *
+ * 一次把所有锚点读完再统一写回：读一次写一次会让浏览器反复重排 ——
+ * 100 行 × 7 列这个量级下，两种写法的差别是肉眼可见的卡顿。
+ */
+function remeasureColumns() {
   const wrap = tableWrap.value
   if (!wrap) return
-  let max = 0
-  wrap.querySelectorAll('.ant-table-tbody .model-cell').forEach((el) => {
-    // 量的是内容（含胶囊），而单元格此刻可能因旧列宽更宽 —— scrollWidth
-    // 在 inline-flex + nowrap 下就是「装下全部内容需要的宽度」
-    const w = (el as HTMLElement).scrollWidth
-    if (w > max) max = w
-  })
-  if (max === 0) return
-  const want = max + 16 + 6
-  const clamped = Math.min(MODEL_COL_MAX, Math.max(MODEL_COL_MIN, want))
-  // 只在整数像素级变化时写：1px 的抖动不值得触发一次表格重排
-  if (Math.abs(clamped - modelColWidth.value) >= 2) modelColWidth.value = clamped
+  // 空表不量：加载中 / 筛选无结果时量不到内容，会把列宽收到下限白闪一下
+  if (!wrap.querySelector('.ant-table-tbody tr[data-row-key]')) return
+
+  const next: Partial<Record<ColKey, number>> = {}
+  for (const key of COL_KEYS) {
+    const spec = CONTENT_MEASURE[key]
+    if (!spec) continue
+    let max = 0
+    wrap.querySelectorAll<HTMLElement>(`.ant-table-tbody ${spec.sel}`).forEach((el) => {
+      // scrollWidth 对「不被压缩的元素」就是装下全部内容需要的宽度；
+      // 锚点的选择因此有硬性要求，见 CONTENT_MEASURE 的注释
+      const w = el.scrollWidth
+      if (w > max) max = w
+    })
+    if (max === 0) continue // 本页该列没有锚点（如全是空值），保持原宽
+    const [lo, hi] = COL_BOUNDS[key]
+    next[key] = Math.min(hi, Math.max(lo, max + spec.pad + CELL_PAD + CELL_BREATH))
+  }
+
+  let changed = false
+  for (const key of COL_KEYS) {
+    const want = next[key]
+    if (want === undefined) continue
+    // 只在 ≥2px 时写：1px 的抖动不值得让整张表重排一次
+    // （列宽一抖，所有行的扫光位置都要跟着重算）
+    if (Math.abs(want - colW.value[key]) >= 2) {
+      colW.value[key] = want
+      changed = true
+    }
+  }
+  // 列宽变了 → 行宽也变了 → 正在飞的扫光亮带要重新定位
+  if (changed) nextTick(repositionBeams)
 }
-watch(rows, () => nextTick(remeasureModelColumn))
+
+// 列宽在 rows 变化后重算：翻页 / 换筛选 / 首屏的整批替换，以及实时推送插行
+// （后者也走这里，阈值负责把抖动挡在外面）
+watch(rows, () => nextTick(remeasureColumns))
 
 // ---- 新日志的扫光（那条彩虹只为「刚插进来的行」而闪）----
 //
@@ -776,6 +851,9 @@ onMounted(() => {
   // 分组表与渠道图标由看板取好传下来，这里只负责取列表。
   // 首次挂载不经过 watch（它只在 props 变化时触发），所以这一次必须显式取。
   load()
+  // 列表字体（Harding-Regular.ttf）就绪前，量到的是回退字体的宽度 ——
+  // 两者字宽不同，按回退字体算出的列宽会偏窄。字体到了要重量一次。
+  document.fonts?.ready.then(() => nextTick(remeasureColumns))
 })
 </script>
 
@@ -791,24 +869,25 @@ onMounted(() => {
       title="请求日志加载失败"
       @retry="load()"
     >
-      <!-- 列宽按实测取值：scroll.x 必须装得进表体容器（1440 视口下是 1182），
-           否则横向滚动时固定在右侧的「操作」列会把最后一列切掉 ——
-           实测过一次：密钥胶囊被切掉小半个字。
-           每列取「表头文字宽」与「本页内容最宽」的较大者 + 16px 内边距
-           （2026-09-16 实测：渠道格 114、任务耗时格 104、费用格 82、
-           密钥格 71、状态格 36），再留几像素余量。
+      <!-- 列宽全部由脚本按当前页内容量出来（见 remeasureColumns 与 COL_BOUNDS）：
+           每列取「下限」与「本页内容所需宽度」的较大者，上限是软上限 ——
+           超出部分交给 ellipsis + 悬停 title。
+           下限就是原来那组人工实测的定宽值（实测出处：渠道格 114、
+           任务耗时格 104、费用格 82、密钥格 71、状态格 36，2026-09-16 量于
+           12px 列表字体），它们同时是「表头文字 + 内边距」的下界，
+           所以列再窄也挤不到表头。
            词元那一列 2026-09-16 改成上下两排后重新量过：表头只剩「词元」两个字
-           （28px），不再撑宽列，列宽改由内容决定 —— 12px 字体下最宽的一排是
+           （28px），列宽改由内容决定 —— 12px 字体下最宽的一排是
            「↓ 300.48K ↑ 32.76K」124px（近 7 天输入词元的最大值 304483），
-           下排「▣ 479.23K 99.86%」107px，加 16px 内边距 = 140，取 150 留余量。
+           下排「▣ 479.23K 99.86%」107px。
            操作列 72 -> 64 是「详情」文字链接改成图标按钮那一次
            （见模板里那一列上方的注释）。
            思考等级 2026-09-18 并入模型列（独立 80px 列删除）：胶囊贴在模型名
            后面，「用什么模型、什么强度思考」一行读完。
-           2026-09-20 模型列改为**按当前页内容自适应**（站主要求以页内最长的
-           模型定宽）：初始 190，rows 渲染后量 .model-cell 的最宽内容并
-           clamp 到 [120, 300]（见 remeasureModelColumn），超出部分 ellipsis。
-           其余列保持定宽；scroll.x 由 modelColTotal 随之联动。 -->
+           2026-09-20 模型列先改成按内容自适应；2026-09-23 推广到每一列
+           （站主要求「每列至少把内容显示完整」），scroll.x 改为各列宽之和。
+           横向滚动仍可能发生（内容比容器宽时），固定列的遮挡情况由
+           scripts/check-log-columns.mjs 盯着。 -->
       <!-- 外面这层只为扫光存在：亮带是这一层里的绝对定位元素，表格内部
            一个字节都不动（原因见脚本里 fxTargets 的注释 —— 往 tr 里加伪元素会让
            列宽塌回声明宽度）。overflow: hidden 是兜底：亮带永远不该撑出滚动条。
@@ -823,18 +902,18 @@ onMounted(() => {
           :row-class-name="rowClassName"
           row-key="id"
           size="small"
-          :scroll="{ x: modelColTotal, y: TABLE_BODY_Y }"
+          :scroll="{ x: columnsTotal, y: TABLE_BODY_Y }"
         >
         <template #emptyText>
           <a-empty :description="emptyText" />
         </template>
-        <a-table-column title="请求时间" :width="COL_W.time" fixed="left">
+        <a-table-column title="请求时间" :width="colW.time" fixed="left">
           <template #default="{ record }">{{ fmtTime(record.created_at) }}</template>
         </a-table-column>
         <!-- 模型名带 ellipsis：不加的话长模型名会在这里折成两三行，
              把整行从 40px 顶到 98px（50 行就是 5000px 的页面）；
              完整名字悬停可见，详情里也有 -->
-        <a-table-column title="模型" :width="modelColWidth" ellipsis>
+        <a-table-column title="模型" :width="colW.model" ellipsis>
           <template #default="{ record }">
             <!-- 模型、密钥两处用的是同一个组件与同一个颜色：
                  它们描述的是「这次请求属于哪个分组」，颜色因此必须一致。
@@ -872,7 +951,7 @@ onMounted(() => {
              排障时正是要看这个，而且一屏里的渠道名往往只差几个字。
              名称前带渠道图标（与渠道页那张表同一个组件、同一套规则）。
              失败请求没走到渠道（channel_id=0）、渠道事后被删都会是空值，显示 — -->
-        <a-table-column title="渠道" :width="COL_W.channel" ellipsis>
+        <a-table-column title="渠道" :width="colW.channel" ellipsis>
           <template #default="{ record }">
             <span v-if="record.channel_name" class="chan-cell">
               <ChannelIcon :name="record.channel_name" :icon="channelIconOf(record.channel_id)" :size="18" />
@@ -897,7 +976,7 @@ onMounted(() => {
              颜色沿用 theme.css 那套语义色（输入陶土 / 输出紫 / 缓存绿），
              命中率与缓存同色 —— 它就是缓存那个数的比值。
              悬停给出一行汇总：图标只表达「这是哪一类词元」，具体数字看悬停。 -->
-        <a-table-column title="词元" :width="COL_W.tokens">
+        <a-table-column title="词元" :width="colW.tokens">
           <template #default="{ record }">
             <div class="token-cell" :title="tokenTitle(record)">
               <div class="tk-line">
@@ -936,7 +1015,7 @@ onMounted(() => {
              标签只留两个字（截图就是这样）：`总耗时` 三个字在 36px 的标签轨里
              会把数值列推远，而这一格的宽度是按最窄列倒推出来的，一寸都不富余。
              数值按同一档位着色，悬停说明这一行是什么、以及这一档的判据。 -->
-        <a-table-column title="任务耗时" :width="COL_W.elapsed">
+        <a-table-column title="任务耗时" :width="colW.elapsed">
           <template #default="{ record }">
             <div class="dur">
               <!-- 一条竖条、两段。两段各挂自己那一行的档位类，
@@ -964,14 +1043,20 @@ onMounted(() => {
             </div>
           </template>
         </a-table-column>
-        <a-table-column title="费用" :width="COL_W.cost">
-          <template #default="{ record }">{{ fmtCost(record.estimated_cost, record.cost_currency) }}</template>
+        <a-table-column title="费用" :width="colW.cost">
+          <template #default="{ record }">
+            <!-- 包一层 .txt-cell：它是这一列的测量锚点（见 CONTENT_MEASURE）。
+                 必须是普通 inline —— inline-block 会改变单元格行高
+                 （ui-spec 第 10 条实测 41px → 49px），而 inline 盒子的
+                 rect 宽度恰好就是文本自身的宽度。 -->
+            <span class="txt-cell">{{ fmtCost(record.estimated_cost, record.cost_currency) }}</span>
+          </template>
         </a-table-column>
         <!-- 速度列：每秒词元输出速度。流式请求在数值前带「流」胶囊（同一行）——
              输出速度必须结合输出方式才读得懂：流式的分母是首字之后的生成时段，
              非流式只能用总耗时近似（口径见 tokPerSec 注释），胶囊就是那个分叉的
              可视标记。失败请求通常没有输出词元，显示 — -->
-        <a-table-column title="速度" :width="COL_W.speed">
+        <a-table-column title="速度" :width="colW.speed">
           <template #default="{ record }">
             <span v-if="tokPerSec(record)" class="spd-cell" :title="speedTitle(record)">
               <span v-if="record.stream" class="stream-pill">流</span>
@@ -982,13 +1067,13 @@ onMounted(() => {
         </a-table-column>
         <!-- 状态列移到费用之后（站主 2026-09-20 要求）：数字区（词元/耗时/费用）
              读完后，「成没成」与「哪把密钥」两个结果性信息收尾 -->
-        <a-table-column title="状态" :width="COL_W.status">
+        <a-table-column title="状态" :width="colW.status">
           <template #default="{ record }">
             <a-tag :color="statusColor(record.status_code)">{{ record.status_code }}</a-tag>
           </template>
         </a-table-column>
         <!-- 密钥跟着状态收尾：它们本来就是一问一答（哪把密钥、结果如何） -->
-        <a-table-column title="密钥" :width="COL_W.key" ellipsis>
+        <a-table-column title="密钥" :width="colW.key" ellipsis>
           <template #default="{ record }">
             <GroupTag v-if="record.api_key_name" :name="record.api_key_name" v-bind="tagColorOf(record.group_id)" />
             <span v-else class="muted">—</span>
@@ -999,7 +1084,7 @@ onMounted(() => {
              换成图标后列收到 64px，表格总宽跟着从 1036 降到 1028。
              图标按钮没有可见文字，tooltip 与 aria-label 是它的动作名 ——
              少了这两样，读屏用户只会听到一个没有名字的按钮。 -->
-        <a-table-column title="操作" :width="COL_W.action" fixed="right">
+        <a-table-column title="操作" :width="colW.action" fixed="right">
           <template #default="{ record }">
             <a-tooltip title="调用详情：报文、错误原文与链路">
               <a-button
@@ -1310,6 +1395,13 @@ onMounted(() => {
    其它四个视图都有这条，只有这里漏了 —— 漏掉的表现是占位符用了正文色，
    比旁边的真实值还显眼，而它本该是「这里什么都没有」 */
 .muted { color: var(--color-text-secondary); }
+
+/* 费用格里的文本包一层，作为该列的测量锚点（见 CONTENT_MEASURE）。
+   必须是普通 inline：inline-block 会参与行盒并改变单元格行高
+   （ui-spec 第 10 条实测 41px → 49px），而 inline 盒子的 rect 宽度
+   就是文本自身的宽度，正好是要量的那个数。nowrap 保证金额这类
+   定长文本不会被折行拆开。 */
+.txt-cell { white-space: nowrap; }
 
 /* 思考胶囊（并入模型列，2026-09-18 起替代独立的「思考」列与色点）。
    形态与模型/密钥的 GroupTag 完全同款（padding、圆角、字号、字重、

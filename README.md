@@ -588,6 +588,29 @@ node scripts/audit-cursors.mjs http://127.0.0.1:8888 light   # 只审浅色（�
 `.shots/verify-cross-theme-detection.mjs` 会手动把深色页面的光标变量改写成浅色
 那套，确认审计真的报出 1062 个串主题箭头 + 205 个串主题手型。
 
+`scripts/check-table-widths.mjs` 与 `scripts/check-log-columns.mjs` 一起守请求日志
+表格的列宽。列宽 2026-09-23 起由脚本按当前页内容量出来（见 `docs/ui-spec.md` 第 17 条），
+于是「列宽对不对」不再能从源码里一眼看出来：
+
+- **check-table-widths.mjs**（静态，不需要浏览器）：每个表的 `scroll.x` 与各列声明宽度
+  要对得上。运行时表（列宽来自 `colW`）它查的是「**每一列都绑了那个表达式**」——
+  混进一个裸数字，那一列就不会随测量联动，表现为它永远停在声明值上。这个脚本此前
+  只认数字字面量，请求日志表改成 `colW.xxx` 之后**整张表被静默跳过**，
+  「没报错」于是被读成「没问题」，所以现在它会把「跳过」明确打出来并给出退出码；
+- **check-log-columns.mjs**（需要调试端口的 Chrome）：静态检查只能确认「测量代码接对了」，
+  而「量出来的宽度是否真的装得下内容」只有渲染后才知道 —— 这类问题不报错，
+  内容被省略号截掉、页面一切正常。它按「3 视口 × 3 种每页条数」逐格断言三件事：
+  锚点元素没有溢出（内容没被截断）、单元格自身没有横向溢出、横向滚到最右端时
+  右侧固定列不遮挡内容。每页条数是从源码读出的 localStorage 键名写进去的，
+  并断言行数真的等于这一轮的 pageSize —— 否则整套矩阵会跑在同一个行数上，
+  看着全绿其实只测了一种（第一版就是这么错的）。
+
+```bash
+node scripts/check-table-widths.mjs                                # 静态，秒出
+node scripts/check-log-columns.mjs                                 # 默认 3 视口 × 20/50/100 条
+node scripts/check-log-columns.mjs http://127.0.0.1:8888 1440 20   # 单组合
+```
+
 `scripts/verify-all.sh` 会按顺序跑完上面这些可离线执行的用例并汇总，
 最后打印 `ALL_PASS`；日常改完代码跑它一次就够。
 （`test-coldstart.sh` 要拆容器与镜像，不在其中。）
