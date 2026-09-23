@@ -529,6 +529,7 @@ Harding 不含中文字形，会一路回退到 `--font-family-base`）。
 | `test-live.sh` | WebSocket 握手、统计快照、新请求的日志推送 |
 | `test-cost.sh` | 计费口径：缓存读写、推理 Token、子集型与并列型缓存 |
 | `test-default-model.sh` | **默认模型映射**：兜底改写、精确优先、密钥白名单不豁免、日志标记与计费口径 |
+| `test-thinking-map.sh` | **思考强度跨协议落地**：mock 上游断言 Anthropic 收到 `output_config.effort`、Gemini 收到 `thinkingBudget`、OpenAI 兼容上游收到原生档位（跨协议归一出的 off/auto 被剔除），以及 anthropic→anthropic 的无损往返 |
 | `test-legacy-column-add.sh` | 老库缺列时自动补列并恢复可用（会短暂重启应用） |
 | `test-backup.sh` | 备份导出/导入、明文泄漏检查 |
 | `test-backup-roundtrip.sh` | 删除渠道后从备份恢复并真实调用 |
