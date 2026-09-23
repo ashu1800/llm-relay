@@ -153,6 +153,18 @@ const colW = ref<Record<ColKey, number>>({
  * 没列出的（time / status / action）不参与测量：它们的内容宽度恒定，下限即
  * 所需宽度。pad 是内容之外必须一起算进去的部分：渠道的图标与间距、
  * 耗时的竖条与间距。
+ *
+ * 锚点的两条硬性要求：
+ *  1. 选择器在表体里**只能匹配这一列**。测量是全局查询
+ *     （`wrap.querySelectorAll('.ant-table-tbody ' + sel)`），跨列命中就会把
+ *     别的列的内容算进本列。
+ *  2. 元素要「不被压缩」：块级 flex/grid 量的是自己的盒子，行内级（inline-flex /
+ *     inline-block）才是紧贴内容的 shrink-to-fit。
+ *
+ * 第 1 条是 2026-09-23 的实测教训：密钥列原来写的是 '.group-tag'，而模型名与
+ * 密钥名都用 GroupTag 渲染 —— 模型列那枚更宽的胶囊（deepseek-v4.1-flash ≈ 123px）
+ * 也被算了进来，密钥列因此常年 145px，而那一页的内容只需要 71px（多出 58px 空白）。
+ * 现在密钥列用只属于它的 .key-tag。
  */
 const CONTENT_MEASURE: Partial<Record<ColKey, { sel: string; pad: number }>> = {
   model: { sel: '.model-cell', pad: 0 }, // inline-flex + nowrap
@@ -161,7 +173,7 @@ const CONTENT_MEASURE: Partial<Record<ColKey, { sel: string; pad: number }>> = {
   elapsed: { sel: '.dur-line', pad: 9 }, // 3 竖条 + 6 间距
   cost: { sel: '.txt-cell', pad: 0 },
   speed: { sel: '.spd-cell', pad: 0 }, // inline-flex + nowrap
-  key: { sel: '.group-tag', pad: 0 } // inline-block + ellipsis，溢出量真实
+  key: { sel: '.key-tag', pad: 0 } // inline-block + ellipsis，溢出量真实
 }
 
 /** 各列宽之和。模板里每列的 :width 与表格 scroll.x 都取这里 ——
@@ -1081,7 +1093,12 @@ onMounted(() => {
         <!-- 密钥跟着状态收尾：它们本来就是一问一答（哪把密钥、结果如何） -->
         <a-table-column title="密钥" :width="colW.key" ellipsis>
           <template #default="{ record }">
-            <GroupTag v-if="record.api_key_name" :name="record.api_key_name" v-bind="tagColorOf(record.group_id)" />
+            <GroupTag
+              v-if="record.api_key_name"
+              class="key-tag"
+              :name="record.api_key_name"
+              v-bind="tagColorOf(record.group_id)"
+            />
             <span v-else class="muted">—</span>
           </template>
         </a-table-column>

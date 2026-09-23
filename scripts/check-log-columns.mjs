@@ -8,9 +8,9 @@
 //
 // 判据（对当前页每一行、每一列）：
 //   锚点元素的 scrollWidth ≤ clientWidth  →  内容没有被截断
-// 锚点就是测量用的那几个（.model-cell / .chan-name / .tk-line / .dur-line /
-// .txt-cell / .spd-cell / .group-tag）。inline 元素（.txt-cell）没有 clientWidth，
-// 它的溢出由外层单元格兜住，所以单元格自身也单独判一次。
+// 锚点就是测量用的那几个，**从 CONTENT_MEASURE 读**（不在这里再抄一份）。
+// inline 元素（.txt-cell）没有 clientWidth，它的溢出由外层单元格兜住，
+// 所以单元格自身也单独判一次。
 //
 // 另外两条是**报告**而不是判据：表格总宽 vs 容器宽（内容比容器宽时横向滚动是
 // 设计允许的），以及横向滚到最右端时右侧固定列遮挡了多少像素（遮挡大于 0
@@ -37,6 +37,17 @@ const sizeKey =
   (panelSrcForKeys.match(/PAGE_SIZE_KEY\s*=\s*'([^']+)'/) || [, ''])[1]
 if (!sizeKey) {
   console.error('读不到每页条数的 localStorage 键名（RequestLogPanel 的 PAGE_SIZE_KEY）')
+  process.exit(1)
+}
+
+// 测量锚点也从源码读 CONTENT_MEASURE：脚本里再抄一份的话，源码换了锚点
+// （就像密钥列从 .group-tag 换成 .key-tag 这次）脚本还在盯旧的那个，
+// 于是「锚点只命中一列」这条断言看着在跑，其实盯的是一列都不命中的旧名字。
+const ANCHORS = [
+  ...((panelSrcForKeys.match(/const CONTENT_MEASURE[\s\S]*?\n\}/) || [''])[0].matchAll(/sel:\s*'([^']+)'/g)),
+].map((m) => m[1])
+if (ANCHORS.length < 6) {
+  console.error(`读不到列宽测量锚点（CONTENT_MEASURE 里只解析出 ${ANCHORS.length} 个）`)
   process.exit(1)
 }
 
@@ -163,12 +174,28 @@ const PROBE = `(() => {
       右: Math.round((c.right - padR - t.right) * 10) / 10,
     }
   })
+  // 每个测量锚点在表体里只能落在一列上。
+  // remeasureColumns 是**全局查询**（.ant-table-tbody 拼上锚点选择器），锚点跨列命中就会把
+  // 别列的内容算进本列：密钥列原来用 '.group-tag'，而模型名与密钥名都用 GroupTag
+  // 渲染，于是模型列那枚更宽的胶囊（deepseek-v4.1-flash ≈ 123px）被算进了密钥列，
+  // 密钥列常年 145px，而内容只要 71px（站主 2026-09-23 反馈「密钥列为什么那么宽」）。
+  // 静态检查看不出这种事 —— 只有真渲染出来，才知道哪些列被同一个选择器命中了。
+  const anchorColumns = {}
+  for (const sel of ${JSON.stringify(ANCHORS)}) {
+    const cols = new Set()
+    for (const tr of wrap.querySelectorAll('.ant-table-tbody tr[data-row-key]')) {
+      [...tr.querySelectorAll('td')].forEach((td, i) => {
+        if (td.querySelector(sel)) cols.add(i)
+      })
+    }
+    anchorColumns[sel] = [...cols].sort((a, b) => a - b)
+  }
   // 诊断用：每页条数是存在 localStorage 里的，读回来确认这轮真的切过去了 ——
   // 否则整套矩阵测的都是同一个 pageSize（第一版就踩了：9 组全是 20 行）
   let stored = 'N/A'
   try { stored = String(localStorage.getItem('${sizeKey}')) } catch (e) { stored = 'ERR' }
   const pagerText = (document.querySelector('.ant-pagination-options') || {}).textContent || ''
-  return JSON.stringify({ rows, cells: cells.length, cw, tw, overflow: overflow.slice(0, 8), overflowN: overflow.length, cellOver, cellOverList: cellOverList.slice(0, 6), cover, colW, stored, pagerText: pagerText.trim(), pillLefts, spdLefts, pillCount, tagOffsets })
+  return JSON.stringify({ rows, cells: cells.length, cw, tw, overflow: overflow.slice(0, 8), overflowN: overflow.length, cellOver, cellOverList: cellOverList.slice(0, 6), cover, colW, stored, pagerText: pagerText.trim(), pillLefts, spdLefts, pillCount, tagOffsets, anchorColumns })
 })()`
 
 let failed = 0
@@ -232,6 +259,15 @@ for (const w of widths) {
       tagBad.length
         ? `${tagBad.length}/${d.tagOffsets.length} 格偏移，例如 左 ${tagBad[0].左}px / 右 ${tagBad[0].右}px`
         : `${d.tagOffsets.length} 格，例如 左 ${d.tagOffsets[0] ? d.tagOffsets[0].左 : '-'}px / 右 ${d.tagOffsets[0] ? d.tagOffsets[0].右 : '-'}px`,
+    )
+    // 锚点跨列命中：静态检查看不出来，只有真渲染出来才知道哪几列被同一个选择器命中
+    const crossed = Object.entries(d.anchorColumns).filter(([, cols]) => cols.length > 1)
+    check(
+      '每个列宽测量锚点只命中一列',
+      crossed.length === 0,
+      crossed.length
+        ? crossed.map(([sel, cols]) => `${sel} 命中第 ${cols.join('、')} 列`).join('；')
+        : Object.entries(d.anchorColumns).map(([sel, cols]) => `${sel}→第${cols.length ? cols[0] : '?'}列`).join(' '),
     )
   }
 }

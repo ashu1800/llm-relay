@@ -741,9 +741,13 @@ console.log('=== 请求日志列宽：测量锚点与模板必须对得上 ===')
     const sels = [...measureBlock[0].matchAll(/sel:\s*'([^']+)'/g)].map((m) => m[1])
     check('锚点选择器不是空的', sels.length >= 6, `读到 ${sels.length} 个`)
     const tpl = panelSrc.slice(panelSrc.indexOf('<template>'))
-    // .group-tag 是子组件 GroupTag.vue 的根类名，不在本文件的模板里 ——
-    // 对它改为断言那个组件确实被用上了
-    const external = { '.group-tag': /<GroupTag\b/ }
+    // .key-tag 是传给子组件 GroupTag 的 class（它自己渲染成 <span class="group-tag
+    // key-tag">），不在本文件的模板文本里 —— 对它改为断言「那个组件确实带了这个类」。
+    // 2026-09-23 之前这里写的是 .group-tag：模型列与密钥列都用 GroupTag 渲染，而
+    // 测量是全局查询，于是模型列那枚更宽的胶囊被算进了密钥列（密钥列常年宽 58px）。
+    // 静态检查看不出跨列命中，那一条在 scripts/check-log-columns.mjs 里运行时把关；
+    // 这里守住的是另一半：锚点的类名得真的挂在元素上。
+    const external = { '.key-tag': /<GroupTag\b[^>]*\bkey-tag\b/ }
     for (const sel of sels) {
       const ok = external[sel]
         ? external[sel].test(tpl)
