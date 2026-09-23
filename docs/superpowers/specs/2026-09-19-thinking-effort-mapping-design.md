@@ -1,7 +1,13 @@
 # 思考强度的跨协议映射
 
 日期：2026-09-19
-状态：待评审
+状态：已实现（2026-09-23，提交 5fb3340；链路验证脚本 `scripts/test-thinking-map.sh`）
+
+实现落点：映射表与四个方向的处理都在 `backend/internal/relay/convert/thinking_map.go`，
+入站三家各写一笔 `reasoning_effort`（`anthropic.go` / `gemini.go` / `responses.go`），
+出站三家各自翻译（`upstream_anthropic.go` / `upstream_gemini.go` / `upstream_responses.go`），
+OpenAI 兼容上游剔除它表达不了的 `off`/`auto`（`upstream.go` 的 `stripUnsupportedEffort`）。
+分档刻度由 `convert.ThinkingBudget*` 常量定义，`relay/thinking.go` 引用同一组值。
 
 ## 背景
 
