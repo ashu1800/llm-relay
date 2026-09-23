@@ -369,7 +369,7 @@ function markFresh(ids: number[]) {
 // 胶囊形态与模型/密钥的 GroupTag 同款（描边胶囊、无动效 —— 2026-09-18
 // 站主点名撤掉之前的整套分层动效），档位之间只靠颜色区分：
 //   off/minimal 灰（关掉的、没说的）  low 青   medium 琥珀   high 品红
-//   on 绿   auto 蓝   xhigh 暗琥珀   max 琥珀金（effort 的最高档）
+//   on 绿   auto 蓝   xhigh 暗琥珀   max 血红（effort 的最高档）
 // 文字色的对比度处理（淡底上原色多数不达 4.5:1）在 .think-pill 的 CSS 里
 // 做 oklab 混黑/混白，这里只管「哪个档位是哪个颜色」。
 const THINKING_COLORS: Record<string, string> = {
@@ -383,7 +383,13 @@ const THINKING_COLORS: Record<string, string> = {
   // xhigh / max 是 anthropic 4.6+ output_config.effort 的两档
   // （Claude Code 发的就是 max）。max 曾经只由客户端自定义档位用上。
   xhigh: '#d48806',
-  max: '#faad14',
+  // max 2026-09-23 由琥珀改成血红（站主要求）：它原本与 medium 同为 #faad14，
+  // 两枚胶囊在列表里根本分不出来，而它恰恰是最高档、最该一眼认出的那个。
+  // 取纯红 #a10000 而不是更暗的 #8b0000（darkred）：这一族的颜色还要当 13% 的
+  // 淡底与 32% 的描边用，太暗的基色做出来的底发灰、看不出红调。
+  // 与项目里另外两个红也拉得开 —— --color-red #ea4343、--text-red #c0392b
+  // 都是偏砖的珊瑚红，这个是纯红；与 high 的品红 #eb2f96 差在色相上。
+  max: '#a10000',
 }
 
 function thinkingColor(level?: string) {
