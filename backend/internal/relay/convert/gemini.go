@@ -142,6 +142,11 @@ func GeminiRequestToOpenAIChat(body []byte, model string, stream bool) ([]byte, 
 				out[pair[1]] = v
 			}
 		}
+		// 思考强度写进通用语顶层：thinkingConfig 在 Chat 里没有对应物，
+		// 不记这一笔，出站到 Anthropic / 别的上游时思考强度就整段丢失。
+		if effort := geminiThinkingEffort(src); effort != "" {
+			out[reasoningEffortField] = effort
+		}
 	}
 
 	if tools, ok := src["tools"].([]any); ok {

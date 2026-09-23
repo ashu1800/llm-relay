@@ -143,6 +143,10 @@ func TestAnthropicThinkingTopKRoundTrip(t *testing.T) {
 }
 
 // 暂存字段绝不能漏给出站非 Anthropic 的上游（严格校验的会直接 400）。
+//
+// 判的是 **Anthropic 私有字段**（anthropic_params 与 Anthropic 那几项顶层参数名），
+// 不是「出现 thinking 字样」：入站 Anthropic 的思考强度现在会按档位映射成
+// Gemini 自己的 thinkingConfig（见 thinking_map.go），那是修复要的行为。
 func TestAnthropicParamsStrippedForGeminiUpstream(t *testing.T) {
 	src := []byte(`{
 		"model": "claude-3",
@@ -158,8 +162,17 @@ func TestAnthropicParamsStrippedForGeminiUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(out), "anthropic_params") || strings.Contains(string(out), "thinking") {
+	if strings.Contains(string(out), "anthropic_params") || strings.Contains(string(out), `"thinking":`) {
 		t.Fatalf("发给 Gemini 的请求不应带 Anthropic 私有字段:\n%s", out)
+	}
+	// 强度按档位过去：budget 512 → low → 4096
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	tc := asMap(asMap(got["generationConfig"])["thinkingConfig"])
+	if tc == nil || asInt(tc["thinkingBudget"]) != ThinkingBudgetLow {
+		t.Fatalf("思考强度应映射成 Gemini 的 thinkingBudget=%d，实际 %v", ThinkingBudgetLow, got["generationConfig"])
 	}
 }
 

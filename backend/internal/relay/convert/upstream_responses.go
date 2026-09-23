@@ -67,6 +67,11 @@ func OpenAIChatToResponsesRequest(body []byte) ([]byte, error) {
 			out["tool_choice"] = tc
 		}
 	}
+	// 思考强度：Chat 里是顶层 reasoning_effort，Responses 里是 reasoning.effort。
+	// off / auto 不发声（那边没有对应表达），原生取值（含 none）原样过去。
+	if r := responsesReasoningFromEffort(asString(src[reasoningEffortField])); r != nil {
+		out["reasoning"] = r
+	}
 
 	instructions, input, err := openAIMessagesToResponses(src["messages"])
 	if err != nil {

@@ -61,6 +61,12 @@ func OpenAIChatToGeminiRequest(body []byte) ([]byte, error) {
 			gc["stopSequences"] = seq
 		}
 	}
+	// 思考强度 → generationConfig.thinkingConfig（数值预算，刻度见 thinking_map.go）。
+	// 只在通用语里真有这个字段时才写：没有就完全交给上游默认行为，
+	// 不凭空注入一个预算值去改用户的调用。
+	if tc := geminiThinkingConfig(asString(src[reasoningEffortField])); tc != nil {
+		gc["thinkingConfig"] = tc
+	}
 	// n / presence_penalty / frequency_penalty / logprobs / stream_options 等
 	// Gemini 不认识的字段一律不发：它和 Anthropic 一样对多余字段是直接 400
 	if len(gc) > 0 {

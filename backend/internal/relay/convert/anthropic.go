@@ -43,9 +43,16 @@ func AnthropicRequestToOpenAIChat(body []byte) ([]byte, error) {
 	if v, ok := src["tool_choice"]; ok {
 		out["tool_choice"] = anthropicToolChoiceToOpenAI(v)
 	}
-	// Anthropic 特有顶层参数（thinking/top_k/metadata/service_tier）进私有字段暂存，
-	// 出站目标还是 Anthropic 时能原样恢复（见 takeAnthropicParams）
+	// Anthropic 特有顶层参数（thinking/top_k/metadata/service_tier/output_config/
+	// context_management）进私有字段暂存，出站目标还是 Anthropic 时能原样恢复
+	// （见 takeAnthropicParams）
 	carryAnthropicParams(out, src)
+	// 思考强度另外写一份到通用语顶层：出站目标不是 Anthropic 时（Gemini /
+	// Responses / OpenAI 兼容上游）thinking 本身没有对应物，只能靠这个字段传递 ——
+	// 上面那份暂存只在「出站还是 Anthropic」时被读回。
+	if effort := anthropicThinkingEffort(src); effort != "" {
+		out[reasoningEffortField] = effort
+	}
 
 	var messages []any
 	// 用 isEmptyContent 而不是 sys != nil：没有 system 时上面返回的是空字符串，
@@ -228,7 +235,8 @@ const cacheControlKey = "cache_control"
 
 // anthropicParamsKey 是通用语里承载 Anthropic 特有**顶层参数**的附加字段，
 // 与 cache_control 同一思路（见上），但装的是请求级配置而非块级断点：
-// thinking（扩展思考及其 budget_tokens）、top_k、metadata、service_tier。
+// thinking（扩展思考及其 budget_tokens）、top_k、metadata、service_tier，
+// 以及 4.6 代的 output_config（effort 记在这里）与 context_management。
 //
 // 这些参数在 OpenAI 通用语里没有对应物，白名单不抄就静默失效 ——
 // Claude 客户端开了 extended thinking，中继 Anthropic→Anthropic 链路上
@@ -254,12 +262,17 @@ const anthropicParamsKey = "anthropic_params"
 const anthropicBlocksKey = "anthropic_blocks"
 
 // carryAnthropicParams 把 Anthropic 特有顶层参数抄进通用语的私有字段。
+//
+// output_config 与 context_management 是 4.6 代客户端的报文形状：
+// 前者的 effort 是新的思考强度表达（Claude Code 就发它），后者是服务端
+// 上下文管理配置。不进白名单的话它们在 Anthropic→Anthropic 链路上被丢掉，
+// 表现为「思考开着但强度丢失」—— 与本项目此前踩过的同一类缺口。
 func carryAnthropicParams(dst, src map[string]any) {
 	if dst == nil || src == nil {
 		return
 	}
 	extra := map[string]any{}
-	for _, k := range []string{"thinking", "top_k", "metadata", "service_tier"} {
+	for _, k := range []string{"thinking", "top_k", "metadata", "service_tier", "output_config", "context_management"} {
 		if v, ok := src[k]; ok {
 			extra[k] = v
 		}

@@ -79,7 +79,10 @@ func UpstreamRequest(protocol, path string, body []byte, upstreamModel string) (
 		// 但要清掉通用语里可能残留的 cache_control 附加字段：它是为
 		// 「入站 Anthropic -> 出站 Anthropic」暂存断点用的，OpenAI 兼容端点
 		// 不认识它。严格校验的实现（如 Azure OpenAI）会直接 400。
-		return path, stripCacheControlFromJSON(body), nil
+		//
+		// 同样要剔除跨协议归一出来的 off / auto：OpenAI 兼容上游对这两个值
+		// 一律 400（见 stripUnsupportedEffort）。原生的 none / minimal / low… 不动。
+		return path, stripUnsupportedEffort(stripCacheControlFromJSON(body)), nil
 	}
 }
 

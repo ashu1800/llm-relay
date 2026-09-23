@@ -3,6 +3,8 @@ package relay
 import (
 	"encoding/json"
 	"strings"
+
+	"llm-relay/internal/relay/convert"
 )
 
 // 入站思考参数的提取：从客户端原始请求体里读「这次调用想要的思考强度」，
@@ -29,10 +31,14 @@ const (
 // budget 分档是有意的粗档：列表要的是「思考强度的直觉」，不是精确保留
 // 参数原值 —— 精确数值在详情报文留存里有。边界取各家常用档：
 // Anthropic 常见 1024/4096/8192/16384/31999；Gemini Flash 预算上限 24576、Pro 32768。
+//
+// 数值不在这里写死，直接引用 convert 的刻度常量：那边是**转发方向**
+// （档位 → 预算数值）用的同一把尺子。各写一份的话，改了一边就会出现
+// 「列表显示 medium、上游收到 high」这类没人会立刻发现的偏差。
 const (
-	budgetMediumFrom  = 8192
-	anthropicHighFrom = 16384
-	geminiHighFrom    = 24576
+	budgetMediumFrom  = convert.ThinkingBudgetMedium
+	anthropicHighFrom = convert.ThinkingBudgetHigh
+	geminiHighFrom    = convert.ThinkingBudgetXHigh
 )
 
 // ExtractThinkingLevel 从入站请求体提取思考等级。

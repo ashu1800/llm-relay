@@ -55,16 +55,23 @@ func OpenAIChatToAnthropicRequest(body []byte) ([]byte, error) {
 			out[k] = v
 		}
 	}
-	// 入站是 Anthropic 时暂存的特有参数（thinking/top_k/metadata/service_tier）
-	// 在这里恢复：链路 Anthropic→Anthropic 上它们不该静默丢失 ——
-	// 扩展思考开没开直接改变模型行为与计费口径
-	if extra := takeAnthropicParams(src); extra != nil {
-		for _, k := range []string{"thinking", "top_k", "metadata", "service_tier"} {
+	// 入站是 Anthropic 时暂存的特有参数在这里恢复：链路 Anthropic→Anthropic 上
+	// 它们不该静默丢失 —— 扩展思考开没开直接改变模型行为与计费口径。
+	//
+	// output_config 装的是新代客户端的思考强度（output_config.effort）与输出配置，
+	// context_management 是纯 Anthropic 概念（无跨协议对应物），两者都只在
+	// 无损往返里存活。它们是 Claude Code 这类客户端报文的实际形状，早先没进白名单，
+	// 表现正是「思考开着但强度丢失」。
+	extra := takeAnthropicParams(src)
+	if extra != nil {
+		for _, k := range []string{"thinking", "top_k", "metadata", "service_tier", "output_config", "context_management"} {
 			if v, ok := extra[k]; ok {
 				out[k] = v
 			}
 		}
 	}
+	// 入站不是 Anthropic 时没有上面那份暂存，思考强度改由通用语映射过来
+	applyEffortToAnthropicRequest(out, src, extra)
 	if v, ok := src["stop"]; ok {
 		out["stop_sequences"] = openAIStopList(v)
 	}

@@ -54,6 +54,11 @@ func ResponsesRequestToOpenAIChat(body []byte) ([]byte, error) {
 	if v, ok := src["tool_choice"]; ok {
 		out["tool_choice"] = responsesToolChoiceToOpenAI(v)
 	}
+	// 思考强度写进通用语顶层（reasoning.effort）：Responses 的 reasoning 对象
+	// 在 Chat 里没有对应物，不记就整段丢失。取值原样保留（含 "none"）。
+	if effort := responsesReasoningEffort(src); effort != "" {
+		out[reasoningEffortField] = effort
+	}
 
 	var messages []any
 	// instructions 在 Responses 规范里可以有两种形态：
