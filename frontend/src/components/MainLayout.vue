@@ -425,6 +425,17 @@ onUnmounted(() => {
   flex-basis: 56px;
 }
 
+/* 收起态：这一列只剩图标，而 .console-menu-item 的左右 10px 内边距是给展开态的
+   文字留的。56px 宽减去侧栏自己左右各 8px 只剩 40px，图标 15px 加上左内边距
+   之后左留白 18px、右留白 23px —— 实测（.shots/measure-sidebar.mjs）整列图标比
+   侧栏中轴偏左 5px，与上面居中的 LR 圆标（12/12）、底部那枚主题按钮（20.5/20.5）
+   不在一条竖线上。收起态改成内容居中并去掉内边距，四处的中心线统一落到中轴上
+   （实测都是 28px，即 56/2）。 */
+.console-sidebar.is-collapsed .console-menu-item {
+  justify-content: center;
+  padding: 0;
+}
+
 .console-menu-list {
   display: flex;
   flex-direction: column;

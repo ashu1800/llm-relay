@@ -133,12 +133,25 @@ const PROBE = `(() => {
     }
   }
   const colW = [...wrap.querySelectorAll('.ant-table-thead th')].map((th) => Math.round(th.getBoundingClientRect().width))
+  // 列**内部**的对齐：速度列的「流」胶囊要落在同一条纵线上。
+  // 速度是「输出词元 ÷ 耗时」，位数随请求变，而这一块在单元格里居中 ——
+  // 数值轨道不定宽时整块宽度逐行不同，胶囊就跟着左右跳（站主 2026-09-23 反馈）。
+  // 判据：所有胶囊的左缘只允许有一个取值。用左缘而不是宽度：宽度本来就该一样，
+  // 而「在不在一条线上」问的是位置。
+  const uniqRound = (xs) => [...new Set(xs.map((v) => Math.round(v * 10) / 10))]
+  const pillLefts = uniqRound([...wrap.querySelectorAll('.ant-table-tbody .stream-pill')].map((el) => el.getBoundingClientRect().left))
+  // 数值只统计**流式行**里的：非流式行没有胶囊，它的数值本来就该自己居中
+  // （整块居中的结果），与流式行不在一条线上是设计如此，不是缺陷
+  const spdLefts = uniqRound(
+    [...wrap.querySelectorAll('.ant-table-tbody .spd-cell:has(.stream-pill) .spd')].map((el) => el.getBoundingClientRect().left),
+  )
+  const pillCount = wrap.querySelectorAll('.ant-table-tbody .stream-pill').length
   // 诊断用：每页条数是存在 localStorage 里的，读回来确认这轮真的切过去了 ——
   // 否则整套矩阵测的都是同一个 pageSize（第一版就踩了：9 组全是 20 行）
   let stored = 'N/A'
   try { stored = String(localStorage.getItem('${sizeKey}')) } catch (e) { stored = 'ERR' }
   const pagerText = (document.querySelector('.ant-pagination-options') || {}).textContent || ''
-  return JSON.stringify({ rows, cells: cells.length, cw, tw, overflow: overflow.slice(0, 8), overflowN: overflow.length, cellOver, cellOverList: cellOverList.slice(0, 6), cover, colW, stored, pagerText: pagerText.trim() })
+  return JSON.stringify({ rows, cells: cells.length, cw, tw, overflow: overflow.slice(0, 8), overflowN: overflow.length, cellOver, cellOverList: cellOverList.slice(0, 6), cover, colW, stored, pagerText: pagerText.trim(), pillLefts, spdLefts, pillCount })
 })()`
 
 let failed = 0
@@ -184,6 +197,16 @@ for (const w of widths) {
       d.cellOverList.map((x) => `第 ${x.col} 列宽 ${x.width} 溢出 ${x.over}px「${x.txt}」`).join(' | '),
     )
     check('横向滚到最右时右侧固定列不遮挡内容', d.cover <= 0 || d.cover === -1, d.cover > 0 ? `遮挡 ${d.cover}px` : '')
+    check(
+      '速度列的「流」胶囊都落在同一条纵线上',
+      d.pillCount < 2 || d.pillLefts.length === 1,
+      `${d.pillCount} 枚胶囊，左缘 ${d.pillLefts.length} 个取值：${d.pillLefts.slice(0, 6).join(' / ')}`,
+    )
+    check(
+      '速度列流式行的数值起点也一致',
+      d.spdLefts.length <= 1,
+      `数值左缘 ${d.spdLefts.length} 个取值：${d.spdLefts.slice(0, 6).join(' / ')}`,
+    )
   }
 }
 
