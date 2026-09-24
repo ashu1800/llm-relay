@@ -822,6 +822,52 @@ console.log('=== 请求日志列宽：测量锚点与模板必须对得上 ===')
       /:scroll="\{\s*x:\s*columnsTotal/.test(panelSrc),
       'scroll.x 与列宽来自两份定义时，横向滚动的边界会与实际不符',
     )
+
+    // ---- 下限与内容的相称性：**只报告，不判定**（2026-09-24）----
+    //
+    // 背景：ui-spec 第 17 条要求「每列按显示内容动态调整列宽」。机制是
+    // `取 max(下限, 内容所需宽度)`，所以**下限一旦偏高，那一列就永远宽** ——
+    // 量出来的内容宽度根本没机会生效。
+    //
+    // 渠道列就是这么坏掉的：下限 130 是 2026-09-16 人工拍的最坏情况常量，
+    // 2026-09-23 改成按内容量之后被原样留下。当前页渠道名只要 47px
+    //（+图标 24 +内边距 16 +呼吸 6 = 93）时列仍占 137px，**44px 全是空白**，
+    // 而同期其它列只空 28-34px。站主一眼看出「渠道列宽不对」。
+    //
+    // 为什么最终**没有**做成断言 —— 我试了四种判据，全都会误伤或漏判：
+    //   · 运行时绝对阈值 24px：全部列误判（正常列也空 30+px，因为 antd
+    //     按比例分配容器余量）
+    //   · 运行时绝对阈值 40px：放过真问题（旧代码渠道列空 38px 仍 PASS）
+    //   · 运行时「比其它列中位数高 X px」：实测只差 8px，同样漏掉
+    //   · 静态「下限 vs 表头+内边距」：把 model(76) / tokens(96) / speed(74)
+    //     一并判失败 —— 那些余量是内容真的需要（模型名很长、词元是两排数字）
+    //
+    // 根因是「合理余量」取决于该列的真实数据，静态看不出来，而运行时又因
+    // 余量分配而浮动。所以这里只把数字打出来供人核对 —— 站主当初就是
+    // 「一眼看出渠道列宽不对」，数字在输出里，下次改列宽时能直接对比。
+    // 运行时那一侧（scripts/check-log-columns.mjs）同样只报告各列空白量。
+    const headLabels = {
+      time: '请求时间', model: '模型', channel: '渠道', tokens: '词元',
+      elapsed: '任务耗时', cost: '费用', speed: '速度', status: '状态',
+      key: '密钥', action: '操作',
+    }
+    const measurePads = {}
+    for (const m of panelSrc.matchAll(/^\s{2}(\w+):\s*\{\s*sel:\s*'[^']+',\s*pad:\s*(\d+)/gm)) {
+      measurePads[m[1]] = Number(m[2])
+    }
+    const CELL_PAD_TOTAL = 16
+    const report = []
+    for (const m of boundsBlock[0].matchAll(/^\s{2}(\w+):\s*\[(\d+),\s*(\d+)\]/gm)) {
+      const key = m[1]
+      const label = headLabels[key]
+      if (!label) continue
+      const headW = Math.ceil(
+        [...label].reduce((s, ch) => s + (/[\u4e00-\u9fa5]/.test(ch) ? 14 : 8.4), 0),
+      )
+      const hardFloor = headW + CELL_PAD_TOTAL + (measurePads[key] || 0)
+      report.push(`${key} ${m[2]}(余 ${Number(m[2]) - hardFloor})`)
+    }
+    console.log(`  下限与硬下界之差（表头+内边距+图标）：${report.join(' / ')}`)
   }
 }
 

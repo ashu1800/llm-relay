@@ -51,6 +51,34 @@ if (ANCHORS.length < 6) {
   process.exit(1)
 }
 
+// 「列宽 vs 内容」判据要用的 (表头文字, 锚点, 固定前缀宽) 三元组。
+//
+// 这一份**从源码解析**而不是在脚本里抄：抄的那份会在源码改了锚点或 pad 之后
+// 静默失效（本文件上面那段注释已经为 ANCHORS 踩过一次同样的坑）。
+// CONTENT_MEASURE 的形态是 `key: { sel: '...', pad: N }`，键名与表头文字
+// 的对应关系来自 COL_LABELS。
+const COL_LABELS = {
+  model: '模型',
+  channel: '渠道',
+  tokens: '词元',
+  elapsed: '任务耗时',
+  cost: '费用',
+  speed: '速度',
+  key: '密钥',
+}
+const CONTENT_MEASURES = [
+  ...((panelSrcForKeys.match(/const CONTENT_MEASURE[\s\S]*?\n\}/) || [''])[0]).matchAll(
+    /(\w+):\s*\{\s*sel:\s*'([^']+)',\s*pad:\s*(\d+)/g,
+  ),
+]
+  .map((m) => ({ name: COL_LABELS[m[1]], sel: m[2], pad: Number(m[3]) }))
+  .filter((m) => m.name)
+if (CONTENT_MEASURES.length < 6) {
+  console.error(`读不到列宽测量项（只解析出 ${CONTENT_MEASURES.length} 项，需要 6 项以上）`)
+  process.exit(1)
+}
+
+
 const ver = await (await fetch('http://127.0.0.1:9222/json/version')).json()
 const ws = new WebSocket(ver.webSocketDebuggerUrl)
 await new Promise((r, j) => {
@@ -195,7 +223,88 @@ const PROBE = `(() => {
   let stored = 'N/A'
   try { stored = String(localStorage.getItem('${sizeKey}')) } catch (e) { stored = 'ERR' }
   const pagerText = (document.querySelector('.ant-pagination-options') || {}).textContent || ''
-  return JSON.stringify({ rows, cells: cells.length, cw, tw, overflow: overflow.slice(0, 8), overflowN: overflow.length, cellOver, cellOverList: cellOverList.slice(0, 6), cover, colW, stored, pagerText: pagerText.trim(), pillLefts, spdLefts, pillCount, tagOffsets, anchorColumns })
+  // 列宽 vs 内容所需宽度（2026-09-24 新增）。
+  //
+  // 上面那些判据全是「有没有被截断」，方向是**列太窄**。而反方向的问题
+  //（列比内容宽一大截）一样违反 ui-spec 第 17 条「按内容动态调整列宽」，
+  // 却一条断言都拦不住 —— 它看起来不像故障，只是「排版松」。
+  //
+  // 实测来源：渠道列的 [下限] 是 2026-09-16 人工拍的最坏情况常量 130，
+  // 2026-09-23 改成按内容量之后它被原样留下，于是当前页渠道名只要 47px
+  //（+图标 24 +内边距 16 +呼吸 6 = 93）时，列仍占 137px，**44px 全是空白**，
+  // 而同期其它列只空 5-10px。站主一眼看出来「渠道列宽不对」。
+  //
+  // 量出来供**报告**用（不做阈值判定 —— 原因见下方断言处的注释：
+  // 空白量随视口与内容浮动，没有稳定的门槛；真正的判据放在静态契约里）。
+  const contentNeed = {}
+  // 用**离屏 span** 量每个锚点里文字的真实宽度（2026-09-24 新增）。
+  //
+  // 为什么需要它：上面那条「没有一格内容被截断」用的是
+  // scrollWidth ≤ clientWidth，而 text-overflow: ellipsis 的列上
+  // 这条判据不敏感 —— 被省略号截断时 scrollWidth 会被压到接近 clientWidth。
+  // 实测（1280 视口、渠道名 CodingPlan）：clientW=74 / scrollW=75 判为「没溢出」，
+  // 而离屏量出的真实文字宽是 82px，名字明明被截了。
+  //
+  // 这个坑让渠道列的问题从一开始就查不出来：列宽不合适 → 名字被省略 →
+  // scrollWidth 也跟着变小 → 断言反而更「绿」。
+  //
+  // 做法：拿同一个元素的 computed font 建一个 nowrap 的离屏 span，量文字宽度，
+  // 再和该元素实际可用宽度（clientWidth）比。只对**文字类**锚点做
+  //（.chan-name / .key-tag / .spd-cell / .txt-cell 这类；图标/胶囊类的
+  //  .model-cell 内部还有子元素，文字宽不等于内容宽，不在此列）。
+  const textEllipsis = []
+  for (const m of ${JSON.stringify(CONTENT_MEASURES)}) {
+    if (!['渠道', '密钥', '速度', '费用'].includes(m.name)) continue
+    const els = [...wrap.querySelectorAll('.ant-table-tbody ' + m.sel)]
+    if (!els.length) continue
+    const probe = document.createElement('span')
+    const cs = getComputedStyle(els[0])
+    probe.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;left:-9999px;font:' + cs.font
+    document.body.appendChild(probe)
+    let worst = null
+    for (const el of els) {
+      const text = (el.innerText || '').trim()
+      if (!text) continue
+      probe.textContent = text
+      const need = Math.ceil(probe.getBoundingClientRect().width)
+      // 可用宽度取**单元格**而不是锚点自己：.txt-cell（费用）是 display:inline，
+      // 没有 clientWidth（恒为 0），拿它比会得出「需 73px 只有 0px」这种假失败。
+      // 单元格减去左右内边距才是内容真正能用的宽度。
+      const cell = el.closest('td')
+      let have
+      if (cell) {
+        const ccs = getComputedStyle(cell)
+        have = Math.floor(cell.clientWidth - parseFloat(ccs.paddingLeft || 0) - parseFloat(ccs.paddingRight || 0))
+      } else {
+        have = el.clientWidth
+      }
+      if (need > have + 1 && (!worst || need - have > worst.over)) {
+        worst = { col: m.name, text: text.slice(0, 20), need, have, over: need - have }
+      }
+    }
+    probe.remove()
+    if (worst) textEllipsis.push(worst)
+  }
+
+  for (const m of ${JSON.stringify(CONTENT_MEASURES)}) {
+    let max = 0
+    wrap.querySelectorAll('.ant-table-tbody ' + m.sel).forEach((el) => {
+      const w = Math.ceil(el.getBoundingClientRect().width)
+      if (w > max) max = w
+    })
+    if (max > 0) contentNeed[m.name] = max + m.pad
+  }
+  const headByTitle = {}
+  ;[...wrap.querySelectorAll('.ant-table-thead th')].forEach((th) => {
+    headByTitle[th.innerText.replace(/\\s+/g, ' ').trim()] = Math.round(th.getBoundingClientRect().width)
+  })
+  const slack = Object.keys(contentNeed).map((name) => ({
+    name,
+    need: contentNeed[name],
+    got: headByTitle[name] === undefined ? -1 : headByTitle[name],
+    slack: headByTitle[name] === undefined ? -1 : headByTitle[name] - contentNeed[name],
+  }))
+  return JSON.stringify({ rows, cells: cells.length, cw, tw, overflow: overflow.slice(0, 8), overflowN: overflow.length, cellOver, cellOverList: cellOverList.slice(0, 6), cover, colW, stored, pagerText: pagerText.trim(), pillLefts, spdLefts, pillCount, tagOffsets, anchorColumns, slack, textEllipsis })
 })()`
 
 let failed = 0
@@ -235,12 +344,38 @@ for (const w of widths) {
     // 「全通过」就是假的（库里有两万多条日志，不可能是数据不够）
     check(`每页条数生效（${ps} 行）`, d.rows === Number(ps), `实际 ${d.rows} 行，分页显示「${d.pagerText}」`)
     check('没有一格内容被截断', d.overflowN === 0, d.overflow.slice(0, 4).join(' | '))
+    // 省略号列的截断：上面那条对它们**不敏感**（scrollWidth 被省略号压小），
+    // 见 PROBE 里 textEllipsis 的注释。这里拿离屏量出的文字宽 vs 元素可用宽比。
+    check(
+      '省略号列的文字没有被截（离屏量宽判定）',
+      (d.textEllipsis || []).length === 0,
+      (d.textEllipsis || [])
+        .map((x) => `${x.col}「${x.text}」需 ${x.need}px 只有 ${x.have}px（差 ${x.over}px）`)
+        .join(' | '),
+    )
     check(
       '单元格自身没有横向溢出',
       d.cellOver === 0,
       d.cellOverList.map((x) => `第 ${x.col} 列宽 ${x.width} 溢出 ${x.over}px「${x.txt}」`).join(' | '),
     )
     check('横向滚到最右时右侧固定列不遮挡内容', d.cover <= 0 || d.cover === -1, d.cover > 0 ? `遮挡 ${d.cover}px` : '')
+    // 各列空白量的**报告**（不是判据）。
+    //
+    // 为什么不做成判据：我试过两种写法，都不可靠 ——
+    //   · 绝对阈值 24px：所有列都空 30+px（antd 按比例分配容器余量），全部误判
+    //   · 绝对阈值 40px：旧代码的渠道列空 38px，放过了真问题
+    //   · 相对中位数 10px：旧代码渠道列 38px vs 中位数 30px，只差 8px，同样漏掉
+    // 空白量随视口与当前页内容浮动，没有稳定的绝对或相对门槛。
+    //
+    // 真正能精确钉住的是**下限常量本身**（「某列的下限远高于它内容所需」
+    // 这种缺陷就写在那行常量里），那条由 frontend/scripts/check-contracts.mjs
+    // 静态检查守（源码即判据，不随渲染浮动）。
+    // 这里把实测空白打出来供人核对 —— 站主当初就是「一眼看出渠道列宽不对」，
+    // 数字留在输出里，下次改列宽时能立刻对比。
+    const slacks = (d.slack || []).filter((s) => s.slack >= 0)
+    if (slacks.length) {
+      console.log(`  各列空白 ${slacks.map((s) => `${s.name} ${s.slack}px`).join(' / ')}`)
+    }
     check(
       '速度列的「流」胶囊都落在同一条纵线上',
       d.pillCount < 2 || d.pillLefts.length === 1,
