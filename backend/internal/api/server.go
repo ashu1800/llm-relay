@@ -51,6 +51,14 @@ type Server struct {
 	keys      *keyCache
 	touchMu   sync.Mutex
 	lastTouch map[uint]time.Time
+
+	// ---- 管理台登录鉴权（无账号模型，详见 console_auth.go）----
+	// adminKeyHash 为 nil 表示鉴权关闭（未配置 RELAY_ADMIN_KEY）
+	adminKeyHash    []byte
+	adminKeyVersion []byte
+	sessionKey      []byte
+	sessionTTL      time.Duration
+	loginGuards     *loginLimiter
 }
 
 // New 构造 HTTP 层。
@@ -78,12 +86,14 @@ func New(deps *Deps) *Server {
 			}}))
 		}
 	}
-	return &Server{
+	srv := &Server{
 		deps:      deps,
 		startedAt: time.Now(),
 		keys:      newKeyCache(),
 		lastTouch: map[uint]time.Time{},
 	}
+	srv.initConsoleAuth(deps.Config, deps.Logger)
+	return srv
 }
 
 // Register 挂载全部路由。
@@ -108,13 +118,32 @@ func (s *Server) Register(r *gin.Engine) {
 		v1beta.POST("/models/*action", s.geminiGenerateContent)
 	}
 
-	// ---- 管理后台 API：本地自用，不做登录 ----
-	//
-	// 不做登录不等于可以不做来源校验：没有这道中间件，浏览器里任意一个网页
-	// 都能用表单提交触发管理操作（详见 sameOriginOnly 的说明）。
-	// limitAdminBody 给所有管理接口加上请求体上限 —— 这些接口的输入
-	// 全部来自网络，而原来只有转发链路设了上限。
-	admin := r.Group("/api/admin", sameOriginOnly(), limitAdminBody)
+	s.registerAdminRoutes(r)
+
+	s.registerStatic(r)
+}
+
+// registerAdminRoutes 挂载管理后台 API。
+//
+// 三层防线，从外到内：
+//   1. sameOriginOnly —— 拒绝来自其它网页的跨站请求（表单 CSRF 的主防线，
+//      见其注释）。没有登录时它几乎是唯一的防线，有了登录后依然必要。
+//   2. requireConsoleAuth —— 无账号模型的密钥登录（console_auth.go）。
+//      未配置 RELAY_ADMIN_KEY 时放行一切，保持旧部署行为。
+//   3. limitAdminBody —— 管理接口请求体上限，输入全部来自网络。
+//
+// 登录/状态三个接口挂在独立的公开子组上：它们必须在鉴权之前可达，
+// 否则永远拿不到会话。公开子组同样受 1、3 两层约束 —— 登录接口的
+// 输入同样来自网络。抽成独立方法而非留在 Register 里，是让测试能
+// 挂载与管理环境完全相同的路由接线（含中间件顺序）。
+func (s *Server) registerAdminRoutes(r *gin.Engine) {
+	adminPublic := r.Group("/api/admin", sameOriginOnly(), limitAdminBody)
+	{
+		adminPublic.POST("/auth/login", s.consoleLogin)
+		adminPublic.POST("/auth/logout", s.consoleLogout)
+		adminPublic.GET("/auth/status", s.consoleAuthStatus)
+	}
+	admin := r.Group("/api/admin", sameOriginOnly(), s.requireConsoleAuth(), limitAdminBody)
 	{
 		admin.GET("/system/info", s.systemInfo)
 		registerChannelRoutes(admin, s)
@@ -126,11 +155,11 @@ func (s *Server) Register(r *gin.Engine) {
 
 		registerProxyRoutes(admin, s)
 		registerStatsRoutes(admin, s)
-		// 实时推送（WebSocket）：看板数值与请求日志由它主动推给前端
+		// 实时推送（WebSocket）：看板数值与请求日志由它主动推给前端。
+		// 升级握手前会先过 requireConsoleAuth —— 浏览器发起 WebSocket
+		// 时自动携带同源 Cookie，登录态随握手一起送达，前端无需额外传参
 		admin.GET("/live", s.liveSocket)
 	}
-
-	s.registerStatic(r)
 }
 
 // registerStatic 挂载嵌入的前端资源，并为前端路由提供 SPA 回退。
@@ -202,6 +231,9 @@ func (s *Server) systemInfo(c *gin.Context) {
 		"payload_store": s.deps.Config.Relay.PayloadStorageMode,
 		// 前端据此显示持久告警，而不是只在启动日志里提一句
 		"using_default_secret": UsingDefaultSecret(s.deps.Config.Security.Secret),
+		// 管理台登录鉴权状态：未启用时前端同样显示持久告警。
+		// 只暴露布尔位，密钥本身（哪怕哈希）永远不随接口出去
+		"console_auth_enabled": s.consoleAuthEnabled(),
 	})
 }
 

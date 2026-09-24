@@ -10,6 +10,10 @@
 # 要么先判断「现在在不在这个窗口里」再决定期望值 —— 写死 09:00-12:00 的话，
 # 这个脚本在别的时间跑就会莫名其妙地失败。
 set -uo pipefail
+
+# 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
+source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
+
 BASE="http://127.0.0.1:8888"
 API="$BASE/api/admin"
 P() { docker exec -i llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "$1"; }

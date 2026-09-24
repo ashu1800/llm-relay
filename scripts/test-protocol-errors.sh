@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -uo pipefail
+
+# 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
+source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
+
 BASE="http://127.0.0.1:8888"
 echo "=== Anthropic 端点缺鉴权（应为 type=error 结构）==="
 curl -s -m 20 -X POST "$BASE/v1/messages" -H 'Content-Type: application/json' \

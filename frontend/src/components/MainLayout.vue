@@ -12,9 +12,11 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   BulbOutlined,
-  BulbFilled
+  BulbFilled,
+  LogoutOutlined
 } from '@ant-design/icons-vue'
 import { useThemeStore } from '@/stores/theme'
+import { useAuthStore } from '@/stores/auth'
 import { message } from 'ant-design-vue'
 import { onLive } from '@/composables/useLive'
 import { startTabPulse } from '@/utils/tabPulse'
@@ -23,6 +25,14 @@ import { moneyText } from '@/utils/money'
 const route = useRoute()
 const router = useRouter()
 const themeStore = useThemeStore()
+const authStore = useAuthStore()
+
+// 退出登录：服务端清掉会话 Cookie，本地状态随之置否，回登录页。
+// logout 内部已保证「请求失败也清本地状态」—— 会话可能早已过期。
+async function logout() {
+  await authStore.logout()
+  router.push('/login')
+}
 
 // 主题切换带上点击坐标：新主题从灯泡位置圆形扩散铺满全屏
 // （动画本身在 themeStore.toggleWithBurst，这里只负责把事件坐标递过去）
@@ -69,6 +79,10 @@ onLive('budget_alert', (a: BudgetAlert) => {
 // 原来只在启动日志里警告一句，容器日志一滚就看不见了 ——
 // 这种事必须持续可见，所以放在界面上。
 const usingDefaultSecret = ref(false)
+
+// 登录鉴权未启用的提示（后端 /system/info 的 console_auth_enabled）。
+// 服务绑在回环上时这是合理配置；一旦放到公网，管理接口等于对所有人敞开。
+const authDisabled = ref(false)
 
 // 后端版本号，显示在侧栏底部。
 //
@@ -136,9 +150,12 @@ onMounted(() => {
   // /system/info —— 每次进页面白打一个重复请求（窄屏适配改造时留下的）。
   // 版本号搭这个请求顺路带回来，不额外发一次。
   api
-    .get<{ using_default_secret?: boolean; version?: string }>('/system/info')
+    .get<{ using_default_secret?: boolean; console_auth_enabled?: boolean; version?: string }>('/system/info')
     .then((info) => {
       usingDefaultSecret.value = !!info.using_default_secret
+      // 登录鉴权未启用时持续横幅提醒：只绑回环的旧部署不受影响，
+      // 但公网部署下这就是把管理台裸奔给整个互联网
+      authDisabled.value = info.console_auth_enabled === false
       // 构建时没传 VERSION 会是 "dev"，照常显示 —— 它本身就是一个有用的信号
       // （说明这次构建是本地随手构建的，不是 install.sh 产出的）
       appVersion.value = (info.version || '').trim()
@@ -214,6 +231,12 @@ onUnmounted(() => {
               <MenuFoldOutlined v-else class="console-menu-icon" aria-hidden="true" />
               <span v-if="!collapsed" class="console-menu-label">收起侧栏</span>
             </button>
+            <!-- 退出登录（无账号模型：清掉会话 Cookie 回登录页）。
+                 收起态同样只留图标，aria-label 保证动作可读 -->
+            <button class="console-menu-item" aria-label="退出登录" @click="logout">
+              <LogoutOutlined class="console-menu-icon" aria-hidden="true" />
+              <span v-if="!collapsed" class="console-menu-label">退出登录</span>
+            </button>
             <button
               class="nav-icon-btn"
               :title="themeStore.isDark ? '切换浅色' : '切换深色'"
@@ -242,6 +265,20 @@ onUnmounted(() => {
               <template #description>
                 请设置环境变量 <code>RELAY_SECRET</code> 为一段随机字符串后重启服务。
                 注意：更换密钥后，已保存的渠道密钥需要用原密钥重新加密，否则会解不开。
+                <router-link to="/console/system">前往系统设置</router-link>
+              </template>
+            </a-alert>
+            <a-alert
+              v-if="authDisabled"
+              type="error"
+              show-icon
+              banner
+              class="secret-banner"
+              message="管理后台登录鉴权未启用"
+            >
+              <template #description>
+                未设置 <code>RELAY_ADMIN_KEY</code>，任何能访问本服务的人都可以打开管理台。
+                仅绑定回环（127.0.0.1）的本地部署不受影响；部署到公网前请务必设置该环境变量并重启服务。
                 <router-link to="/console/system">前往系统设置</router-link>
               </template>
             </a-alert>

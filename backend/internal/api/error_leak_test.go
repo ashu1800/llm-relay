@@ -20,8 +20,8 @@ import (
 //	ERROR: duplicate key value violates unique constraint "idx_channel_model"
 //	DETAIL: Key (channel_id, public_name)=(3, gpt-4o) already exists. (SQLSTATE 23505)
 //
-// 表名、列名、索引名与**被拒的实际列值**全在里面。管理接口没有鉴权
-// （设计如此，靠同源中间件兜底），回显它等于额外暴露库结构与被拒数据。
+// 表名、列名、索引名与**被拒的实际列值**全在里面。管理接口即便有登录鉴权，
+// 回显它也等于额外暴露库结构与被拒数据，没有任何收益。
 func TestInternalErrorHidesDatabaseDetails(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

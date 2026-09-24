@@ -48,6 +48,8 @@ const report = ref<{ created: Record<string, number>; skipped: Record<string, nu
 const runtimeRows = [
   { key: 'listen', label: '监听地址' },
   { key: 'mode', label: '运行模式' },
+  { key: 'console_auth_enabled', label: '管理台登录鉴权' },
+  { key: 'session_ttl_hours', label: '登录会话有效期（小时）' },
   { key: 'log_level', label: '日志级别' },
   { key: 'log_format', label: '日志格式' },
   { key: 'upstream_timeout_sec', label: '上游总超时（秒）' },
@@ -299,6 +301,31 @@ onMounted(load)
     </section>
 
     <section class="panel">
+      <div class="panel-title">登录认证</div>
+      <!-- 登录鉴权的现状总览。密钥永远不回显（后端只存哈希、接口只出布尔位），
+           这里回答的是三件事：开没开、会话多久、想改去哪里改 -->
+      <div class="auth-line">
+        <a-tag :color="runtime.console_auth_enabled ? 'green' : 'red'">
+          {{ runtime.console_auth_enabled ? '已启用' : '未启用' }}
+        </a-tag>
+        <span v-if="runtime.console_auth_enabled" class="dim">
+          会话有效期 <span class="mono">{{ runtime.session_ttl_hours }}</span> 小时，登录限流为 15 分钟内错 5 次锁定
+        </span>
+        <span v-else class="dim">
+          管理接口没有任何登录门槛，仅绑定回环（127.0.0.1）时方可接受；公网部署必须启用
+        </span>
+      </div>
+      <div class="note">
+        本站采用<strong>无账号的密钥登录</strong>：不设用户名、没有注册与找回，全站只有一把管理密钥。
+        它来自服务器环境变量 <span class="mono">RELAY_ADMIN_KEY</span>（长度至少 16 位），只在启动时取哈希，
+        不落库、不进配置备份。登录成功后会话保存在 HttpOnly Cookie 中；
+        <strong>轮换密钥并重启后，所有已登录会话立即失效</strong>，这是无状态会话唯一的吊销手段。
+        会话时长可用 <span class="mono">RELAY_SESSION_TTL</span>（Go duration 写法，默认 168h，上限 720h）调整。
+        经 HTTPS 反代部署时登录 Cookie 自动附加 Secure 标志。
+      </div>
+    </section>
+
+    <section class="panel">
       <div class="panel-title">配置备份</div>
       <div class="note">
         导出渠道、模型、绑定、模板、密钥与手工定价，用于换机或重装后快速恢复。
@@ -450,6 +477,7 @@ onMounted(load)
 .muted { color: var(--color-text-secondary); }
 .dim { color: var(--color-text-secondary); font-size: 12px; }
 .db-line { margin-top: 12px; display: flex; align-items: center; gap: 8px; }
+.auth-line { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
 .note-panel .note { font-size: 13px; line-height: 1.9; color: var(--color-text-secondary); }
 .note { font-size: 13px; line-height: 1.9; color: var(--color-text-secondary); }
 .backup-note {

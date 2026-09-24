@@ -99,8 +99,19 @@ if [[ "${1:-}" == "--verify" || "${1:-}" == "-v" ]]; then
   # 版本号取自**运行中的服务**而不是 .env —— .env 里那个是「上次构建时用的值」，
   # 而这个接口回的是真正跑着的二进制里编进去的版本（见 Dockerfile 的 -ldflags）。
   # 两者不一致本身就是个信号：说明构建之后有人改过 .env 但没重新部署。
+  #
+  # 管理接口有登录鉴权（RELAY_ADMIN_KEY）：先读已安装 .env 里的密钥登录一次，
+  # 拿会话 Cookie 再取系统信息。密钥没配（鉴权关闭）时直接取，两种情况都兼容。
   printf ' 服务版本   : '
-  SYSINFO="$(curl -fsS -m 5 "http://127.0.0.1:8888/api/admin/system/info" 2>/dev/null || true)"
+  VERIFY_ENV="$INSTALL_DIR/deploy/.env"
+  VERIFY_JAR="$(mktemp)"
+  VERIFY_KEY="$(grep '^RELAY_ADMIN_KEY=' "$VERIFY_ENV" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+  if [[ -n "$VERIFY_KEY" ]]; then
+    curl -fsS -m 5 -c "$VERIFY_JAR" -X POST "http://127.0.0.1:8888/api/admin/auth/login" \
+      -H 'Content-Type: application/json' -d "{\"key\":\"$VERIFY_KEY\"}" >/dev/null 2>&1 || true
+  fi
+  SYSINFO="$(curl -fsS -m 5 -b "$VERIFY_JAR" "http://127.0.0.1:8888/api/admin/system/info" 2>/dev/null || true)"
+  rm -f "$VERIFY_JAR"
   if [[ -n "$SYSINFO" ]]; then
     echo "$SYSINFO" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("version") or "?")' 2>/dev/null \
       || echo "(响应解析失败)"
@@ -298,8 +309,13 @@ if [[ ! -f "$ENV_FILE" ]]; then
   log "生成 $ENV_FILE"
   DB_PASSWORD="$(openssl rand -hex 24)"
   RELAY_SECRET="$(openssl rand -hex 24)"
+  # 管理台登录密钥与加密主密钥相互独立、各自随机：登录密钥出现在
+  # 每个登录请求里，泄露面更大，绝不能图省事两处共用一个值
+  RELAY_ADMIN_KEY="$(openssl rand -hex 24)"
+  RELAY_ADMIN_KEY_PRINT="$RELAY_ADMIN_KEY"
   sed -e "s|^DB_PASSWORD=.*|DB_PASSWORD=$DB_PASSWORD|" \
       -e "s|^RELAY_SECRET=.*|RELAY_SECRET=$RELAY_SECRET|" \
+      -e "s|^RELAY_ADMIN_KEY=.*|RELAY_ADMIN_KEY=$RELAY_ADMIN_KEY|" \
       "$INSTALL_DIR/deploy/.env.example" > "$ENV_FILE"
   chmod 600 "$ENV_FILE"
 elif ! grep -q '^DB_PASSWORD=.\+' "$ENV_FILE"; then
@@ -321,8 +337,17 @@ elif ! grep -q '^DB_PASSWORD=.\+' "$ENV_FILE"; then
     warn "补齐了缺失的 RELAY_SECRET（原配置里没有）"
     warn "若渠道已用内置默认密钥加密过，需要运行轮换工具迁移，否则渠道会认证失败"
   fi
+  # 登录密钥同样只补缺失；与主密钥不同，它不落库，换新值只影响「下次登录」
+  if grep -q '^RELAY_ADMIN_KEY=.\+' "$TMP_ENV"; then
+    RELAY_ADMIN_KEY="$(grep '^RELAY_ADMIN_KEY=' "$TMP_ENV" | head -1 | cut -d= -f2-)"
+  else
+    RELAY_ADMIN_KEY="$(openssl rand -hex 24)"
+    RELAY_ADMIN_KEY_PRINT="$RELAY_ADMIN_KEY"
+    warn "补齐了缺失的 RELAY_ADMIN_KEY（管理台登录鉴权此前处于关闭状态）"
+  fi
   sed -e "s|^DB_PASSWORD=.*|DB_PASSWORD=$DB_PASSWORD|" \
       -e "s|^RELAY_SECRET=.*|RELAY_SECRET=$RELAY_SECRET|" \
+      -e "s|^RELAY_ADMIN_KEY=.*|RELAY_ADMIN_KEY=$RELAY_ADMIN_KEY|" \
       "$INSTALL_DIR/deploy/.env.example" > "$ENV_FILE"
   while IFS= read -r line; do
     key="${line%%=*}"
@@ -338,6 +363,13 @@ else
     printf 'RELAY_SECRET=%s\n' "$(openssl rand -hex 24)" >> "$ENV_FILE"
     warn "已为 $ENV_FILE 补上 RELAY_SECRET（此前缺失，渠道密钥用的是公开默认密钥）"
     warn "已有渠道需要用 scripts/rotate-secret 迁移，否则会认证失败"
+  fi
+  # 同样补上管理台登录密钥：老配置没有它时登录鉴权是关闭的
+  if ! grep -q '^RELAY_ADMIN_KEY=.\+' "$ENV_FILE"; then
+    RELAY_ADMIN_KEY="$(openssl rand -hex 24)"
+    printf 'RELAY_ADMIN_KEY=%s\n' "$RELAY_ADMIN_KEY" >> "$ENV_FILE"
+    RELAY_ADMIN_KEY_PRINT="$RELAY_ADMIN_KEY"
+    warn "已为 $ENV_FILE 补上 RELAY_ADMIN_KEY（管理台登录鉴权此前处于关闭状态）"
   fi
 fi
 
@@ -765,6 +797,14 @@ else
 fi
 echo "------------------------------------------------------------"
 echo " 访问地址   : http://localhost:$PORT"
+# 管理台登录密钥：安装时（重新）生成过就当面打印出来，别让人去 .env 里翻；
+# 没生成过（用户自设）则只提示位置。登录页在 http://<地址>/login。
+if [[ -n "${RELAY_ADMIN_KEY_PRINT:-}" ]]; then
+  echo " 管理密钥   : $RELAY_ADMIN_KEY_PRINT"
+  echo "              （打开管理台时输入它登录；妥善保存，泄露后在 .env 轮换并重启）"
+else
+  echo " 管理密钥   : 见 $ENV_FILE 中的 RELAY_ADMIN_KEY（打开管理台时输入它登录）"
+fi
 if [[ "${DB_READY:-no}" == "yes" ]]; then
   echo " 就绪检查   : /healthz 与 /readyz 均通过（进程活着且数据库可连）"
 else
@@ -786,7 +826,7 @@ fi
 PUB_BIND="$(ss -ltn 2>/dev/null | awk -v p=":$PORT" '$4 ~ p {print $4}' | head -1 | sed 's/^[^:]*://')"
 case "$PUB_BIND" in
   ""|127.0.0.1|"::1"|localhost)
-    echo " 局域网访问 : 在 deploy/.env 设 SERVER_HOST=0.0.0.0 后重启（管理接口无鉴权，自行加防火墙）" ;;
+    echo " 局域网访问 : 在 deploy/.env 设 SERVER_HOST=0.0.0.0 后重启（确保已设 RELAY_ADMIN_KEY，公网建议再加反代 + HTTPS）" ;;
   0.0.0.0|"::*")
     [[ -n "$WSL_IP" ]] && echo " 局域网地址 : http://$WSL_IP:$PORT" ;;
   *)

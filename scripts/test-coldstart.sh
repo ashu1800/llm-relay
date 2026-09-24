@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -uo pipefail
+
+# 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
+source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
+
 cd /opt/llm-relay/deploy || exit 1
 
 echo "=== 冷启动前的数据基线 ==="

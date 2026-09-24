@@ -6,6 +6,10 @@
 # 拒绝 OpenAI 形状的请求，并在漏掉 alt=sse 时返回 JSON 数组而不是 SSE。
 # 因此「客户端拿到正常分片流」本身就证明路径与载荷都转对了。
 set -uo pipefail
+
+# 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
+source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
+
 BASE="http://127.0.0.1:8888"
 API="$BASE/api/admin"
 MOCK="http://127.0.0.1:9998"

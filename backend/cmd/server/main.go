@@ -139,6 +139,13 @@ func run() error {
 	gin.SetMode(ginMode(cfg.Server.Mode))
 	engine := gin.New()
 	engine.Use(gin.Recovery(), requestLogger(logger))
+	// 可信反向代理：管理台登录限流按客户端 IP 计数，而经反代部署时
+	// 请求的远端地址是代理本身 —— Gin 只有对可信来源才会采信
+	// X-Forwarded-For，否则攻击者伪造该头部就能让每个请求都像新 IP，
+	// 把限流绕成摆设（默认值与校验见 config.ServerConfig.TrustedProxies）
+	if err := engine.SetTrustedProxies(cfg.Server.TrustedProxies); err != nil {
+		return fmt.Errorf("配置可信代理失败: %w", err)
+	}
 
 	srv := api.New(&api.Deps{
 		Config:  cfg,

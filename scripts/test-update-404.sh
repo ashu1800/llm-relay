@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # 不存在的 ID 做更新，应当返回 404，而不是谎报「更新成功」
 set -uo pipefail
+
+# 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
+source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
+
 BASE=http://127.0.0.1:8888/api/admin
 pass=0; fail=0
 chk() {

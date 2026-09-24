@@ -6,6 +6,10 @@
 # 拒绝 OpenAI 形状的请求（未知字段、缺 max_tokens、system 在 messages 里）。
 # 所以「转发成功」本身就证明请求被转换了，而不是被一个宽容的 mock 放过。
 set -uo pipefail
+
+# 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
+source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
+
 BASE="http://127.0.0.1:8888"
 API="$BASE/api/admin"
 MOCK="http://127.0.0.1:9998"

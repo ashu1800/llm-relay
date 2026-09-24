@@ -19,16 +19,33 @@ type Config struct {
 	Log      LogConfig      `yaml:"log"`
 }
 
-// SecurityConfig 保管加密主密钥与出站凭据。
+// SecurityConfig 保管加密主密钥、管理台登录密钥与出站凭据。
 type SecurityConfig struct {
 	// Secret 用于 AES-GCM 加密上游渠道密钥；生产环境务必通过 RELAY_SECRET 注入。
 	Secret string `yaml:"secret"`
+	// AdminKey 是管理后台的登录密钥（无账号模型：全站只有这一把）。
+	// 为空表示关闭管理台登录鉴权 —— 仅建议在「只绑回环」的本地部署下使用；
+	// 公网部署必须设置，否则管理接口（含渠道密钥与调用日志）对外裸奔。
+	// 密钥本身不落库：启动时只算哈希，登录时常数时间比对。
+	AdminKey string `yaml:"admin_key"`
+	// SessionTTL 是管理台登录会话的有效期，默认 168h（7 天）。
+	// 登录签发的会话令牌在签发时刻就带上了绝对过期时间，进程重启不影响它。
+	SessionTTL time.Duration `yaml:"session_ttl"`
 }
 
 type ServerConfig struct {
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"`
 	Mode string `yaml:"mode"` // debug | release
+	// TrustedProxies 是可信反向代理的地址列表，交给 gin.SetTrustedProxies。
+	// 登录限流按客户端 IP 计数，而经反代部署时请求的远端地址是代理本身，
+	// 真实 IP 在 X-Forwarded-For 里 —— 只有来自可信代理的该头部才会被采信，
+	// 否则攻击者可以伪造头部、每个请求换一个假 IP 把限流绕成摆设。
+	//
+	// 默认只信回环：覆盖最常见的「nginx/caddy 与本服务同机」的部署；
+	// 反代在别的机器上时在这里列出它的地址。直连部署（无代理）不受影响。
+	// 传空列表表示一个都不信，此时客户端 IP 取 TCP 远端地址。
+	TrustedProxies []string `yaml:"trusted_proxies"`
 }
 
 // Addr 返回 Gin 监听地址。
@@ -82,13 +99,16 @@ type LogConfig struct {
 
 // Default 返回内置默认值。
 func Default() *Config {
-	return &Config{
+	cfg := &Config{
 		Server: ServerConfig{Host: "0.0.0.0", Port: 8888, Mode: "release"},
 		Database: DatabaseConfig{
 			Host: "127.0.0.1", Port: 5432, User: "llmrelay",
 			Password: "", DBName: "llm_relay", SSLMode: "disable", TimeZone: "UTC",
 		},
-		Security: SecurityConfig{Secret: "llm-relay-dev-secret-change-me"},
+		Security: SecurityConfig{
+			Secret:     "llm-relay-dev-secret-change-me",
+			SessionTTL: 168 * time.Hour,
+		},
 		Relay: RelayConfig{
 			UpstreamTimeout:    300 * time.Second,
 			FirstByteTimeout:   120 * time.Second,
@@ -106,6 +126,10 @@ func Default() *Config {
 		},
 		Log: LogConfig{Level: "info", Format: "text"},
 	}
+	// TrustedProxies 不能写进上面的字面量后统一返回 —— 切片是可变值，
+	// 两个调用方拿到同一底层数组会互相改写；每次现造一份。
+	cfg.Server.TrustedProxies = []string{"127.0.0.1", "::1"}
+	return cfg
 }
 
 // Load 读取配置文件并叠加环境变量覆盖。
@@ -140,6 +164,7 @@ func applyEnv(c *Config) {
 	setStr(&c.Server.Host, "SERVER_HOST")
 	setInt(&c.Server.Port, "SERVER_PORT")
 	setStr(&c.Server.Mode, "GIN_MODE")
+	setCsv(&c.Server.TrustedProxies, "SERVER_TRUSTED_PROXIES")
 
 	setStr(&c.Database.Host, "DB_HOST")
 	setInt(&c.Database.Port, "DB_PORT")
@@ -161,6 +186,11 @@ func applyEnv(c *Config) {
 	setDuration(&c.Relay.RetrySameUpstreamDelay, "RELAY_RETRY_SAME_UPSTREAM_DELAY")
 
 	setStr(&c.Security.Secret, "RELAY_SECRET")
+	// 管理台登录密钥与会话时长。密钥缺失不报错（保持旧部署可升级），
+	// 但「鉴权未启用」会体现在启动日志与 /api/admin/system/info 里，
+	// 让界面能持续提醒 —— 与默认加密密钥的处理是同一个思路。
+	setStr(&c.Security.AdminKey, "RELAY_ADMIN_KEY")
+	setDuration(&c.Security.SessionTTL, "RELAY_SESSION_TTL")
 
 	setStr(&c.Log.Level, "LOG_LEVEL")
 	setStr(&c.Log.Format, "LOG_FORMAT")
@@ -177,6 +207,7 @@ func envKeys() map[string]string {
 		"host":                         "SERVER_HOST",
 		"port":                         "SERVER_PORT",
 		"mode":                         "GIN_MODE",
+		"trusted_proxies":              "SERVER_TRUSTED_PROXIES",
 		"log_level":                    "LOG_LEVEL",
 		"log_format":                   "LOG_FORMAT",
 		"upstream_timeout_sec":         "RELAY_UPSTREAM_TIMEOUT",
@@ -190,6 +221,8 @@ func envKeys() map[string]string {
 		"default_rpm":                  "RELAY_DEFAULT_RPM",
 		"retry_same_upstream_delay_ms": "RELAY_RETRY_SAME_UPSTREAM_DELAY",
 		"secret":                       "RELAY_SECRET",
+		"console_auth_enabled":         "RELAY_ADMIN_KEY",
+		"session_ttl_hours":            "RELAY_SESSION_TTL",
 		"database":                     "DB_HOST / DB_PORT / DB_USER / DB_PASSWORD / DB_NAME / DB_SSLMODE / DB_TIMEZONE",
 	}
 }
@@ -200,6 +233,26 @@ func EnvKeys() map[string]string { return envKeys() }
 func (c *Config) validate() error {
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port 非法: %d", c.Server.Port)
+	}
+	// 管理密钥的强度在启动时就地卡死，而不是等到被暴力破解才后悔：
+	// 公网上的登录接口面对的是无限次的自动化尝试，太短的密钥（哪怕有
+	// 限流）在时间尺度上仍然守不住。install.sh 生成的 48 位随机值远超门槛。
+	if key := c.Security.AdminKey; key != "" {
+		if key == "CHANGE_ME" {
+			return fmt.Errorf("security.admin_key 还是占位值 CHANGE_ME，请设置真实的管理密钥（deploy/.env 中 RELAY_ADMIN_KEY）")
+		}
+		if len(key) < 16 {
+			return fmt.Errorf("security.admin_key 长度不足 16 位（当前 %d 位），公网部署会被暴力破解；建议使用随机长字符串", len(key))
+		}
+		if key == c.Security.Secret {
+			return fmt.Errorf("security.admin_key 不能与加密主密钥（security.secret）相同：登录密钥出现在每个请求里，泄露面更大，两者共用等于把主密钥交给网络")
+		}
+	}
+	switch {
+	case c.Security.SessionTTL <= 0:
+		return fmt.Errorf("security.session_ttl 必须为正，当前: %s", c.Security.SessionTTL)
+	case c.Security.SessionTTL > 720*time.Hour:
+		return fmt.Errorf("security.session_ttl 不应超过 720h（30 天），当前: %s", c.Security.SessionTTL)
 	}
 	switch c.Relay.PayloadStorageMode {
 	case "all", "errors", "none":
@@ -248,4 +301,20 @@ func setDuration(dst *time.Duration, key string) {
 		return
 	}
 	*dst = d
+}
+
+// setCsv 读取逗号分隔的字符串列表（空白项剔除）。
+// 变量未设置时不改动默认值；设为空串则清空列表（= 一个代理都不信）。
+func setCsv(dst *[]string, key string) {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return
+	}
+	items := []string{}
+	for _, part := range strings.Split(v, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			items = append(items, p)
+		}
+	}
+	*dst = items
 }

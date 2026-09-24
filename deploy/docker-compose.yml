@@ -99,15 +99,19 @@ services:
         condition: service_healthy
     environment:
       # host 模式下这就是**宿主侧**的实际绑定地址（没有 docker-proxy 转译了）。
-      # 安全默认保持与原 ports 的「127.0.0.1:8888:8888」同义：只绑回环 ——
-      # 管理接口没有登录鉴权，绑 0.0.0.0 会把渠道密钥与调用日志暴露给局域网。
-      # 确需局域网访问（手机/别的机器）时，在 .env 设 SERVER_HOST=0.0.0.0
-      # 并自行加防火墙。
+      # 部署到公网时改 0.0.0.0 前必须先设好 RELAY_ADMIN_KEY（登录鉴权），
+      # 并建议加反向代理 + HTTPS。
       SERVER_HOST: ${SERVER_HOST:-127.0.0.1}
       SERVER_PORT: 8888
       # 渠道密钥的加密主密钥。缺失会退回内置默认值（公开可知），
       # 因此这里不给默认值，让配置缺失在安装阶段就暴露出来。
       RELAY_SECRET: ${RELAY_SECRET:?请在 .env 中设置 RELAY_SECRET}
+      # 管理台登录密钥。留空表示关闭登录鉴权（旧部署兼容），
+      # 但启动日志与界面横幅会持续提醒；公网部署必须设置。
+      RELAY_ADMIN_KEY: ${RELAY_ADMIN_KEY:-}
+      # 登录会话有效期（默认 168h）与可信反向代理（默认只信回环）
+      RELAY_SESSION_TTL: ${RELAY_SESSION_TTL:-168h}
+      SERVER_TRUSTED_PROXIES: ${SERVER_TRUSTED_PROXIES:-127.0.0.1,::1}
       GIN_MODE: release
       # host 模式下没有容器 DNS，数据库走宿主回环的 15432
       # （postgres 把 5432 发布在那里，见 postgres 段的注释）

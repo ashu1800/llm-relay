@@ -54,6 +54,19 @@ else
   log "已生成新的加密主密钥"
 fi
 
+# 管理台登录密钥（无账号模型）：重装沿用原值，首次安装随机生成。
+# 与加密主密钥相互独立 —— 登录密钥出现在每个登录请求里，泄露面更大，
+# 两处绝不能共用同一个值
+ADMIN_KEY_GENERATED=no
+if [ -f "$ENV_FILE" ] && grep -q "^RELAY_ADMIN_KEY=.\+" "$ENV_FILE"; then
+  RELAY_ADMIN_KEY="$(grep '^RELAY_ADMIN_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d "\"'[[:space:]]")"
+  log "复用已有配置中的管理台登录密钥"
+else
+  RELAY_ADMIN_KEY="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  ADMIN_KEY_GENERATED=yes
+  log "已生成新的管理台登录密钥"
+fi
+
 # ---------------------------------------------------------------- 依赖安装
 log "检查系统依赖"
 export DEBIAN_FRONTEND=noninteractive
@@ -151,6 +164,9 @@ SERVER_HOST=${BIND_ADDR}
 # 渠道密钥的加密主密钥。缺失会退回程序内置的公开默认值，等于没有加密
 RELAY_SECRET=${RELAY_SECRET}
 
+# 管理台登录密钥：浏览器打开管理台时输入它登录（无账号模型）
+RELAY_ADMIN_KEY=${RELAY_ADMIN_KEY}
+
 DB_HOST=127.0.0.1
 DB_PORT=5432
 DB_NAME=${DB_NAME}
@@ -213,14 +229,15 @@ if [ "$OK" = "1" ]; then
   echo "  管理后台: http://localhost:${APP_PORT}"
   echo "  监听地址: ${BIND_ADDR}:${APP_PORT}"
   echo "  配置文件: ${ENV_FILE}"
+  echo "  管理密钥: ${RELAY_ADMIN_KEY}（打开管理台时输入它登录）"
+  [ "$ADMIN_KEY_GENERATED" = "no" ] || echo "            （本次新生成，请妥善保存；泄露后在 ${ENV_FILE} 轮换并重启）"
   echo
   echo "  查看日志: journalctl -u ${SERVICE} -f"
   echo "  重启服务: systemctl restart ${SERVICE}"
   echo "  停止服务: systemctl stop ${SERVICE}"
   if [ "${BIND_ADDR}" != "127.0.0.1" ] && [ "${BIND_ADDR}" != "localhost" ]; then
     echo
-    warn "当前绑定在 ${BIND_ADDR}，管理接口没有鉴权，同网段可读取日志与密钥。"
-    warn "若只需本机访问，建议改成 BIND_ADDR=127.0.0.1 后重启。"
+    warn "当前绑定在 ${BIND_ADDR}，管理台已由 RELAY_ADMIN_KEY 保护；公网部署建议再加反向代理 + HTTPS。"
   fi
 else
   systemctl status "$SERVICE" --no-pager -l | head -20 || true

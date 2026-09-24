@@ -6,6 +6,7 @@
 // 断线重连用指数退避（1s 起，上限 15s）：后端重启时，
 // 一堆标签页同时以固定间隔重连会把刚起来的服务再打一遍。
 import { onUnmounted, ref } from 'vue'
+import { useAuthStore } from '@/stores/auth'
 
 type Handler = (data: any) => void
 
@@ -121,6 +122,11 @@ function connect() {
 
 function scheduleReconnect() {
   if (reconnectTimer !== null) return
+  // 未登录（或会话已过期）时不重连：/api/admin/live 在服务端先过鉴权中间件，
+  // 401 的握手再怎么重试也不会成功，只会以指数退避的节奏空转刷日志。
+  // 登录成功是整页跳转，页面重新挂载订阅时这里会以新会话重新建连。
+  const auth = useAuthStore()
+  if (auth.statusLoaded && auth.enabled && !auth.authenticated) return
   const delay = Math.min(15000, 1000 * Math.pow(2, retry))
   retry++
   reconnectTimer = window.setTimeout(() => {

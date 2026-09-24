@@ -12,6 +12,10 @@
 # 依赖：llm-relay:local 镜像（先跑 scripts/redeploy.sh）与运行中的 llm-relay
 # 容器 —— 数据库账号密码直接从它的环境变量里取，不去读 deploy/.env。
 set -uo pipefail
+
+# 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
+source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
+
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 TESTDB=llm_relay_seedtest

@@ -21,6 +21,10 @@
 # 删列前会把这几列的既有值存进 __probe_col_backup，跑完按原值还原 ——
 # 用户的渠道价格不该为了一次回归测试而丢。
 set -uo pipefail
+
+# 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
+source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
+
 BASE="http://127.0.0.1:8888"
 API="$BASE/api/admin"
 P() { docker exec -i llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "$1"; }

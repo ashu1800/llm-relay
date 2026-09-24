@@ -5,6 +5,10 @@
 # 不引第三方代理镜像 —— 那会让这个用例依赖外部网络。
 set -uo pipefail
 
+# 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
+source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
+
+
 API=${API:-http://127.0.0.1:8888/api/admin}
 PG="docker exec -i llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c"
 PROXY_PORT=18099

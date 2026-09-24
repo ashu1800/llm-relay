@@ -27,6 +27,18 @@ export class ApiError extends Error {
 const NETWORK_ERROR = '无法连接到后端服务，请确认服务正在运行（默认 http://127.0.0.1:8888）'
 const TIMEOUT_ERROR = '请求超时（15 秒无响应），后端可能正忙，请稍后重试'
 
+// 全局 401 收口。
+//
+// 登录上线后，管理接口的任何 401 都意味着「没有会话或会话已过期」，
+// 分散到每个调用点去处理必然漏。这里集中监听，由 router 在启动时注册
+// 处理器（跳转登录页并带上当前地址）；本模块不 import router/store，
+// 避免循环依赖。/auth/* 自身的 401 是「密钥错误」的正常反馈，不触发跳转。
+let onUnauthorized: (() => void) | null = null
+
+export function setOnUnauthorized(fn: () => void) {
+  onUnauthorized = fn
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response
   try {
@@ -55,6 +67,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
   }
   if (!res.ok) {
+    if (res.status === 401 && !path.startsWith('/auth/')) {
+      onUnauthorized?.()
+    }
     const msg = data?.error?.message || data?.message || '请求失败 ' + res.status
     throw new ApiError(msg, res.status)
   }

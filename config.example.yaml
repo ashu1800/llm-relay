@@ -4,6 +4,10 @@ server:
   host: 0.0.0.0
   port: 8888
   mode: release
+  # 可信反向代理地址列表（也可用 SERVER_TRUSTED_PROXIES 环境变量，逗号分隔）。
+  # 经 nginx/caddy 反代时按它采信 X-Forwarded-For 解析真实客户端 IP
+  # （管理台登录限流按 IP 计数）。默认只信回环；直连部署不用改。
+  # trusted_proxies: ["127.0.0.1", "::1"]
 
 database:
   host: 127.0.0.1
@@ -28,6 +32,17 @@ relay:
   # 则不等 —— 那不会给谁造成压力，白等只是让用户多等。
   # 0 表示关闭（回到「零间隔重试」的旧行为）。
   retry_same_upstream_delay: 500ms
+
+security:
+  # AES-GCM 加密上游渠道密钥的主密钥；生产环境务必换成随机长字符串。
+  secret: llm-relay-dev-secret-change-me
+  # 管理台登录密钥（无账号模型）：浏览器打开管理台时输入它登录。
+  # 留空 = 关闭登录鉴权（仅建议在只绑回环的本地部署下）；
+  # 部署到公网必须设置，至少 16 位，且不能与 secret 相同。
+  # 轮换并重启后，所有已登录会话立即失效。
+  # admin_key: change-me-to-a-long-random-string
+  # 登录会话有效期（Go duration 写法），默认 168h，上限 720h。
+  # session_ttl: 168h
 
 log:
   level: info

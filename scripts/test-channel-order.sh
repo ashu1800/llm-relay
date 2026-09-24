@@ -8,6 +8,10 @@
 # 全程使用独立的探测分组 + 探测渠道，不动真实渠道，也不依赖真实上游：
 # 探测渠道指向一个不存在的端口，用「报错内容」区分「命中渠道」与「根本没路由」。
 set -uo pipefail
+
+# 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
+source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
+
 BASE="http://127.0.0.1:8888"
 API="$BASE/api/admin"
 P() { docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "$1"; }

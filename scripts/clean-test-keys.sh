@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # 清掉历史遗留的 regress 测试密钥。
 set -uo pipefail
+
+# 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
+source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
+
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 python3 - <<'PY'
 import json, urllib.request

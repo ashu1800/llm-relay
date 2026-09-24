@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -uo pipefail
+
+# 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
+source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
+
 BASE="http://127.0.0.1:8888"
 
 # 路由分析那一节随功能下线一起删除（接口已不存在，留着只会打印一堆 404）

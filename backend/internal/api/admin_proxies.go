@@ -313,10 +313,10 @@ func (s *Server) testProxyDraft(c *gin.Context) {
 	// 编辑已有代理时没提交的凭据沿用库里的：否则用户会看到
 	// 「明明没改密码却测不通」
 	//
-	// 但只在「目标仍然是库里那个服务器」时才沿用。否则任何人都能发
+	// 但只在「目标仍然是库里那个服务器」时才沿用。否则拿到会话的人都能发
 	// {id: 1, host: "attacker.com"} 让服务用代理 #1 的密码去连攻击者的机器 ——
-	// 管理接口没有鉴权（设计如此），这等于把库里的代理凭据交出去。
-	// 改了地址就让用户重新输一次密码，代价很小。
+	// 这等于把库里的代理凭据交出去（登录鉴权挡的是陌生人，挡不住「被诱导的
+	// 登录者本人」）。改了地址就让用户重新输一次密码，代价很小。
 	if body.ID > 0 && (body.Password == nil || body.Username == nil) {
 		var row model.Proxy
 		if err := s.deps.Store.DB().First(&row, body.ID).Error; err == nil {

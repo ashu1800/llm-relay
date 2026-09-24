@@ -1,8 +1,18 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
+import { setOnUnauthorized } from '@/api/client'
 
-// 路由结构对齐参考站 /console/* 的命名，剔除登录/用户/订单/工单/兑换/礼品/邮件/公告
+// 路由结构对齐参考站 /console/* 的命名，剔除登录/用户/订单/工单/兑换/礼品/邮件/公告。
+// 登录页在管理后台部署到公网后成为入口（无账号模型：只认管理密钥）。
 const routes: RouteRecordRaw[] = [
   { path: '/', redirect: '/console/dashboard' },
+  {
+    path: '/login',
+    name: 'login',
+    component: () => import('@/views/LoginView.vue'),
+    // 不进 MainLayout：登录页没有侧栏与菜单
+    meta: { title: '登录' }
+  },
   {
     path: '/console',
     component: () => import('@/components/MainLayout.vue'),
@@ -35,7 +45,50 @@ const routes: RouteRecordRaw[] = [
   { path: '/:pathMatch(.*)*', redirect: '/console/dashboard' }
 ]
 
-export default createRouter({
+const router = createRouter({
   history: createWebHistory(),
   routes
 })
+
+// ---- 登录守卫 ----
+//
+// 后端开启了登录鉴权（配置了 RELAY_ADMIN_KEY）时，未登录一律先去登录页；
+// 未开启鉴权（旧部署、只绑回环）时 fetchStatus 报 enabled=false，全部放行，
+// 行为与没有登录功能时完全一致。
+//
+// 状态只查一次（statusLoaded），之后由两条路径维持新鲜：
+//   - 登录/登出各自更新 store；
+//   - 任何接口 401（会话过期/被轮换）经 client.ts 的全局收口跳回登录页。
+router.beforeEach(async (to) => {
+  const auth = useAuthStore()
+  if (!auth.statusLoaded) {
+    try {
+      await auth.fetchStatus()
+    } catch {
+      // status 拿不到（后端没起、网络断）：放行，让页面里的请求自己报错。
+      // 在这里拦去登录页没有意义 —— 登录页同样打不到后端。
+      return true
+    }
+  }
+  if (auth.enabled && !auth.authenticated && to.path !== '/login') {
+    // 带上完整目标地址（含 query）：登录后回到原来想去的地方，
+    // 排障深链（?trace_id=…）才不会在登录这一步丢掉
+    return { path: '/login', query: { redirect: to.fullPath } }
+  }
+  if (to.path === '/login' && auth.authenticated) {
+    return { path: '/console/dashboard' }
+  }
+})
+
+// 会话过期的全局出口：client.ts 发现 401 时叫醒这里。
+// 用 router.currentRoute 而不是闭包外部的 route 对象 —— 处理器注册时
+// 还没有任何当前路由。
+setOnUnauthorized(() => {
+  const auth = useAuthStore()
+  auth.markUnauthenticated()
+  const current = router.currentRoute.value
+  if (current.path === '/login') return
+  router.push({ path: '/login', query: { redirect: current.fullPath } })
+})
+
+export default router
