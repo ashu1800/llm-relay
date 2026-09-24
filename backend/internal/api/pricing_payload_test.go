@@ -69,6 +69,32 @@ func TestApplyPriceFieldsMultiplier(t *testing.T) {
 	}
 }
 
+// 四位小数倍率（2026-09-24）：channel_models.multiplier 是 numeric(10,4)，
+// 上游按折扣率报价时常见 0.1875 / 0.1234 这种四位值。
+//
+// 这条测试盯的是「API 层别把它舍掉」：曾经前端输入框的 precision=2 会在
+// 失焦时把 0.1875 四舍五入成 0.19（那是前端问题，已修），但**后端这条路径
+// 同样不能有隐式收窄** —— 一旦有人在这里加了 round/toFixed 之类的
+// 「顺手归一」，四位倍率就会再次静默变成两位，而账单上完全看不出。
+func TestApplyPriceFieldsMultiplierFourDecimals(t *testing.T) {
+	for _, v := range []float64{0.1875, 0.1234, 0.0001, 1.2345, 0.0625} {
+		want := v
+		in := whitelistItem{PublicName: "m", Multiplier: &want}
+		var row model.ChannelModel
+		if err := applyPriceFields(&row, in); err != nil {
+			t.Fatalf("倍率 %v 不应报错: %v", v, err)
+		}
+		if row.Multiplier != v {
+			t.Errorf("四位倍率 %v 应原样保留，实际 %v", v, row.Multiplier)
+		}
+	}
+}
+
+// 计价引擎侧的四位倍率精度在 internal/pricing 包内测
+//（TestFourDecimalMultiplierExact，见 pricing/engine_multiplier_test.go）——
+// 那条链路要直接填 Engine 的缓存才能不依赖数据库，而 cache 是包内字段。
+// 这里只守 API 层：别在 applyPriceFields 这条路上把四位值收窄。
+
 func TestApplyPriceFieldsDecimals(t *testing.T) {
 	in := whitelistItem{
 		PublicName: "m",

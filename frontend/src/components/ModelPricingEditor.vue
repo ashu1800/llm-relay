@@ -78,11 +78,25 @@ export function priceSummary(p?: PriceConfig | null, currency?: string): string 
   let s = sym + (q.input_per_1m || '0') + ' / ' + sym + (q.output_per_1m || '0')
   const rules = q.peak_rules || []
   if (rules.length) {
-    s += ' · 时段×' + rules[0].multiplier + (rules.length > 1 ? ' 等' + rules.length + '条' : '')
+    s += ' · 时段×' + multiplierText(rules[0].multiplier) + (rules.length > 1 ? ' 等' + rules.length + '条' : '')
   } else if (q.multiplier && q.multiplier !== 1) {
-    s += ' · ×' + q.multiplier
+    s += ' · ×' + multiplierText(q.multiplier)
   }
   return s
+}
+
+/**
+ * 倍率的展示写法（摘要行、确认弹窗里用）。
+ *
+ * 不用裸的 `String(m)`：倍率要经过 multiply/divide 之类的运算才到这里，
+ * 浮点尾数会让 0.1875 显示成 0.18749999999999997 —— 那串数字会直接被
+ * 用户当成「系统算错了」。toFixed(4) 之后再去掉尾零，既能盖住尾数，
+ * 又不会把 0.5 显示成 0.5000。
+ */
+export function multiplierText(v: number | null | undefined): string {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return String(v ?? '')
+  return String(Number(n.toFixed(MULTIPLIER_PRECISION)))
 }
 
 // ---- 定价规则的唯一落点 ----
@@ -95,6 +109,30 @@ export function priceSummary(p?: PriceConfig | null, currency?: string): string 
 // MAX_MULTIPLIER 与后端 pricing.MaxMultiplier 必须一致：
 // 前端放行而后端拒绝，用户会看到「填得进去、保存报错」。
 export const MAX_MULTIPLIER = 100
+
+// 倍率的小数位数（2026-09-24）。
+//
+// 这里以前是 2，于是**填不进 0.1875 这种四位小数**：antd 的
+// a-input-number 会在失焦时按 precision 四舍五入，用户键入 0.1875、
+// 松开后输入框自己变成 0.19 —— 保存下去的是 0.19，而他以为自己填的是
+// 0.1875。这类「界面悄悄改掉你的值」比直接报错难查得多：账单算出来不对，
+// 回头核对时看到的是 0.19，怎么看都「没错」。
+//
+// 为什么是 4 位：数据库列就是 numeric(10,4)（见 model.ChannelModel.Multiplier），
+// 4 位是存储的真上限 —— 位数再放开也只会在落库时被截断，反而制造出
+// 「输入框里是 0.18751、库里是 0.1875」这种新的不一致。上游按「折扣率」
+// 报价时（如 ×0.1875、×0.1234）恰好就是四位，这也是提出这个需求的场景。
+//
+// 后端不需要跟着改：validatePricingRow 只校验区间 [0, 100]，
+// decimal.NewFromFloat 对四位小数是精确转换（实测 0.1875 → "0.1875"，
+// 0.15 × 0.1875 = 0.028125），没有任何截断。
+export const MULTIPLIER_PRECISION = 4
+
+// 步进键的步长。取 0.0001 而不是原来的 0.1：既然允许四位小数，
+// 步长就该能一格一格走到任意一位，否则想从 1 调到 0.1875 得先敲键盘、
+// 再点十几下（而 0.1 的步长下点出来的值永远是 1.0 / 0.9 / 0.8… 这些
+// 两位以内的数，等于把新放开的精度又藏起来了）。直接键入仍然是最快的方式。
+export const MULTIPLIER_STEP = 0.0001
 
 // PRICE_FIELDS 是四个单价的规范清单（展示名 + 字段名）。
 // 校验、清零确认、导入拣字段都从它派生，加字段只改这一处。
@@ -110,6 +148,39 @@ export const PRICE_FIELDS: [
 
 const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/
 
+/**
+ * 倍率的小数位是否在存储精度以内（MULTIPLIER_PRECISION 位）。
+ *
+ * 为什么需要它：输入框有 precision 限制，但**导入路径绕过了输入框** ——
+ * 粘贴一份手编辑过的 JSON，倍率可以是 0.18751。那种值能保存成功，
+ * 落库时被 numeric(10,4) 截成 0.1875，而界面上、用户的剪贴板里都还是
+ * 0.18751 —— 又一次「你以为存进去的和你实际存的不是一个数」。
+ *
+ * 判据用字符串而不是数字：JS 里 0.1 + 0.2 这种浮点误差会让
+ * 「× 10000 后取整」的做法把 0.1875 判成 1874.9999… 而误报。
+ * 所以直接看小数部分的字符长度。
+ *
+ * 科学计数法（1e-5）也归到这一条上：它的实际值是 0.00001，
+ * 同样存不进 4 位小数。
+ */
+export function multiplierPrecisionError(v: unknown): string | null {
+  const s = String(v ?? '').trim()
+  if (!s) return null
+  // 先归一化成普通十进制字符串，挡住 1e-5 / 1E-7 这类写法
+  const n = Number(s)
+  if (!Number.isFinite(n)) return `倍率「${s}」不是合法数字`
+  const plain = n.toString()
+  if (plain.includes('e') || plain.includes('E')) {
+    return `倍率 ${s} 太小，超出 ${MULTIPLIER_PRECISION} 位小数的精度`
+  }
+  const dot = plain.indexOf('.')
+  const decimals = dot < 0 ? 0 : plain.length - dot - 1
+  if (decimals > MULTIPLIER_PRECISION) {
+    return `倍率最多 ${MULTIPLIER_PRECISION} 位小数（${s} 会被截断成 ${n.toFixed(MULTIPLIER_PRECISION)}）`
+  }
+  return null
+}
+
 // validatePeakRules 校验时段规则，返回错误文案（无错返回 null）。
 // idx 非空时在文案前加「第 N 条」——导入路径要指出是数组里哪一条。
 export function validatePeakRules(rules: RateRule[], idx?: number): string | null {
@@ -124,6 +195,10 @@ export function validatePeakRules(rules: RateRule[], idx?: number): string | nul
     }
     if (!(Number(r.multiplier) > 0)) {
       return `${at}时段的倍率要大于 0`
+    }
+    const precErr = multiplierPrecisionError(r.multiplier)
+    if (precErr) {
+      return `${at}时段：${precErr}`
     }
   }
   return null
@@ -152,6 +227,8 @@ const emit = defineEmits<{
 // 模板只能看到 <script setup> 作用域里的绑定，模块级 script 块的声明要在这里
 // 重新绑定一次才能被模板引用（脚本内部则可以直接用模块级的那个）
 const maxMultiplier = MAX_MULTIPLIER
+const MULTIPLIER_PRECISION_IN_TEMPLATE = MULTIPLIER_PRECISION
+const MULTIPLIER_STEP_IN_TEMPLATE = MULTIPLIER_STEP
 
 const form = ref<PriceConfig>(emptyPrice())
 
@@ -296,6 +373,12 @@ function applyImport() {
       message.error(`固定倍率需要在 0 到 ${MAX_MULTIPLIER} 之间`)
       return
     }
+    // 导入绕过输入框的 precision，这里补上同一道精度关（见 multiplierPrecisionError）
+    const precErr = multiplierPrecisionError(raw.multiplier)
+    if (precErr) {
+      message.error(precErr)
+      return
+    }
     out.multiplier = m === 0 ? 1 : m
     gotAny = true
   }
@@ -344,7 +427,7 @@ function applyImport() {
     if (raw[key] === undefined && cur !== '') kept.push(label + ' ' + cur)
   }
   if (raw.multiplier === undefined && form.value.multiplier && form.value.multiplier !== 1) {
-    kept.push('固定倍率 ×' + form.value.multiplier)
+    kept.push('固定倍率 ×' + multiplierText(form.value.multiplier))
   }
   if (raw.peak_rules === undefined && (form.value.peak_rules || []).length > 0) {
     kept.push('时段倍率 ' + (form.value.peak_rules || []).length + ' 条')
@@ -363,6 +446,15 @@ function submit() {
   const ruleErr = validatePeakRules(rules())
   if (ruleErr) {
     message.error(ruleErr)
+    return
+  }
+  // 固定倍率的精度：输入框本身有 precision 限制，但**表单里的值不一定来自
+  // 输入框** —— 导入（applyImport）与打开时的回填都能塞进更长的值，
+  // 而落库是 numeric(10,4)。这里与时段规则同口径拦一次，
+  // 免掉「界面是 0.18751、库里是 0.1875」。
+  const fixedPrecErr = multiplierPrecisionError(form.value.multiplier)
+  if (fixedPrecErr) {
+    message.error(fixedPrecErr)
     return
   }
   for (const [label, key] of PRICE_FIELDS) {
@@ -435,11 +527,15 @@ function doSave() {
           :value="form.multiplier ?? 1"
           :min="0"
           :max="maxMultiplier"
-          :step="0.1"
-          :precision="2"
+          :step="0.0001"
+          :precision="MULTIPLIER_PRECISION_IN_TEMPLATE"
           style="width: 160px"
           @update:value="(v: number | null) => (form.multiplier = v ?? 1)"
         />
+        <div class="field-hint">
+          最多 {{ MULTIPLIER_PRECISION_IN_TEMPLATE }} 位小数（如 0.1875）。步进键按
+          {{ MULTIPLIER_STEP_IN_TEMPLATE }} 走，也可以直接键入精确值。
+        </div>
       </a-form-item>
 
       <a-form-item>
@@ -470,7 +566,14 @@ function doSave() {
           <span class="rule-sep">→</span>
           <input v-model="rule.end" type="time" class="time-input" />
           <span class="rule-sep">×</span>
-          <a-input-number v-model:value="rule.multiplier" :min="0" :step="0.1" :precision="2" size="small" style="width: 88px" />
+          <a-input-number
+            v-model:value="rule.multiplier"
+            :min="0"
+            :step="MULTIPLIER_STEP_IN_TEMPLATE"
+            :precision="MULTIPLIER_PRECISION_IN_TEMPLATE"
+            size="small"
+            style="width: 88px"
+          />
           <a-input v-model:value="rule.label" size="small" placeholder="备注" style="width: 110px" />
           <a-button type="text" danger size="small" @click="removeRule(i)"><DeleteOutlined /></a-button>
         </div>

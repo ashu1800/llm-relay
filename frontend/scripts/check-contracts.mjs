@@ -738,6 +738,33 @@ try {
       !/m\s*>\s*100|倍率[^"'`]*100/.test(stripComments(editorSrc)),
       '写死的 100 会在上限调整时被漏改，表现为前后端口径不一致',
     )
+
+    // 倍率精度（2026-09-24）：前端 MULTIPLIER_PRECISION 必须与数据库列的
+    // 小数位数一致。这一列是 numeric(10,4) —— 前端若放开到 5 位，
+    // 输入框收下 0.18751、落库被截成 0.1875，用户看到的是「我明明填了五位」
+    // 而账单按四位算；反过来前端若收窄回 2 位，就又会把 0.1875 舍成 0.19
+    // （这正是本次要修的问题）。
+    //
+    // 钉在**实体定义**上而不是迁移语句上：numeric(10,4) 在两个地方出现
+    //（GORM tag 与 ALTER TABLE），实体那份才是常态声明。
+    const tsPrec = editorSrc.match(/export\s+const\s+MULTIPLIER_PRECISION\s*=\s*(\d+)/)
+    const entityGo = join(SRC, '..', '..', 'backend', 'internal', 'model', 'entities.go')
+    const entitySrc = readFileSync(entityGo, 'utf8')
+    const colPrec = entitySrc.match(/column:multiplier;type:numeric\(\d+,(\d+)\)/)
+    if (tsPrec && colPrec) {
+      check(
+        `倍率精度与数据库列一致（${colPrec[1]} 位小数）`,
+        Number(tsPrec[1]) === Number(colPrec[1]),
+        `channel_models.multiplier 是 numeric(…,${colPrec[1]})，前端 MULTIPLIER_PRECISION=${tsPrec[1]}`,
+      )
+    }
+    // 输入框不能再写死 2 位：那正是「填不进 0.1875」的原因，
+    // 而且 a-input-number 是失焦即舍入 —— 悄悄改掉用户的值
+    check(
+      '倍率输入框不再硬编码 2 位精度',
+      !/:precision="2"/.test(editorSrc),
+      'precision 写死 2 会让 0.1875 在失焦时被舍成 0.19',
+    )
   }
 } catch {
   // 后端源码不在本地：跳过这段（CI 里前后端一起 checkout，会真正跑到）
