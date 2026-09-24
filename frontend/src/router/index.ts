@@ -91,4 +91,27 @@ setOnUnauthorized(() => {
   router.push({ path: '/login', query: { redirect: current.fullPath } })
 })
 
+// ---- 页面标题（2026-09-24 UI 审评 P2-10）----
+//
+// 每个路由早就写了 meta.title，但全仓没有一处 document.title ——
+// 于是 6 个管理页 + 登录页在标签栏上全都叫「LLM Relay」。多开几个标签排障时
+// （看板一个、渠道一个、设置一个）分不清哪张是哪个页面，只能逐个点开看。
+//
+// 格式 `页面名 · LLM Relay`：**页面名在前**，因为标签栏是从右往左截断的 ——
+// 把站点名放前面，多标签同开时看到的就是一排完全相同的「LLM Relay…」，
+// 恰好丢掉唯一有区分度的那部分。
+//
+// 为什么写在 afterEach 而不是 beforeEach：守卫里可能把导航改道
+//（未登录 → /login、已登录访问 /login → 看板），afterEach 拿到的才是
+// **最终落地**的那条路由。写在 beforeEach 会先写上「数据看板」、
+// 再跳登录页，标签闪一下错的标题。
+//
+// index.html 里那个 <title>LLM Relay</title> 保留：它是 JS 起来之前的兜底，
+// 首屏加载期间标签上不至于空着。这里只负责 thereafter 的更新。
+const APP_NAME = 'LLM Relay'
+router.afterEach((to) => {
+  const page = typeof to.meta.title === 'string' ? to.meta.title : ''
+  document.title = page ? `${page} · ${APP_NAME}` : APP_NAME
+})
+
 export default router
