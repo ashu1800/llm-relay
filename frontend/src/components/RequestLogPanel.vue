@@ -23,7 +23,7 @@
 // 仍用 PanelCard，不传 title 时它不会渲染标题栏。
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { CopyOutlined, ProfileOutlined } from '@ant-design/icons-vue'
+import { CopyOutlined, ProfileOutlined, ArrowUpOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import PanelCard from '@/components/PanelCard.vue'
@@ -641,6 +641,9 @@ async function load(opts: { silent?: boolean } = {}) {
   if (!silent) {
     freshIds.value.clear()
     fxTargets.value = []
+    // 非静默重取会把整屏换掉，服务端返回的这批里已经包含挂起的那几行 ——
+    // 再留着它们等于同一批记录在列表里出现两次（P1-6）
+    pendingLogs.value = []
   }
   // silent 是实时推送独有的路径（useLive.createThrottledLiveReloader 是唯一调用点），
   // 所以「多出来的行」必然是刚入库的那几条，不会是筛选切换带来的整屏替换
@@ -673,6 +676,9 @@ async function load(opts: { silent?: boolean } = {}) {
 
 function search() {
   page.value = 1
+  // 条件变了（深链、翻页、刷新）就作废挂起的行：它们的「新」是相对
+  // 上一个视角说的，换一批数据之后再落地会把毫不相干的记录插到最前面
+  pendingLogs.value = []
   load()
 }
 
@@ -968,11 +974,98 @@ onLive('logs', (items: RequestLog[]) => {
   // 列表不带时间范围，新日志必然属于「全部最新」，直接插即可
   const fresh = items.filter((it) => !rows.value.some((r) => r.id === it.id))
   if (!fresh.length) return
-  rows.value = [...fresh.reverse(), ...rows.value].slice(0, pageSize.value)
-  total.value += fresh.length
-  // 刚插到最上面的这几行做一次入场动画（用户正在看第一页，新行就在眼前）
-  markFresh(fresh.map((r) => r.id))
+  // 用户正在读的时候不插（2026-09-24 UI 审评 P1-6）：一行 44/45px，
+  // 一次插入就把正在读的那一行整体顶下去一整行 —— 鼠标没动，指的那一行
+  // 已经换人，此时点「详情」打开的可能是上一条请求。改成挂起，
+  // 由工具条上的「N 条新日志」按钮落地（见 pendingLogs）。
+  if (shouldHoldInsert()) {
+    pendingLogs.value = [...fresh.reverse(), ...pendingLogs.value]
+    return
+  }
+  insertFresh(fresh)
 })
+
+// ---- 实时插行的「挂起」机制（P1-6，2026-09-24）----
+//
+// 问题：新行 unshift 到头部，表体内容整体下移一行（44/45px 实测），
+// 而滚动位置不变 —— 用户正在读的那一行被顶走了，鼠标指着的已经不是刚才那条。
+//
+// 什么时候要挂起（三条任一成立）：
+//   1. 表体已经向下滚过（scrollTop > 1）—— 用户明确在看中间某一段；
+//   2. 鼠标正停在表体上 —— 他随时可能点那一行（顶走的话点中的是别的行）；
+//   3. 详情抽屉开着 —— 抽屉是盖在列表上的，但用户的注意力在列表刚才那一行上。
+//
+// 三者都不成立时（列表停在顶部、鼠标不在、抽屉关着）就直接插：
+// 那是「盯着最新发生了什么」的常态，此时用户要的正是立刻看到新行。
+//
+// 为什么不是「只要不在顶部就不插」：列表默认就在顶部，多数时候直接插
+// 才是对的；把常态也挂起会让这个面板失去「实时」的意义。
+const pendingLogs = ref<RequestLog[]>([])
+const hoveringTable = ref(false)
+
+function tableBody(): HTMLElement | null {
+  return tableWrap.value?.querySelector<HTMLElement>('.ant-table-body') ?? null
+}
+
+function shouldHoldInsert(): boolean {
+  if (detailOpen.value) return true
+  if (hoveringTable.value) return true
+  const body = tableBody()
+  return !!body && body.scrollTop > 1
+}
+
+/** 把新行插到第一行并做入场动画（原路径，抽出来给「落地」复用）。 */
+function insertFresh(fresh: RequestLog[]) {
+  rows.value = [...[...fresh].reverse(), ...rows.value].slice(0, pageSize.value)
+  total.value += fresh.length
+  markFresh(fresh.map((r) => r.id))
+}
+
+// 挂起的行落到列表里。点按钮 = 用户明确要求看新行，所以先滚回顶部
+// 再插 —— 否则插完他仍然停在原来那一屏，会觉得「点了没反应」。
+function applyPendingLogs() {
+  const fresh = pendingLogs.value
+  pendingLogs.value = []
+  insertFresh(fresh)
+  const body = tableBody()
+  if (body) body.scrollTop = 0
+}
+
+/**
+ * 挂起的行该不该自己落地。
+ *
+ * 三个时机各对应一种「用户不再盯着那几行了」：滚回顶部（他准备看最新的）、
+ * 鼠标离开表体（不再指着某一行）、抽屉关掉（注意力回到列表）。
+ * 条件与挂起时用的是同一个判据（shouldHoldInsert），所以不会出现
+ * 「刚放手又立刻挂起」的抖动。
+ */
+function maybeReleasePending() {
+  if (!pendingLogs.value.length) return
+  if (shouldHoldInsert()) return
+  applyPendingLogs()
+}
+
+// 滚动/改窗口时除了更新两侧渐隐，还要看一眼挂起的行能不能落地 ——
+// 两件事都由「表体的滚动位置」驱动，挂在同一个监听上。
+function onScrollOrResize() {
+  syncScrollHints()
+  maybeReleasePending()
+}
+
+// 抽屉关掉 = 用户看完了详情，注意力回到列表，挂起的行可以落地了
+watch(detailOpen, (open) => {
+  if (!open) maybeReleasePending()
+})
+
+// 鼠标进出表体。进入只是「记住他在里面」（挂起新行），
+// 离开才可能让挂起的行落地 —— 所以这里只改状态再问一次能不能放手。
+function onTableEnter() {
+  hoveringTable.value = true
+}
+function onTableLeave() {
+  hoveringTable.value = false
+  maybeReleasePending()
+}
 
 onMounted(() => {
   // 分组表与渠道图标由看板取好传下来，这里只负责取列表。
@@ -996,8 +1089,8 @@ onMounted(() => {
   // 但 window 捕获监听不依赖拿到它。而轮询版有个真实风险：表体若在 2 秒后才
   // 出现（后端慢、首屏加载失败重试），监听就永远挂不上，阴影从此不再更新。
   // 删掉。
-  window.addEventListener('scroll', syncScrollHints, true)
-  window.addEventListener('resize', syncScrollHints)
+  window.addEventListener('scroll', onScrollOrResize, true)
+  window.addEventListener('resize', onScrollOrResize)
   nextTick(syncScrollHints)
 })
 </script>
@@ -1045,6 +1138,23 @@ onMounted(() => {
         仅失败
       </button>
     </div>
+
+    <!-- 挂起的新日志（P1-6）。只在「用户正在读」时出现：表体滚过、
+         鼠标停在表体上、或详情抽屉开着。此时把新行攒着并在这里报数 ——
+         直接插会把正在读的那一行顶下去一整行（44/45px 实测），
+         鼠标没动而指的那一行已经换人，点「详情」打开的可能是上一条请求。
+         按钮是他的「我看完了，给我看新的」：点了才落地并滚回顶部。 -->
+    <div v-if="pendingLogs.length" class="pending-bar">
+      <button
+        type="button"
+        class="pending-btn"
+        :aria-label="`有 ${pendingLogs.length} 条新日志，点击查看`"
+        @click="applyPendingLogs()"
+      >
+        <ArrowUpOutlined aria-hidden="true" />
+        有 {{ pendingLogs.length }} 条新日志，点击查看
+      </button>
+    </div>
     <DataState
       :error="loadError"
       :has-data="rows.length > 0"
@@ -1082,6 +1192,8 @@ onMounted(() => {
         :data-fx="logFx.fx"
         :data-hint-l="canScrollLeft ? '1' : '0'"
         :data-hint-r="canScrollRight ? '1' : '0'"
+        @mouseenter="onTableEnter"
+        @mouseleave="onTableLeave"
       >
         <NewLogEffect :mode="logFx.fx" :targets="fxTargets" />
         <a-table
@@ -1834,6 +1946,20 @@ onMounted(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
+
+  /* 滚动锚定的兜底（P1-6）。挂起机制已经覆盖了「用户正在读」的三种情形，
+     但它靠 JS 判断，判据之外的变化（浏览器自己重排、字体加载完成、
+     行高从 44 变 45）仍可能让内容跳一下。overflow-anchor 让浏览器把
+     当前可见的第一行当作锚点、内容变化时自动补偿滚动位置 ——
+     它不替代上面的挂起（新行插到头部时锚点补偿仍会让「正在读的行」
+     从视口位置移动），只是多一层保险。
+
+     为什么写在 .log-table 而不是 .ant-table-body：锚定要作用在**产生滚动**的
+     那个盒子上，而这里真正滚的是 .ant-table-body（它自己有 overflow: auto）。
+     见下面那条 :deep 规则 —— 属性在那边设。 */
+}
+.log-table :deep(.ant-table-body) {
+  overflow-anchor: auto;
 }
 
 /* ---- 把面板剩下的高度一路传到表体 ----
@@ -1921,6 +2047,41 @@ onMounted(() => {
 }
 .queue-dropped {
   font-weight: 600;
+}
+
+/* ---- 挂起的新日志提示条（P1-6）----
+   出现在工具条与表格之间，只在真的攒了行的时候渲染（v-if），
+   所以没有新行时它一个像素都不占。
+   配色用主色实心块那一对（--solid-primary-*）：它是个明确的行动号召，
+   而 --solid-primary-* 是全站唯一保证「底色与其上文字」都达标的一对
+   （浅色 4.84:1 / 深色 6.98:1）—— 不能自己拼 background + #fff。 */
+.pending-bar {
+  flex: none;
+  display: flex;
+  justify-content: center;
+  margin-bottom: 6px;
+}
+.pending-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 14px;
+  background: var(--solid-primary-bg);
+  color: var(--solid-primary-fg);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+.pending-btn:hover {
+  transform: translateY(-1px);
+}
+.pending-btn:active {
+  transform: translateY(0) scale(0.98);
 }
 
 /* ---- 列表小工具条（实时状态 P1-10 +「仅失败」开关 P1-8）----
