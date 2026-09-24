@@ -29,7 +29,7 @@ import DataState from '@/components/DataState.vue'
 import PanelCard from '@/components/PanelCard.vue'
 import GroupTag from '@/components/GroupTag.vue'
 import ChannelIcon from '@/components/ChannelIcon.vue'
-import { onLive, createThrottledLiveReloader } from '@/composables/useLive'
+import { onLive, createThrottledLiveReloader, liveConnected } from '@/composables/useLive'
 import NewLogEffect, { type FxTarget } from '@/components/NewLogEffect.vue'
 import { useLogFxStore } from '@/stores/logFx'
 import { costText, symbolOf } from '@/utils/money'
@@ -575,6 +575,30 @@ function toggleFailOnly() {
   emit('update:statusClass', props.statusClass === 'error' ? '' : 'error')
 }
 
+// ---- 实时连接状态（2026-09-24 UI 审评 P1-10）----
+//
+// useLive.ts 早就导出了 liveConnected，但全仓 0 引用：WebSocket 断了，界面照旧
+// 显示旧数据、数字不再跳动，而用户分不清这是「没有流量」还是「连接死了」——
+// 「实时」二字因此不可信。这里把它接出来，与「最后更新」时间戳一起显示：
+//
+//   链路正常 → 绿点 +「实时 · 最后更新 10:13:23」
+//   断开重连 → 红点 +「已断开，正在重连 · 最后更新 10:13:23」
+//
+// 时间戳只在**数据或推送真的到达**时刷新（load 成功、收到 logs 帧），不是每秒
+// 走的表：它要回答的正是「我看到的这屏有多旧」，所以静默时段停住不动才是对的。
+// 断线时它同时说明了两件事 —— 界面上的数据停在哪个时刻，以及为什么不再动。
+//
+// everConnected 是为了首屏：订阅刚建立、握手还没完成的那几百毫秒里
+// liveConnected 仍是 false，直接显示「已断开」会闪一下假警报。
+const everConnected = ref(false)
+watch(liveConnected, (v) => {
+  if (v) everConnected.value = true
+})
+const lastLiveAt = ref('')
+function touchLive() {
+  lastLiveAt.value = fmtTimeCompact(new Date().toISOString())
+}
+
 // 复制 Trace ID：排障时它要被贴进日志搜索、聊天工具或上游工单，
 // 24 位十六进制手动划选又慢又容易断行漏字符。
 // 降级路径与密钥复制共用 utils/clipboard.ts（http 非 localhost 环境照常可用）。
@@ -627,6 +651,9 @@ async function load(opts: { silent?: boolean } = {}) {
     if (seq !== loadSeq) return
     rows.value = res.items || []
     total.value = res.total || 0
+    // 数据真的到了才刷新「最后更新」（P1-10）：它是「这屏有多旧」的判据，
+    // 不能因为一次失败的静默重取而跳到当前时间
+    touchLive()
     // 首屏落地：从这一刻起，实时推送标出来的行才真的是「新来的」
     if (!silent) loadedOnce = true
     if (before) markFresh(rows.value.filter((r) => !before.has(r.id)).map((r) => r.id))
@@ -900,6 +927,10 @@ const queueInfo = ref<LogQueueInfo | null>(null)
 let lastDroppedAlert = 0
 
 onLive('health', (data: LogQueueInfo) => {
+  // 与 logs 帧同理：health 帧是服务端统计循环的固定节拍，
+  // 它到了就说明这条链路还在（P1-10 的「最后更新」用它兜底：没有日志流量时
+  // 时间戳仍会跳，于是「链路活着」与「没有新请求」两件事分得开）
+  touchLive()
   const prev = queueInfo.value
   queueInfo.value = data
   // 丢弃新增：弹一条 error。持续丢弃时不刷屏 —— 同一场告警 10 秒内只弹一条，
@@ -924,6 +955,9 @@ onUnmounted(() => {
 })
 
 onLive('logs', (items: RequestLog[]) => {
+  // 收到任何一帧都说明链路还活着（空帧也算）——「最后更新」因此是
+  // 「最后收到实时推送的时刻」，断线时它停住的那一刻正是界面开始失效的时刻
+  touchLive()
   if (!Array.isArray(items) || !items.length) return
   if (page.value !== 1) return
   const filtered = !!props.traceId || !!props.statusClass
@@ -979,6 +1013,26 @@ onMounted(() => {
          这一行刻意做薄（26px）：面板标题栏当年就是为省 40px 被拿掉的，
          这里不能再吃回去。左边留给将来的实时状态（P1-10），现在先空着。 -->
     <div class="list-bar">
+      <!-- 实时状态（P1-10）：链路是否活着 + 界面数据最后刷新的时刻。
+           放左侧是因为它是这一屏所有数字的前提 —— 先可信，再读数。 -->
+      <div
+        class="live-status"
+        :class="{ off: everConnected && !liveConnected }"
+        role="status"
+        aria-live="polite"
+        :title="
+          liveConnected
+            ? '实时推送链路正常；这个时间随服务端推送刷新，断线时它会停住'
+            : '与后端的实时连接已断开，正在自动重连；下面的数据停在上面的时刻'
+        "
+      >
+        <span class="live-dot" aria-hidden="true"></span>
+        <template v-if="!everConnected">连接中…</template>
+        <template v-else>
+          {{ liveConnected ? '实时' : '已断开，正在重连' }}
+          <span v-if="lastLiveAt" class="live-at">· 最后更新 {{ lastLiveAt }}</span>
+        </template>
+      </div>
       <button
         type="button"
         class="fail-toggle"
@@ -1869,8 +1923,8 @@ onMounted(() => {
   font-weight: 600;
 }
 
-/* ---- 列表小工具条（「仅失败」开关，P1-8）----
-   一行 flex、26px 高，右对齐留白给左边的实时状态（P1-10 预留）。
+/* ---- 列表小工具条（实时状态 P1-10 +「仅失败」开关 P1-8）----
+   一行 flex、26px 高：左边实时状态，右边「仅失败」开关。
    面板外壳（PanelCard → DataState → .panel-body）是纵向 flex，
    这一行 flex:none，表体的 100% 弹性高度自动让位 —— 与「顶上多出一条
    默认密钥告警」同一机制，不需要重算任何高度。 */
@@ -1879,8 +1933,41 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--gap);
   min-height: 26px;
   margin-bottom: 4px;
+}
+
+/* 实时状态：绿点 +「实时 · 最后更新 HH:mm:ss」。断线时整行转红并换文案。
+   文字色用 --text-red（白底 5.44:1 / 暗色 5.42:1）而不是 --color-red ——
+   后者当正文不达 AA，这条恰恰是最需要看清的一句。
+   圆点是第二个线索（正常绿 / 断线红），文案是第三个：色觉障碍下同样分得清。 */
+.live-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.live-status.off {
+  color: var(--text-red);
+  font-weight: 500;
+}
+.live-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--color-green);
+}
+.live-status.off .live-dot {
+  background: var(--color-red);
+}
+/* 「最后更新」比前面那半句再淡一档：它是佐证不是结论 */
+.live-at {
+  color: var(--color-text-secondary);
+  font-weight: 400;
 }
 
 /* 「仅失败」切换：原生 button（不是 a-button）—— 它是切换器不是命令按钮，

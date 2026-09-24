@@ -117,6 +117,27 @@ const liveLogsInterval = time.Second
 // 超时说明这个客户端已经不消费数据了，断开比无限等更合适。
 const liveWriteTimeout = 10 * time.Second
 
+// 心跳间隔（2026-09-24，配合前端 P1-10 的实时状态指示）。
+//
+// 为什么需要它：三条推送（logs / stats / health）全都是「变了才推」——
+// 闲时**一帧都不发**。而前端的 useLive 靠「45 秒没收到任何消息」判断半开连接
+// （看门狗，见 useLive.armWatchdog），于是深夜没有流量时它会把一条完全正常的
+// 连接判成断开：重连、再判、再重连，看板上的「实时」指示灯周期性闪红，
+// 而数据其实一直是新的。加指示灯本来是为了让「实时」二字可信，
+// 误报比不加还糟。
+//
+// 为什么不把前端的判据放宽：那会把「真的断了」也一起拖慢 ——
+// 而断线被察觉的速度正是这个指示灯的用处。让服务端定期说话，
+// 判据就能同时保持「闲时可信」与「断时快报」。
+//
+// 25 秒：留出 20 秒余量给 45 秒的看门狗（单帧延迟 + 时钟漂移都在其中），
+// 同时空载流量可以忽略（约 50 字节 / 25 秒 / 每个订阅者）。
+const liveHeartbeatInterval = 25 * time.Second
+
+// heartbeatInterval 是实际使用的节拍。默认取上面的常量；
+// 测试里会改小 —— 一个真等 25 秒的用例不会有人愿意跑第二次。
+var heartbeatInterval = liveHeartbeatInterval
+
 // 单次查询的超时。聚合查询再慢也不该拖过推送间隔，
 // 否则循环会一个接一个地堆积查询。
 const liveQueryTimeout = 3 * time.Second
@@ -341,9 +362,15 @@ func (s *Server) liveSocket(c *gin.Context) {
 		// 连上先补一份当前快照：不然要等到下一次变化才有东西显示，
 		// 而「打开页面后数字是空的」看起来就像坏了。
 		// 与 liveStatsLoop 同一口径：今天 + 全站（零值筛选）
-		start, end, _ := resolveRange("today")
-		if data, err := s.summarySnapshot(start, end, statsFilter{}); err == nil {
-			_ = websocket.Message.Send(ws, string(mustJSON(liveMessage{Type: "stats", Data: data})))
+		//
+		// Store 为 nil 时整段跳过（与下面 health 的 Logs != nil 同一个防御）：
+		// 没有数据库就取不出汇总，而这条连接仍然该能建立、能收心跳 ——
+		// 心跳的测试正是这样跑的（不起数据库）。
+		if s.deps.Store != nil {
+			start, end, _ := resolveRange("today")
+			if data, err := s.summarySnapshot(start, end, statsFilter{}); err == nil {
+				_ = websocket.Message.Send(ws, string(mustJSON(liveMessage{Type: "stats", Data: data})))
+			}
 		}
 		// 队列水位同样补一份：否则要等到它变化才显示（大多数时候队列是
 		// 平稳的，那一等可能就是永远）
@@ -351,11 +378,26 @@ func (s *Server) liveSocket(c *gin.Context) {
 			_ = websocket.Message.Send(ws, string(mustJSON(liveMessage{Type: "health", Data: s.deps.Logs.QueueStats()})))
 		}
 
-		// WebSocket 连接不允许并发写，所以写只在这个 goroutine 里做
+		// WebSocket 连接不允许并发写，所以写只在这个 goroutine 里做。
+		//
+		// 心跳也走这里而不是另起一个 goroutine：并发写会被 x/net/websocket
+		// 直接判为错误，心跳必须和普通帧排在同一条写队列上。
+		// 心跳带 `{"type":"heartbeat"}` 而不是空帧 —— 前端 dispatch 只认已知
+		// type，未知的直接忽略；写成心跳类型让它可被日志与探针识别。
+		heartbeat := time.NewTicker(heartbeatInterval)
+		defer heartbeat.Stop()
 		for {
 			select {
 			case <-closed:
 				return
+			case <-heartbeat.C:
+				// 与普通帧同一条写超时：客户端 TCP 缓冲区满时（标签页被挂起）
+				// 没有 deadline 的 Send 会把这条 goroutine 永久堵住
+				_ = ws.SetWriteDeadline(time.Now().Add(liveWriteTimeout))
+				if err := websocket.Message.Send(ws, string(mustJSON(liveMessage{Type: "heartbeat"}))); err != nil {
+					s.logger().Warn("实时心跳发送失败，断开该订阅", "err", err)
+					return
+				}
 			case payload, ok := <-ch:
 				if !ok {
 					return
