@@ -565,6 +565,16 @@ function onlyThisTrace() {
   detailOpen.value = false
 }
 
+// 「仅失败」切换（2026-09-24 UI 审评 P1-8）：面板一直支持 status_class=error，
+// 但此前唯一的入口是手改 URL —— 而失败排查恰恰是这类工具的第一需求。
+// 条件与深链、看板工具栏那个小标签共享同一个 ref（由看板持有），
+// 所以这里只往上抛；watch 在 props 上，状态一变列表自动重取并回第一页。
+// 只做 error 一档：success 深链仍可从 URL 进来（看板 applyUrlFilters 认它），
+// 但不值得为「只看成功」做一个常驻开关 —— 排障找的是坏的，不是好的。
+function toggleFailOnly() {
+  emit('update:statusClass', props.statusClass === 'error' ? '' : 'error')
+}
+
 // 复制 Trace ID：排障时它要被贴进日志搜索、聊天工具或上游工单，
 // 24 位十六进制手动划选又慢又容易断行漏字符。
 // 降级路径与密钥复制共用 utils/clipboard.ts（http 非 localhost 环境照常可用）。
@@ -963,6 +973,24 @@ onMounted(() => {
        但不传 title、也不传 extra：标题栏会说一遍表头已经说清的事，还占 40px；
        去掉之后表体刚好能多放一整行。 -->
   <PanelCard>
+    <!-- 列表自己的小工具条。上面看板的工具栏只服务概览卡（列表不吃那四个筛选），
+         而「仅失败」是**列表自己的**条件 —— 入口长在列表旁边，看着列表点它，
+         眼睛不用跑（2026-09-24 UI 审评 P1-8：此前唯一入口是手改 URL 深链）。
+         这一行刻意做薄（26px）：面板标题栏当年就是为省 40px 被拿掉的，
+         这里不能再吃回去。左边留给将来的实时状态（P1-10），现在先空着。 -->
+    <div class="list-bar">
+      <button
+        type="button"
+        class="fail-toggle"
+        :class="{ on: statusClass === 'error' }"
+        :aria-pressed="statusClass === 'error'"
+        title="只显示失败的请求；再次点击恢复全量"
+        @click="toggleFailOnly()"
+      >
+        <span class="fail-dot" aria-hidden="true"></span>
+        仅失败
+      </button>
+    </div>
     <DataState
       :error="loadError"
       :has-data="rows.length > 0"
@@ -1839,5 +1867,77 @@ onMounted(() => {
 }
 .queue-dropped {
   font-weight: 600;
+}
+
+/* ---- 列表小工具条（「仅失败」开关，P1-8）----
+   一行 flex、26px 高，右对齐留白给左边的实时状态（P1-10 预留）。
+   面板外壳（PanelCard → DataState → .panel-body）是纵向 flex，
+   这一行 flex:none，表体的 100% 弹性高度自动让位 —— 与「顶上多出一条
+   默认密钥告警」同一机制，不需要重算任何高度。 */
+.list-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 26px;
+  margin-bottom: 4px;
+}
+
+/* 「仅失败」切换：原生 button（不是 a-button）—— 它是切换器不是命令按钮，
+   要的是 pill + aria-pressed 的形态；antd 的 checked 态（a-check-tag）
+   配色不走主题令牌。
+   颜色策略：文字恒用正文色（#303030 / 暗 #e8e6e3，两套主题下都远超 4.5:1），
+   开关态由**边框 + 圆点**承载 —— 亮色主题的 --color-red (#ea4343) 在白底
+   只有约 3.9:1，当正文不达 AA，但当非文本图形（3:1 即可）是达标的；
+   把态交给边框与圆点，文字就永远不用为对比度操心。 */
+.fail-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 12px;
+  border-radius: 13px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background-color 0.15s ease;
+}
+.fail-toggle:hover {
+  border-color: color-mix(in oklab, var(--color-red) 45%, var(--color-border));
+  background: color-mix(in oklab, var(--color-red) 6%, transparent);
+}
+.fail-toggle:active {
+  transform: scale(0.96);
+}
+/* 激活：红边 + 淡红底 + 实心红点。红点从空心变实心是第二个视觉线索
+   （色觉之外），aria-pressed 是第三个（读屏） */
+.fail-toggle.on {
+  border-color: color-mix(in oklab, var(--color-red) 55%, var(--color-border));
+  background: color-mix(in oklab, var(--color-red) 10%, transparent);
+  font-weight: 500;
+}
+.fail-toggle:focus-visible {
+  outline: 2px solid var(--text-primary-ink);
+  outline-offset: 2px;
+}
+
+/* 圆点：未激活空心（只描边），激活实心。空心时边框色 3:1 于白底达标
+   （#ea4343 约 3.9:1）；暗色主题的 --color-red 是提亮版 #f08a7a（5.42:1） */
+.fail-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  border: 1.5px solid var(--color-red);
+  background: transparent;
+  transition: background-color 0.15s ease;
+}
+.fail-toggle.on .fail-dot {
+  background: var(--color-red);
 }
 </style>
