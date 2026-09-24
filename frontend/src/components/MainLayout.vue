@@ -18,6 +18,7 @@ import { useThemeStore } from '@/stores/theme'
 import { message } from 'ant-design-vue'
 import { onLive } from '@/composables/useLive'
 import { startTabPulse } from '@/utils/tabPulse'
+import { moneyText } from '@/utils/money'
 
 const route = useRoute()
 const router = useRouter()
@@ -46,8 +47,11 @@ type BudgetAlert = {
 }
 
 onLive('budget_alert', (a: BudgetAlert) => {
-  const money = a.currency === 'CNY' ? '¥' + a.spent.toFixed(2) : a.currency + ' ' + a.spent.toFixed(2)
-  const limitMoney = a.currency === 'CNY' ? '¥' + a.limit.toFixed(2) : a.currency + ' ' + a.limit.toFixed(2)
+  // 金额走 utils/money 的统一规则（这里原来是 toFixed(2)，与日志的六位、
+  // 分组的两位各说各话）。告警里两个数是给用户去日志里核对的，
+  // 对不上就等于没给 —— 2026-09-24 UI 审评。
+  const money = moneyText(a.spent, a.currency)
+  const limitMoney = moneyText(a.limit, a.currency)
   // 超支不显示百分比：花费 36 倍于预算时「已达预算 3600%」除了吓人没有信息量，
   // 直接说「已超支」并给出两个数，用户自己看得懂
   const text =

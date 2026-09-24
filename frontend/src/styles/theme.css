@@ -31,7 +31,16 @@
   --color-fg: #ffffff;
   --color-fg-shadow: 0 0 0.5rem 0 rgba(0, 0, 0, 0.1);
   --color-text: #303030;
-  --color-text-secondary: rgba(48, 48, 48, 0.65);
+  /* 次要文字。alpha 从 0.65 提到 0.70 是**修复**不是调色（2026-09-24 UI 审评）：
+     0.65 在三种底色上全部低于 WCAG AA 正文要求的 4.5:1 ——
+       白卡片  合成 rgb(120,120,120) → 4.39:1
+       页面米白 #f8f5ee      → 4.20:1
+     而它承载的是「失败 0 次」「命中率 97.2%」「平均首字耗时 2900ms」
+     「按照渠道币种计，不折算」这一类**副标**，恰恰是需要读清的正文。
+     0.70 之后：白卡 5.10:1、米白底 4.89:1（暗色卡片 4.69:1，见下方 dark 块）。
+     再淡一档（0.6）会掉到 4.0 以下；再深一档（0.75）就与正文 #303030 难分主次，
+     层次会塌掉 —— 0.70 是「够读」与「看得出是次要」之间那一档。 */
+  --color-text-secondary: rgba(48, 48, 48, 0.7);
   --color-border: #d9d9d9;
 
   --color-red: #ea4343;
@@ -255,7 +264,9 @@
   --color-fg: #303030;
   --color-fg-shadow: 0 0 0.5rem 0 rgba(0, 0, 0, 0.8);
   --color-text: #c8c8c8;
-  --color-text-secondary: rgba(200, 200, 200, 0.65);
+  /* 与浅色主题同一个 alpha（0.70）：暗色卡片 #303030 上合成 rgb(154,154,154)
+     → 4.69:1，过 AA。0.65 时是 4.30:1，不达标。 */
+  --color-text-secondary: rgba(200, 200, 200, 0.7);
   --color-border: #424242;
   --scrollbar-thumb: rgba(100, 100, 100);
 
@@ -452,6 +463,62 @@ a:hover { opacity: 0.85; }
   background: color-mix(in oklab, var(--color-red) 12%, transparent) !important;
 }
 
+/* ---- 固定列（fixed left/right）的边界提示 ----
+   2026-09-24 UI 审评中最误导人的一个现象：表格横向滚动时，左侧固定的
+   「请求时间」列会盖住后面列的开头，而被盖住的又正好是数字 ——
+   1055 视口下表体滚到中段时，「词元」列可见的只剩 `↓ 2.38K` 和 `22K 99.59%`
+   （真实值是 `↑ 131.22K ↓ 2.38K` 与 `131.22K 99.59%`）。
+   用户读到的是一个**残缺的、看起来比真实值小一个数量级的数**，
+   而屏幕上没有任何东西提示「左边还有内容被挡住了」。
+
+   sticky 列本身必须有实底（否则下面的行会透出来），所以不能靠透明来示弱。
+   这里在 antd 自己那条 `::after` 阴影（它已经存在，宽 30px、定位在固定列外侧）
+   上叠一层朝内的渐隐 —— 不新增元素、不改列宽，只在滚动位置上画一条
+   「这里被切开了」的视觉边界。
+
+   为什么不用 antd 自带的那套（`.ant-table-ping-left/right` +
+   `.ant-table-cell-fix-left-last::after { box-shadow: inset ... }`）：
+   实测在这张表上不生效 —— 1055 视口滚到中段与末尾，表根类名里始终
+   只有 `ping-right`（左侧无论如何都不亮），而 `::after` 的 boxShadow
+   恒为 `none`。所以这里自己画，并因此必须自己管显示时机（见下）。
+   顺带说明：`ping-right` 常亮也是个 bug —— 1440 视口本来就不需要滚动，
+   它照样挂着，等于告诉用户「右边还有内容」。
+
+   **显示时机由 JS 决定**（组件里的 canScrollLeft / canScrollRight，
+   输出到 data-hint-l / data-hint-r）：只有那一侧真的藏了内容才画。
+   1440 这种不滚的宽度上两侧都不画；滚到最左时左侧不画；
+   滚到最右时右侧不画 —— 阴影因此始终是「这里确实有东西被挡住」的
+   可信信号，而不是一条常驻的装饰。
+
+   注意：本文件是**全局**样式表，不能用 :deep()（那是 scoped 样式才有的
+   编译期语法，写在这里会被整个丢掉）—— 第一版正是这么写的，
+   实测 ::after 的 backgroundImage 仍是 antd 的 none。 */
+.log-table .ant-table-cell-fix-left-last::after,
+.log-table .ant-table-cell-fix-right-first::after {
+  pointer-events: none;
+  background-image: none;
+}
+.log-table[data-hint-l='1'] .ant-table-cell-fix-left-last::after {
+  background-image: linear-gradient(to right, rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0));
+}
+.log-table[data-hint-r='1'] .ant-table-cell-fix-right-first::after {
+  background-image: linear-gradient(to left, rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0));
+}
+:root[data-theme='dark'] .log-table[data-hint-l='1'] .ant-table-cell-fix-left-last::after {
+  background-image: linear-gradient(to right, rgba(0, 0, 0, 0.4), rgba(0, 0, 0, 0));
+}
+:root[data-theme='dark'] .log-table[data-hint-r='1'] .ant-table-cell-fix-right-first::after {
+  background-image: linear-gradient(to left, rgba(0, 0, 0, 0.4), rgba(0, 0, 0, 0));
+}
+
+/* ---- 表头与表体不需要额外补宽 ----
+   2026-09-24 审评时曾按「表头容器比表体窄一个滚动条宽度」推断需要给
+   .ant-table-header 加 padding-right，**实测这是错的**：antd 用 colgroup +
+   逐列定宽渲染，padding 不会让 th 变窄，只会把表体推出容器。
+   逐列量中线才是判据 —— 1055 视口（真正出现横向滚动的宽度）实测
+   10 列的中线漂移全部为 0，1440 视口下最大 1.92px（亚像素 + 末尾那列
+   8px 的滚动条占位列）。**列中线是对齐的，这条不用改。** */
+
 /* ---- 悬浮提示的配色（全局，不只是操作列的图标按钮）----
    全站的 a-tooltip 都用这一套：底色 --tooltip-bg 配文字 --tooltip-fg。
 
@@ -495,6 +562,32 @@ a:hover { opacity: 0.85; }
 .ant-list,
 .ant-tag {
   font-family: var(--font-family-list);
+}
+
+/* ---- 数字必须等宽（2026-09-24 UI 审评）----
+ *
+ * Harding 的数字是 **proportional（比例宽度）**：同一个字号下
+ * '1' 的 advance 只有 348/1000 em，'0' 是 559/1000 em ——
+ * 实测 12px 下十位数「1111111111」是 50.16px，「0000000000」是 79.56px，
+ * 差了 1.6 倍。这在文章排版里是优点，在**要竖着扫的数字列**里是硬伤：
+ * 同一列里「1.00K」和「479.23K」的数位不对齐，小数点不在一条竖线上，
+ * 扫描时每行都要重新找基准（这正是审评里「数字高度基线不一」的真正成因 ——
+ * 不是旧式数字，Harding 的数字是 lining 的，字形顶底都对齐；
+ * 问题只出在**宽度**上）。
+ *
+ * Harding 自带可用的 tnum 特性（字体表里有 GSUB 'tnum'），
+ * 开启后十个数字统一 72px（vs 原来的 66.11px），数位因此严格对齐。
+ * 比换字体好得多：观感仍是参考站那一套，只把「宽度」这一项掰正。
+ *
+ * 覆盖面：表格、列表、标签里的数字。这几处就是「一列数字要竖着比」的地方。
+ * 不覆盖的（标题、正文、统计卡大数字）本来就没有对齐需求 ——
+ * 而且 StatCard 的 .summary-value 早就自己写了 tabular-nums（它的数字
+ * 会随实时推送跳变，不等宽就会左右抖），所以这里不重复声明。 */
+.ant-table-thead > tr > th,
+.ant-table-tbody > tr > td,
+.ant-list,
+.ant-tag {
+  font-variant-numeric: tabular-nums;
 }
 
 /* 弹窗内容区自己滚，标题栏与按钮栏始终留在视口里。

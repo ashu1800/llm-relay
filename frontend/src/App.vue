@@ -47,6 +47,23 @@ const themeConfig = computed(() => ({
     colorBgBase: themeStore.isDark ? '#202020' : '#f8f5ee',
     colorBgContainer: themeStore.isDark ? '#303030' : '#ffffff',
     colorBorder: themeStore.isDark ? '#424242' : '#d9d9d9',
+    // ---- 文字灰阶必须显式映射（2026-09-24 UI 审评）----
+    //
+    // 不映射的话它们走 antd 默认的 rgba(0,0,0,.25) / rgba(0,0,0,.45)：
+    //   · 占位文字 rgba(0,0,0,.25) 压白底只有 **1.84:1**（暗色 2.23:1）——
+    //     输入框里「这个框该填什么」的唯一线索几乎看不见（表单没有别的示例文案）。
+    //   · 二级文字 rgba(0,0,0,.45) 只有 3.36:1，不达 AA 正文的 4.5:1。
+    //
+    // 下面两个值与 styles/theme.css 的 --color-text-secondary 同源（alpha 0.70）：
+    // 浅色白卡 5.10:1 / 暗色卡片 4.69:1。占位文字比二级文字再淡一点点，
+    // 但仍守在 4.5:1 之上：浅色 #767676（白卡 4.54:1）、暗色 #979797（卡片 4.52:1）。
+    // 它**必须**比真实值淡 —— 否则用户分不清「已经填了」和「还没填」。
+    colorTextSecondary: themeStore.isDark ? 'rgba(200, 200, 200, 0.7)' : 'rgba(48, 48, 48, 0.7)',
+    colorTextPlaceholder: themeStore.isDark ? '#979797' : '#767676',
+    // 三级文字（antd 用它画表单说明与空态补充）。比上面两档更淡是**有意的**：
+    // 这一档只承载「读不到也不影响操作」的补充信息。亮度与 antd 默认同档
+    // （白底 3.36:1），但色相跟着页面的暖灰走，不再是从别处飘来的纯黑透明。
+    colorTextTertiary: themeStore.isDark ? 'rgba(200, 200, 200, 0.55)' : 'rgba(48, 48, 48, 0.55)',
     borderRadius: 6,
     fontFamily: 'var(--font-family-base)'
   }

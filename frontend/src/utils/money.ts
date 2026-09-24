@@ -19,18 +19,43 @@ export function symbolOf(currency?: string | null): string {
 }
 
 /**
- * 金额数字：小于 1 时保留 6 位（单次调用常常是几厘，固定 4 位会全变成 0.0000），
- * 否则 4 位。与看板原有的口径一致。
+ * 金额数字的小数位：**按量级分档，全站只有这一份规则**（2026-09-24 UI 审评收口）。
+ *
+ * 分档与理由：
+ *   ≥ 0.01 → 4 位。单次调用常常只花几厘，固定 2 位会把一大片显示成 0.00；
+ *            而 4 位足以区分它们（0.0375 / 0.0412），第 5 位起就是噪声 ——
+ *            价格表本身也只精确到「每百万词元」的厘位。
+ *   < 0.01 → 6 位。这一档再砍就真的会看见 0.00 了（库里最便宜的一单是 0.000938）。
+ *   0      → '0.00'，不是 '0.0000'：四个零看起来像「算过但是零」。
+ *
+ * 以前这里是 `n < 1 ? 6 : 4`，于是 0.037510 会拖着两个没有信息量的尾零；
+ * 更要紧的是**别处各自写了一套**：日志列表 toFixed(6)、日志详情 toFixed(8)、
+ * 分组预算 toFixed(2)、日报 toFixed(4)。同一个数字在四处是四个样子，
+ * 用户核对「这一单到底多少钱」时对不上。现在它们都走这里。
  */
 export function amountText(v: string | number | null | undefined): string {
   const n = Number(v ?? 0)
-  if (!Number.isFinite(n) || n === 0) return '0.0000'
-  return n.toFixed(n < 1 ? 6 : 4)
+  if (!Number.isFinite(n) || n === 0) return '0.00'
+  return n.toFixed(Math.abs(n) < 0.01 ? 6 : 4)
 }
 
 /** 带符号的金额，如 ¥12.3400、$0.000938 */
 export function moneyText(v: string | number | null | undefined, currency?: string | null): string {
   return symbolOf(currency) + amountText(v)
+}
+
+/**
+ * 单笔费用的列表/详情写法：没有金额时返回 `-` 而不是 `¥0.00`。
+ *
+ * 为什么与 moneyText 分开：看板那张卡回答的是「这段时间一共花了多少」，
+ * 0 就是 0，写 ¥0.00 是对的；而日志里的一行回答的是「这一笔花了多少」，
+ * 0 的真实含义是「没计价 / 免费渠道 / 失败请求」—— 写成 ¥0.00 会被读成
+ * 「这次很便宜」，那是错的。规则同一份，空值语义各自表达。
+ */
+export function costText(v: string | number | null | undefined, currency?: string | null): string {
+  const n = Number(v ?? 0)
+  if (!Number.isFinite(n) || n <= 0) return '-'
+  return symbolOf(currency) + amountText(n)
 }
 
 // 多币种的展示顺序：按这张表定序，而不是按 Object.keys 的顺序 ——

@@ -10,7 +10,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { api } from '@/api/client'
 import AnimatedNumber from '@/components/AnimatedNumber.vue'
-import { currencyKeys, moneyText, symbolOf } from '@/utils/money'
+import { currencyKeys, moneyText } from '@/utils/money'
 import { burstConfetti } from '@/utils/celebrate'
 
 type Report = {
@@ -111,6 +111,9 @@ function fmtTokens(n: number) {
   return String(n ?? 0)
 }
 
+// 单笔金额走 utils/money 的统一规则（原来这里是 toFixed(4)：
+// 与日志的 6 位、分组的 2 位对不上）。符号也交给同一个函数，
+// 不认得的币种它会给「代码 + 空格」而不是猜一个 $。
 const priciestLines = computed(() => {
   const list = report.value?.priciest || []
   // 单币种站点保持原样一行；两种币各自一行，互不比较、不合成"全场最贵"
@@ -118,7 +121,7 @@ const priciestLines = computed(() => {
     .filter((p) => p.model)
     .map((p) => {
       const cur = p.currency || 'USD'
-      return `${symbolOf(cur)}${Number(p.cost).toFixed(4)} · ${p.model}${p.channel ? ' @ ' + p.channel : ''}`
+      return `${moneyText(p.cost, cur)} · ${p.model}${p.channel ? ' @ ' + p.channel : ''}`
     })
 })
 </script>
