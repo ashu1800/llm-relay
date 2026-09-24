@@ -32,9 +32,9 @@ import ChannelIcon from '@/components/ChannelIcon.vue'
 import { onLive, createThrottledLiveReloader } from '@/composables/useLive'
 import NewLogEffect, { type FxTarget } from '@/components/NewLogEffect.vue'
 import { useLogFxStore } from '@/stores/logFx'
-import { symbolOf } from '@/utils/money'
+import { costText, symbolOf } from '@/utils/money'
 import { writeClipboard } from '@/utils/clipboard'
-import { fmtTime, pad2 } from '@/utils/fmtTime'
+import { fmtTime, fmtTimeCompact, pad2 } from '@/utils/fmtTime'
 import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
 import type { Channel, ChannelGroup, Paged, RequestLog } from '@/api/types'
 
@@ -120,10 +120,13 @@ type ColKey = (typeof COL_KEYS)[number]
  * 不存在 —— 为它牺牲整张表的可读性不划算。
  */
 const COL_BOUNDS: Record<ColKey, [number, number]> = {
-  time: [155, 155], // fmtTime 输出定长（19 字符），不需要量
+  // 时间列现在按内容量（见 fmtTimeCompact 的说明：今天只显示时分秒）。
+  // 下限 92 = 「昨天 23:59:59」这类最长形态在 12px 下的宽度 + 内边距，
+  // 上限 170 留给跨年的完整日期
+  time: [92, 170],
   model: [120, 300],
   channel: [130, 240],
-  tokens: [150, 180],
+  tokens: [140, 200],
   elapsed: [120, 150],
   cost: [90, 140],
   speed: [118, 150],
@@ -135,7 +138,7 @@ const COL_BOUNDS: Record<ColKey, [number, number]> = {
 /** 运行时列宽。初值取原来那组定宽常量（模型列的 190 是它的常规值），
  *  首屏先按它们渲染、测量结果随后覆盖 —— 避免「先窄后宽」闪一下。 */
 const colW = ref<Record<ColKey, number>>({
-  time: 155,
+  time: 96,
   model: 190,
   channel: 130,
   tokens: 150,
@@ -169,7 +172,12 @@ const colW = ref<Record<ColKey, number>>({
 const CONTENT_MEASURE: Partial<Record<ColKey, { sel: string; pad: number }>> = {
   model: { sel: '.model-cell', pad: 0 }, // inline-flex + nowrap
   channel: { sel: '.chan-name', pad: 24 }, // 18 图标 + 6 间距
-  tokens: { sel: '.tk-line', pad: 0 }, // 两行取最大
+  // 词元的锚点是整格（两排共用一个网格，量它就是量最宽的那一排）。
+  // 2026-09-24 之前锚点是 .tk-line，那时它是 display:flex 的定宽轨道 ——
+  // 量到的是轨道（恒 128px）而不是内容，列宽因此锁死在初值；
+  // 现在 .tk-line 是 display:contents（只为一排共用轨道），
+  // 根本量不到盒子，必须换成 .token-cell（width: fit-content，紧贴内容）
+  tokens: { sel: '.token-cell', pad: 0 },
   elapsed: { sel: '.dur-line', pad: 9 }, // 3 竖条 + 6 间距
   cost: { sel: '.txt-cell', pad: 0 },
   speed: { sel: '.spd-cell', pad: 0 }, // inline-flex + nowrap
@@ -203,9 +211,21 @@ function remeasureColumns() {
     if (!spec) continue
     let max = 0
     wrap.querySelectorAll<HTMLElement>(`.ant-table-tbody ${spec.sel}`).forEach((el) => {
-      // scrollWidth 对「不被压缩的元素」就是装下全部内容需要的宽度；
-      // 锚点的选择因此有硬性要求，见 CONTENT_MEASURE 的注释
-      const w = el.scrollWidth
+      // getBoundingClientRect 而不是 scrollWidth。两者对**块级/行内块**锚点
+      // 是同一个数（实测 .model-cell 172.2 对 172、.key-tag 72.8 对 71，
+      // 差的是亚像素舍入），但对 **display: inline** 的锚点只有前者有效：
+      // inline 元素不生成盒子，scrollWidth / clientWidth 恒为 0。
+      //
+      // 费用列的锚点 .txt-cell 必须是 inline（inline-block 会参与行盒、
+      // 把单元格行高从 44px 顶到 49px，见那里的注释），于是 2026-09-24
+      // 之前的 `const w = el.scrollWidth` 在这列上永远读到 0，
+      // 走进下面的 `max === 0 → continue` 分支 —— 费用列因此**从未**随内容
+      // 变过宽，一直停在初值 90px。这是本次 UI 审评实测发现的：
+      // 该列金额最长 72.3px，加内边距与呼吸位需要 94px，90px 是差一点的，
+      // 而列宽自适应看起来「生效了」，所以一直没被发现。
+      //
+      // 亚像素：rect.width 带小数（72.3），取整后再进下面的 ≥2px 抖动判断
+      const w = Math.ceil(el.getBoundingClientRect().width)
       if (w > max) max = w
     })
     if (max === 0) continue // 本页该列没有锚点（如全是空值），保持原宽
@@ -225,7 +245,11 @@ function remeasureColumns() {
     }
   }
   // 列宽变了 → 行宽也变了 → 正在飞的扫光亮带要重新定位
-  if (changed) nextTick(repositionBeams)
+  if (changed) {
+    nextTick(repositionBeams)
+    // 列宽一变，「右边还有没有内容」也跟着变（列变窄可能就不再需要滚动）
+    nextTick(syncScrollHints)
+  }
 }
 
 // 列宽在 rows 变化后重算：翻页 / 换筛选 / 首屏的整批替换，以及实时推送插行
@@ -308,6 +332,40 @@ watch(
   },
   { deep: true },
 )
+
+// ---- 固定列的边界提示：只在真的藏了内容时才画 ----
+//
+// 两枚固定列（左侧「请求时间」、右侧「操作」）都盖在别的列上面。
+// 横向滚动时被盖住的可能正好是数字 —— 1055 视口下「词元」列只剩
+// `↓ 2.38K` 和 `22K 99.59%`（真实是 `↑ 131.22K ↓ 2.38K`），
+// 用户读到的是一个看起来小一个数量级的残缺值，而屏幕上没有任何提示。
+//
+// 为什么不用 antd 自带的固定列阴影：它有这套机制（`.ant-table-ping-left/right`
+// 挂在表根上，`.ant-table-cell-fix-left-last::after` 上加 inset box-shadow），
+// 但**实测在这张表上不工作** —— 1055 视口滚到中段、末尾，表根的类名里
+// 始终只有 `ping-right`、`::after` 的 boxShadow 恒为 `none`。
+// 所以这里自己画一条渐隐，并且**自己判断什么时候该显示**。
+//
+// 判断依据不是「能不能滚」（那会让 1440 这种本来就不滚的宽度上也常亮一条
+// 无意义的阴影 —— 本文件第一版就是这么错的），而是分别看两侧：
+//   canLeft  = 已经向右滚了（左边有内容被盖住）
+//   canRight = 还没滚到底（右边还有内容）
+// 两侧各自独立，滚到最左时左侧不画、滚到最右时右侧不画。
+const canScrollLeft = ref(false)
+const canScrollRight = ref(false)
+
+function syncScrollHints() {
+  const body = tableWrap.value?.querySelector<HTMLElement>('.ant-table-body')
+  if (!body) {
+    canScrollLeft.value = false
+    canScrollRight.value = false
+    return
+  }
+  // 1px 容差：缩放比例非整数时 scrollLeft 会有零点几像素的余量，
+  // 严格比较会让「已经滚到底」被判成「还能再滚」，右侧阴影因此不消失
+  canScrollLeft.value = body.scrollLeft > 1
+  canScrollRight.value = body.scrollLeft < body.scrollWidth - body.clientWidth - 1
+}
 
 // ---- 新日志入场动效：档位来自系统设置，立刻生效（store 是同一个实例）----
 //
@@ -739,10 +797,14 @@ function fmtTokens(v: number | null | undefined) {
 }
 
 // 费用：符号取这条日志自己的币种快照（渠道后来改了币种也不影响历史行），
-// 不做任何换算 —— 人民币渠道的钱就是人民币
+// 不做任何换算 —— 人民币渠道的钱就是人民币。
+//
+// 小数位交给 utils/money.ts 的 costText：它按量级分档（<0.01 六位、否则四位），
+// 并且是全站唯一一份规则。这里原来是自己的 toFixed(6)，而同一笔钱在详情里
+// 是 toFixed(8)、在分组预算是 toFixed(2)、在日报是 toFixed(4) ——
+// 用户核对「这一单到底多少钱」时四个地方对不上（2026-09-24 UI 审评）。
 function fmtCost(v: string, currency?: string) {
-  const n = Number(v)
-  return n > 0 ? symbolOf(currency) + n.toFixed(6) : '-'
+  return costText(v, currency)
 }
 
 // 费用为什么是这么多：把当时生效的倍率摊在金额旁边。
@@ -846,6 +908,9 @@ onUnmounted(() => {
   freshTimers.clear()
   fxTargets.value = []
   detachBeamWatch()
+  // 横向滚动边界提示的两个监听（滚动走捕获、改窗口）
+  window.removeEventListener('scroll', syncScrollHints, true)
+  window.removeEventListener('resize', syncScrollHints)
 })
 
 onLive('logs', (items: RequestLog[]) => {
@@ -872,6 +937,24 @@ onMounted(() => {
   // 列表字体（Harding-Regular.ttf）就绪前，量到的是回退字体的宽度 ——
   // 两者字宽不同，按回退字体算出的列宽会偏窄。字体到了要重量一次。
   document.fonts?.ready.then(() => nextTick(remeasureColumns))
+
+  // 横向滚动的边界提示。列宽是量出来的、行数还会随实时推送变，
+  // 所以「能不能往右滚」在每个可能改变它的时机都要重算：
+  // 列宽重算后（remeasureColumns 里调）、改窗口（resize）、滚动（scroll）。
+  //
+  // scroll 用 capture 挂在 window 上就够了，**不需要**再去
+  // .ant-table-body 上单独挂一个：scroll 事件虽然不冒泡，但**捕获阶段
+  // 会经过所有祖先** —— window 上的捕获监听因此收得到表体发出来的滚动。
+  // 本文件上面的扫光亮带（repositionBeams）用的也是同一条，早已验证可行。
+  //
+  // 这里原本还写了一个「轮询 20 次 × 100ms 等 .ant-table-body 渲染出来再挂监听」
+  // 的兜底 —— 那是多余的：表体是 antd 挂载后才渲染的，首帧确实拿不到它，
+  // 但 window 捕获监听不依赖拿到它。而轮询版有个真实风险：表体若在 2 秒后才
+  // 出现（后端慢、首屏加载失败重试），监听就永远挂不上，阴影从此不再更新。
+  // 删掉。
+  window.addEventListener('scroll', syncScrollHints, true)
+  window.addEventListener('resize', syncScrollHints)
+  nextTick(syncScrollHints)
 })
 </script>
 
@@ -911,7 +994,13 @@ onMounted(() => {
            列宽塌回声明宽度）。overflow: hidden 是兜底：亮带永远不该撑出滚动条。
            data-fx 是当前档位：动效层里那几条纯 CSS 的规则靠 .log-table[data-fx='x']
            选中 tr.is-new 的单元格（自上滑入与光晕脉动两档），换档时不用重挂表格。 -->
-      <div ref="tableWrap" class="log-table" :data-fx="logFx.fx">
+      <div
+        ref="tableWrap"
+        class="log-table"
+        :data-fx="logFx.fx"
+        :data-hint-l="canScrollLeft ? '1' : '0'"
+        :data-hint-r="canScrollRight ? '1' : '0'"
+      >
         <NewLogEffect :mode="logFx.fx" :targets="fxTargets" />
         <a-table
           :data-source="rows"
@@ -925,8 +1014,14 @@ onMounted(() => {
         <template #emptyText>
           <a-empty :description="emptyText" />
         </template>
+        <!-- 请求时间：这一列昨天还占 155px（「2026-09-24 11:01:22」19 个字符），
+             是横向滚动的最大单一贡献者，而「今天」这一档下 50 行的日期部分
+             逐行完全相同。现在按 fmtTimeCompact 分档显示（今天 = 时分秒），
+             完整时间挂在 title 上。省下来的 ~60px 直接来自这一列。 -->
         <a-table-column title="请求时间" :width="colW.time" fixed="left">
-          <template #default="{ record }">{{ fmtTime(record.created_at) }}</template>
+          <template #default="{ record }">
+            <span :title="fmtTime(record.created_at)">{{ fmtTimeCompact(record.created_at) }}</span>
+          </template>
         </a-table-column>
         <!-- 模型名带 ellipsis：不加的话长模型名会在这里折成两三行，
              把整行从 40px 顶到 98px（50 行就是 5000px 的页面）；
@@ -1019,7 +1114,7 @@ onMounted(() => {
                   </svg>
                   <span class="tk">{{ fmtTokens(record.cached_tokens) }}</span>
                 </span>
-                <span class="tk tk-cache">{{ cacheRate(record) }}</span>
+                <span class="tk tk-cache tk-rate">{{ cacheRate(record) }}</span>
               </div>
             </div>
           </template>
@@ -1224,7 +1319,10 @@ onMounted(() => {
           </span>
         </a-descriptions-item>
         <a-descriptions-item label="费用">
-          {{ symbolOf(current.cost_currency) }}{{ Number(current.estimated_cost).toFixed(8) }}
+          <!-- 与列表同一个规则（utils/money.ts 的 costText）。
+               这里原来是 toFixed(8)：同一个数字，列表显示 ¥0.037510、
+               详情显示 ¥0.03751000 —— 多出来的两位既不是精度也不是信息 -->
+          {{ costText(current.estimated_cost, current.cost_currency) }}
           <a-tag v-if="current.usage_estimated" color="orange" style="margin-left: 6px">用量为估算值</a-tag>
           <!-- 金额为什么是这个数：把当时生效的倍率与来源摊开，省得去猜 -->
           <a-tag v-if="costMultiplierTag(current).peak" color="orange" style="margin-left: 6px">
@@ -1249,43 +1347,73 @@ onMounted(() => {
 <style scoped>
 /* 「词元」那一格：上下两排、小一档字，上排输入/输出、下排缓存/命中率。
    两排 15px 合计 30px，再用 -4px 的上下负边距挤成 22px —— 与「任务耗时」列
-   同一手法，行高因此与改版前完全一样（实测 40.25/41.25 两档）。
+   同一手法，行高因此与改版前完全一样（实测 44/45px 两档）。
    行高一变，固定表体的可视行数与滚动位置都会跟着变（见 TABLE_BODY_Y 的说明）。
 
-   必须是「块级 + justify-content: center」，不能用 inline-block：
-   全局规则里单元格是 text-align: center（theme.css），块级盒子会撑满单元格、
-   里面的两排从左边起排 —— 表现就是「整格数字偏左」，实测右空隙比左空隙大 42px。
-   但也不能改成 inline-block：inline 级盒子要参与行盒，单元格那 14px 的行高
-   （strut）会跟它叠起来，行高从 41px 涨到 49px，可视行数与滚动位置全变。
-   块级 grid 加 justify-content: center 两头都顾上：轨道按内容收缩再整体居中，
-   两排共用同一条左基线（较宽的那排决定轨道宽度），行高一点不动。
+   ---- 2026-09-24 改版：两排共用一个网格，数字按列右对齐 ----
+   改版前每一排是各自独立的 flex，四个数左对齐，于是「↓」的位置跟着「↑」的
+   位数左右跑（`↑ 1.33K ↓ 3.66K` 与 `↑ 139 ↓ 42` 的 ↓ 差约 20px）——
+   竖着扫这一列时找不到基准。现在两排合成一个 grid，四个格子按列对齐：
+     第 1 列 = 输入 / 缓存命中   第 2 列 = 输出 / 命中率
+   两排共用同一组轨道（这是关键：改版前是「每排一个网格」，
+   auto 轨道跟着各排内容伸缩，整块宽度与左缘因此逐行漂移，
+   实测 50 行里 5～6 个位置、左右漂 9.38px）。同一组轨道下，
+   右对齐的数字右缘在整列里落在同一条竖线上。
 
-   **轨道宽度同样要定死**：auto 轨道跟着两排里较宽的那排伸缩（实测 64.81px →
-   149.53px），整块宽度随之变化、而它又居中 —— 每行内容块的左缘因此落在不同
-   x 上（实测 50 行里 5～6 个位置，左右漂 9.38px）：扫这一列时图标和数字会左右
-   跳，「词元」整列看着毛糙。
+   必须是「块级 + 定宽 = 内容宽」而不是撑满单元格：全局规则里单元格是
+   text-align: center（theme.css），撑满的块级盒子会让两排从左起排
+   （实测右空隙比左空隙大 42px），而这个盒子同时是**列宽的测量锚点**
+   （见 CONTENT_MEASURE），撑满时 scrollWidth 量到的是单元格宽度而不是内容，
+   列宽就再也不随内容变了 —— 这正是「费用列锚点失效」的同一个坑。
+   width: fit-content 两头都顾上：盒子贴着内容，margin-inline auto 负责居中，
+   锚点量到的也就是内容本身。
 
-   128px 是按「列最窄时的可用宽度」倒推的，不是按某个数值档位拍的：
-   1440/1600 这类宽窗口下列被 antd 拉伸（可用 177.14px），但窗口窄到出现横向
-   滚动时列就是声明的 150px —— 减去左右各 8px 内边距只剩 134px，任何大于它的
-   定宽都会把这一格顶出去（第一版取 136px，在 1055 视口实测溢出 2px）。
-   128px 覆盖库里真实最大值 479.23K（六位数字的「479.23K 479.23K」实测
-   127.92px，正是这一档），且在任何窗口下都留有余量。
-   真出现七位数词元（fmtTokens 会写成 1234.56K）时，轨道按 minmax 让开，
-   不会把数字压到相邻单元格上。 */
+   ---- 轨道 min 的取法（这里错过一次，记下来）----
+   第一版写 minmax(58px, auto) / minmax(52px, auto)，是从「最窄窗口的可用宽度」
+   倒推的。结果：**同一列里不同行的右缘仍差 2.78px** —— 因为轨道是每行各自
+   计算的，内容不满 58px 的行轨道就是 58，内容 63.56px 的行轨道是 63.56，
+   而整块又居中，于是右缘跟着走。
+   正确取法是「按真实内容的实测最大值」：把库里所有行的四个槽位逐一量出来
+   （见审评取证的 measure-tk.js），得
+     第 1 列 max(输入 63.56, 缓存 63.56) = 63.56
+     第 2 列 max(输出 49.16, 命中率 40.81) = 49.16
+   min 取 66 / 54（留一点余量），两列合计 66 + 8 + 54 = **128px** ——
+   与改版前那条单轨道的定宽正好相等，所以列宽行为与之前完全一致，
+   只是从「一根轨道」变成「两根对齐的轨道」。
+   min 一旦覆盖了真实最大值，auto 就永远不会被触发，
+   所有行的轨道因而恒等 —— 这才是右缘能对齐的原因。
+
+   万一真出现八位词元（fmtTokens 写成 1234.56K，约 88px），
+   minmax 的 auto 会让那一行的第 1 列让开，不会把数字压到相邻格上 ——
+   代价只是那一行的右缘偏一点，而这种事在 25152 行里没有发生过。 */
 .token-cell {
   display: grid;
+  grid-template-columns: minmax(66px, auto) minmax(54px, auto);
   justify-content: center;
-  grid-template-columns: minmax(128px, auto);
+  column-gap: 8px;
+  width: fit-content;
   margin: -4px 0;
+  margin-inline: auto;
+  white-space: nowrap;
   font-size: 12px;
   line-height: 15px;
   font-variant-numeric: tabular-nums;
 }
-.tk-line { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
-/* 图标与它后面那个数是「一组」：组内 4px，两组之间 8px。
-   这样「输入 300.48K ↑ 32.76K」读起来是两个词元种类，而不是四个数。 */
-.tk-pair { display: inline-flex; align-items: center; gap: 4px; }
+/* display: contents 让两排的四个格子直接成为上面那个网格的子项 ——
+   两排因此共用同一组轨道。颜色仍然按 DOM 继承，不受影响 */
+.tk-line { display: contents; }
+/* 图标与它后面那个数是「一组」：组内 4px。
+   整组靠右（justify-self: end）：数字的右缘因此对齐，
+   图标会随之左右移动 —— 但图标只是个字形，数字对齐才是扫列时要的。
+   两个组之间靠网格的 column-gap 拉开。 */
+.tk-pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  justify-self: end;
+}
+/* 命中率与缓存那个数配对，落在第 2 列、右对齐 */
+.tk-rate { justify-self: end; }
 /* 三个字形（下箭头 / 上箭头 / 缓存盒）共用一条描边规则：
    线宽、圆角、颜色来源都一致，换字形时不必逐个调。
    颜色走 currentColor —— 挂色的地方是外面那一组（.tk-in/.tk-out/.tk-cache），
@@ -1368,22 +1496,33 @@ onMounted(() => {
 }
 /* 竖条本身也是一个两行的 grid，两段各占一行 —— 分段因此天然与两行文字齐平，
    不用写死像素高度（字号或行高改了，两段跟着走）。
-   overflow: hidden 把两段的直角裁成整条的圆角：截图里两端是圆角、
-   中间交界处是直角（实测交界行满宽 6/6，顶端才收窄成 2/6），
-   所以圆角只能加在整条上，不能加在每一段上。 */
+
+   ---- 2026-09-24 改版：两段由「连成一整条」改成「两枚独立的短标」----
+   改版前是 grid-template-rows: 1fr 1fr + 整条 border-radius + overflow: hidden：
+   两段等高、紧贴、共用一个圆角外壳 —— 视觉上就是一根**被分成两截的比例条**。
+   但它不是比例条：段高恒为 1fr，与首字/耗时的数值大小毫无关系，
+   它表达的只是「这两行各自属于哪个耗时档位」。
+   实测代价：站主与审评者都把它读成了「首字占这次调用的比例」，
+   而 3px 宽的色块本来也分辨不出档位色（橙 #a16207 与红 #c0392b 在 3px 上
+   几乎一样）。**画成比例条就得是比例条** —— 要么改成真比例，要么别像比例条。
+   选了后者：两段各留 3px 高、分开成两枚圆角短标，与右侧两行文字一一对位，
+   读法变成「上面那行的档位色 / 下面那行的档位色」，不再暗示比例。
+   段色仍然继承各自那一行的 currentColor，与数值色同源。 */
 .dur-bar {
   grid-column: 1;
   grid-row: 1 / span 2;
   display: grid;
   grid-template-rows: 1fr 1fr;
   align-self: stretch;
-  overflow: hidden;
-  border-radius: 2px;
+  /* 两段之间的缝：没有它两枚短标又会连成一条 */
+  row-gap: 3px;
+  padding: 1px 0;
 }
 /* 两段各自继承自己那一行的 currentColor：段色与数值色永远同源，
    不会出现「文字橙、竖条绿」这种对不上的情况 */
 .dur-bar i {
   background: currentColor;
+  border-radius: 2px;
 }
 .dur-line {
   grid-column: 2;
@@ -1651,12 +1790,16 @@ onMounted(() => {
 }
 
 /* ---- 日志队列水位 ----
-   12px 小字，与分页组件同一水平（左侧）—— 它和「共 N 条 / 页码」都是
-   表格的地基信息，拆成两行高度白费；负边距把它拉上分页那一行：
-   分页块高 32 + 上下边距 16，小字行高 20，上移 28px 后两者中线对齐。
-   width: fit-content 是必须的 —— 块级盒子会横撑整行盖住分页的点击区，
-   收到内容宽就只占左下角。flex: none 是必须的 —— 上面的表格吃掉了
-   弹性分配，这一条按内容占高，否则弹性链把它压扁或被挤出面板。 */
+   12px 小字，与分页组件同一行（左侧）—— 它和「共 N 条 / 页码」都是表格的
+   地基信息。原来靠 `margin: -28px` 把它硬拉上分页那一行，那个 28 是按
+   「分页块高 32」算的，而实测分页块只有 24px —— 于是它并没有落到分页那一行，
+   而是压在分页**下方**并与它重叠：390px 视口下「共 25152 条」被这一行盖住，
+   两块文字直接叠在一起（2026-09-24 UI 审评实测，gapY = -28.1px，
+   1440/1055/390 三个宽度都重叠）。
+
+   现在不猜高度了：给分页组件加一条下外边距，把这一行**推到分页下面**
+   （见下面的 .ant-pagination 规则），负边距整个删掉。
+   同一行放不下时的表现也从「重叠」变成「换行」—— 这是布局该有的行为。 */
 .queue-status {
   flex: none;
   display: flex;
@@ -1664,10 +1807,16 @@ onMounted(() => {
   justify-content: flex-start;
   width: fit-content;
   gap: 6px;
-  margin: -28px 0 0;
   font-size: 12px;
   color: var(--color-text-secondary);
   font-variant-numeric: tabular-nums;
+}
+
+/* 分页与队列水位之间的间距。用 margin-bottom 而不是水位上的负 margin：
+   间距是分页「下方」的属性，写在下游元素上就会在分页高度变化时失准
+   （上面那个 -28px 就是这么坏的）。 */
+.log-table :deep(.ant-pagination) {
+  margin-bottom: 6px;
 }
 
 .queue-dot {
