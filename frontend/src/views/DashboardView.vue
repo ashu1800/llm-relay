@@ -738,11 +738,8 @@ onMounted(async () => {
   transform: scale(0.92);
 }
 /* 键盘焦点必须可见（项目一贯的可访问性口径）：
-   outline 用数值色，2px + 2px 偏移在浅底深底都够清楚 */
-.fmt-toggle:focus-visible {
-  outline: 2px solid var(--tone-ink);
-  outline-offset: 2px;
-}
+   环的取值改由 theme.css 的全站 :focus-visible 统一给出（P1-7）——
+   这里原来用卡片色调 --tone-ink，与其余控件的焦点环不是一个颜色。 */
 
 /* 词元数字的格式切换过渡：旧值淡出上移、新值淡入（out-in 模式）。
    key 只绑格式，数值推送不经过这里 —— 滚动补间是 AnimatedNumber 自己的事。

@@ -112,6 +112,38 @@
   --text-blue: #0e7490;       /* 5.36:1 —— 青色相要压到很深才够，见 StatCard 的说明 */
   --text-gray: #5b6270;       /* 6.13:1 */
 
+  /* ---- 键盘焦点环（2026-09-24 UI 审评 P1-7）----
+     全站只有一套焦点环，值定义在这里，任何组件都不要自己写 outline。
+
+     为什么需要统一：审评实测出三套并存的焦点环 ——
+       · antd 按钮   2px solid rgb(214,191,180)，对白底 **1.76:1**
+       · 侧栏菜单    浏览器默认 1px auto
+       · 词元格式按钮 青色 #0e7490（5.39:1，唯一达标的一套）
+     WCAG 1.4.11 要求「非文本内容」至少 3:1，1.76:1 的焦点环等于
+     「键盘用户看不见自己停在哪儿」—— 而这是键盘可用的底线。
+
+     取 --text-primary-ink：白底 5.94:1、菜单选中底 4.81:1（深色主题
+     在下方换成提亮版 6.36:1 / 4.88:1）。用 2px + 2px offset：
+     焦点环画在元素外侧，压在任何底色上都能读。 */
+  --focus-ring-color: var(--text-primary-ink);
+  --focus-ring: 2px solid var(--focus-ring-color);
+  --focus-ring-offset: 2px;
+
+  /* 环与元素之间那 2px 空隙的填充色（halo）。
+     为什么需要它：焦点环只保证「环对外面底色」够清楚，可元素**自己的底色**
+     可能是与环同色相的实心主色块 —— 实测选中的单选按钮（底色 #b15840）
+     上面的环色 #94523f 只有 **1.23:1**，等于焦点落在实心按钮上看不见。
+     浅色主题填白：白对 #b15840 是 4.84:1，焦点块上立刻显出「这里被框住了」；
+     在白色卡片上它与底色融为一体，观感没有任何变化。
+     深色主题填 #3a241d（对亮色实心块 6.98:1），方向与主色块换档一致。
+     两者都只在需要的地方才看得见 —— 这正是「填一层反色」而不是换个环色的原因：
+     换环色只能照顾一种底色，而底色是控件自己决定的。 */
+  --focus-ring-halo: #ffffff;
+  /* 目标尺寸：`outline` 画在 offset 之外，这 2px 由 box-shadow 填成实底。
+     用 box-shadow 而不是 border：border 会改变盒模型尺寸（布局抖动），
+     而焦点出现的瞬间不该让任何东西移动。 */
+  --focus-ring-halo-shadow: 0 0 0 var(--focus-ring-offset) var(--focus-ring-halo);
+
   /* 词元构成三段的配色。与看板「消耗分布」同源：
      输入是花钱的那部分（陶土色），缓存命中是省下来的（绿），输出单独一色。
      看板环形图用的是同色相的深浅阶（大面积色块），这里是文字，
@@ -306,6 +338,12 @@
 
   /* 主色当文字用：深色底上往亮的方向调 */
   --text-primary-ink: #e8a48c; /* 面板 6.36:1；菜单选中底 4.88:1 */
+
+  /* 焦点环不在这里重新定义：--focus-ring-color 指向 --text-primary-ink，
+     它在本块已经换成提亮版（面板 6.36:1）—— 焦点环跟着一起换档，
+     正是「同一个语义、两套值」该有的样子。见浅色块里的说明。
+     halo 同理：深色主题填深色（亮色实心块上的对比靠它）。 */
+  --focus-ring-halo: #3a241d;
 
   /* 品牌标记：深色主题下用亮底 + 深字（亮底上的白字不可读） */
   --brand-mark-bg: #e8a48c;
@@ -604,6 +642,85 @@ a:hover { opacity: 0.85; }
 .ant-btn-primary {
   box-shadow: none;
 }
+
+/* ---- 全站统一的键盘焦点环（2026-09-24 UI 审评 P1-7）----
+   用一条 :focus-visible 覆盖全站，而不是让每个组件各写一份：
+   审评实测当时并存的三种写法（antd 自带 1.76:1、浏览器默认 1px auto、
+   组件私有青色 5.39:1）就是「各写各的」的必然结果 —— 同一次 Tab 走查里，
+   焦点环的粗细、偏移、颜色每几步就换一次，而其中一套根本不达标。
+
+   为什么用 :focus-visible 而不是 :focus：前者只在键盘导航时命中，
+   鼠标点击不会留下焦点环（浏览器对 button 的原生行为就是这样，
+   写成 :focus 会让每一次鼠标点击都在按钮上留一圈框）。
+
+   为什么加 !important：antd 的按钮样式由 CSS-in-JS 在运行时插进 <head>，
+   排在 theme.css 之后；`.ant-btn:focus-visible` 这类同权重规则后写的赢，
+   不加就改不动（与本文件里表头 text-align、图标按钮那几条同因）。
+
+   outline-offset 用正值把环画在元素**外面**：画在里面会压住文字与图标，
+   而这些控件尺寸本来就小（22px 的星期胶囊、28px 的表格图标按钮）。
+   环与元素之间的空隙由 box-shadow 填成 halo（见令牌处的说明）：
+   元素底色若是与环同色相的实心块，没有这层反色就只剩 1.23:1。 */
+:focus-visible {
+  outline: var(--focus-ring) !important;
+  outline-offset: var(--focus-ring-offset) !important;
+  box-shadow: var(--focus-ring-halo-shadow) !important;
+}
+
+/* ---- 焦点在「零尺寸 / 透明」控件上时，环要画到它的可见容器上 ----
+   全局那条规则对**可见**控件是对的，但有一类控件的真实输入藏在里面：
+   antd 的单选按钮组把 <input> 设成 opacity:0 + 0×0 的盒子，可见的是
+   外层的 <label>（.ant-radio-button-wrapper）。焦点环画在那个 0×0 的
+   input 上等于什么都没画 —— 实测（.shots/probe-focus-radio.mjs）
+   输入框的 rect 是 [329, 142, 0, 0]，环和 halo 都落在了一个不存在的位置上，
+   键盘用户在这个控件上看不到焦点。这比改之前更糟，所以必须单独接住。
+
+   为什么不用 :focus-within 一揽子解决：那会让「单击标签文字」也算焦点态，
+   而我们要的是键盘导航（Tab）才出现环 —— 与 :focus-visible 的语义一致。
+   改用 :has(:focus-visible)，它的语义正是「我内部有一个键盘焦点」，
+   Chrome 105+ 支持（本项目是 headless Chrome 153 实测）。
+
+   用**后代**选择器而不是 `>` 子选择器：antd 的单选按钮真实层级是
+   label > span.ant-radio-button > input，那个 span 夹在中间，
+   写成 `> .ant-radio-button-input` 一条都匹配不上（实测 matches() 为 false，
+   环因此一直停在 antd 自带的 1.76:1 上 —— .shots/probe-radio-dom.mjs）。
+   环画在容器上、由容器承担 halo：容器有实底，halo 才有东西可隔。
+
+   下拉（a-select）的搜索框同样命中这一类：input.ant-select-selection-search-input
+   是 opacity:0 的（实测 box 146×30，看得见的是外层的 .ant-select-selector）。
+   antd 自己给聚焦的下拉画的是 10% 透明的主色阴影，对白底几乎看不出边界。
+
+   下拉这条要**叠两个类**（.ant-select.ant-select-focused:has(...) .ant-select-selector）：
+   antd 在 CSS-in-JS 里给聚焦态写的是
+   `.ant-select-focused:where(.css-xxx).ant-select:not(...):not(...):not(...)`，
+   :where() 不贡献权重而三个 :not() 各算一个类 —— 合计 0,4,0，压过
+   `.ant-select:has(...) .ant-select-selector`（0,3,0）。实测该规则里带
+   `outline:0`，所以权重不够就永远看不到环（.shots/probe-select-outline.mjs
+   用 CSS.getMatchedStylesForNode 把两条规则的来源与权重都打了出来）。
+   写到 0,5,0 之后靠 !important 取胜，而不是靠源码顺序 —— 那不可靠。 */
+.ant-radio-button-wrapper:has(.ant-radio-button-input:focus-visible),
+.ant-radio-wrapper:has(.ant-radio-input:focus-visible),
+.ant-checkbox-wrapper:has(input.ant-checkbox-input:focus-visible),
+.ant-select.ant-select-focused:has(.ant-select-selection-search-input:focus-visible) .ant-select-selector {
+  outline: var(--focus-ring) !important;
+  outline-offset: var(--focus-ring-offset) !important;
+  box-shadow: var(--focus-ring-halo-shadow) !important;
+}
+/* 内层那些看不见的输入框自己不要再画一遍（否则环落在 0×0 / 透明的盒子上，
+   等于没画 —— 实测 antd 的单选按钮 input 是 0×0、下拉搜索框是 opacity:0） */
+.ant-radio-button-input:focus-visible,
+.ant-radio-input:focus-visible,
+.ant-checkbox-input:focus-visible,
+.ant-select-selection-search-input:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* 焦点在「藏起来的原生控件」上时，环要画到可见的容器上 ——
+   设置页的效果单选是 1px 透明的 radio（.fx-radio），它自己看不见，
+   焦点环必须由外层卡片承担（.fx-item 上的 :focus-within 规则）。
+   这里不去掉那条，只说明它为什么不能由上面这条覆盖：上面那三行是给
+   「可见控件」用的通用规则，藏起来的控件要单独指定宿主。 */
 
 /* ---- 自定义光标 ----
    默认箭头挂在 html 而不是 #app：cursor 是可继承属性，而 antd 的弹窗、

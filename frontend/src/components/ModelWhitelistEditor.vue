@@ -354,12 +354,9 @@ function applyBulk() {
 .wl-del:hover { background: color-mix(in oklab, var(--color-red) 14%, transparent); }
 
 /* 键盘走到这里要看得见焦点：胶囊与删除都是图标动作，没有焦点环
-   等于键盘用户不知道自己停在哪儿 */
-.price-pill:focus-visible,
-.wl-del:focus-visible {
-  outline: 2px solid var(--color-primary);
-  outline-offset: 1px;
-}
+   等于键盘用户不知道自己停在哪儿。
+   焦点环的样式不在这里写 —— theme.css 有一条全站 :focus-visible
+   （2026-09-24 UI 审评 P1-7：此前四处各写一份，颜色与偏移各不相同）。 */
 
 .wl-empty {
   padding: 12px;

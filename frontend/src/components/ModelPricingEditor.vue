@@ -535,7 +535,9 @@ function doSave() {
   font-size: 12px; cursor: var(--cursor-hand); color: var(--color-text-secondary);
   background: transparent; padding: 0;
 }
-.day-chip:focus-visible { outline: 2px solid var(--color-icon); outline-offset: 1px; }
+/* 焦点环交给 theme.css 的全站 :focus-visible（2026-09-24 UI 审评 P1-7）。
+   这里原来写的是 --color-icon（青色 #127a94，5.0:1）—— 它本身达标，
+   但与全站其余控件的焦点环不是同一种颜色，同一次 Tab 走查里会看到两种。 */
 /* 选中态如实心按钮：用 --solid-primary-* 这一对，而不是
    `background: var(--color-primary); color: #fff`。
    后者是 #c87864 + 白字，只有 3.32:1，而「周一」这些字样是 12px 正文，

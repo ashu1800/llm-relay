@@ -2008,10 +2008,7 @@ onMounted(() => {
   background: color-mix(in oklab, var(--color-red) 10%, transparent);
   font-weight: 500;
 }
-.fail-toggle:focus-visible {
-  outline: 2px solid var(--text-primary-ink);
-  outline-offset: 2px;
-}
+/* 焦点环不在这里写：theme.css 有一条全站 :focus-visible（P1-7） */
 
 /* 圆点：未激活空心（只描边），激活实心。空心时边框色 3:1 于白底达标
    （#ea4343 约 3.9:1）；暗色主题的 --color-red 是提亮版 #f08a7a（5.42:1） */

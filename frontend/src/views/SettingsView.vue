@@ -450,10 +450,14 @@ onMounted(load)
   pointer-events: none;
 }
 /* 键盘焦点必须看得见（项目一贯口径）：焦点在藏起来的 radio 上，
-   把焦点环画到卡片上 */
+   把焦点环画到卡片上。
+   这是全站唯一不能直接用 theme.css 那条 :focus-visible 的地方 ——
+   被聚焦的元素是不可见的（1px 透明），环必须由它的容器承担；
+   值仍取同一套令牌，颜色与偏移因此与别处一致（2026-09-24 P1-7）。 */
 .fx-item:focus-within {
-  outline: 2px solid var(--color-primary);
-  outline-offset: 2px;
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+  box-shadow: var(--focus-ring-halo-shadow);
 }
 .fx-name { font-size: 13px; font-weight: 600; color: var(--text-primary-ink); display: flex; align-items: center; gap: 6px; }
 .fx-item:not(.is-active) .fx-name { color: var(--color-text); }
