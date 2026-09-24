@@ -14,8 +14,11 @@ import {
   WarningOutlined,
   InfoCircleOutlined
 } from '@ant-design/icons-vue'
+// FormInstance 用于「提交前先校验、失败时聚焦并滚动到第一个出错字段」
+import type { FormInstance, Rule } from 'ant-design-vue/es/form'
 import { api } from '@/api/client'
 import { onLive } from '@/composables/useLive'
+import { useFormValidate } from '@/composables/useFormValidate'
 import DataState from '@/components/DataState.vue'
 import ModelWhitelistEditor, { type WhitelistRow } from '@/components/ModelWhitelistEditor.vue'
 // Proxy 只用于代理下拉的选项类型
@@ -145,6 +148,53 @@ const form = reactive({
 const proxies = ref<Proxy[]>([])
 
 const title = computed(() => (editing.value ? '编辑渠道' : '新建渠道'))
+
+// ---- 表单校验（2026-09-24 UI 审评补）----
+//
+// 补之前的状态：a-form-item 上的 required 只是个**视觉星号** ——
+// a-form 没绑 :model、字段没绑 name、表单没绑 :rules，全前端
+// `:rules / formRef / validate()` 零命中。填错只得到顶部一句 message，
+// 七百像素宽的弹窗里用户得自己找是哪个字段漏了；输入框失焦也没有任何反应。
+//
+// 现在的分工：
+//   · 格式类约束（必填、URL 形态）交给 rules —— 失焦即校验，错误就显示在字段下方；
+//   · 需要跨字段判断的（白名单非空、兜底模型必须在白名单里）留在 save() 里，
+//     它们不是「这个框填错了」，给字段挂红框反而指错了地方；
+//   · 值域固定、不可能为空的（上游协议、记账币种）只在模板上留 required 星号，
+//     不进 rules —— 详见模板里那两处的注释。
+const formRef = ref<FormInstance>()
+
+// 上游地址的形态：允许 http/https，也允许只写域名（后端会补协议，见 relay 的按协议补全）。
+// 这里不追求严格的 URL 语法 —— 拦的是「明显写错」的那种，
+// 真正的判据是后端能不能连通（渠道页有「测试连通性」按钮）。
+function looksLikeUrl(v: string): boolean {
+  const s = v.trim()
+  if (!s) return false
+  if (/\s/.test(s)) return false // 带空格的几乎一定是粘贴时带了尾巴
+  return /^(https?:\/\/)?[\w.-]+(:\d+)?(\/\S*)?$/i.test(s)
+}
+
+const rules: Record<string, Rule[]> = {
+  name: [
+    { required: true, message: '给这条渠道起个名字：列表、日志与看板都用它标识上游', trigger: 'blur' },
+    { max: 64, message: '名字最长 64 个字符', trigger: 'blur' }
+  ],
+  base_url: [
+    { required: true, message: '上游地址必填：转发时请求会发到这里', trigger: 'blur' },
+    {
+      validator: (_rule: Rule, value: string) =>
+        !value || looksLikeUrl(value)
+          ? Promise.resolve()
+          : Promise.reject('地址格式不对：写 https://api.example.com/v1 或只写域名都行，但不能带空格'),
+      trigger: 'blur'
+    }
+  ]
+}
+
+// 校验失败的统一收尾（滚动 + 聚焦到第一个出错的字段）在
+// composables/useFormValidate.ts 里，四个视图共用同一份 ——
+// 「点保存后视野与焦点该落在哪里」是同一件事，不该在四页各写一遍。
+const { validateForm } = useFormValidate(formRef)
 
 // 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
 // 表格紧接着显示「暂无数据」，用户会以为本来就没有渠道
@@ -375,10 +425,10 @@ const fallbackModelOptions = computed(() =>
 )
 
 async function save() {
-  if (!form.name.trim() || !form.base_url.trim()) {
-    message.warning('渠道名称与地址必填')
-    return
-  }
+  // 先过格式校验（必填 + 地址形态），错误直接显示在字段下方。
+  // 这条**必须**排在 base_url 的其余用法之前 —— 后面的白名单重拉、
+  // 兜底模型检查都假定这张表单至少是「填完整的」
+  if (!(await validateForm())) return
   // 上次回填失败过的，保存前重拉一次白名单（必须先于 whitelistPayload：
   // 重拉会改写 form.models）。重拉再失败就拦下保存 —— 用一张没读到内容
   // 的表去覆盖库里完整的白名单，比「晚点再保存」糟糕得多
@@ -1264,14 +1314,21 @@ onBeforeUnmount(() => {
       <!-- 表单排布：短字段两列并排、长字段整行，说明文字移到标签旁的 ⓘ 里。
            纵向一列排下来时每个字段要占掉「标签 + 控件 + 两三行说明」，
            十段表单就是一千多像素高，找字段得一路滚 -->
-      <a-form layout="vertical" class="channel-form">
+      <a-form ref="formRef" :model="form" :rules="rules" layout="vertical" class="channel-form">
         <a-row :gutter="12">
           <a-col :span="12">
-            <a-form-item label="渠道名称" required>
+            <a-form-item label="渠道名称" name="name">
               <a-input v-model:value="form.name" placeholder="例如 ohub-deepseek" />
             </a-form-item>
           </a-col>
           <a-col :span="12">
+            <!-- 协议与币种只留 `required`（星号），**不绑 name、不写 rules**：
+                 两者的值域是固定的选项列表（PROTOCOLS / CURRENCY_OPTIONS），
+                 form 初值就落在列表内且下拉没有 allowClear —— 不可能为空。
+                 绑上 name 只会给 formRef.validate() 注册一条永远不可能失败的
+                 校验路径（antd 在无 name 时直接跳过校验，见 FormItem.js:220），
+                 所以维持原样：只出星号。
+                 星号本身不能省 —— 「用户看不出哪些是必填」正是本次审评要修的问题。 -->
             <a-form-item required>
               <template #label>
                 上游协议
@@ -1284,7 +1341,7 @@ onBeforeUnmount(() => {
           </a-col>
         </a-row>
 
-        <a-form-item required>
+        <a-form-item name="base_url">
           <template #label>
             上游地址
             <a-tooltip title="填到 /v1 或只填域名都行，转发时会按所选协议补全路径。">
@@ -1423,6 +1480,12 @@ onBeforeUnmount(() => {
           </div>
         </a-form-item>
 
+        <!-- 白名单非空由 save() 拦（它要给的是「没有白名单的渠道不参与路由」
+             这条业务后果，挂在字段上的红字说不清）。这一项**只留 required 星号、
+             不绑 name**：a-form-item 一旦绑 name，antd 就会去 form.models 上
+             找校验路径，而那是一个数组，规则写在这里只会得到一个含义不明的报错；
+             无 name 时 antd 直接跳过校验（FormItem.js:220），星号仍然照出。
+             星号必须留 —— 它原来就有，是我改这一版时删掉的（回归）。 -->
         <a-form-item required>
           <template #label>
             模型白名单与映射

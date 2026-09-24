@@ -13,10 +13,15 @@ import {
   PlayCircleOutlined
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
+import { useFormValidate } from '@/composables/useFormValidate'
 import DataState from '@/components/DataState.vue'
 import GroupTag from '@/components/GroupTag.vue'
 import { writeClipboard } from '@/utils/clipboard'
 import { fmtTime } from '@/utils/fmtTime'
+
+// 表单校验（2026-09-24 UI 审评补）：原来名称的 required 只是个视觉星号，
+// 弹窗里失焦没有任何反应，填漏了只得到顶部一句 message
+import type { FormInstance, Rule } from 'ant-design-vue/es/form'
 
 import type { APIKey, ChannelGroup } from '@/api/types'
 
@@ -38,6 +43,25 @@ const form = reactive({
 })
 
 const title = computed(() => (editing.value ? '编辑密钥' : '新建密钥'))
+
+// ---- 表单校验（2026-09-24 UI 审评补）----
+//
+// 补之前：`<a-form-item label="名称" required>` 的 required 只是个**视觉星号** ——
+// a-form 没绑 :model、字段没绑 name、表单没绑 :rules，失焦不校验，
+// 提交失败只有顶部一句「名称必填」。这里把它接上：
+// 名称失焦即校验、错误显示在输入框下方；提交前 validateForm() 兜底。
+const formRef = ref<FormInstance>()
+
+const formRules: Record<string, Rule[]> = {
+  name: [
+    { required: true, message: '给这把密钥起个名字：它在列表与分组统计里标识调用方', trigger: 'blur' },
+    { max: 64, message: '名字最长 64 个字符', trigger: 'blur' }
+  ]
+}
+
+// 校验失败的统一收尾（滚动 + 聚焦）在 composables/useFormValidate.ts，
+// 四个视图共用同一份
+const { validateForm } = useFormValidate(formRef)
 
 // 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
 // 表格紧接着显示「暂无数据」，用户会以为密钥本来就没有
@@ -267,10 +291,7 @@ async function save() {
     closeModal()
     return
   }
-  if (!form.name.trim()) {
-    message.warning('名称必填')
-    return
-  }
+  if (!(await validateForm())) return
   saving.value = true
   try {
     // 白名单始终显式发送：空数组是有效值（表示清空），不传则后端保持原值
@@ -510,8 +531,8 @@ onMounted(() => {
       @ok="save"
       @cancel="onCancel"
     >
-      <a-form layout="vertical">
-        <a-form-item label="名称" required>
+      <a-form ref="formRef" :model="form" :rules="formRules" layout="vertical">
+        <a-form-item label="名称" name="name">
           <a-input v-model:value="form.name" placeholder="例如 本地客户端" />
         </a-form-item>
         <a-form-item label="每分钟请求上限">

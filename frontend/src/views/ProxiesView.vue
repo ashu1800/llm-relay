@@ -3,9 +3,14 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { PlusOutlined, ReloadOutlined, ThunderboltOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
+import { useFormValidate } from '@/composables/useFormValidate'
 import DataState from '@/components/DataState.vue'
 import { fmtTime } from '@/utils/fmtTime'
 import type { Proxy, ProxyTestResult } from '@/api/types'
+
+// 表单校验（2026-09-24 UI 审评补）：名称与地址必填，但原来**连星号都没有**，
+// 只在提交时弹一句 message。现在两条都挂上规则：失焦即校验、错误在字段下方
+import type { FormInstance, Rule } from 'ant-design-vue/es/form'
 
 const loading = ref(false)
 const rows = ref<Proxy[]>([])
@@ -27,6 +32,35 @@ const form = reactive({
   password: '',
   enabled: true
 })
+
+// ---- 表单校验（2026-09-24 UI 审评补）----
+//
+// 名称与地址是必填，但原来两条都只写在 save() 里弹 message，
+// 字段上连星号都没有 —— 用户看不出哪一项不能空着。
+// 地址只做「明显写错」的拦截（协议前缀、空格），真正的判据是
+// 「能不能连上」，那由弹窗里的「测试连接」回答。
+const formRef = ref<FormInstance>()
+
+const proxyRules: Record<string, Rule[]> = {
+  name: [
+    { required: true, message: '给这个代理起个名字：渠道表单的「出站代理」下拉用它区分节点', trigger: 'blur' },
+    { max: 64, message: '名字最长 64 个字符', trigger: 'blur' }
+  ],
+  host: [
+    { required: true, message: '代理地址必填：填 IP 或域名，不要带 socks5:// 这类协议前缀（协议在上面单独选）', trigger: 'blur' },
+    {
+      validator: (_rule: Rule, value: string) =>
+        !value || (!/\s/.test(value) && !/:\/\//.test(value))
+          ? Promise.resolve()
+          : Promise.reject('只填主机名或 IP，不要带协议前缀与空格；端口在右边单独填'),
+      trigger: 'blur'
+    }
+  ]
+}
+
+// 校验失败的统一收尾（滚动 + 聚焦）在 composables/useFormValidate.ts，
+// 四个视图共用同一份
+const { validateForm } = useFormValidate(formRef)
 
 // 协议换了要给个合理的默认端口：改完协议还得手动改端口是纯粹的摩擦
 const protocolOptions = [
@@ -83,14 +117,7 @@ function openEdit(row: Proxy) {
 }
 
 async function save() {
-  if (!form.name.trim()) {
-    message.warning('请填写代理名称')
-    return
-  }
-  if (!form.host.trim()) {
-    message.warning('请填写代理地址')
-    return
-  }
+  if (!(await validateForm())) return
   saving.value = true
   try {
     const body: Record<string, unknown> = {
@@ -350,8 +377,8 @@ onMounted(load)
       centered
       @ok="save"
     >
-      <a-form layout="vertical">
-        <a-form-item label="名称">
+      <a-form ref="formRef" :model="form" :rules="proxyRules" layout="vertical">
+        <a-form-item label="名称" name="name">
           <a-input v-model:value="form.name" placeholder="例如：日本节点" />
         </a-form-item>
         <a-form-item label="协议">
@@ -361,7 +388,7 @@ onMounted(load)
           </div>
         </a-form-item>
         <div class="two-col">
-          <a-form-item label="地址">
+          <a-form-item label="地址" name="host">
             <a-input v-model:value="form.host" placeholder="127.0.0.1 或 proxy.example.com" />
           </a-form-item>
           <a-form-item label="端口">

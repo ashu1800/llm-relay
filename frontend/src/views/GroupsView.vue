@@ -3,10 +3,16 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { PlusOutlined, ReloadOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
+import { useFormValidate } from '@/composables/useFormValidate'
 import DataState from '@/components/DataState.vue'
 import GroupTag from '@/components/GroupTag.vue'
 import { groupStyle } from '@/utils/groupStyle'
+import { moneyText } from '@/utils/money'
 import { STRATEGIES, type ChannelGroup } from '@/api/types'
+
+// 表单校验（2026-09-24 UI 审评补）：原来名称的 required 只是个视觉星号，
+// 失焦不校验、填漏了只弹一句 message
+import type { FormInstance, Rule } from 'ant-design-vue/es/form'
 
 // 常用色板：分组颜色是给「一眼分辨哪个分组」用的，
 // 给几个对比度够、色相拉得开的预设，比让人从取色器里随便挑更实用。
@@ -42,6 +48,24 @@ const form = reactive({
   budgetUsd: null as number | null
 })
 
+// ---- 表单校验（2026-09-24 UI 审评补）----
+//
+// 名称是这一页唯一的必填项，但 required 以前只是个视觉星号：
+// a-form 没绑 :model、字段没绑 name、表单没绑 :rules。补上之后
+// 名称失焦即校验、错误显示在字段下方，提交前再兜一次底。
+const formRef = ref<FormInstance>()
+
+const formRules: Record<string, Rule[]> = {
+  name: [
+    { required: true, message: '给分组起个名字：渠道与密钥都按它划分路由与额度', trigger: 'blur' },
+    { max: 64, message: '名字最长 64 个字符', trigger: 'blur' }
+  ]
+}
+
+// 校验失败的统一收尾（滚动 + 聚焦）在 composables/useFormValidate.ts，
+// 四个视图共用同一份
+const { validateForm } = useFormValidate(formRef)
+
 // 预算表单 -> 提交值：把两个输入框收敛成按币种的 map，空的不带。
 // 两个都空时提交空对象（= 清除预算），而不是省略字段 —— 省略在编辑接口
 // 里是「保持原值」，用户删掉两个数字再保存，期望的显然是删掉预算
@@ -52,10 +76,13 @@ function budgetPayload(): Record<string, number> {
   return out
 }
 
-/** 预算列的金额显示：符号跟随币种（与 utils/money 的符号约定一致） */
+/** 预算列的金额显示：走 utils/money 的符号表与小数位规则。
+ *  这里原来是 local 的 `sym + v.toFixed(2)` —— 同一笔钱在日志里六位、
+ *  在这里两位，用户拿预算数字去对日志明细时对不上（2026-09-24 UI 审评）。
+ *  预算额度量级在「元」，四位小数对它是冗余的，但**一致性比省字符重要**：
+ *  分档规则由 money.ts 统一决定，这里不再自己拍。 */
 function budgetMoney(v: number, cur: string) {
-  const sym = cur === 'CNY' ? '¥' : cur === 'USD' ? '$' : cur + ' '
-  return sym + v.toFixed(2)
+  return moneyText(v, cur)
 }
 
 /** 预算列的一格：配了预算才有内容 —— 花费/限额 + 占比，80% 变黄、100% 变红 */
@@ -154,10 +181,9 @@ function openEdit(row: ChannelGroup) {
 }
 
 async function save() {
-  if (!form.name.trim()) {
-    message.warning('分组名称必填')
-    return
-  }
+  // 原实现失焦与提交都不校验，只在提交时弹一句 message；
+  // 现在交给 rules：名称失焦即校验，这里再兜一次底
+  if (!(await validateForm())) return
   saving.value = true
   try {
     const body = {
@@ -331,8 +357,8 @@ onMounted(load)
     </section>
 
     <a-modal v-model:open="modalOpen" :title="title" :confirm-loading="saving" :width="'min(560px, 94vw)'" centered @ok="save">
-      <a-form layout="vertical">
-        <a-form-item label="分组名称" required>
+      <a-form ref="formRef" :model="form" :rules="formRules" layout="vertical">
+        <a-form-item label="分组名称" name="name">
           <a-input v-model:value="form.name" placeholder="例如 高优先级" />
         </a-form-item>
         <a-form-item label="备注">
