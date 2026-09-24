@@ -1951,6 +1951,51 @@ func (s *Server) logFilters(c *gin.Context) (*gorm.DB, bool) {
 	return q, true
 }
 
+// logSortClause 把 `sort=` 参数翻成 ORDER BY 片段（2026-09-24 UI 审评 P1-9）。
+//
+// 为什么做成白名单常量表而不是把参数拼进 SQL：`sort` 直接来自查询串，
+// 拼进去就是注入面。这里只认表里写死的几个键，认不出的一律退回默认 ——
+// 用户看到的是「排序没生效」，而不是一个 500 或者一条被改写过的查询。
+//
+// 为什么每个键都要带 id 兜底：排序值相同的行（例如同一秒入库的两条、
+// 同样 0ms 的两条失败）在 PostgreSQL 里顺序不确定，翻页时同一行可能
+// 出现在两页上、也可能一行都不出现。补一个唯一的 id 作末位键，
+// 排序才是**全序**，翻页才稳定 —— 这是分页 + 排序一起用时必须做的事。
+//
+// 方向由 sort 前缀决定：`-` 开头是降序（`-elapsed` = 耗时最长的在前）。
+// 默认（不带 sort）保持 `id DESC`：那是「最新在前」，也是列表的既有语义。
+//
+// **cost 是唯一一个需要特殊处理的排序键**：站里明确不做汇率换算
+// （不同币种的钱不能相加，看板的金额从不出现合计），而 estimated_cost
+// 只是一个 numeric 列 —— 直接 ORDER BY 会把币种当成同一个单位比较，
+// 得出「$0.0007 比 ¥2.35 贵」这种结论。实测本机数据里两种币都在
+// （CNY 26935 行、最大 2.35；USD 682 行、最大 0.0007），所以这不是理论问题。
+//
+// 处理办法是**先按币种分组、再在组内按金额排**（cost_currency 放在前面）：
+// 每种币各自有序，跨币种的那条边界不会被当成一次真的比较 —— 与看板
+// 「出现两种币就分成两行/两条线」是同一个做法。前端会在费用列旁说明
+// 这件事，用户看到的顺序因此是可解释的。
+//
+// 这里**不走**「多币种就不许排序」那条路：面板恒定显示全量最新请求
+// （不吃工具栏筛选），全量下几乎必然混着币种 —— 禁用等于这个功能
+// 永远用不上，而它恰恰是「找最贵的那几单」唯一的入口。
+var logSortClause = map[string]string{
+	"elapsed":  "total_ms ASC, id DESC",
+	"-elapsed": "total_ms DESC, id DESC",
+	"cost":     "cost_currency ASC, estimated_cost ASC, id DESC",
+	"-cost":    "cost_currency ASC, estimated_cost DESC, id DESC",
+	"status":   "status_code ASC, id DESC",
+	"-status":  "status_code DESC, id DESC",
+}
+
+// orderLogs 给日志查询按 sort 参数排序；认不出的键退回「最新在前」。
+func orderLogs(q *gorm.DB, sort string) *gorm.DB {
+	if clause, ok := logSortClause[sort]; ok {
+		return q.Order(clause)
+	}
+	return q.Order("id DESC")
+}
+
 func (s *Server) listLogs(c *gin.Context) {
 	page, _ := strconv.Atoi(orDefault(c.Query("page"), "1"))
 	size, _ := strconv.Atoi(orDefault(c.Query("page_size"), "50"))
@@ -1983,7 +2028,7 @@ func (s *Server) listLogs(c *gin.Context) {
 		return
 	}
 	var items []model.RequestLog
-	if err := q.Order("id DESC").Offset((page - 1) * size).Limit(size).Find(&items).Error; err != nil {
+	if err := orderLogs(q, c.Query("sort")).Offset((page - 1) * size).Limit(size).Find(&items).Error; err != nil {
 		writeInternalError(c, err)
 		return
 	}
@@ -2015,7 +2060,9 @@ func (s *Server) exportLogs(c *gin.Context) {
 	}
 
 	var items []model.RequestLog
-	if err := filters.Order("id DESC").Limit(int(exported)).Find(&items).Error; err != nil {
+	// 与列表接口同一套排序（含 sort 参数）：导出的顺序该与屏幕上看到的一致，
+	// 否则「按耗时排完再导出」拿到的文件是另一个次序（P1-9 的配套）
+	if err := orderLogs(filters, c.Query("sort")).Limit(int(exported)).Find(&items).Error; err != nil {
 		writeInternalError(c, err)
 		return
 	}

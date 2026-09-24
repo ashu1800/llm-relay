@@ -538,14 +538,19 @@ console.log('=== 请求日志列表不吃筛选条件 ===')
   const referenced = filterProps.filter((p) => new RegExp(`props\\.${p}\\b`).test(panel))
   check('面板里没有残留的 props.<筛选> 引用', referenced.length === 0, referenced.join(', '))
 
-  // 查询串只该有分页与两个排障深链。用参数名而不是「有没有 if」来判：
+  // 查询串只该有分页、两个排障深链与排序。用参数名而不是「有没有 if」来判：
   // 少传一个 range 但改成别的方式塞进去（比如拼在 URL 上）同样要拦住。
+  //
+  // 2026-09-24：白名单加入 sort（P1-9 的服务端排序）。它进查询串是有意的 ——
+  // 排序必须由服务端做，前端只能排当前页那 50 条，而「最贵的一单」
+  // 显然不在当前页。这条断言的用意仍然成立：**别的一律不许出现**
+  //（尤其是时间范围 / 分组 / 渠道 / 模型那四个，见下面两条）。
   const bpStart = panel.indexOf('function buildParams')
   const bp = panel.slice(bpStart, panel.indexOf('\n}', bpStart))
   const sent = [...bp.matchAll(/params\.set\(\s*'([\w-]+)'/g)].map((m) => m[1]).sort()
   check(
-    '查询串只剩分页与两个排障深链',
-    sent.join(',') === 'page,page_size,status_class,trace_id',
+    '查询串只剩分页、两个排障深链与排序',
+    sent.join(',') === 'page,page_size,sort,status_class,trace_id',
     `实际发出: ${sent.join(', ')}`,
   )
 

@@ -489,6 +489,62 @@ const PAGE_SIZE_KEY = 'log-page-size'
 const PAGE_SIZE_OPTIONS = ['20', '50', '100']
 const pageSize = ref(Number(readStoredChoice(PAGE_SIZE_KEY, PAGE_SIZE_OPTIONS, '20')))
 
+// ---- 排序（P1-9，2026-09-24）----
+//
+// 三列可排：耗时、费用、状态。为什么是这三列：审评的原话是
+// 「25000 条里没法按耗时/费用/状态找异常」—— 排障要找的就是「最慢的那次、
+// 最贵的那单、失败的那批」，而这三件事恰好各对应一列。
+//
+// 排序**由服务端做**（`sort=` 参数），不是前端 sort —— 前端只能排当前页的
+// 50 条，而「最贵的一单」显然不在当前页。这也是为什么审评把这一条
+// 标成「需要后端加 sort= 参数」。
+//
+// 值为空串 = 默认（最新在前），由后端 orderLogs 兜底。
+const sort = ref('')
+const SORTABLE = ['elapsed', 'cost', 'status'] as const
+
+// 表头用的 sortOrder：antd 据此画箭头（升/降/无）。
+function sortOrderOf(key: string): 'ascend' | 'descend' | null {
+  if (sort.value === key) return 'ascend'
+  if (sort.value === '-' + key) return 'descend'
+  return null
+}
+
+/**
+ * a-table 的 change：分页、筛选、排序三者共用一个回调，只处理排序那一路。
+ *
+ * 必须用 extra.action 区分（而不是「sorter 有值就当家」）：翻页时 antd
+ * 也会带着当前 sorter 回调一次，不区分就会在翻页时重复触发一次排序重取
+ * （分页自己的 onChange 已经取过一次了）。
+ *
+ * 取列名要读 **`column.key`**，不是 `columnKey` 之外的什么自定义字段：
+ * antd 的 getColumnKey 只认 column.key → dataIndex → 位置下标（见
+ * node_modules/ant-design-vue/es/table/util.js:11）。这条是实测踩出来的：
+ * 一开始把标识写在 `column-key` 上，于是 sorter.columnKey 拿到的是位置下标
+ * （"4"、"5"），下面的白名单判断永远不成立 —— 表头点得动、箭头不亮、
+ * 一条请求都不发，看起来像「antd 没接上线」，其实是回调里把它丢了。
+ */
+function onTableChange(_pag: unknown, _filters: unknown, sorter: any, extra: any) {
+  if (extra?.action !== 'sort') return
+  const key = typeof sorter?.columnKey === 'string' ? sorter.columnKey : ''
+  const order = sorter?.order
+  // 认不出的列（将来加了别的可排序列）保持现状，不乱改视角
+  if (!(SORTABLE as readonly string[]).includes(key)) return
+  sort.value = order === 'ascend' ? key : order === 'descend' ? '-' + key : ''
+  // 换了次序，原来那一页的偏移量已经没有意义（第 7 页的「最慢的 50 条」
+  // 与第 1 页的不是同一批）——排序变动一律回第一页
+  search()
+}
+
+// 费用排序的说明文案：站里不做汇率换算，两种币都在时后端会先按币种分组
+// 再排金额（见后端 logSortClause 的注释）。工具条上把这件事说清楚，
+// 否则用户看到「¥ 排在 $ 后面」会以为是坏了。
+const costSortHint = computed(() =>
+  sort.value === 'cost' || sort.value === '-cost'
+    ? '费用按币种分组后排序（不同币种不做换算，也不互相比较大小）'
+    : '',
+)
+
 // 表体的高度上限，交给 antd 的 scroll.y。
 //
 // 它现在只剩一个作用：**让 antd 渲染出「表头 / 表体」分离的固定表头结构**
@@ -538,6 +594,8 @@ function buildParams(): URLSearchParams {
   // URL 带来的额外条件（深链过来的 trace / 状态）也要进查询串
   if (props.traceId) params.set('trace_id', props.traceId)
   if (props.statusClass) params.set('status_class', props.statusClass)
+  // 排序（P1-9）：空串不传，让后端用默认的「最新在前」
+  if (sort.value) params.set('sort', sort.value)
   return params
 }
 
@@ -898,6 +956,10 @@ const pagination = computed(() => ({
   total: total.value,
   showSizeChanger: true,
   pageSizeOptions: PAGE_SIZE_OPTIONS,
+  // 快速跳页（P1-9）：25000 条按 20 条一页是 1260 页，
+  // 而分页器只显示 5 个页码 + `•••`（一次跳 5 页）——
+  // 「跳到第 800 页」原来只能靠连点 160 次省略号，等于做不到。
+  showQuickJumper: true,
   showTotal: (t: number) => '共 ' + t + ' 条',
   onChange: (p: number, ps: number) => {
     page.value = p
@@ -1139,6 +1201,11 @@ onMounted(() => {
       </button>
     </div>
 
+    <!-- 排序生效时的口径说明（P1-9）。只对「费用」这一列出现：
+         站里不做汇率换算，后端会先按币种分组再排金额，不说清的话
+         用户看到 ¥ 排在 $ 后面会以为坏了。role=status 让读屏也听得到。 -->
+    <div v-if="costSortHint" class="sort-hint" role="status">{{ costSortHint }}</div>
+
     <!-- 挂起的新日志（P1-6）。只在「用户正在读」时出现：表体滚过、
          鼠标停在表体上、或详情抽屉开着。此时把新行攒着并在这里报数 ——
          直接插会把正在读的那一行顶下去一整行（44/45px 实测），
@@ -1204,6 +1271,7 @@ onMounted(() => {
           row-key="id"
           size="small"
           :scroll="{ x: columnsTotal, y: TABLE_BODY_Y }"
+          @change="onTableChange"
         >
         <template #emptyText>
           <a-empty :description="emptyText" />
@@ -1322,7 +1390,22 @@ onMounted(() => {
              标签只留两个字（截图就是这样）：`总耗时` 三个字在 36px 的标签轨里
              会把数值列推远，而这一格的宽度是按最窄列倒推出来的，一寸都不富余。
              数值按同一档位着色，悬停说明这一行是什么、以及这一档的判据。 -->
-        <a-table-column title="任务耗时" :width="colW.elapsed">
+        <!-- 三列可排序（P1-9）：耗时 / 费用 / 状态。
+             用 antd 的 sorter 而不是手写表头点击：它自带升/降箭头、
+             键盘可达、以及 <th aria-sort>（读屏用户听得到当前次序），
+             这些都是手写版要一项项补齐的。
+             sorter: true 表示「服务端排序」——表格不本地比较数据，
+             而是回调 onTableChange 让我们带着 sort= 重新取数。
+             注意不能用 :sort-order 之外的受控方式：箭头状态由
+             sortOrderOf 给出，与 URL 参数是同一个来源。 -->
+        <a-table-column
+          title="任务耗时"
+          :width="colW.elapsed"
+          key="elapsed"
+          :sorter="true"
+          :sort-order="sortOrderOf('elapsed')"
+          :show-sorter-tooltip="false"
+        >
           <template #default="{ record }">
             <div class="dur">
               <!-- 一条竖条、两段。两段各挂自己那一行的档位类，
@@ -1350,7 +1433,14 @@ onMounted(() => {
             </div>
           </template>
         </a-table-column>
-        <a-table-column title="费用" :width="colW.cost">
+        <a-table-column
+          title="费用"
+          :width="colW.cost"
+          key="cost"
+          :sorter="true"
+          :sort-order="sortOrderOf('cost')"
+          :show-sorter-tooltip="false"
+        >
           <template #default="{ record }">
             <!-- 包一层 .txt-cell：它是这一列的测量锚点（见 CONTENT_MEASURE）。
                  必须是普通 inline —— inline-block 会改变单元格行高
@@ -1374,7 +1464,14 @@ onMounted(() => {
         </a-table-column>
         <!-- 状态列移到费用之后（站主 2026-09-20 要求）：数字区（词元/耗时/费用）
              读完后，「成没成」与「哪把密钥」两个结果性信息收尾 -->
-        <a-table-column title="状态" :width="colW.status">
+        <a-table-column
+          title="状态"
+          :width="colW.status"
+          key="status"
+          :sorter="true"
+          :sort-order="sortOrderOf('status')"
+          :show-sorter-tooltip="false"
+        >
           <template #default="{ record }">
             <a-tag :color="statusColor(record.status_code)">{{ record.status_code }}</a-tag>
           </template>
@@ -2047,6 +2144,16 @@ onMounted(() => {
 }
 .queue-dropped {
   font-weight: 600;
+}
+
+/* ---- 排序口径说明（P1-9）----
+   只在「费用」排序生效时出现的一行小字。12px 次要色（--color-text-secondary
+   是 0.70 alpha，白卡 5.10:1）—— 它是解释不是警示，但也要读得清。 */
+.sort-hint {
+  flex: none;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
 }
 
 /* ---- 挂起的新日志提示条（P1-6）----
