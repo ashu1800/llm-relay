@@ -170,6 +170,18 @@ jobs:
           # 重新检出会覆盖未提交的修改，这一步是把它补回来。
           path: backend/internal/version/
 
+      - name: 屏蔽 VERSION 文件的工作树改动
+        run: |
+          set -euo pipefail
+          # goreleaser 拒绝在**脏工作树**里构建。上一步用 artifact 覆盖
+          # VERSION 后，git status 会报 M —— 但这个改动正是发布需要的
+          # （它是版本号的 embed 兜底），且真正生效的注入走的是 goreleaser
+          # 的 -ldflags（见 .goreleaser.yaml），两者取的是同一个值。
+          # assume-unchanged 让 git 忽略这一处，不提交、也不改内容。
+          git update-index --assume-unchanged backend/internal/version/VERSION
+          git status --porcelain --untracked-files=no && \
+            { echo "::error::工作树仍有其它脏文件，goreleaser 会拒绝构建"; exit 1; } || true
+
       - name: 设置 Go 环境
         uses: actions/setup-go@v5
         with:
@@ -201,8 +213,14 @@ jobs:
           # 先删干净：//go:embed all:dist 会把目录下**所有**文件打进二进制，
           # 上一次构建残留的旧 hash 资源不清掉，会一起被打包进去
           # （镜像/二进物体积白白变大，且埋下「旧资源还在被访问」的隐患）。
+          #
+          # .gitkeep 是入库的占位文件（保证全新克隆能编译），rm -rf 会把它
+          # 一起删掉 —— git status 报 D，goreleaser 因此拒绝构建（v0.1.1
+          # 首次发布实测踩过）。dist 反正马上会被真实产物填满，把占位文件
+          # 单独保住即可：既满足 embed 的目录存在性检查，也不弄脏工作树。
           rm -rf backend/internal/web/dist
-          cp -r frontend/dist backend/internal/web/dist
+          mkdir -p backend/internal/web/dist
+          cp -r frontend/dist/. backend/internal/web/dist/
           test -f backend/internal/web/dist/index.html
           echo "前端产物已就位：$(find backend/internal/web/dist -type f | wc -l) 个文件"
 

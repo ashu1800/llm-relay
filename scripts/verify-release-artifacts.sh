@@ -64,7 +64,11 @@ if [ ! -f "$SRC/frontend/dist/index.html" ]; then
     echo "  ✗ 前端构建失败："; tail -15 /tmp/fe-build.log | sed 's/^/    /'; exit 1; }
 fi
 rm -rf backend/internal/web/dist
+# .gitkeep 是入库占位（保证全新克隆能编译），单独保住：本脚本在**源码副本**
+# 里跑 goreleaser，goreleaser 拒绝脏工作树，而 rm -rf 会把 .gitkeep 一起删掉。
+mkdir -p backend/internal/web/dist
 cp -r "$SRC/frontend/dist" backend/internal/web/dist
+test -f backend/internal/web/dist/.gitkeep || { echo "  ✗ .gitkeep 丢失（占位文件被删）"; exit 1; }
 test -f backend/internal/web/dist/index.html || { echo "  ✗ 前端产物没有就位"; exit 1; }
 echo "  · 前端产物已就位（$(find backend/internal/web/dist -type f | wc -l) 个文件）"
 
