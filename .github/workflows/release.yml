@@ -222,13 +222,15 @@ jobs:
           # 上一次构建残留的旧 hash 资源不清掉，会一起被打包进去
           # （镜像/二进物体积白白变大，且埋下「旧资源还在被访问」的隐患）。
           #
-          # .gitkeep 是入库的占位文件（保证全新克隆能编译），rm -rf 会把它
-          # 一起删掉 —— git status 报 D，goreleaser 因此拒绝构建（v0.1.1
-          # 首次发布实测踩过）。dist 反正马上会被真实产物填满，把占位文件
-          # 单独保住即可：既满足 embed 的目录存在性检查，也不弄脏工作树。
+          # .gitkeep 是入库的占位文件（保证全新克隆能编译），必须**原样保留**
+          # 在工作树里，否则 git status 报 D、goreleaser 拒绝构建（v0.1.1
+          # 首发连续三次实测踩过：第一次连 VERSION 一起报，守卫修好后只剩它）。
+          # frontend/dist 由 vite 的 emptyOutDir 清空重建，里面**没有** .gitkeep，
+          # 所以 cp 之后要单独补写一个（内容无关紧要，git 只在乎「文件还在」）。
           rm -rf backend/internal/web/dist
           mkdir -p backend/internal/web/dist
           cp -r frontend/dist/. backend/internal/web/dist/
+          touch backend/internal/web/dist/.gitkeep
           test -f backend/internal/web/dist/index.html
           echo "前端产物已就位：$(find backend/internal/web/dist -type f | wc -l) 个文件"
 
