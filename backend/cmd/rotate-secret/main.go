@@ -9,8 +9,9 @@
 //	RELAY_SECRET=<新密钥> OLD_SECRET=<旧密钥> DB_... go run ./cmd/rotate-secret
 //	# 加 -dry-run 只检查不改动
 //
-// 更推荐把两个密钥都从标准输入喂进来（见 -stdin）：环境变量虽然不出现在
-// 进程列表里，但 docker exec -e 这种调用方式仍会把值写进 docker 客户端的 argv。
+// 更推荐把两个密钥都从标准输入喂进来（见 -stdin）：命令行参数与
+// 进程环境对同机其他用户是可见的（/proc/<pid>/cmdline、systemd 日志），
+// 标准输入不会留下任何可读痕迹。
 package main
 
 import (
