@@ -1,6 +1,6 @@
 # LLM Relay
 
-本地大模型中转服务 —— 在 WSL2 + Docker 上运行的个人自用 AI API 网关。
+本地大模型中转服务 —— 以**裸二进制 + systemd** 运行的个人自用 AI API 网关。
 默认端口 **8888**，提供与 `llm.ohub.vip` 视觉一致的管理后台。
 
 ## 特性
@@ -54,7 +54,7 @@
   它们是临时的，不跟着记住；而且**带这两个参数的链接不受本机记住的筛选影响**
   （同一个链接发给谁、隔多久打开，看到的都是同一批记录）。
   旧地址 `/console/logs` 会带着 query 跳到看板，老的链接与书签仍然可用
-- **渠道管理**：分组、权重、可用时段（支持跨午夜，按服务进程本地时区判断——容器部署由 TZ 决定，与时段倍率同一口径）、**模型白名单（对外名 → 上游名映射）**、
+- **渠道管理**：分组、权重、可用时段（支持跨午夜，按服务进程本地时区判断——官方部署由 `.env` 的 TZ 决定，与时段倍率同一口径）、**模型白名单（对外名 → 上游名映射）**、
   **默认模型映射（兜底）**、渠道图标（可从上游抓 favicon，也可填 emoji）、**发一句 "hi" 测连通性**
 - **默认模型映射（兜底）**：每条渠道可单独开启，指定一个白名单里的模型。
   开启后，**白名单没精确命中的请求**一律改用这个模型发往上游；精确命中的仍按
@@ -165,12 +165,12 @@
   WebSocket 实时推送与全部管理接口同受保护。未设置该密钥时鉴权关闭
   （只绑回环的本地部署不受影响），启动日志与界面横幅持续提醒
 - **在线版本检查与一键更新**：侧栏品牌下方常驻一枚版本徽标，点开可看到
-  当前版本、检测新版本、一键更新与回滚。按部署形态自动选择更新方式 ——
-  容器部署由宿主侧更新器（`llm-relay-updater`，走 unix socket）代为
-  「取新版本 → 重建容器 → 健康检查 → 失败自动回滚」，二进制部署则直接
-  替换自己的可执行文件后由 systemd 拉起；源码构建只提示不自动更新。
-  检测结果服务端缓存 20 分钟，且**检测不成功时明说「未能确认」**，
-  不会把一次失败的请求显示成「已是最新」。详见「在线更新」一节
+  当前版本、检测新版本、一键更新与回滚。按构建形态自动选择更新方式 ——
+  官方预编译二进制（`deploy/install.sh` 安装的形态）直接原子替换自己的
+  可执行文件，再由 systemd 拉起；源码构建只提示不自动更新（避免用官方
+  二进制覆盖开发者本地的构建物）。检测结果服务端缓存 20 分钟，且**检测
+  不成功时明说「未能确认」**，不会把一次失败的请求显示成「已是最新」。
+  详见「在线更新」一节
 - **无充值 / 无金额系统**：金额只做成本感知，不参与任何扣减
 
 ## 目录结构
@@ -179,7 +179,7 @@
 llm-relay/
 ├── backend/                    Go 1.25 + Gin 后端
 │   ├── cmd/server/             程序入口
-│   ├── cmd/updater/            宿主侧更新器（容器一键更新靠它，见「在线更新」）
+│   ├── cmd/rotate-secret/      主密钥轮换工具（发布归档自带）
 │   └── internal/
 │       ├── api/                HTTP 路由与处理
 │       ├── config/             配置加载（YAML + 环境变量覆盖）
@@ -199,278 +199,121 @@ llm-relay/
 │       ├── stores/             主题等状态
 │       └── styles/theme.css    设计令牌（实测自参考站）
 ├── deploy/
-│   ├── Dockerfile              多阶段构建（前端 → 后端 → 运行时）
-│   ├── docker-compose.yml      app + postgres
-│   ├── .env.example            部署配置模板
-│   ├── install.sh              一键部署脚本（Docker）
-│   ├── install-bare.sh         无 Docker 部署脚本（systemd 直跑）
-│   ├── llm-relay.service       app 的 systemd 单元
-│   └── llm-relay-updater.service  宿主侧更新器的 systemd 单元
+│   ├── install.sh              一键部署脚本（下载 Release 预编译二进制 + systemd）
+│   ├── restore.sh              备份恢复脚本（原生 psql）
+│   └── .env.example            部署配置模板
 ├── .github/workflows/
-│   ├── release.yml             tag 触发：归档 + Release + 多架构镜像
+│   ├── release.yml             tag 触发：goreleaser 归档 + Release
 │   └── ci.yml                  push/PR：后端 vet+test、前端 type-check+build
 ├── Makefile                    version / build / test / release-snapshot
 ├── scripts/
 │   ├── capture-ui.mjs          CDP 抓取参考站计算样式
 │   ├── capture-layout.mjs      CDP 深度抓取 DOM 与 class 规格
 │   ├── verify-version-ui.mjs   CDP 验证版本徽标与更新面板
+│   ├── lib/testdb.sh|py        测试共用的数据库访问层（原生 psql）
 │   └── screenshot.mjs          CDP 页面截图
 └── docs/
     ├── ui-spec.md              UI 规格书（实测数据）
     └── layout-*.json           原始抓取数据
 ```
 
-## Docker 形态部署实录（WSL2 / Ubuntu 24.04）
+## 部署方式
 
-> 本节是 Docker 形态（`deploy/install.sh`）的安装与排错实录。**当前主形态是
-> 裸二进制 + systemd**（见「部署」章节），本节保留是因为其中的实测结论
-> （WSL 转发、退出预算、低内存编译）对两种形态都成立。
->
-> **改了前端（或后端）之后，必须重新部署才会在 8888 上生效。**
-> 前端产物不是单独挂载的目录，而是被 `deploy/Dockerfile` 烘进 Go 二进制
-> （stage 1 构建 `dist` → stage 2 `COPY --from=frontend-build /src/dist`），
-> 所以「源码改了」「dev 服务器 5173 上看着好了」都不等于线上好了。
-> 2026-09-17 踩过一次：在 5173 上验证通过就交了活，站主开 8888 看到的是旧构建，
-> 回了「问题并没有得到修复」。判定办法是读**浏览器里实际生效的样式**
-> （`.shots/probe-toolbar-css.mjs` 会把命中规则的原文和 computed style 打出来），
-> 而不是读源码 —— 源码确实改了，这骗不过任何人，但骗得过自己。
+### 方式一：脚本安装（推荐）
+
+一键安装脚本，自动从 GitHub Releases 下载预编译的二进制文件（前端产物已
+embed 进二进制），装好 PostgreSQL 并注册 systemd 服务。
+
+**前置条件**
+
+- Linux 服务器（amd64 或 arm64），Debian/Ubuntu
+- Root 权限
+- systemd 运行中（WSL 需在 `/etc/wsl.conf` 里启用 `[boot] systemd=true`）
+
+PostgreSQL 由脚本自动安装并配置，无需预装。
+
+**安装步骤**
 
 ```bash
-cd llm-relay
-# 方式一：WSL 免密直用 root（推荐，本机已验证）
-wsl -u root -- bash deploy/install.sh
-
-# 方式二：常规 sudo
-sudo bash deploy/install.sh
+curl -sSL https://raw.githubusercontent.com/ashu1800/llm-relay/main/deploy/install.sh | sudo bash
 ```
 
-脚本会依次完成：
+**脚本会自动：**
 
-1. 清理 Docker Desktop 卸载后残留的失效软链
-2. 从 `download.docker.com` 安装 Docker Engine（直连可用）
-3. **自动探测** Docker Hub 连通性：直连通 -> 跳过；否则 socks5 可用就用 **privoxy** 转成 http
-   给 Docker daemon（daemon **不原生支持 socks5**，必须转换）；再不行退回 http 代理
-4. 部署源码到 `/opt/llm-relay`，生成带随机数据库密码的 `.env`
-5. 备份数据库，`docker compose build` 构建新镜像
-6. **切换前预检**：新镜像先在 `127.0.0.1:8899` 配一个临时数据库跑起来，
-   `/readyz` 通过才切；不通过就保留旧版本继续服务（不会把线上切成挂的）
-7. 注册 `llm-relay.service`（`Type=oneshot` + `docker compose up -d`）并重启服务，
-   等待 `/healthz` 与 `/readyz` 通过，最后打印**本次切换的实际中断时长**
-   （`/healthz` 每 100ms 探一次）与数据库容器是否被重启过
+1. 检测系统架构（amd64 / arm64）
+2. 从 GitHub Releases 下载最新版本并做 sha256 校验
+3. 安装二进制文件到 `/opt/llm-relay`
+4. 安装并初始化 PostgreSQL（建库、建用户）
+5. 生成配置与随机密钥（数据库密码 / `RELAY_SECRET` / `RELAY_ADMIN_KEY`）
+6. 创建 systemd 服务并设置开机自启
+7. 健康检查确认服务就绪
 
-### 重新部署时的中断
+**安装后配置**
 
-重新部署（换镜像）只需要重建 app 容器，数据库容器全程不动。实测（1440 行数据量的本机）：
+```bash
+# 1. 查看服务状态
+sudo systemctl status llm-relay
 
-| 场景 | 改造前 | 现在 |
+# 2. 管理密钥在安装结束时打印，也保存在 /opt/llm-relay/deploy/.env
+#    （RELAY_ADMIN_KEY，打开管理台时输入它登录）
+
+# 3. 在浏览器中打开管理后台
+# http://你的服务器IP:8888
+```
+
+**可选参数**（跟在 `bash -s --` 后面，或先 export 再 `sudo -E`）：
+
+```bash
+# 例：监听公网 + 自定义端口
+curl -sSL https://raw.githubusercontent.com/ashu1800/llm-relay/main/deploy/install.sh   | sudo bash -s -- PORT=9000 BIND_ADDR=0.0.0.0
+```
+
+| 变量 | 默认值 | 说明 |
 |---|---|---|
-| 换镜像（app 容器重建） | 6.7 s，且数据库被停掉重建 | **0.65 s**，数据库容器 ID 与启动时刻都不变 |
-| 开着看板页面时换镜像 | 6.5 s | **1.8 s** |
-| 镜像没变化的重复部署 | 6.7 s | **0 次失败探测**（100 ms 粒度） |
+| `INSTALL_DIR` | `/opt/llm-relay` | 安装目录 |
+| `PORT` | `8888` | 监听端口（写入 `.env` 的 `SERVER_PORT`） |
+| `BIND_ADDR` | `127.0.0.1` | 监听地址（写入 `.env` 的 `SERVER_HOST`） |
+| `DB_NAME` / `DB_USER` | `llm_relay` / `llmrelay` | 数据库 |
+| `VERSION` | 最新 Release | 要安装的版本号（不带 v 前缀） |
+| `RELAY_GH_PROXY` | — | GitHub 下载加速前缀（形如 `https://gh-proxy.com`） |
 
-（「开着看板页面」那一行才是真实场景 —— 见下面第二条，慢的正是浏览器留下的连接。）
-
-脚本每次都会打印真实值与数据库容器是否被重启过。做到这一点的六件事：
-
-- **不重启 Docker daemon**：只有 daemon 不可用或刚写过代理配置时才重启它
-  （`systemctl restart docker` 会把所有容器一起停掉再拉起，白白中断十几秒）
-- **主动关掉「连上了但一个字节都没发」的连接**（2026-09-16 修，最大的一笔）：
-  Go 的 `http.Server.Shutdown` 只等非空闲连接，但它对 `StateNew`（TCP 连上了、
-  请求头还没读完）有一条 **5 秒特判**（[golang/go#22682]）—— 存在超过 5 秒才当作
-  空闲关掉。浏览器的**预连接**恰好就是这种：握手完成、什么都不发。于是每次部署
-  都被它拖满 5 秒，而 `stop_grace_period` 原先也是 5 秒，进程刚要退就被 SIGKILL，
-  连「已退出」那行日志都打不出来。现在进程用 `ConnState` 盯住这批连接，退出时
-  主动关掉（`.shots/exp-shutdown.sh` 是判定它的对照实验：同一种连接，新建的拖
-  5414 ms、存在 8 秒的只要 522 ms；顺带证伪了「是实时推送的 WebSocket 拖的」——
-  hijack 过的连接 `Shutdown` 本来就不等它，实测 741 ms）
-- **日志队列关停前写完**：请求日志是异步落库的，原来 `Close()` 只关通道不等写完，
-  每次重启都会静默丢掉队列里最后那批日志 —— 而那批恰好是停机前正在发生的请求。
-  现在 `CloseAndFlush` 有明确上限（1.5 s），超时也继续退出（宁可丢几条，不能被
-  SIGKILL）。顺带修掉一个真会崩进程的隐患：关闭之后仍在收尾的请求会往已关闭的
-  通道发送，**即使写在 `select` 里也会 panic**，现在用读写锁把「关闭」与「投递」
-  隔开，并配了变异测试确认拆掉保护就会炸
-- **单元用 `up -d` 而不是前台 `up`**：systemd 停单元时会给前台 `up` 发 SIGTERM，
-  而它是按**整个项目**善后的 —— 连数据库容器一起停掉重建（实测一次中断 6.7 秒）
-- **切换用 `docker compose up -d --no-deps app`**：只重建 app 这一个服务，
-  不经过 systemd 的停止阶段，数据库连重启都不会有
-- **`ExecStop` 只 `stop app`**：手工 `systemctl restart` 时也不会 `down` 整个项目，
-  并且脚本会在切换前确认这条定义真的生效了（systemd 用旧定义时最隐蔽）
-
-> 退出预算必须小于 `deploy/docker-compose.yml` 里的 `stop_grace_period`（现在 8 s）：
-> 进程侧是「等在途请求 3 s + 等日志写完 1.5 s + 关预连接 0.5 s ≈ 5 s」，
-> 常量定义在 `backend/cmd/server/main.go` 顶部，改任一边都要一起看。
-
-[golang/go#22682]: https://github.com/golang/go/issues/22682
-
-> `systemctl status llm-relay` 的 active 含义是「这个单元启动过」，
-> 真实状态看 `curl -s localhost:8888/readyz` 或 `cd /opt/llm-relay/deploy && docker compose ps`。
-> `systemctl stop llm-relay` 只停中转服务本身，要连数据库一起停用 `docker compose down`。
-
-部署完成后访问 `http://localhost:8888`（Windows 浏览器直接可开，WSL2 localhost 转发）。
-
-#### 部署成功了，但浏览器打不开
-
-先分清是谁的问题，一步就能判定：
-
-```bash
-wsl -u root -- curl -I http://127.0.0.1:8888/healthz   # WSL 里返回 200 ⇒ 服务本身没问题
-```
-
-200 的话，断的是 **Windows↔WSL 的 localhost 转发**（`wslrelay.exe`）：它会把 TCP
-连接接住，一个字节都不转发，浏览器表现为一直转圈、curl 报 timeout 却「连得上」。
-2026-09-16 实测踩到一次：部署时 WSL 内新建/替换了监听端口，转发还指着旧的 ——
-同一个 VM 里**连没被动过的 5432 也一起不通**，所以它跟应用无关，别在这里查日志。
-
-> **2026-09-20 起，这个坑已从机制上根治**：app 改为 **host 网络模式**，部署不再有
-> 任何「宿主端口发布/重发布」动作（没有 docker-proxy、没有 ports 映射，进程直接
-> 监听宿主 8888），转发不会再被部署打断。历史上预检端口（8899）与 app 容器重建
-> 两个触发点都已消失。此段保留给真正的边缘情况（如 wslrelay 因其它原因失效）。
-
-在 Windows 上执行：
-
-```powershell
-wsl --shutdown
-```
-
-> ⚠ **`wsl --shutdown` 会让中转服务真的停掉约 30 秒**，不是「无感重启」。
-> 容器与 `llm-relay.service` 都是开机自启（`systemctl is-enabled` 均为 enabled），
-> WSL 下次被访问时会自己把整套拉起来 —— 实测 2026-09-20 那次整机重启后约 27 秒
-> `healthz` 恢复，数据库数据在 docker volume 里不受影响。
-> **但这 30 秒内所有请求都会失败**，所以不是必须重启就先别重启：
-> 浏览器打不开只影响你自己看界面，中转请求走 `127.0.0.1:8888`，与浏览器的
-> localhost 转发是两回事。
-
-### 体检：现在跑的到底是哪个版本
-
-部署或重启之后，随时可以只读地查一遍（**不做任何改动**，不构建、不重启）：
-
-```bash
-wsl -u root -- bash /opt/llm-relay/deploy/install.sh --verify
-```
-
-输出服务健康状态、容器状态、镜像构建时间、systemd 是否开机自启、**服务版本**，
-以及**版本新鲜度** —— 最后一项目回答的是「我改了代码但到底部署了没有」：
-
-```
- 服务版本   : v0.1.0-3-g8fc91c3
- 版本新鲜度 : ⚠ 源码比镜像新 —— 改动尚未部署，8888 上跑的还是旧代码
-```
-
-> 这条判断来自实测的教训：2026-09-20 部署成功后服务因整机重启停了 27 秒，
-> 而当时**无法快速确认重启回来的到底是新版本还是旧版本**，只能靠翻日志比对时间。
-> 现在一次 `--verify` 就能答。
-
-另外，`install.sh` 在开始改动线上（重建容器）之前会装上中断处理器：中途被
-Ctrl+C、SSH 断开、或被关机信号打断时，都会打印一份当前状态与下一步命令，
-不会留下「跑了一半、不知道哪个版本在跑」的模糊状态。
-
-### 版本号
-
-版本号的**单一来源是 `backend/internal/version` 包**，按优先级取三处：
-
-| 优先级 | 来源 | 用在什么场合 |
-|---|---|---|
-| 1 | `-ldflags -X llm-relay/internal/version.Version=...` | 正式发布、`install.sh` 部署、`make build` |
-| 2 | `//go:embed VERSION` 文件 | 直接 `go build` 时兜底，值形如 `0.1.0` |
-| 3 | `dev` | 以上都没有 |
-
-必须有兜底：手写的版本常量迟早和实际代码对不上，而「界面上显示的版本
-是不是正在跑的那份代码」正是它唯一要回答的问题。
-
-`install.sh` 在部署时用 `git describe` 算出版本号，写进 `.env` 的 `VERSION`，
-经 `docker-compose` 的 build arg 传到 `Dockerfile` 的 `-ldflags`，编进二进制。
-必须在这个时机算：源码 tar 到安装目录时排除了 `.git`，到了 `docker build`
-阶段已经读不到 git 了。
-
-格式：
-
-| 形态 | 含义 |
-|---|---|
-| `v0.1.0` | 正好在 tag `v0.1.0` 上 |
-| `v0.1.0-3-g8fc91c3` | tag 之后又有 3 个提交 |
-| `v0.1.0-3-g8fc91c3-dirty` | 并且工作区有未提交改动 |
-| `unknown` | 不是 git 仓库（例如拿一份导出源码去部署） |
-
-带提交数与哈希是有意的：否则改了代码但没打新 tag 时，版本号会一动不动，
-看着像部署没成功。界面上显示的是「简写」形式（`v0.1.0-3`，去掉
-`-g<hash>-dirty` 这些构建细节），悬停可看完整值。
-
-确认线上版本：
-
-```bash
-# 开启登录鉴权后管理接口需要会话：先登录拿 Cookie 再取系统信息
-curl -s -c /tmp/jar -X POST http://127.0.0.1:8888/api/admin/auth/login \
-  -H 'Content-Type: application/json' -d "{\"key\":\"$RELAY_ADMIN_KEY\"}"
-curl -s -b /tmp/jar http://127.0.0.1:8888/api/admin/system/info | python3 -m json.tool
-```
+> - 默认只绑 `127.0.0.1`。放到公网时加 `BIND_ADDR=0.0.0.0`，
+>   并保管好 `RELAY_ADMIN_KEY`（登录鉴权），建议再加反向代理 + HTTPS。
+> - **重复运行就是升级**：数据库密码、`RELAY_SECRET`、`RELAY_ADMIN_KEY`
+>   从已有 `.env` 原样沿用，升级前自动备份数据库到
+>   `$INSTALL_DIR/backups/`（恢复入口 `deploy/restore.sh`）。
+> - 小内存服务器（2 核 1.6G）也能装：不编译任何东西，下载归档约 8 MB。
 
 ## 在线更新
 
 管理台侧栏品牌下方那枚版本徽标就是更新入口。点开它可以看到当前版本、
 检测新版本、一键更新、以及回滚。
 
-### 三种部署形态，三种更新方式
+### 两种构建形态，两种更新方式
 
-版本徽标旁边的「更新」能力**取决于这份程序是怎么部署的**。后端启动时
-自动判定形态（容器里看到 `/.dockerenv` 即判为 `docker`），也可以由
-构建时的 `-ldflags` 显式指定：
+「更新」能力**取决于这份程序是怎么构建的**（构建时经 `-ldflags` 注入的
+`BuildType`，见 `backend/internal/version`）：
 
-| 形态 | 判定方式 | 一键更新 | 原因 |
+| 形态 | 谁注入 | 一键更新 | 原因 |
 |---|---|---|---|
-| `docker` | 容器内自动识别 | 由**宿主侧更新器**代为执行 | 容器里的进程换不掉自己的镜像 |
-| `binary` | `install-bare.sh` 显式注入 | 直接替换自己的可执行文件 | 有文件系统权限，`systemd` 负责拉起 |
-| `source` | 兜底 | **不允许** | 避免用官方二进制覆盖开发者本地的构建产物 |
+| `binary` | goreleaser 发布产物（`deploy/install.sh` 安装的即此形态） | 直接原子替换自己的可执行文件 | systemd `Restart=always` 负责拉起新版本 |
+| `source` | 兜底（本地 `go build` 未注入时一律按它处理） | **不允许** | 避免用官方二进制覆盖开发者本地的构建产物 |
 
-`source` 形态下界面会说明原因并给出命令，而不是显示一个点了没反应的按钮。
+`source` 形态下界面会说明原因并给出发布页链接，而不是显示一个点了没反应的按钮。
 
-### 为什么容器更新需要宿主侧更新器
+### 更新流程
 
-一个容器里的进程没有办法更新自己：它可以下载新版本、可以写文件，
-但**那些改动会在下一次重建容器时全部消失** —— 而重建容器正是这次更新
-要做的动作。这是容器模型本身决定的，不是实现上的偷懒。
+一键更新 = 后台任务「下载目标版本归档 → sha256 校验 → 原子替换可执行文件 →
+人点一下重启」。几个刻意的取舍：
 
-所以 `install.sh` 会在宿主机上装一个常驻小程序 `llm-relay-updater`
-（systemd 服务 `llm-relay-updater.service`），它监听
-`/run/llm-relay-updater.sock`，收到请求后执行：
-
-```
-记录当前镜像（回滚依据）→ 取新版本 → 重建容器 → 健康检查 → 失败自动回滚
-```
-
-「失败自动回滚」是这套流程里最重要的一环：一次坏的更新如果留在原地，
-用户面对的是一个起不来的服务，而修复它需要登上服务器 —— 那正是这个
-功能想避免的场景。
-
-### 两种更新策略
-
-| 策略 | 做什么 | 适用 |
-|---|---|---|
-| `build`（默认） | 下载目标版本的**源码归档** → 覆盖源码 → `docker compose build` → 重建 | 源码就在这台机器上（`install.sh` 的部署方式） |
-| `image` | `docker pull` 新镜像 → 重建 | 镜像来自 GHCR、机器上不留源码 |
-
-用 `build` 而不是 `git pull` 是有原因的：安装目录里**没有 `.git`**
-（`install.sh` 把源码 tar 过去时显式排除了它，避免让构建上下文变大）。
-而且 tarball 是**不可变**的 —— 它对应一个确切的 tag，而 `git pull`
-拿到的是分支最新提交，「我更新到了哪一版」的答案会随时间变化。
-
-> **重建时必须显式传入目标版本号。** compose 文件里 `build.args.VERSION`
-> 的插值来源是安装目录的 `deploy/.env`，而那个文件是 `install.sh` 写的，
-> 更新器刻意不动它（里面有数据库密码与主密钥）。不覆盖的话会是这样：
-> 新镜像里编的还是**更新前**的版本号 → 界面版本号纹丝不动 →
-> 「已是最新」判断永远为 false → 用户每次点更新都真的重建一遍（几分钟），
-> 却看不出任何变化。
->
-> 更新器的做法是用环境变量覆盖插值（compose 的优先级是
-> 进程环境 > `.env` 文件），而不是去改 `.env`。这个缺陷只有等仓库
-> 真正发布过之后才会暴露 —— 在那之前更新在第一步就失败了。
-
-策略由 `install.sh` 按部署形态写好，也可在服务器上覆盖：
-
-```bash
-# 换成从镜像仓库更新
-RELAY_UPDATE_STRATEGY=image RELAY_UPDATE_IMAGE=ghcr.io/ashu1800/llm-relay:latest \
-  bash /opt/llm-relay/deploy/install.sh
-```
+- **更新是异步任务**：跨洋下载归档是分钟级操作，同步 HTTP 必被浏览器或
+  反向代理掐断。界面轮询进度（阶段 + 百分比 + 日志），刷新页面也不丢。
+- **校验和缺失即拒绝安装**：这个功能的本质是「从网络上下载一个可执行文件
+  并让它以服务身份运行」，校验和是最后一道完整性检查。
+- **替换前留 `.backup`**：旧版本始终在场，回滚不依赖网络。
+- **更新完不自动重启**：替换后如果新版本启动就崩，自动重启会把服务变成
+  崩溃循环，而此刻留在旧进程上的管理台正是唯一的救援入口。
+- 已是最新时任务正常结束并如实说明，不会假装更新了一遍。
 
 ### 检测与限额
 
@@ -489,50 +332,32 @@ RELAY_UPDATE_STRATEGY=image RELAY_UPDATE_IMAGE=ghcr.io/ashu1800/llm-relay:latest
 
 ### 回滚
 
-| 形态 | 依据 | 说明 |
+| 方式 | 依据 | 说明 |
 |---|---|---|
-| `docker` | 更新器在动手前打上的**回滚标签**（`llm-relay:rollback`） | 跨更新器重启依然可用，也不受镜像回收影响 |
-| `binary` | 可执行文件旁的 `.backup` 文件 | 回滚本身也可撤销（会留 `.rollback-from`） |
-
-容器形态为什么需要一个标签，而不是「记下旧镜像的 ID」—— 这一点是实测
-才发现的，值得写下来：
-
-> Docker 29 默认用 containerd snapshotter。`docker compose build` 把
-> `llm-relay:local` 这个 tag 指向新镜像之后，**旧镜像会被回收**：
-> 容器因为持有自己的快照仍能继续跑（服务看着没事），但
-> `docker image inspect <旧 ID>` 从此失败，
-> `RELAY_IMAGE=<旧 ID> docker compose up` 直接报 `No such image`。
->
-> 也就是说：如果回滚依据是一个裸的 content ID，那句
-> 「更新失败，正在自动回滚」**注定失败** —— 而这恰恰是它最该起作用的时刻。
-
-标签是对镜像的一次引用，有引用的镜像不会被回收；而且它是一个稳定的
-**名字**，不受后续 tag 重新指向的影响。用固定的标签名（而不是带时间戳的）
-是有意的：每次更新覆盖它，于是它始终精确表示「上一个版本」，也不会让
-镜像无限堆积。
-
-同理，容器的回滚依据**刻意不落盘成状态文件**：一个能在「更新到一半断电」
-后幸存的文件，会留下一条指向未知状态的记录，而那比没有记录更危险。
-镜像标签是 Docker 自己管理的引用，天然满足「要么在、要么不在」。
+| 本地回滚（不指定版本） | 可执行文件旁的 `.backup` 文件 | 完全不联网，GitHub 不可达时依然可用；回滚本身也可撤销 |
+| 下载指定版本 | Release 列表（比当前版本旧、且非预发布） | 目标必须在白名单列表里 —— 没有它，调用方可以传任意 tag，把未经发布验证的产物装上服务器 |
 
 面板里还会列出「比当前版本旧、且非预发布」的历史版本，可以选一个回滚。
-若自动更新不可用（没有更新器），那里会给出可复制的命令。
 
-### 版本号是怎么进到镜像里的
+### 版本号
 
-宿主侧更新器需要回答两个问题：「当前跑的是哪一版」、「新镜像建对了没有」。
-答案是镜像标签 `org.opencontainers.image.version` 与 `/app/version.txt`
-（同一个值，见 `deploy/Dockerfile`），**不经过 HTTP**：
+版本号的**单一来源是 `backend/internal/version` 包**，按优先级取三处：
 
-- 那张标签不需要任何凭据。早先的实现读 `/api/admin/system/version`，
-  而那个接口要登录 —— 更新器没有会话，实测 401，于是
-  「已是最新，无需重建」这条捷径从来没生效过。
-- 更要紧的是，问 HTTP 等于问一个**可能正躺着**的服务。更新器最需要
-  知道版本的时刻恰恰是服务起不来的时候，那时 HTTP 必然不通。
+| 优先级 | 来源 | 用在什么场合 |
+|---|---|---|
+| 1 | `-ldflags -X llm-relay/internal/version.Version=...` | 正式发布（goreleaser 注入） |
+| 2 | `//go:embed VERSION` 文件 | 直接 `go build` 时兜底 |
+| 3 | `dev` | 以上都没有 |
 
-更新器在重建前后各读一次标签，因此它能确认「新镜像确实带着目标版本号」。
-少了这一步，一个把版本号编错的更新会一路走到「更新完成」并显示那个
-纹丝不动的版本号 —— 用户唯一的感受是「点了没用」，而日志里全是成功。
+必须有兜底：手写的版本常量迟早和实际代码对不上，而「界面上显示的版本
+是不是正在跑的那份代码」正是它唯一要回答的问题。发布流水线在打 tag 时
+把版本号写进 VERSION 文件并回写 main，与 goreleaser 的注入互为校验。
+
+确认线上版本：
+
+```bash
+curl -s http://127.0.0.1:8888/system/info | python3 -m json.tool
+```
 
 ### 发布流程（本仓库维护者）
 
@@ -540,7 +365,7 @@ RELAY_UPDATE_STRATEGY=image RELAY_UPDATE_IMAGE=ghcr.io/ashu1800/llm-relay:latest
 自己拿新版本，人只负责把版本号命名出来：
 
 ```powershell
-pwsh -File scripts\release.ps1 patch     # 或 minor / major / v0.1.5 / --dry-run
+pwsh -File scriptselease.ps1 patch     # 或 minor / major / v0.1.5 / --dry-run
 ```
 
 （Linux/macOS 直接跑 `bash scripts/release.sh`，两者同一实现，ps1 只是
@@ -551,7 +376,7 @@ Windows 侧把 gh 的 PATH 拼好再转发。）
 这里先跑是把失败拦在打 tag 之前，tag 一推就是「已发布」状态，不可收回）→
 按 semver 递增算出新版本号 → 推送 main → 打 tag 推送（触发流水线）→
 `gh run watch` 观察到全部 job 结束 → 验证 Release 归档与 checksums.txt
-真的在场（归档名是更新器拼下载 URL 的硬契约）。
+真的在场（归档名是安装脚本与在线更新拼下载 URL 的硬契约）。
 
 发布完成后，服务器上**不需要任何操作**：
 
@@ -569,71 +394,21 @@ git tag -a v0.1.2 -m "v0.1.2" && git push origin v0.1.2
 tag 触发 `.github/workflows/release.yml`，它会：
 
 1. 跑测试，并把版本号写进 `backend/internal/version/VERSION`；
-2. 用 goreleaser 构建 5 个平台的归档 + `checksums.txt`，创建 Release；
-3. 构建多架构镜像推到 `ghcr.io/ashu1800/llm-relay`（`:v0.1.2` 与 `:latest`）；
-4. 把 `VERSION` 回写到主分支，让下次构建的兜底版本号跟上。
+2. 用 goreleaser 构建 5 个平台的归档（含 `rotate-secret` 工具）
+   + `checksums.txt`，创建 Release；
+3. 把 `VERSION` 回写到主分支，让下次构建的兜底版本号跟上。
 
-产物命名是硬契约，更新器按它拼下载地址：
+产物命名是硬契约，`deploy/install.sh` 与在线更新按它拼下载地址：
 
 ```
 llm-relay_<版本>_<系统>_<架构>.tar.gz     # windows 用 .zip，版本号不带 v
-  └── llm-relay / llm-relay.exe          # 归档内只有这一个可执行文件
+  └── llm-relay / llm-relay.exe          # 归档内的主可执行文件
+  └── rotate-secret                      # 主密钥轮换工具（linux 归档）
+  └── deploy/                            # install.sh / restore.sh / .env.example
 checksums.txt                            # sha256，两空格分隔
 ```
 
 也可以在本机试跑：`make release-snapshot`（需先装 goreleaser）。
-
-### 环境变量
-
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `INSTALL_DIR` | `/opt/llm-relay` | 安装目录 |
-| `PORT` | `8888` | 服务端口 |
-| `USE_PROXY` | `auto` | `auto` / `yes` / `no` |
-| `UPSTREAM_SOCKS` | 见脚本 | socks5 上游（优先使用） |
-| `UPSTREAM_HTTP` | 见脚本 | http 代理（备用） |
-| `RELAY_UPDATE_STRATEGY` | `build` | 宿主侧更新器的更新策略：`build` / `image` |
-| `RELAY_UPDATE_IMAGE` | `llm-relay:local` | `image` 策略下要拉取的镜像名 |
-| `RELAY_UPDATE_REPO` | `ashu1800/llm-relay` | 发布源仓库（`owner/name`） |
-
-## 部署
-
-**主形态：裸二进制 + systemd**（对齐 sub2api 的部署模型）。选它是为了
-自动更新的速度：binary 形态的更新 = 下载 Release 归档（~7.5 MB 压缩后）→
-sha256 校验 → 原子替换可执行文件 → systemd 拉起，**1~2 分钟完成**；
-Docker 形态的更新要么在服务器现场编译（15~20 分钟），要么拉几百 MB 镜像。
-
-```bash
-sudo bash deploy/install-bare.sh
-```
-
-脚本会自行装齐 PostgreSQL 与 Go/Node，本机编译前端与后端，产出单个二进制
-交由 systemd 托管（不需要 Redis —— 后端从未使用它，编排里也已移除）。
-**只在小内存服务器上编译要小心**：2 核 1.6G 的机器跑 `npm ci + go build`
-会被压到无响应（实测记录见 docs/deploy-47.108.173.29.md）——那台机器上的
-做法是本地交叉编译后上传，或直接从 GitHub Release 下载归档安装。
-
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `BIND_ADDR` | `127.0.0.1` | 监听地址，对应应用的 `SERVER_HOST` |
-| `PORT` | `8888` | 端口 |
-| `DB_NAME` / `DB_USER` | `llm_relay` / `llmrelay` | 数据库 |
-
-> 应用的绑定变量是 `SERVER_HOST` / `SERVER_PORT`。脚本里写成 `BIND_ADDR` / `PORT`
-> 只是为了和其他部署方式统一，生成 `.env` 时会转成前者——名字写错不会报错，
-> 只在非默认端口时静默失效。
-
-**改了代码怎么上线**：不走部署，走发布 + 自更新 ——
-`scripts/release.ps1 patch` 发布新版本（见「发布流程」），然后到管理台点
-「一键更新」；历史日志、渠道与密钥原样保留（更新只替换可执行文件）。
-
-### Docker 形态（备选，遗留）
-
-`deploy/install.sh`（WSL2 / Ubuntu 24.04，Docker Compose）仍然可用，
-适合明确想要容器隔离的场景。它在服务器上装 Docker、构建镜像并注册
-systemd 单元，配套的宿主侧更新器让容器形态也能一键更新（更新策略分
-`build` / `image` 两种，见「在线更新」）。当前主形态是裸二进制，
-Docker 路径按遗留维护 —— 服务器实测的更新速度对比见上。
 
 ## 密钥管理（重要）
 
@@ -652,7 +427,7 @@ Docker 路径按遗留维护 —— 服务器实测的更新速度对比见上�
 
 渠道里的上游密钥以 **AES-256-GCM** 加密后存库，密钥由 `RELAY_SECRET` 派生。
 
-- `install.sh` / `install-bare.sh` 首次安装会自动生成 48 位随机 `RELAY_SECRET`
+- `install.sh` 首次安装会自动生成 48 位随机 `RELAY_SECRET`
 - **重装或换机必须沿用同一个值**，否则渠道密钥解不开，表现为渠道全部认证失败
 - 备份文件里存的是密文，因此**备份与 `RELAY_SECRET` 要分开保管**：
   只拿到备份解不开密钥，只拿到主密钥也拿不到密文
@@ -668,35 +443,9 @@ bash scripts/rotate-secret.sh          # 内部会先 dry-run 再正式迁移
 ```bash
 systemctl status llm-relay                 # 服务状态
 systemctl restart llm-relay                # 重启
-cd /opt/llm-relay/deploy && docker compose logs -f app
-cd /opt/llm-relay/deploy && docker compose down
+journalctl -u llm-relay -f                 # 实时日志
+bash deploy/restore.sh --list              # 查看升级前的自动备份
 ```
-
-### 网络说明（本机实测结论）
-
-| 目标 | 直连 | HTTP 代理 :8088 | SOCKS5 :1080 |
-|---|---|---|---|
-| `registry-1.docker.io` | 失败 | **连接被重置** | **可达（401）** |
-| `auth.docker.io` | 超时 | 连接被重置 | 可达（200） |
-| `ghcr.io` / `quay.io` | 可达 | 可达 | 可达 |
-| `download.docker.com` | 可达 | 可达 | — |
-| `goproxy.cn` / `registry.npmmirror.com` | 可达 | 可达 | — |
-
-**关键结论：HTTP 代理对 Docker Hub 会被重置，只有 socks5 能通**，所以脚本优先用
-socks5 + privoxy 转换，而不是直接用 HTTP 代理。
-
-### 构建期踩坑记录
-
-以下三点已固化进配置，改动前请留意：
-
-1. **Dockerfile 首行不能写 `# syntax=docker/dockerfile:1`**
-   该指令会让 BuildKit 去 Docker Hub 拉取外部前端镜像，本机不可达会直接构建失败。
-   已改用 BuildKit 内置前端。
-2. **前端依赖用 `npm ci` 而不是 `npm install`**
-   实测 `npm ci` 在容器内 **9.8 秒**完成；而在非 TTY 的构建环境下 `npm install`
-   会长时间无输出（>17 分钟仍未完成）。
-3. **privoxy 的 `listen-address` 必须唯一**
-   重复行会导致 privoxy 启动失败（端口冲突），脚本已做去重处理。
 
 ## 本地开发
 
@@ -748,8 +497,8 @@ rm -rf backend/internal/web/dist && cp -r frontend/dist backend/internal/web/dis
 | `RELAY_MAX_CONCURRENCY` | `64` | 全局在途请求上限，超出排队（最多 60 秒）；`0` 不限 |
 | `RELAY_DEFAULT_RPM` | `0` | 密钥默认每分钟配额；单把密钥可覆盖，负数表示该密钥不限 |
 | `RELAY_SECRET` | 无 | 渠道密钥的加密主密钥，**必须显式设置** |
-| `SERVER_HOST` | `127.0.0.1` | 监听地址。host 网络模式下就是宿主侧实际绑定（老配置键 `BIND_ADDR` 会被部署脚本自动迁移为此键） |
-| `DB_HOST_PORT` | `15432` | 仅 Docker 部署：postgres 发布到宿主回环的端口（5432 留给宿主原生 postgres；host 模式的 app 经它连库） |
+| `SERVER_HOST` | `127.0.0.1` | 监听地址。`deploy/.env` 与 `install.sh` 的 `BIND_ADDR` 参数写的都是它 |
+| `TZ` | `Asia/Shanghai` | 进程本地时区：可用时段与时段倍率按它判断。systemd 服务默认没有时区，官方部署的 `.env` 里显式写了这一项 |
 
 ## UI 还原说明
 
@@ -789,13 +538,13 @@ Harding 不含中文字形，会一路回退到 `--font-family-base`）。
 
 ## 开发进度
 
-- [x] Phase 0 项目骨架：Go+Gin 服务、Vue3+AntdV 前端、Docker 多阶段构建、一键脚本
+- [x] Phase 0 项目骨架：Go+Gin 服务、Vue3+AntdV 前端、一键部署脚本
 - [x] Phase 1 UI 逆向与设计系统：CDP 抓取、`ui-spec.md`、主题令牌、MainLayout、看板骨架
 - [x] Phase 2 数据层与转发内核：实体与迁移、渠道路由（加权/轮询/故障转移）、协议适配
 - [x] Phase 3 计量与成本：Token 计量归一化、手工定价、时段倍率（价格不再自动同步）
 - [x] Phase 4 全协议与页面完善：Chat / Responses / Anthropic / Gemini / Embeddings 入站
 - [x] Phase 5 健壮性与可观测：报文留存、限流与并发、配置备份
-- [x] Phase 6 部署固化与冷启动验收：`install-bare.sh`、密钥轮换、冷启动实测
+- [x] Phase 6 部署固化与冷启动验收：一键安装（Release 预编译二进制 + systemd）、密钥轮换、重装演练
 
 ## 验证脚本
 
@@ -805,6 +554,12 @@ Harding 不含中文字形，会一路回退到 `--font-family-base`）。
 > `scripts/admin-auth.sh`，会从 `RELAY_ADMIN_KEY` 环境变量或 `deploy/.env`
 > 里取管理密钥登录并给后续 curl 注入会话 Cookie；鉴权关闭（未配置密钥）时
 > 静默跳过，行为同从前。服务不在 8888 端口时用 `ADMIN_BASE` 指定地址。
+>
+> 查库类断言统一走 `scripts/lib/testdb.sh`（bash）与 `scripts/lib/testdb.py`
+> （python）：原生 psql over TCP，连接参数取自 `deploy/.env`（可用
+> `RELAY_TEST_DB_*` 环境变量覆盖），不再依赖任何容器。依赖 mock 上游的
+> 用例（分组路由、流式截断、重试退避……）以**宿主 node 进程**跑
+> mock（≥18 即可，`bash scripts/ensure-mock-upstream.sh` 自动拉起）。
 
 | 脚本 | 验证内容 |
 |---|---|
@@ -825,7 +580,7 @@ Harding 不含中文字形，会一路回退到 `--font-family-base`）。
 | `test-legacy-column-add.sh` | 老库缺列时自动补列并恢复可用（会短暂重启应用） |
 | `test-backup.sh` | 备份导出/导入、明文泄漏检查 |
 | `test-backup-roundtrip.sh` | 删除渠道后从备份恢复并真实调用 |
-| `test-coldstart.sh` | 拆除容器与镜像后从零重建，核对数据完好 |
+| `test-coldstart.sh` | 重装演练：重跑 `install.sh`（钉住当前版本），核对数据完好、密钥沿用、服务健康 |
 | `check-secrets.sh` | 扫描仓库与提交历史中的明文凭据 |
 | `purge-test-logs.sh` | 清掉验证脚本产生的请求日志（否则会污染看板的今日统计） |
 
@@ -844,7 +599,7 @@ Harding 不含中文字形，会一路回退到 `--font-family-base`）。
 Import-Module .\scripts\wsl-bash.psm1
 
 # 跑脚本文件（推荐）：内容由 bash 直接读，中文与各种引号都不需要转义
-Invoke-WslScript -Path .\deploy\install.sh -Arguments '--verify'
+Invoke-WslScript -Path .\deploy\install.sh
 
 # 跑一条内联命令：**用单引号**，避免 PowerShell 先做变量插值
 (Invoke-WslBash -Command 'systemctl is-active llm-relay').Output
@@ -905,7 +660,7 @@ node scripts/check-log-columns.mjs http://127.0.0.1:8888 1440 20   # 单组合
 
 `scripts/verify-all.sh` 会按顺序跑完上面这些可离线执行的用例并汇总，
 最后打印 `ALL_PASS`；日常改完代码跑它一次就够。
-（`test-coldstart.sh` 要拆容器与镜像，不在其中。）
+（`test-coldstart.sh` 要重跑 `install.sh` 重启服务，不在其中。）
 
 界面动效的回归脚本在 `.shots/`（不入库，随源码本地保留）。它们都需要一个带
 调试端口的 Chrome，用真实数据造场景，所以不进 `verify-all.sh`：
@@ -941,17 +696,12 @@ node scripts/verify-version-ui.mjs          # 版本徽标与更新面板：徽�
                                             # 面板 teleport 到 body 后不再被侧栏的 overflow 裁掉、
                                             # 展开回滚区后仍在视口内、正文可滚动、
                                             # 且「检测失败」时不许出现绿勾与「已是最新」
-bash scripts/drill-rollback.sh              # 回滚端到端（**会重建镜像与容器**，别在意的机器上跑）：
-                                            # 切到一个「有问题的新版」→ 经 unix socket 调
-                                            # POST /rollback → 断言容器真的回到回滚标签所指的
-                                            # 镜像、版本号一致、服务健康；跑完自动把
-                                            # llm-relay:local 恢复成真实版本
 bash scripts/verify-release-artifacts.sh    # 产物命名契约（**本机需装 goreleaser**，会真跑一次
                                             # snapshot 构建）：归档名必须是
                                             # llm-relay_<版本>_<系统>_<架构>.tar.gz（windows 用
-                                            # .zip）、内含可执行文件 llm-relay、checksums.txt 是
-                                            # sha256 两列格式、且 deploy/ 下 install.sh 要用到的
-                                            # 文件（含 llm-relay-updater.service）都在归档里。
+                                            # .zip）、内含可执行文件 llm-relay 与 rotate-secret、
+                                            # checksums.txt 是 sha256 两列格式、且 deploy/ 下
+                                            # install.sh 要用到的文件都在归档里。
                                             # 这个契约跨 Go 模板 / YAML / shell 三处，读配置看不出
                                             # 对错 —— 一旦漂了，第一次发布时所有平台的下载都会 404
 node .shots/verify-focus-ring.mjs           # 键盘焦点环：Tab 走查 6 个路由，断言全部落点
@@ -1005,7 +755,7 @@ node .shots/verify-sidebar-short.mjs        # 矮视口（420/520/620 高）下�
 ## 安全提醒
 
 管理后台采用**无账号的密钥登录**：全站只有一把管理密钥
-（`deploy/.env` 里的 `RELAY_ADMIN_KEY`，`install.sh` / `install-bare.sh`
+（`deploy/.env` 里的 `RELAY_ADMIN_KEY`，`install.sh`
 首次安装会自动生成 48 位随机值并在摘要里打印），浏览器打开管理台时
 输入它换取登录会话（HttpOnly Cookie，默认 7 天，`RELAY_SESSION_TTL` 可调）。
 登录接口带暴力破解限流（15 分钟内错 5 次锁定），经 HTTPS 反代部署时
