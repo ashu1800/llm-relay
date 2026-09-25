@@ -28,9 +28,9 @@ import (
 	"llm-relay/internal/version"
 )
 
-// 退出预算。三个数加起来必须小于 deploy/docker-compose.yml 里的
-// stop_grace_period（5 秒），否则容器会被 SIGKILL —— 那时连日志都来不及落库，
-// 比多停机几秒更糟。改这几个值时要和那个配置一起看。
+// 退出预算。三个数加起来必须小于停机宽限（systemd 默认 90 秒，
+// 官方部署单元里配了 Restart=always），否则进程会被 SIGKILL ——
+// 那时连日志都来不及落库，比多停机几秒更糟。改这几个值时要一起看。
 const (
 	// 等在途请求收尾的上限
 	shutdownHTTPTimeout = 3 * time.Second
@@ -139,15 +139,9 @@ func run() error {
 
 	// ---- 版本更新 ----
 	//
-	// 宿主侧更新器只在 docker 部署下存在（它跑在宿主上、经 unix socket 通信）。
-	// 裸机部署下连不上是正常的，不该记成错误 —— 那种部署走 binary 自替换路径。
-	//
-	// 这里不做「启动时探测一次」的判断：更新器可能比本服务晚启动
-	// （systemd 单元之间没有严格顺序），启动时探测失败会让整个会话
-	// 都以为它不在场。可用性在真正发起升级请求时才知道（连不上会
-	// 得到 ErrUpdaterUnavailable）。
-	updaterRunner := update.NewSocketRunner()
-	updateSvc := update.NewService(st.DB(), updaterRunner, logger)
+	// binary 形态（install.sh 安装的官方产物）由进程原子替换自身可执行文件，
+	// systemd 的 Restart=always 负责拉起新版本；source 形态只提示、不能自更新。
+	updateSvc := update.NewService(st.DB(), logger)
 	logger.Info("版本更新功能已就绪",
 		"version", version.Version,
 		"build_type", version.BuildType,
@@ -195,12 +189,11 @@ func run() error {
 	// 为什么需要它：Go 的 http.Server.Shutdown 会等所有非空闲连接结束，而它对
 	// StateNew（连上了、请求头还没读完）的连接有一条特判（golang/go#22682）：
 	// 只有连接存在超过 **5 秒**才把它当作空闲关掉。浏览器的预连接（preconnect）
-	// 恰好就是这种连接 —— TCP 握手完成、一个字节都没发。于是每次重新部署，
-	// Shutdown 都被它拖满 5 秒，而 compose 里 stop_grace_period 正好也是 5 秒：
-	// 进程刚要退就被 SIGKILL，「已退出」那行日志都打不出来。
+	// 恰好就是这种连接 —— TCP 握手完成、一个字节都没发。于是每次重新部署
+	// （更新替换二进制后重启服务），Shutdown 都被它拖满 5 秒才能退干净。
 	//
 	// 实测（.shots/exp-shutdown.sh，五种连接各测一次）：
-	//   空闲          → 容器退出 1565ms
+	//   空闲          → 进程退出 1565ms
 	//   新建连接(1s)  → 5414ms   ← 就是这条
 	//   同样的连接但存在 8s → 522ms（过了那 5 秒特判，Go 直接关掉它）
 	//   WebSocket     → 741ms（握手后连接被 hijack，Shutdown 本来就不等它）

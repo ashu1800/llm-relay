@@ -126,7 +126,7 @@ func validatePricingRow(row *model.ChannelModel) error {
 	return nil
 }
 
-// nowUTC 统一用 UTC 落库，避免容器时区差异导致统计错位。
+// nowUTC 统一用 UTC 落库，避免进程时区差异导致统计错位。
 func nowUTC() time.Time { return time.Now().UTC() }
 
 // copyHeader 复制上游响应头，跳过逐跳首部与长度相关头。

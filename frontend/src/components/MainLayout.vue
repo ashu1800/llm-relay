@@ -77,7 +77,7 @@ onLive('budget_alert', (a: BudgetAlert) => {
 //
 // 用默认密钥时渠道密钥的加密等于没有：主密钥是从这个公开占位串推出来的，
 // 数据库或备份文件落到别人手里就能直接解开。
-// 原来只在启动日志里警告一句，容器日志一滚就看不见了 ——
+// 原来只在启动日志里警告一句，journald 一滚就看不见了 ——
 // 这种事必须持续可见，所以放在界面上。
 const usingDefaultSecret = ref(false)
 
@@ -91,7 +91,7 @@ const authDisabled = ref(false)
 // README 里写过「改了前端或后端必须重新部署才会在 8888 上生效」，
 // 但先前没有任何办法在界面上确认这件事 —— 改了代码、部署失败、还以为看到了新版。
 //
-// 版本号由构建时经 -ldflags 编进二进制（见 Dockerfile 与 install.sh），
+// 版本号由构建时经 -ldflags 编进二进制（见 .goreleaser.yaml 与 install.sh），
 // 所以它回的一定是真正跑着的那份，不是某个配置文件里的声明。
 //
 // 现在它由 VersionBadge 组件承担（见其注释）：那枚徽标除了显示版本，
@@ -151,7 +151,7 @@ onMounted(() => {
   //
   // 版本号曾经也搭这个请求顺路带回来。现在它由 VersionBadge 自己取
   // （见 stores/version.ts 的 fetchInfo）：那个组件需要一个结构化的
-  // 版本对象（构建形态、是否 release、更新器是否在场），而 /system/info
+  // 版本对象（构建形态、是否 release、能否一键更新），而 /system/info
   // 只给一个字符串。两处都取会让侧栏发两个请求，所以这里不再管版本。
   api
     .get<{ using_default_secret?: boolean; console_auth_enabled?: boolean }>('/system/info')

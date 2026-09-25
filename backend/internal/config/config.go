@@ -154,11 +154,10 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// applyEnv 让容器编排可以通过环境变量覆盖任意关键配置。
+// applyEnv 让部署环境可以通过环境变量覆盖任意关键配置（官方部署把
+// .env 交给 systemd 的 EnvironmentFile，走的正是这些键）。
 //
-// 覆盖率是刻意做全的：Dockerfile 里设了 CONFIG_PATH=/app/config.yaml，
-// 但仓库里没有这个文件、编排也没挂载它，而 Load 对「文件不存在」是静默
-// 跳过的。也就是说容器部署下，凡是这里没有环境变量入口的字段就**无法调整**，
+// 覆盖率是刻意做全的：凡是这里没有环境变量入口的字段，部署侧就**无法调整**，
 // 且不会有任何提示。新增配置项时请一并在这里补上入口。
 func applyEnv(c *Config) {
 	setStr(&c.Server.Host, "SERVER_HOST")

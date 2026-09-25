@@ -65,7 +65,7 @@ func OpenByDSN(dsn string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
-// Ready 用于容器健康检查。
+// Ready 用于就绪探针（/readyz 借它确认数据库可接受请求）。
 func (s *Store) Ready() error {
 	sqlDB, err := s.db.DB()
 	if err != nil {

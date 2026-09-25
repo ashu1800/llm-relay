@@ -90,11 +90,11 @@ func (s *Server) checkUpdate(c *gin.Context) {
 
 // startUpdate 启动更新。
 //
-// 请求体可带 {"mode":"docker"|"binary"} 显式指定方式，留空则自动判定。
+// 请求体可带 {"mode":"binary"} 显式指定方式，留空则自动判定。
 // 立即返回任务对象（含 id 与初始阶段），真正的下载在后台跑 ——
 // 前端之后轮询 /update/progress?task=<id> 拿进度。
 //
-// 为什么要异步：docker 拉镜像和跨洋下载归档都是分钟级操作，
+// 为什么要异步：跨洋下载归档是分钟级操作，
 // 同步 HTTP 一定会被浏览器或反向代理掐断（见 update 包注释）。
 func (s *Server) startUpdate(c *gin.Context) {
 	var body struct {
@@ -113,11 +113,10 @@ func (s *Server) startUpdate(c *gin.Context) {
 
 // updateProgress 查询进度。
 //
-// task 参数是任务 id（binary 形态）或宿主侧升级 id（docker 形态）。
-// 不传时返回当前/最近一次任务 —— 这解决的是「刷新页面后手上没有 id」
-// 的问题：用户 F5 之后仍该看到刚才那次更新跑到哪了。
+// task 参数是任务 id；不传时返回当前/最近一次任务 ——
+// 用户 F5 之后手上没有 id，仍该看到刚才那次更新跑到哪了。
 func (s *Server) updateProgress(c *gin.Context) {
-	task, err := s.deps.Update.Progress(c.Request.Context(), c.Query("task"))
+	task, err := s.deps.Update.Progress(c.Query("task"))
 	if err != nil {
 		writeUpstreamError(c, http.StatusNotFound, err.Error(), "not_found_error")
 		return
@@ -177,18 +176,12 @@ func (s *Server) rollback(c *gin.Context) {
 // # 为什么这里不直接 os.Exit
 //
 // 进程自己退出、靠 systemd 的 Restart=always 拉起来，是最简洁的做法，
-// 但它只在 systemd 托管下成立，而我们的部署形态有三种（compose 托管、
-// systemd 托管容器、systemd 托管裸二进制），逐个判断既脆弱又难测。
+// 但它只在 systemd 托管下成立 —— 官方部署形态（install.sh）正是如此，
+// 而开发者的 source 构建本来就不该由网页远程重启。
 //
-// 所以走一条在三种形态下都成立的路：**先回响应、再退出**。
-//
-//	compose:  容器退出 → restart: unless-stopped 把它拉起来（用新镜像/新二进制）
-//	systemd:  Restart=always 同理
-//	docker 更新场景: 宿主侧 updater 已经重建过容器，重启其实只是让
-//	                 进程重新读一次已经换好的文件
-//
-// 三者的共同点是「进程退出后会被自动拉起」，这正是我们需要的，
-// 而它们各自的机制不必由这里知道。
+// 所以走一条在 systemd 托管下成立的路：**先回响应、再退出**。
+// 进程退出后 Restart=always 会用（更新流程刚刚原子替换好的）可执行文件
+// 把服务拉起来。
 //
 // 之前必须先把 HTTP 响应写出去：直接 os.Exit 会让前端拿到一个
 // 连接被重置的错误，用户看到的是「重启失败」，而实际上重启成功了。
@@ -222,16 +215,13 @@ func (s *Server) restartService(c *gin.Context) {
 //
 // 逐个错误单独映射，因为它们的「下一步该做什么」完全不同：
 //
-//	ErrUpdaterUnavailable → 去装更新器（可操作）
 //	ErrNoBackup           → 没有备份可回滚（说明现状）
 //	业务性拒绝            → 409，用户读那句话就够了
 //	其余                  → 500，去看日志
 //
-// 一律回 500 会让「更新器没装」这种一眼能修的问题看起来像程序崩溃。
+// 一律回 500 会让「本来就不允许更新」这种一眼能懂的问题看起来像程序崩溃。
 func (s *Server) writeUpdateError(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, update.ErrUpdaterUnavailable):
-		writeUpstreamError(c, http.StatusServiceUnavailable, err.Error(), "updater_unavailable")
 	case errors.Is(err, update.ErrNoBackup):
 		writeUpstreamError(c, http.StatusConflict, err.Error(), "no_backup")
 	case update.IsBusinessError(err):

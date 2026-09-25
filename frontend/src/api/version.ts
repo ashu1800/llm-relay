@@ -9,8 +9,8 @@
 //     单独给 30 秒，其余沿用默认。
 import { api } from './client'
 
-/** 服务端的构建形态。三种形态的更新方式完全不同，见后端 version 包。 */
-export type BuildType = 'source' | 'docker' | 'binary'
+/** 服务端的构建形态。两种形态的更新方式完全不同，见后端 version 包。 */
+export type BuildType = 'source' | 'binary'
 
 /** 版本信息（/system/version）。这个接口不访问网络，永远可用。 */
 export interface VersionInfo {
@@ -43,7 +43,7 @@ export interface UpdateCheck {
   build_type: BuildType
   /** 当前形态下能否一键更新 —— 与 has_update 是两个独立的问题 */
   can_apply: boolean
-  /** 即将采用的更新方式：binary / docker / manual */
+  /** 即将采用的更新方式：binary / manual */
   apply_mode: string
   /** can_apply 为 false 时说明原因，可直接显示 */
   blocked_reason?: string

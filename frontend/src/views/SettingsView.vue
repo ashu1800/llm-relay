@@ -149,8 +149,8 @@ const runtimeRows = [
 ]
 
 // listen 的提示是特殊的一条：它由 SERVER_HOST/SERVER_PORT 决定，
-// 而容器部署下宿主机侧的端口还多一层 BIND_ADDR 映射，所以单独说明。
-const LISTEN_HINT = 'SERVER_HOST / SERVER_PORT（Docker 部署的宿主机端口另由 deploy/.env 的 BIND_ADDR 决定）'
+// 改了要重启服务才生效，所以单独说明。
+const LISTEN_HINT = 'SERVER_HOST / SERVER_PORT（在 deploy/.env 中修改后需重启服务）'
 
 // hintOf 取该字段对应的环境变量名。拿不到时返回 undefined，
 // 界面上不显示提示 —— 宁可不说，也不给一个错的变量名。

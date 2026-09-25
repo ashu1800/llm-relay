@@ -46,8 +46,7 @@ type Deps struct {
 	// Update 是版本更新服务（检测 / 下载 / 替换 / 回滚）。
 	// 为 nil 时更新相关的接口回 501，而 /system/version 仍然可用 ——
 	// 「我现在跑的是哪一版」不该依赖更新功能是否启用。
-	// 更新器是否在场不再有独立探测：/update/check 的 can_apply 与
-	// Apply 的错误映射（ErrUpdaterUnavailable）就是答案。
+	// 能否一键更新没有独立探测：/update/check 的 can_apply 就是答案。
 	Update *update.Service
 }
 

@@ -79,10 +79,9 @@ type Info struct {
 	// BuildType 见 version 包的常量，前端据此决定显示哪种入口
 	BuildType string `json:"build_type"`
 	// CanApply 表示**当前形态下能否一键更新**。
-	// 与 HasUpdate 是两个独立的问题：source 构建即便有新版本也不能自动更新，
-	// docker 构建虽然有新版本但宿主侧 updater 不在场时同样不能。
+	// 与 HasUpdate 是两个独立的问题：source 构建即便有新版本也不能自动更新。
 	CanApply bool `json:"can_apply"`
-	// ApplyMode 是即将采用的更新方式：binary / docker / manual
+	// ApplyMode 是即将采用的更新方式：binary / manual
 	ApplyMode string `json:"apply_mode"`
 	// BlockedReason 在 CanApply 为 false 时说明原因，直接显示给用户
 	BlockedReason string `json:"blocked_reason,omitempty"`
@@ -104,39 +103,6 @@ type RollbackCandidate struct {
 	HTMLURL     string `json:"html_url"`
 }
 
-// UpgradeRunner 是宿主侧更新器的抽象。
-//
-// 定义成接口而不是直接依赖具体类型，是为了让「宿主侧更新器不在场」
-// 成为一个可测试的普通状态（返回 ErrUpdaterUnavailable），
-// 而不是一个需要真去连 socket 才能触发的分支。
-type UpgradeRunner interface {
-	// Upgrade 请求宿主侧更新器执行一次升级，返回升级 ID 供查询进度。
-	// 更新器不在场时返回 ErrUpdaterUnavailable（连接被拒会映射成它），
-	// 所以不需要单独的 Available 预检 —— 那只是多一次往返。
-	Upgrade(ctx context.Context) (string, error)
-	// Progress 查询某次升级的进度
-	Progress(ctx context.Context, id string) (*UpgradeProgress, error)
-}
-
-// UpgradeProgress 是宿主侧更新器上报的进度。
-type UpgradeProgress struct {
-	ID      string `json:"id"`
-	Phase   string `json:"phase"`
-	Percent int    `json:"percent"`
-	Message string `json:"message"`
-	Done    bool   `json:"done"`
-	Failed  bool   `json:"failed"`
-	// Logs 是最近若干行输出，供界面在失败时给出可排查的信息
-	Logs []string `json:"logs,omitempty"`
-}
-
-// ErrUpdaterUnavailable 表示宿主侧更新器不在场。
-//
-// 这是 docker 部署下最常见的「不能一键更新」的原因，值得一个专门的错误：
-// 它对应的用户动作是「去服务器上跑一次 install.sh」，
-// 而其它错误对应的动作是「看日志、查网络」——两者不能混为一谈。
-var ErrUpdaterUnavailable = errors.New("宿主侧更新器未运行，无法自动更新镜像")
-
 // 业务性拒绝的哨兵错误。
 //
 // 它们的共同点：错误文案本身就是**给用户的结论**（读一句话就知道该干嘛），
@@ -150,7 +116,7 @@ var (
 	ErrModeUnsupported = errors.New("不支持的更新方式")
 	// ErrCannotApply 当前构建形态不允许一键更新（源码构建 / 无法定位自身）。
 	ErrCannotApply = errors.New("当前部署形态不支持在线更新")
-	// ErrBuildTypeRejected 当前构建形态不支持请求的动作（如 docker 形态的在线回滚）。
+	// ErrBuildTypeRejected 当前构建形态不支持请求的动作（如源码形态的在线回滚）。
 	ErrBuildTypeUnsupported = errors.New("当前构建类型不支持该操作")
 )
 
@@ -181,9 +147,6 @@ type Service struct {
 	cache     *Info
 	cacheAt   time.Time
 	cacheRepo string
-
-	// runner 是宿主侧更新器（docker 形态），可能为 nil
-	runner UpgradeRunner
 
 	// task 是当前正在跑的更新任务（binary 形态的自我替换）。
 	// 全局只允许一个：两个人同时点「更新」去做同一件事没有意义，
@@ -242,15 +205,11 @@ func (t *Task) Snapshot() *Task {
 }
 
 // NewService 构造更新服务。
-//
-// runner 可为 nil —— 那表示这个部署没有宿主侧更新器（bare 安装、
-// 或者用户没装）。此时 docker 形态会明确报告「无法自动更新」，
-// 而不是静默什么都不做。
-func NewService(db *gorm.DB, runner UpgradeRunner, logger *slog.Logger) *Service {
+func NewService(db *gorm.DB, logger *slog.Logger) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	s := &Service{db: db, runner: runner, logger: logger}
+	s := &Service{db: db, logger: logger}
 	cfg, err := s.loadConfig()
 	if err != nil {
 		// 读配置失败不该让服务起不来：用默认值继续，界面上会显示
@@ -380,7 +339,7 @@ func (s *Service) Check(ctx context.Context, force bool) *Info {
 
 	if !force {
 		if cached := s.fromCache(cfg.Repo); cached != nil {
-			// 缓存里的 CanApply 依赖运行期状态（更新器是否在场），
+			// 缓存里的 CanApply 依赖运行期状态（能否定位自身可执行文件），
 			// 所以每次都要用当前状态重新算，不能连它一起缓存
 			cached.CanApply, cached.ApplyMode, cached.BlockedReason = s.applyMode()
 			return cached
@@ -439,28 +398,16 @@ func (s *Service) currentState() *Info {
 
 // applyMode 判定「当前部署形态下能不能一键更新、走哪条路」。
 //
-// 三种形态的判定与理由是这套功能里最该被写清楚的一段：
+// 两种形态的判定与理由是这套功能里最该被写清楚的一段：
 //
 //	source  不能更新。没有发布产物与之对应，自动更新只会用官方二进制
 //	        覆盖掉开发者自己编译的那份，那不是「更新」而是「破坏工作区」。
-//	docker  能，但必须经由宿主侧更新器。容器里的进程替换不了自己 ——
-//	        镜像才是事实来源。更新器不在场时明确报告原因，而不是
-//	        给一个点了没反应的按钮。
 //	binary  能，直接自我替换。这是唯一一条「进程改自己」的路径。
 func (s *Service) applyMode() (canApply bool, mode, reason string) {
 	switch version.BuildType {
 	case version.BuildSource:
 		return false, "manual",
 			"当前是源码构建（未使用官方发布产物），请用 git pull 后重新部署"
-	case version.BuildDocker:
-		if s.runner == nil {
-			return false, "docker",
-				"未检测到宿主侧更新器（llm-relay-updater）。请重新运行 deploy/install.sh 以安装它，之后即可一键更新"
-		}
-		// runner 是否真的活着要连一次 socket 才知道，
-		// 那是网络操作，不放在这个纯判定函数里 —— Check 的调用方
-		// 会在用户点「更新」时拿到真实的错误
-		return true, "docker", ""
 	case version.BuildBinary:
 		if _, err := SelfPath(); err != nil {
 			return false, "binary", err.Error()
@@ -507,9 +454,9 @@ func (s *Service) toCache(info *Info, repo string) {
 // 同步 HTTP 请求必然会被某一层掐断。返回任务 ID 后，界面轮询
 // /system/update/progress 就能看到阶段与百分比，刷新页面也不丢。
 //
-// mode 参数允许前端显式指定走哪条路（"docker"/"binary"），
-// 留空则按当前构建形态自动选。留这个口子是因为存在「容器里跑着
-// 但想用 binary 方式」这类非常规部署，而报错让人无从下手。
+// mode 参数允许前端显式指定走哪条路（"binary"），
+// 留空则按当前构建形态自动选。留这个口子是为了让接口语义保持稳定 ——
+// 显式传一个与形态不符的 mode 会得到明确的「不支持」，而不是静默走错路。
 func (s *Service) Apply(ctx context.Context, mode string) (*Task, error) {
 	mode = strings.TrimSpace(mode)
 	if mode == "" {
@@ -522,42 +469,11 @@ func (s *Service) Apply(ctx context.Context, mode string) (*Task, error) {
 	}
 
 	switch mode {
-	case "docker":
-		return s.applyDocker(ctx)
 	case "binary":
 		return s.applyBinary(ctx)
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrModeUnsupported, mode)
 	}
-}
-
-// applyDocker 把升级交给宿主侧更新器。
-//
-// 这个方法**不启动本地任务** —— 进度的真相在宿主侧，
-// 本进程只是个转发者。返回的任务里带的是宿主侧给的升级 ID，
-// 之后由 Progress 原样转发查询。
-func (s *Service) applyDocker(ctx context.Context) (*Task, error) {
-	if s.runner == nil {
-		return nil, ErrUpdaterUnavailable
-	}
-
-	// 不做 Available 预检：Upgrade 连不上 socket 时会把连接拒绝
-	// 映射成 ErrUpdaterUnavailable（见 runner 的 do），一次往返就能得到
-	// 与「先探测再请求」完全相同的结论。
-	id, err := s.runner.Upgrade(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("请求宿主侧更新器失败: %w", err)
-	}
-	now := time.Now().UTC()
-	return (&Task{
-		ID:      id,
-		Kind:    "update",
-		Target:  "latest",
-		Phase:   "requested",
-		Percent: 0,
-		Message: "已请求宿主侧更新器拉取并重建容器",
-		Started: now,
-	}).Normalized(), nil
 }
 
 // Normalized 保证可选的数组字段非 nil，然后返回自身。
@@ -794,34 +710,15 @@ func (s *Service) finishTask(t *Task) {
 
 // Progress 查询更新进度。
 //
-// docker 形态的进度在宿主侧，这里转发查询；binary 形态读本地任务。
-// 两种形态对界面是同一个接口 —— 前端不该关心「更新是谁在跑」。
-func (s *Service) Progress(ctx context.Context, id string) (*Task, error) {
+// id 为空时返回当前/最近一次任务 —— 这解决的是「刷新页面后手上没有 id」
+// 的问题：用户 F5 之后仍该看到刚才那次更新跑到哪了。
+func (s *Service) Progress(id string) (*Task, error) {
 	s.taskMu.Lock()
 	task := s.task
 	s.taskMu.Unlock()
 
-	// 有本地任务且 ID 对得上（或没传 ID）：用本地的
 	if task != nil && (id == "" || task.ID == id) {
 		return task.Snapshot().Normalized(), nil
-	}
-
-	// 否则问宿主侧更新器
-	if s.runner != nil {
-		p, err := s.runner.Progress(ctx, id)
-		if err == nil && p != nil {
-			return (&Task{
-				ID:      p.ID,
-				Kind:    "update",
-				Target:  "latest",
-				Phase:   p.Phase,
-				Percent: p.Percent,
-				Message: p.Message,
-				Done:    p.Done,
-				Failed:  p.Failed,
-				Logs:    p.Logs,
-			}).Normalized(), nil
-		}
 	}
 
 	if id == "" {
@@ -893,7 +790,7 @@ func filterRollbackCandidates(releases []Release) []RollbackCandidate {
 
 // Rollback 回滚。
 //
-// 两种形态：
+// 两种方式：
 //
 //	version == ""  → 本地回滚：把 .backup 换回来。不需要网络，
 //	                 所以它是**唯一在网络不通时还能用**的救援手段。
@@ -903,10 +800,6 @@ func filterRollbackCandidates(releases []Release) []RollbackCandidate {
 func (s *Service) Rollback(ctx context.Context, targetVersion string) (*Task, error) {
 	targetVersion = strings.TrimSpace(targetVersion)
 
-	if version.BuildType == version.BuildDocker {
-		return nil, fmt.Errorf("%w：容器部署请通过宿主侧更新器回滚（在界面选择版本后会自动走该通道）",
-			ErrBuildTypeUnsupported)
-	}
 	if version.BuildType != version.BuildBinary {
 		return nil, fmt.Errorf("%w：当前构建类型不支持在线回滚", ErrBuildTypeUnsupported)
 	}
@@ -1051,9 +944,9 @@ func (s *Service) Cancel() error {
 
 // LocalBackupAvailable 报告是否存在可本地回滚的备份。
 //
-// 只有 binary 形态才谈得上本地备份 —— 容器里没有「自己的可执行文件」
-// 这个概念（它是镜像的一部分，替换了也没意义）。其它形态一律返回 false，
-// 而不是去探测一个在该形态下根本没有含义的文件。
+// 只有 binary 形态才谈得上本地备份 —— 源码构建没有「上一版官方二进制」
+// 的概念。其它形态一律返回 false，而不是去探测一个在该形态下
+// 根本没有含义的文件。
 func (s *Service) LocalBackupAvailable() bool {
 	if version.BuildType != version.BuildBinary {
 		return false

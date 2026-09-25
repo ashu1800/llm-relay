@@ -5,7 +5,7 @@ import (
 	"io/fs"
 )
 
-// dist 由前端构建产物填充（Dockerfile 中从前端阶段拷贝而来）。
+// dist 由前端构建产物填充（发布流水线构建前端后拷贝而来，见 release.yml）。
 //
 //go:embed all:dist
 var distFS embed.FS

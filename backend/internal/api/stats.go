@@ -84,7 +84,7 @@ func registerStatsRoutes(g *gin.RouterGroup, s *Server) {
 }
 
 // resolveRange 把时间范围关键字换算成区间与分桶粒度。
-// 边界按容器本地时区计算，日志本身以 UTC 落库，比较时由驱动完成时区换算。
+// 边界按进程本地时区计算，日志本身以 UTC 落库，比较时由驱动完成时区换算。
 func resolveRange(key string) (time.Time, time.Time, string) {
 	now := time.Now()
 	switch strings.ToLower(strings.TrimSpace(key)) {
@@ -105,8 +105,9 @@ func resolveRange(key string) (time.Time, time.Time, string) {
 // 为什么不能直接拿 time.Now().Location().String()：Go 在 **TZ 未设置** 时
 // 会加载 /etc/localtime，但把名字硬写成 "Local"（见标准库 zoneinfo_unix.go
 // 的 initLocal）。原来的实现在这种情况下静默返回 "UTC"，于是分桶整体偏 8 小时
-// （北京时间 00:00-08:00 的请求被算进前一天）。裸机部署脚本没有写 TZ，
-// 必然命中这条路径；容器编排里设了 TZ，所以只有裸机用户会看到这个偏差。
+// （北京时间 00:00-08:00 的请求被算进前一天）。systemd 托管的服务默认没有 TZ，
+// 必然命中这条路径 —— 所以官方部署的 .env 里显式写了 TZ=Asia/Shanghai，
+// 其余部署也应在 .env 里配好它。
 //
 // 解析顺序：TZ 环境变量 -> Go 已解析出的具名时区 -> /etc/timezone
 // （Debian/Ubuntu）-> /etc/localtime 符号链接。全都拿不到时返回空串，
@@ -602,7 +603,7 @@ type heatRow struct {
 }
 
 // statsHeatmap 返回近 N 天按「日期 x 小时」分布的热力数据。
-// 日期与小时按容器本地时区切分，否则跨时区看会整体错位。
+// 日期与小时按进程本地时区切分，否则跨时区看会整体错位。
 func (s *Server) statsHeatmap(c *gin.Context) {
 	f, ok := statsFilterOf(c)
 	if !ok {

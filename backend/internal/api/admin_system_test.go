@@ -78,10 +78,10 @@ func TestVersionEndpointAlwaysAnswers(t *testing.T) {
 	if resp["version"] == "" || resp["display"] == "" {
 		t.Errorf("版本号不应为空: version=%v display=%v", resp["version"], resp["display"])
 	}
-	// build_type 必须是三种已知取值之一（前端按它选更新方式）
+	// build_type 必须是已知取值之一（前端按它选更新方式）
 	bt, _ := resp["build_type"].(string)
 	switch bt {
-	case version.BuildSource, version.BuildDocker, version.BuildBinary:
+	case version.BuildSource, version.BuildBinary:
 	default:
 		t.Errorf("build_type 取值非法: %q", bt)
 	}
@@ -164,7 +164,7 @@ func TestUpdateBusinessErrorClassification(t *testing.T) {
 	}{
 		{"已有任务在跑（带阶段信息）", fmt.Errorf("%w（%s，%s）", update.ErrTaskRunning, "pull", "拉取中"), true},
 		{"不支持的更新方式（带 mode）", fmt.Errorf("%w: %q", update.ErrModeUnsupported, "weird"), true},
-		{"构建形态拒绝（docker 回滚）", fmt.Errorf("%w：容器部署请通过宿主侧更新器回滚", update.ErrBuildTypeUnsupported), true},
+		{"构建形态拒绝（源码回滚）", fmt.Errorf("%w：当前构建类型不支持在线回滚", update.ErrBuildTypeUnsupported), true},
 		{"applyMode 的原因（源码构建）", fmt.Errorf("%s: %w", "当前是源码构建，请用 git pull", update.ErrCannotApply), true},
 		// 这些是故障，不是业务拒绝
 		{"下载失败", errors.New("下载失败: dial tcp: connection refused"), false},

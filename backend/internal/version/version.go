@@ -22,7 +22,6 @@ package version
 
 import (
 	_ "embed"
-	"os"
 	"regexp"
 	"runtime"
 	"strings"
@@ -50,15 +49,12 @@ var (
 )
 
 // 构建形态。这个字段不只是描述性的 —— 它是**更新方式的唯一判据**：
-// 三种形态的更新动作完全不同，选错了轻则无效重则把服务搞坏。
+// 两种形态的更新动作完全不同，选错了轻则无效重则把服务搞坏。
 const (
 	// BuildSource 本地随手 go build / go run 出来的。没有发布产物与之对应，
 	// 界面上只提示「有新版本」并给一个跳转链接，绝不提供一键更新 ——
 	// 否则会用官方二进制覆盖掉开发者本地的构建物。
 	BuildSource = "source"
-	// BuildDocker 官方镜像。进程在容器里**不能替换自己**（替换了也没用，
-	// 容器一重建就没了），必须由宿主侧的 updater 拉取新镜像并重建容器。
-	BuildDocker = "docker"
 	// BuildBinary 官方预编译二进制 + systemd。进程可以直接原子替换自己的
 	// 可执行文件，然后靠 systemd 的 Restart=always 把自己拉起来。
 	BuildBinary = "binary"
@@ -82,33 +78,16 @@ func init() {
 	}
 }
 
-// detectBuildType 在没有显式注入时猜一次构建形态。
+// detectBuildType 在没有显式注入时给一个保守的默认值。
 //
-// 只区分「在容器里」与「不在容器里」这一件事：容器内一律按 docker 处理，
-// 容器外一律按 source 处理。宁可把裸机二进制误判成 source（少一个一键更新按钮，
+// 一律按 source 处理：宁可把官方二进制误判成 source（少一个一键更新按钮，
 // 用户仍能看到新版本并手动部署），也不要把源码构建误判成 binary
 // （那会给开发者一个「一键把自己编译的二进制换成官方版」的按钮）。
 //
-// 因此 install-bare.sh 必须显式注入 BuildType=binary，不能依赖这里的探测。
+// 因此 deploy/install.sh 安装的归档二进制与 install-bare 类本地脚本
+// 必须显式注入 BuildType=binary（goreleaser 已经这么配），不能依赖这里的探测。
 func detectBuildType() string {
-	if inContainer() {
-		return BuildDocker
-	}
 	return BuildSource
-}
-
-// inContainer 判断当前进程是否跑在容器里。
-//
-// 用 /.dockerenv 这个约定俗成的标记文件，而不是读 /proc/1/cgroup：
-// 后者在 cgroup v2 + 私有命名空间下经常认不出 docker，而前者由 Docker
-// 自己创建，稳得多。podman 用 /run/.containerenv，一并认上。
-func inContainer() bool {
-	for _, p := range []string{"/.dockerenv", "/run/.containerenv"} {
-		if _, err := os.Stat(p); err == nil {
-			return true
-		}
-	}
-	return false
 }
 
 // Info 是一次性打包好的版本信息，供接口直接序列化。
@@ -119,7 +98,7 @@ type Info struct {
 	Display string `json:"display"`
 	Commit  string `json:"commit"`
 	Date    string `json:"date"`
-	// BuildType 取值见 BuildSource / BuildDocker / BuildBinary
+	// BuildType 取值见 BuildSource / BuildBinary
 	BuildType string `json:"build_type"`
 	// GoVersion/OS/Arch 只在排障时有用（「你那个二进制是 arm64 的」）
 	GoVersion string `json:"go_version"`
@@ -142,10 +121,9 @@ func Current() Info {
 }
 
 // IsRelease 表示这份二进制来自官方发布产物，因而具备自动更新的前提条件。
-// 「前提条件」四个字是认真的：能不能真的更新还取决于部署形态
-// （docker 形态还需要宿主侧 updater 在场，见 update 包）。
+// 「前提条件」四个字是认真的：还要靠 systemd 拉起进程，更新后才会真正生效。
 func IsRelease() bool {
-	return BuildType == BuildDocker || BuildType == BuildBinary
+	return BuildType == BuildBinary
 }
 
 // reGitHash 匹配 git describe 追加的提交段，如 -7-g3f9a1c。

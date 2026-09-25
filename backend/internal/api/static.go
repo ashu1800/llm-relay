@@ -58,9 +58,9 @@ var hashedAssetRe = regexp.MustCompile(`^assets/.+-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9
 
 // 显式列出 Content-Type，不走 mime.TypeByExtension。
 //
-// 后者在 Linux 容器里没问题，但在 Windows 上会读注册表，同一个扩展名
+// 后者在 Linux 服务器上没问题，但在 Windows 上会读注册表，同一个扩展名
 // 可能返回 application/x-javascript 之类的结果 —— 测试跑在 Windows、
-// 服务跑在 Alpine，两边不一致就会让「本机通过、线上不同」的坑很难查。
+// 服务跑在 Linux，两边不一致就会让「本机通过、线上不同」的坑很难查。
 // 而且 .gz 文件必须报**原始类型**（.js.gz 要报 text/javascript），
 // 所以类型一定要按原文件名算、单独给出。
 var staticContentTypes = map[string]string{

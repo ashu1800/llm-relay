@@ -10,7 +10,7 @@
 //   2. 任务进行中    → 进度条与阶段说明
 //   3. 任务刚结束    → 成功 + 重启按钮，或失败 + 原因
 //   4. 有更新且能更新 → 一键更新按钮（附更新日志入口）
-//   5. 有更新但不能   → 说明原因（源码构建 / 更新器不在场）
+//   5. 有更新但不能   → 说明原因（源码构建 / 无法定位自身）
 //   6. 已是最新       → 发布链接 + 回滚入口
 //
 // 第 1 条排在最前是有原因的：更新失败时如果被第 4 条「有新版本可用」盖住，
@@ -34,7 +34,6 @@ import {
 } from '@ant-design/icons-vue'
 import { useVersionStore } from '@/stores/version'
 import { versionApi, type RollbackCandidate } from '@/api/version'
-import { writeClipboard } from '@/utils/clipboard'
 
 const store = useVersionStore()
 
@@ -57,7 +56,6 @@ const rollbackList = ref<RollbackCandidate[]>([])
 const rollbackHasBackup = ref(false)
 const selectedVersion = ref('')
 const rollingBack = ref(false)
-const copied = ref(false)
 
 const info = computed(() => store.info)
 const display = computed(() => info.value?.display || '')
@@ -74,8 +72,6 @@ const badgeClass = computed(() => (store.shouldNotify ? 'is-update' : ''))
 // 更新方式的中文名，用于面板里的说明
 const modeLabel = computed(() => {
   switch (checkResult.value?.apply_mode || buildType.value) {
-    case 'docker':
-      return '拉取新镜像并重建容器'
     case 'binary':
       return '下载新版本并替换程序文件'
     default:
@@ -181,7 +177,7 @@ async function doUpdate() {
 // 后端在回响应之后才退出进程，所以这里通常能拿到响应；
 // 拿不到也是正常的（重启成功了，只是连接断了）。
 // 倒计时只是「最长还要等多久」的展示；探活立刻开始 ——
-// 容器/systemd 通常 1-2 秒就把服务拉起来，回来即刷新，
+// systemd 通常 1-2 秒就把服务拉起来，回来即刷新，
 // 不必白等满 8 秒。
 let restartTimer: ReturnType<typeof setInterval> | null = null
 
@@ -223,7 +219,7 @@ async function waitAndReload() {
     restartTimer = null
   }
   restarting.value = false
-  message.warning('服务在 30 秒内没有恢复响应，请检查容器或进程状态')
+  message.warning('服务在 30 秒内没有恢复响应，请检查服务状态（journalctl -u llm-relay）')
 }
 
 // ---- 回滚 ----
@@ -266,32 +262,12 @@ async function doRollback(version?: string) {
 // 本地回滚提示：不联网，任何情况下都能用，所以单独给一条。
 // 与「下载指定版本」相比它可靠得多，界面上的措辞也要体现这一点。
 //
-// 两条文案都写明了**前提条件**，因为它们各自依赖一份「上一个版本」的记录：
-// 二进制形态靠同目录下的 .backup 文件，容器形态靠更新器内存里记下的
-// 上一个镜像 ID。刚部署完还没更新过时这份记录是空的，此时按钮会失败 ——
+// 文案写明了**前提条件**：它依赖同目录下的 .backup 文件，
+// 刚部署完还没更新过时这份记录是空的，此时按钮会失败 ——
 // 提前一句话说清，比让用户点一下再收到报错要好。
 const localRollbackHint = computed(() => {
-  if (buildType.value === 'binary') {
-    return '把上一版本的程序文件换回来。不联网，因此在 GitHub 不可达时依然可用。'
-  }
-  return '由宿主侧更新器把容器切回上一个镜像（需要此前执行过一次更新）。'
+  return '把上一版本的程序文件换回来。不联网，因此在 GitHub 不可达时依然可用。'
 })
-
-const dockerRollbackCommand = computed(() => {
-  if (!selectedVersion.value) return ''
-  return [
-    `# 在服务器上编辑 deploy/docker-compose.yml，把镜像固定到该版本：`,
-    `#   image: ghcr.io/ashu1800/llm-relay:${selectedVersion.value}`,
-    `# 然后重建容器：`,
-    `cd /opt/llm-relay/deploy && docker compose up -d --no-deps app`
-  ].join('\n')
-})
-
-async function copyCommand() {
-  const ok = await writeClipboard(dockerRollbackCommand.value)
-  copied.value = ok
-  if (ok) setTimeout(() => (copied.value = false), 2000)
-}
 
 function formatTime(s: string): string {
   if (!s) return ''
@@ -310,9 +286,6 @@ const phaseText = computed(() => {
     downloading: '正在下载',
     verifying: '正在校验文件',
     installing: '正在安装',
-    requested: '已请求宿主侧更新器',
-    pull: '正在拉取镜像',
-    recreate: '正在重建容器',
     wait: '正在等待服务就绪',
     rolling_back: '正在回滚',
     done: '已完成',
@@ -384,7 +357,7 @@ const phaseText = computed(() => {
                 <template v-else>已是最新版本</template>
               </div>
               <div class="vb-meta">
-                <span>{{ buildType === 'docker' ? '容器部署' : buildType === 'binary' ? '二进制部署' : '源码构建' }}</span>
+                <span>{{ buildType === 'binary' ? '二进制部署' : '源码构建' }}</span>
                 <span v-if="info?.commit && info.commit !== 'unknown'"> · {{ info.commit }}</span>
               </div>
             </div>
@@ -432,8 +405,7 @@ const phaseText = computed(() => {
                   <p>{{ task.message }}</p>
                 </div>
               </div>
-              <!-- 成功后要重启才生效。binary 形态是必须的；docker 形态
-                   宿主侧更新器已经重建过容器，这一步是兜底 -->
+              <!-- 成功后要重启才生效：更新只替换了磁盘上的可执行文件 -->
               <button
                 v-if="!task.failed"
                 class="vb-btn is-primary"
@@ -513,7 +485,7 @@ const phaseText = computed(() => {
 
                  原来它只在「已是最新」那一支里 —— 结果是更新一失败，
                  回滚入口就消失了，而那一刻用户正需要它。实测踩到过：
-                 宿主侧更新器报错后面板里只剩一句「重新检测」。
+                 更新报错后面板里只剩一句「重新检测」。
 
                  任务运行中不显示（那时点了也不会执行，只会收到 409）。
                  默认收起：它是一个低频且危险的动作，不该和「检测更新」
@@ -529,7 +501,7 @@ const phaseText = computed(() => {
 
               <div v-if="rollbackOpen" class="vb-rollback">
                 <!-- 本地回滚：最可靠的一条路（不联网） -->
-                <div v-if="rollbackHasBackup || buildType === 'docker'" class="vb-local-rb">
+                <div v-if="rollbackHasBackup" class="vb-local-rb">
                   <p class="vb-hint">{{ localRollbackHint }}</p>
                   <button class="vb-btn is-warn" :disabled="rollingBack" @click="doRollback()">
                     <SyncOutlined v-if="rollingBack" spin />
@@ -569,10 +541,8 @@ const phaseText = computed(() => {
                     <span class="vb-rb-date">{{ formatTime(item.published_at) }}</span>
                   </button>
 
-                  <!-- 选中后给出确认与命令。
-                       命令是给「自动更新不可用」的部署留的出路 ——
-                       那种情况下界面上的按钮点了也不会生效（没有更新器），
-                       用户需要的是能复制走的东西 -->
+                  <!-- 选中后给出确认按钮。自动回滚只在 binary 形态下
+                       可用（进程能替换自己的可执行文件） -->
                   <div v-if="selectedVersion" class="vb-rb-confirm">
                     <template v-if="canApply">
                       <button
@@ -586,12 +556,7 @@ const phaseText = computed(() => {
                       </button>
                     </template>
                     <template v-else>
-                      <div class="vb-code">
-                        <button class="vb-copy" @click="copyCommand">
-                          {{ copied ? '已复制' : '复制' }}
-                        </button>
-                        <code>{{ dockerRollbackCommand }}</code>
-                      </div>
+                      <p class="vb-hint">源码构建不支持在线回滚；请到服务器上重新部署该版本。</p>
                     </template>
                     <p class="vb-warn-text">
                       <ExclamationCircleOutlined />
@@ -1093,43 +1058,5 @@ const phaseText = computed(() => {
   font-size: 10px;
   line-height: 1.5;
   color: var(--text-amber);
-}
-
-/* 命令块：给「自动更新不可用」的部署留的出路 */
-.vb-code {
-  position: relative;
-  padding: 8px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-control);
-  background: var(--color-bg);
-}
-
-.vb-code code {
-  display: block;
-  font-family: var(--font-family-mono);
-  font-size: 10px;
-  line-height: 1.6;
-  color: var(--color-text-secondary);
-  white-space: pre-wrap;
-  word-break: break-all;
-  user-select: all;
-}
-
-.vb-copy {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  padding: 1px 6px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-control);
-  background: var(--color-fg);
-  font-family: inherit;
-  font-size: 10px;
-  color: var(--color-text-secondary);
-  cursor: var(--cursor-hand);
-}
-
-.vb-copy:hover {
-  color: var(--text-primary-ink);
 }
 </style>

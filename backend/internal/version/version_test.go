@@ -17,19 +17,10 @@ func TestResolveNeverEmpty(t *testing.T) {
 }
 
 func TestBuildTypeIsKnown(t *testing.T) {
-	// 没有注入时探测结果只能是这两种之一；
+	// 没有注入时探测结果只能是 source（保守默认）；
 	// 若出现了别的值，说明有地方写错了字符串
-	switch BuildType {
-	case BuildSource, BuildDocker, BuildBinary:
-	default:
-		t.Fatalf("BuildType 取值非法: %q", BuildType)
-	}
-	// 测试进程不在容器里（CI 的 Go 步骤也是裸机），应当是 source
-	if inContainer() {
-		t.Skip("当前进程在容器内，跳过形态断言")
-	}
 	if BuildType != BuildSource {
-		t.Fatalf("容器外未注入时应为 source，实际 %q", BuildType)
+		t.Fatalf("未注入时应为 source，实际 %q", BuildType)
 	}
 }
 
@@ -80,7 +71,6 @@ func TestIsRelease(t *testing.T) {
 		bt   string
 		want bool
 	}{
-		{BuildDocker, true},
 		{BuildBinary, true},
 		{BuildSource, false},
 		{"", false},
