@@ -14,6 +14,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import os
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+from testdb import psql_cmd
 ADMIN = "http://127.0.0.1:8888/api/admin"
 BASE = "http://127.0.0.1:8888"
 ok = 0
@@ -65,8 +69,7 @@ def probe_model():
            "WHERE m.enabled = true ORDER BY m.id LIMIT 1")
     try:
         out = subprocess.run(
-            ["docker", "exec", "llm-relay-postgres", "psql", "-U", "llmrelay",
-             "-d", "llm_relay", "-t", "-A", "-c", sql],
+            psql_cmd() + ["-t", "-A", "-c", sql],
             capture_output=True, text=True, timeout=30).stdout.strip()
     except Exception:
         out = ""
@@ -91,8 +94,7 @@ def probe_scope(model):
            "WHERE m.public_name = '%s' AND m.enabled = true ORDER BY m.id LIMIT 1" % model)
     try:
         out = subprocess.run(
-            ["docker", "exec", "llm-relay-postgres", "psql", "-U", "llmrelay",
-             "-d", "llm_relay", "-t", "-A", "-c", sql],
+            psql_cmd() + ["-t", "-A", "-c", sql],
             capture_output=True, text=True, timeout=30).stdout.strip()
     except Exception:
         out = ""
@@ -111,8 +113,7 @@ def channel_outside(group_id):
            "ORDER BY c.id LIMIT 1" % group_id)
     try:
         out = subprocess.run(
-            ["docker", "exec", "llm-relay-postgres", "psql", "-U", "llmrelay",
-             "-d", "llm_relay", "-t", "-A", "-c", sql],
+            psql_cmd() + ["-t", "-A", "-c", sql],
             capture_output=True, text=True, timeout=30).stdout.strip()
     except Exception:
         out = ""
@@ -280,8 +281,7 @@ print("=== 导出必须是全量，不是当前页 ===")
 # 「库里已经攒了很多日志」，于是清一次历史数据它就会失败 ——
 # 测试不该依赖跑之前环境里恰好有什么。用 SQL 直接补齐，跑完再删干净。
 fill = subprocess.run(
-    ["docker", "exec", "-i", "llm-relay-postgres", "psql", "-U", "llmrelay",
-     "-d", "llm_relay", "-t", "-A", "-c",
+    psql_cmd() + ["-t", "-A", "-c",
      "INSERT INTO request_logs (trace_id, model_requested, api_key_name, status_code, is_stream, retry_count, created_at) "
      "SELECT 'export-fill-%s' || g, 'export-fill-model', 'export-fill-key', 200, false, 0, now() "
      "FROM generate_series(1, 60) g"],
@@ -343,8 +343,7 @@ for x in ks.get("items", []):
 
 # 探针数据必须自己收干净：留着 60 条假日志会把看板的今日统计顶上去
 subprocess.run(
-    ["docker", "exec", "-i", "llm-relay-postgres", "psql", "-U", "llmrelay",
-     "-d", "llm_relay", "-t", "-A", "-c",
+    psql_cmd() + ["-t", "-A", "-c",
      "DELETE FROM request_logs WHERE trace_id LIKE 'export-fill-%'"],
     capture_output=True, text=True)
 

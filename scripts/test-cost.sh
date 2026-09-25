@@ -10,6 +10,7 @@
 # （实测同一个值可能是 0.0000315 也可能是 0.00003150），所以统一用 Decimal
 # 归一化后比较，而不是比字符串。
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 
 # 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
@@ -17,7 +18,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
 BASE="http://127.0.0.1:8888"
 API="$BASE/api/admin"
 MOCK="http://127.0.0.1:9998"
-P() { docker exec -i llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "$1"; }
+P() { db_psql -t -A -c "$1"; }
 jqg() { python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
 
 ok=0; bad=0

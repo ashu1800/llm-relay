@@ -9,13 +9,14 @@
 # 所以这里验三件事：计数按渠道归属（不串台）、判据与计价引擎一字不差、
 # 以及配价之后计数会回落。
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 
 # 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
 
 BASE="http://127.0.0.1:8888"
 API="$BASE/api/admin"
-P() { docker exec -i llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "$1"; }
+P() { db_psql -t -A -c "$1"; }
 jqg() { python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
 
 ok=0; bad=0

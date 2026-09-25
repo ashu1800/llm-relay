@@ -10,8 +10,9 @@
 # 用户的真实调用用的是自己的密钥名（如 DeepSeek）与真实模型名，
 # 这里一个都不碰。
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 
-P() { docker exec -i llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "$1"; }
+P() { db_psql -t -A -c "$1"; }
 
 # 判定「名字以双下划线开头」必须用 left/starts_with，**不能**写 LIKE '__%'：
 # LIKE 里的下划线是「任意单个字符」的通配符，'__%' 的真实含义是

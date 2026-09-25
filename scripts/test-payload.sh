@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 
 # 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
@@ -22,7 +23,7 @@ curl -s -m 30 "$BASE/v1/chat/completions" -H "Authorization: Bearer $SK" -H 'Con
 sleep 3
 echo
 echo "=== 3. 库中报文情况 ==="
-docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -F'|' -c \
+db_psql -t -A -F'|' -c \
   "SELECT p.log_id, l.status_code, l.model_requested, length(p.request_body), length(p.response_body) FROM request_payloads p JOIN request_logs l ON l.id=p.log_id ORDER BY p.id DESC LIMIT 5"
 echo "  （列: log_id|状态|模型|请求体长度|响应体长度）"
 

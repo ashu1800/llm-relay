@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 
 # 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
@@ -39,7 +40,7 @@ HOST="http://127.0.0.1:8888"
 # 探测用的模型名必须**从库里现取**，不能写死：
 # 白名单是用户随时会改的（实测只留 deepseek-v4.1-flash 就把写死 deepseek-v4-flash
 # 的探针全变成 502），写死的话每次改白名单都会误报成「协议转换坏了」
-PROBE_MODEL=$(docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c \
+PROBE_MODEL=$(db_psql -t -A -c \
   "SELECT m.public_name FROM channel_models m
      JOIN channels c ON c.id = m.channel_id AND c.enabled = true
      JOIN channel_groups g ON g.id = c.group_id AND g.enabled = true

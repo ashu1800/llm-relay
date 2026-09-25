@@ -4,13 +4,14 @@
 # 需要一个小代理来验证「成功路径」：scripts/mini-proxy.py。
 # 不引第三方代理镜像 —— 那会让这个用例依赖外部网络。
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 
 # 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
 
 
 API=${API:-http://127.0.0.1:8888/api/admin}
-PG="docker exec -i llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c"
+PG="db_psql -t -A -c"
 PROXY_PORT=18099
 
 pass=0
@@ -48,14 +49,14 @@ if curl -s -o /dev/null --max-time 5 -x "http://127.0.0.1:$PROXY_PORT" http://12
 else
   echo "  代理没起来，后面与代理相关的成功断言会失败：$(cat /tmp/mini-proxy.log)"
 fi
-# 中继跑在容器里，访问宿主机上的这个代理要走 docker 网桥网关
-GW=$(docker network inspect llm-relay_relay -f '{{(index .IPAM.Config 0).Gateway}}')
-echo "  容器侧地址 $GW:$PROXY_PORT"
+# 服务以宿主进程跑（或 host 网络），mini-proxy 也在宿主上，
+# 所以代理地址就是本机回环
+echo "  代理地址 127.0.0.1:$PROXY_PORT"
 
 echo
 echo "=== 1. 新建（带密码）==="
 BODY=$(curl -s -X POST "$API/proxies" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"__probe_proxy__\",\"protocol\":\"http\",\"host\":\"$GW\",\"port\":$PROXY_PORT,\"username\":\"u\",\"password\":\"p\"}")
+  -d "{\"name\":\"__probe_proxy__\",\"protocol\":\"http\",\"host\":\"127.0.0.1\",\"port\":$PROXY_PORT,\"username\":\"u\",\"password\":\"p\"}")
 PID=$(echo "$BODY" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 chk "创建返回 has_password" "True" "$(echo "$BODY" | python3 -c 'import sys,json;print(json.load(sys.stdin)["has_password"])')"
 chk "响应体里不出现 password_enc" "0" "$(echo "$BODY" | grep -c 'password_enc')"
@@ -83,14 +84,14 @@ echo "=== 4. 测试未保存的配置（不落库）==="
 chk "非法地址被拒" "400" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/proxies/test" \
   -H 'Content-Type: application/json' -d '{"protocol":"http","host":"http://x","port":1}')"
 chk "合法配置能测通" "True" "$(curl -s -X POST "$API/proxies/test" -H 'Content-Type: application/json' \
-  -d "{\"protocol\":\"http\",\"host\":\"$GW\",\"port\":$PROXY_PORT}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["ok"])')"
+  -d "{\"protocol\":\"http\",\"host\":\"127.0.0.1\",\"port\":$PROXY_PORT}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["ok"])')"
 
 echo
 echo "=== 5. 校验 ==="
 chk "未知协议被拒" "400" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/proxies" -H 'Content-Type: application/json' -d '{"name":"__probe_x__","protocol":"ftp","host":"h","port":1}')"
 chk "端口越界被拒" "400" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/proxies" -H 'Content-Type: application/json' -d '{"name":"__probe_x__","protocol":"http","host":"h","port":70000}')"
 chk "空名字被拒" "400" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/proxies" -H 'Content-Type: application/json' -d '{"name":"  ","protocol":"http","host":"h","port":1}')"
-chk "重名被拒" "409" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/proxies" -H 'Content-Type: application/json' -d "{\"name\":\"__probe_proxy__\",\"protocol\":\"http\",\"host\":\"$GW\",\"port\":$PROXY_PORT}")"
+chk "重名被拒" "409" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/proxies" -H 'Content-Type: application/json' -d "{\"name\":\"__probe_proxy__\",\"protocol\":\"http\",\"host\":\"127.0.0.1\",\"port\":$PROXY_PORT}")"
 
 echo
 echo "=== 6. 只改端口也要带上旧地址一起校验 ==="

@@ -5,6 +5,7 @@
 # 判据是「发一次真实请求后确实收到了一条 logs」，而不是「连接建立了」——
 # 后者证明不了推送链路是通的。
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 
 # 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
@@ -12,7 +13,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
 
 API=${API:-http://127.0.0.1:8888/api/admin}
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PG="docker exec -i llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c"
+PG="db_psql -t -A -c"
 MODEL=$($PG "SELECT public_name FROM channel_models WHERE enabled = true ORDER BY id LIMIT 1")
 KEYNAME=__live_probe__
 

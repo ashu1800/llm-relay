@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # 一次性跑完所有验证脚本。
 #
-# 慢速上游的启动位置很关键：有的脚本（test-foreign-keys.sh）内部会跑 install.sh，
-# 而 install.sh 重建 compose 项目时会把挂在同一网络上的临时容器一并清掉。
-# 所以上游必须在**所有会触发部署的脚本跑完之后**再起，
+# 慢速上游的启动位置很关键：有的脚本（test-legacy-column-add.sh）内部会跑
+# install.sh 重启服务，若上游先起、服务后重启，重建期间的用例会以
+# 「上游不可达」失败。所以上游必须在**所有会触发部署的脚本跑完之后**再起，
 # 否则依赖它的用例会以「上游不可达」失败，看起来像代码坏了。
 #
 # 本脚本自己也要能可靠地判失败，所以这里**不加 -e**（很多命令的「失败」
@@ -83,35 +83,24 @@ for s in test-regression.sh test-foreign-keys.sh; do
 done
 
 echo "########## 启动慢速上游（必须在上面那些会重新部署的脚本之后）##########"
-docker rm -f slow-upstream >/dev/null 2>&1
-docker run -d --name slow-upstream --network llm-relay_relay \
-  -p 127.0.0.1:9997:9999 \
-  -v "$PWD/scripts/slow-upstream.js:/app/server.js:ro" \
-  node:22-alpine node /app/server.js >/dev/null
-for i in $(seq 1 30); do
-  curl -fsS -m 2 http://127.0.0.1:9997/stats >/dev/null 2>&1 && break
-  sleep 1
-done
-if ! curl -fsS -m 3 http://127.0.0.1:9997/stats >/dev/null 2>&1; then
+# 以宿主 node 进程跑（ensure 脚本自己管 pidfile 与就绪探测）
+bash scripts/ensure-mock-upstream.sh || {
   echo "慢速上游未能启动，依赖它的用例无法验证"
   exit 1
-fi
-# 中继容器应当能按名字解析到它，否则失败原因会与用例本身无关。
-#
-# 这里只警告、不再直接判失败：容器刚起来时 Docker 的内嵌 DNS 还在预热，
-# 实测会在一切正常的情况下偶发解析失败，于是整套验证报「有验证未通过」，
-# 而每个用例其实都是 ALL_PASS —— 那种假警报会让人开始忽略这个总判据。
-# 真的解析不到时，依赖它的用例（如 test-live.sh）自己会失败并给出原因。
+}
+# 服务应当能连到它：服务与上游同在本机回环，这里只做一次连通性确认。
+# 失败只警告不判失败 —— 偶发的预热失败会以假警报淹没真正的用例结果；
+# 真的连不到时，依赖它的用例（如 test-live.sh）自己会失败并给出原因。
 RESOLVED=no
 for i in $(seq 1 5); do
-  if docker exec llm-relay sh -c 'wget -qO- -T 3 http://127.0.0.1:9997/stats' >/dev/null 2>&1; then
+  if curl -fsS -m 3 http://127.0.0.1:9997/stats >/dev/null 2>&1; then
     RESOLVED=yes
     break
   fi
   sleep 2
 done
 if [ "$RESOLVED" != "yes" ]; then
-  echo "警告：中继容器解析不到 slow-upstream，依赖上游的用例结果不可信"
+  echo "警告：服务连不到 slow-upstream，依赖上游的用例结果不可信"
 fi
 echo "慢速上游就绪"
 echo
@@ -129,13 +118,12 @@ done
 
 # bash 用例：同样以 ALL_PASS 为唯一通过标志。
 # 依赖 mock 上游的用例自己会拉起它（test-pricing-rules.sh → slow-upstream，
-# test-cost.sh → proto-upstream，test-retry-delay.py → flaky-upstream），
-# 所以上面那次网络重建不会让它们变 502。
-# test-default-group.sh 用同一个镜像另起一个容器、另建一个空库跑（要验的正是
-# 启动时的种子行为），不碰线上库，也不会重建 compose 项目。
+# test-cost.sh → proto-upstream，test-retry-delay.py → flaky-upstream）。
+# test-default-group.sh 另建一个空库跑（要验的正是启动时的种子行为），
+# 不碰线上库。
 # test-legacy-column-add.sh 会删价格列并跑 install.sh 重新部署（几分钟不可用），放在最后跑
 # verify-update-config.sh 只读写更新设置（会临时存一个假 token 再清除），
-# 不碰数据、不重建容器，所以位置不敏感
+# 不碰数据、不重启服务，所以位置不敏感
 for s in test-default-group.sh test-model-whitelist.sh test-upstream-protocol.sh test-upstream-gemini.sh test-thinking-map.sh test-pricing.sh test-pricing-rules.sh test-pricing-backup.sh test-pricing-filter.sh \
          test-group-quota.sh test-proxies.sh test-egress-proxy.sh test-live.sh test-purge-scope.sh test-cost.sh test-legacy-column-add.sh \
          verify-update-config.sh; do

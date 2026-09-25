@@ -4,13 +4,14 @@
 # 这个用例用真实请求验证：把探测分组的 RPM 设成 2，连发 3 次，
 # 第 3 次必须是 429 且带 Retry-After；把额度改回 0 之后立即恢复。
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 
 # 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
 
 BASE="http://127.0.0.1:8888"
 API="$BASE/api/admin"
-P() { docker exec -i llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "$1"; }
+P() { db_psql -t -A -c "$1"; }
 
 ok=0; bad=0
 chk() {

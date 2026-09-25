@@ -15,8 +15,8 @@
 用独立探针渠道，跑完删掉：不碰用户正在用的渠道。
 
 用法：
-  python3 scripts/test-multiplier-precision.py [base] [pg_container]
-默认 base=http://127.0.0.1:8888，容器 llm-relay-postgres。
+  python3 scripts/test-multiplier-precision.py [base]
+默认 base=http://127.0.0.1:8888；数据库连接见 scripts/lib/testdb.py。
 """
 import json
 import subprocess
@@ -24,8 +24,11 @@ import sys
 import urllib.error
 import urllib.request
 
+import os
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+from testdb import psql_cmd
 BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8888").rstrip("/")
-PG = sys.argv[2] if len(sys.argv) > 2 else "llm-relay-postgres"
 ADMIN = BASE + "/api/admin"
 
 ok = 0
@@ -58,10 +61,10 @@ def call(method, path, body=None):
 
 
 def psql(sql):
-    """查库。psql 在容器里，用 -t -A 拿裸值。"""
+    """查库。经 lib/testdb 直连，用 -t -A 拿裸值。"""
     try:
         return subprocess.run(
-            ["docker", "exec", PG, "psql", "-U", "llmrelay", "-d", "llm_relay",
+            psql_cmd() + [
              "-t", "-A", "-c", sql],
             capture_output=True, text=True, timeout=30,
         ).stdout.strip()

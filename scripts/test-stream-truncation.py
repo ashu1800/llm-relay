@@ -7,9 +7,8 @@
 截断若走了正常收尾，客户端会看到 message_stop / [DONE]，
 于是把少了一半的回复当成完整回复。
 
-先启动慢速上游：
-  docker rm -f slow-upstream
-  docker run -d --name slow-upstream --network llm-relay_relay \
+先启动慢速上游（脚本会自己确保它在跑：bash scripts/ensure-mock-upstream.sh，
+以宿主 node 进程跑在 127.0.0.1:9997）：
     -p 127.0.0.1:9997:9999 -v "$PWD/scripts/slow-upstream.js:/app/server.js:ro" \
     node:22-alpine node /app/server.js
 """

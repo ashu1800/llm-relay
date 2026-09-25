@@ -9,9 +9,8 @@
 判据是请求日志里实际命中的渠道：把同一个模型绑到两个分组的渠道上，
 再用只允许其中一个分组的密钥去调，命中哪个渠道是确定的。
 
-先启动慢速上游（作为「分组B」的渠道）：
-  docker rm -f slow-upstream
-  docker run -d --name slow-upstream --network llm-relay_relay \
+先启动慢速上游（脚本会自己确保它在跑：bash scripts/ensure-mock-upstream.sh，
+以宿主 node 进程跑在 127.0.0.1:9997）：
     -p 127.0.0.1:9997:9999 -v "$PWD/scripts/slow-upstream.js:/app/server.js:ro" \
     node:22-alpine node /app/server.js
 """
@@ -23,7 +22,7 @@ import urllib.request
 import os
 import subprocess
 
-# 依赖 mock 上游（slow-upstream）：它会随 docker 网络重建被带走，
+# 依赖 mock 上游（slow-upstream）：它可能不在场，
 # 这里先确保它在跑，避免把「上游不在」误判成产品问题
 subprocess.run(
     ["bash", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ensure-mock-upstream.sh")],

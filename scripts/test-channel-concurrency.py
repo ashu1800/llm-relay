@@ -7,13 +7,12 @@
 上游记录到的同时进行数峰值必须是 1。
 若名额在收到响应头就被释放（旧行为），峰值会是 2。
 
-用耗时推断是不可靠的：耗时里混着连接建立、容器调度等噪声，
+用耗时推断是不可靠的：耗时里混着连接建立、进程调度等噪声，
 实测出现过「4.28s 落在串行与并行之间」这种无法下结论的结果。
 并发峰值是直接证据。
 
-先启动慢速上游（会随项目一起提交，不需要额外依赖）：
-  docker rm -f slow-upstream
-  docker run -d --name slow-upstream --network llm-relay_relay \
+先启动慢速上游（脚本会自己确保它在跑：bash scripts/ensure-mock-upstream.sh，
+以宿主 node 进程跑在 127.0.0.1:9997）：
     -p 127.0.0.1:9997:9999 -e HOLD_MS=2000 \
     -v "$PWD/scripts/slow-upstream.js:/app/server.js:ro" \
     node:22-alpine node /app/server.js

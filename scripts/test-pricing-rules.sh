@@ -5,27 +5,27 @@
 # 上乘出来的，只有日志里的 estimated_cost 与 pricing_snapshot 才看得到最终结果。
 # 价格现在挂在渠道的模型白名单上，所以配置动作是 PUT /channels/:id/models。
 #
-# 时刻全部从应用容器里取（docker exec llm-relay date）：时段按**服务器本地时区**
+# 时刻全部取服务进程的时区（.env 的 TZ）：时段按**服务器本地时区**
 # 判断，脚本所在环境的时区不一定是它。用例要么构造一个一定覆盖当前时刻的窗口，
 # 要么先判断「现在在不在这个窗口里」再决定期望值 —— 写死 09:00-12:00 的话，
 # 这个脚本在别的时间跑就会莫名其妙地失败。
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 
 # 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
 
 BASE="http://127.0.0.1:8888"
 API="$BASE/api/admin"
-P() { docker exec -i llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "$1"; }
-# 应用容器里的本地时间/星期（时段规则就是按它判断的）
-APP() { docker exec llm-relay date "$@"; }
-# 容器里的 date 是精简版，不认 -d '-1 hour' 这类相对时间（实测报 invalid date），
-# 所以偏移在脚本里自己做：只动小时，分钟原样保留
-shift_time() {
-  local hm="$1" delta="$2"
-  local h="${hm%%:*}" m="${hm##*:}"
-  h=$(( (10#$h + delta + 24) % 24 ))
-  printf '%02d:%s' "$h" "$m"
+P() { db_psql -t -A -c "$1"; }
+# 服务器本地时间/星期（时段规则就是按它判断的；脚本与服务同机）
+APP() { date "$@"; }
+# 把 HH:MM 加上 N 分钟（可跨午夜）。偏移自己做：GNU date 的
+# -d "$now +N minutes" 会把「+N」解析成时区偏移而不是加法（实测）
+shift_minutes() {
+  local m=$(( 10#${1%%:*} * 60 + 10#${1##*:} + $2 ))
+  m=$(( (m % 1440 + 1440) % 1440 ))
+  printf '%02d:%02d' $(( m / 60 )) $(( m % 60 ))
 }
 jqg() { python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
 
@@ -179,8 +179,14 @@ else
   # 再构造一个一定覆盖当前时刻的跨午夜窗口：start 取「当前 +2 分钟」、
   # end 取「当前 +1 分钟」，这样 start > end（走的是跨午夜分支），
   # 而 cur <= end 成立 —— 命中证明跨午夜分支真的会命中
-  S=$(shift_time "$NOW" 2); E=$(shift_time "$NOW" 1)
-  chk "构造的窗口确实是跨午夜（start $S > end $E）" "yes" "$( [[ "$S" > "$E" ]] && echo yes || echo no )"
+  S=$(shift_minutes "$NOW" 2); E=$(shift_minutes "$NOW" 1)
+  # S 恰好落到 00:00 的那一分钟（当前 23:58），窗口退化成全天 —— 仍是命中，
+  # 只是形态断言不成立，跳过它即可；下面的 peak 断言才是行为本体
+  if [ "$S" != "00:00" ]; then
+    chk "构造的窗口确实是跨午夜（start $S > end $E）" "yes" "$( [[ "$S" > "$E" ]] && echo yes || echo no )"
+  else
+    echo "  [跳过] 形态断言（S=00:00，窗口退化为全天，依然命中）"
+  fi
   set_price 1.5 "[{\"days\":[],\"start\":\"$S\",\"end\":\"$E\",\"multiplier\":2,\"label\":\"跨午夜构造\"}]"
   R=$(call_and_cost)
   chk "跨午夜窗口 $S -> $E 命中当前 $NOW -> 2 倍" "0.00004" "$(money "$(cost_of "$R")")"

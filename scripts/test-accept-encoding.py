@@ -11,6 +11,10 @@ import time
 import urllib.error
 import urllib.request
 
+import os
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+from testdb import psql_cmd
 ADMIN = "http://127.0.0.1:8888/api/admin"
 BASE = "http://127.0.0.1:8888"
 ok = 0
@@ -49,8 +53,7 @@ def probe_model():
            "WHERE m.enabled = true ORDER BY m.id LIMIT 1")
     try:
         out = subprocess.run(
-            ["docker", "exec", "llm-relay-postgres", "psql", "-U", "llmrelay",
-             "-d", "llm_relay", "-t", "-A", "-c", sql],
+            psql_cmd() + ["-t", "-A", "-c", sql],
             capture_output=True, text=True, timeout=30).stdout.strip()
     except Exception:
         out = ""

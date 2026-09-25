@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 
 # 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
@@ -9,10 +10,10 @@ SK=$(curl -s -X POST "$BASE/api/admin/keys" -H 'Content-Type: application/json' 
   -d '{"name":"post-rotate","rate_limit_rpm":-1}' | python3 -c "import sys,json;print(json.load(sys.stdin)['key'])")
 
 echo "=== 轮换后逐渠道真实调用 ==="
-for cid in $(docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "SELECT id FROM channels ORDER BY id"); do
-  name=$(docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "SELECT name FROM channels WHERE id=$cid")
+for cid in $(db_psql -t -A -c "SELECT id FROM channels ORDER BY id"); do
+  name=$(db_psql -t -A -c "SELECT name FROM channels WHERE id=$cid")
   # 只留这一个渠道可用，确保请求一定走它
-  docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "UPDATE channels SET enabled=(id=$cid)" >/dev/null
+  db_psql -t -A -c "UPDATE channels SET enabled=(id=$cid)" >/dev/null
   code=$(curl -s -o /tmp/rc.json -w "%{http_code}" -m 60 "$BASE/v1/chat/completions" \
     -H "Authorization: Bearer $SK" -H 'Content-Type: application/json' \
     -d '{"model":"deepseek-v4-flash","max_tokens":5,"messages":[{"role":"user","content":"说一个字"}]}')
@@ -26,7 +27,7 @@ else:
     print('错误:', d.get('error',{}).get('message','?')[:60])
 " 2>/dev/null || echo "(解析失败)"
 done
-docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "UPDATE channels SET enabled=true" >/dev/null
+db_psql -t -A -c "UPDATE channels SET enabled=true" >/dev/null
 
 echo
 echo "=== 清理测试密钥 ==="

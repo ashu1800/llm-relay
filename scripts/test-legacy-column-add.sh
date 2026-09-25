@@ -21,13 +21,14 @@
 # 删列前会把这几列的既有值存进 __probe_col_backup，跑完按原值还原 ——
 # 用户的渠道价格不该为了一次回归测试而丢。
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 
 # 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
 
 BASE="http://127.0.0.1:8888"
 API="$BASE/api/admin"
-P() { docker exec -i llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "$1"; }
+P() { db_psql -t -A -c "$1"; }
 jqg() { python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -102,39 +103,37 @@ chk "倍率列已删掉" "0" "$(P "SELECT count(*) FROM information_schema.colum
 chk "表里还有数据（正是 AutoMigrate 会翻车的场景）" "$ROWS_BEFORE" "$(P "SELECT count(*) FROM channel_models")"
 
 echo
-echo "=== 3. 重新部署（install.sh：同步源码 + 重建镜像 + 重启）==="
-echo "  这一步要几分钟，期间服务不可用"
-# 记下容器启动时刻：install.sh 的零中断设计在「镜像内容未变」时不会动容器
-# （compose up -d 判断一致就保持 Running），而连续跑两轮验证时第二轮恰好
-# 就是这种情形。本用例要验证的恰恰是「应用启动时迁移补列」—— 容器没换，
-# Migrate 就没跑，第 4 节会全灭（2026-09-21 实测：列删了没补回，
-# 白名单 INSERT 全部 42703，连带别的用例一起挂）。所以部署后核对启动时刻，
-# 没变就显式重启一次应用 —— 这不是绕过产品行为，是用例自身的前提
-STARTED_BEFORE=$(docker inspect -f '{{.State.StartedAt}}' llm-relay 2>/dev/null || echo none)
+echo "=== 3. 重新部署（install.sh：下载发布归档 + 重启服务）==="
+echo "  这一步要一两分钟，期间服务不可用"
+# 记下服务启动时刻：本用例要验证的是「应用启动时迁移补列」—— 服务没重启，
+# Migrate 就没跑，第 4 节会全灭（2026-09-21 实测：列删了没补回，白名单 INSERT
+# 全部 42703，连带别的用例一起挂）。所以部署后核对启动时刻，没变就显式重启
+# 一次应用 —— 这不是绕过产品行为，是用例自身的前提
+STARTED_BEFORE=$(systemctl show -p ActiveEnterTimestamp --value llm-relay 2>/dev/null || echo none)
 bash "$ROOT/deploy/install.sh" > /tmp/__col-deploy.log 2>&1
 DEPLOY_RC=$?
-STARTED_AFTER=$(docker inspect -f '{{.State.StartedAt}}' llm-relay 2>/dev/null || echo none)
+STARTED_AFTER=$(systemctl show -p ActiveEnterTimestamp --value llm-relay 2>/dev/null || echo none)
 if [ "$STARTED_BEFORE" = "$STARTED_AFTER" ]; then
-  echo "  镜像未变、容器未重启 —— 显式重启应用以触发迁移补列"
+  echo "  服务未被重启 —— 显式重启以触发迁移补列"
   systemctl restart llm-relay
 fi
-chk "install.sh 退出码 0（构建/启动没报错）" "0" "$DEPLOY_RC"
-HEALTH=""
+chk "install.sh 退出码 0（下载/启动没报错）" "0" "$DEPLOY_RC"
+READY=no
 for i in $(seq 1 45); do
   sleep 2
-  HEALTH=$(docker inspect -f '{{.State.Health.Status}}' llm-relay 2>/dev/null || echo none)
-  [ "$HEALTH" = "healthy" ] && break
+  # readyz 会实际探一次数据库：它通过才说明应用真的就绪了
+  if curl -fsS -m 3 http://127.0.0.1:8888/readyz >/dev/null 2>&1; then READY=yes; break; fi
 done
-if [ "$HEALTH" != "healthy" ]; then
+if [ "$READY" != "yes" ]; then
   echo "  部署日志末尾（排查用）:"
   tail -20 /tmp/__col-deploy.log | sed 's/^/    /'
 fi
-chk "应用恢复健康（不是重启循环）" "healthy" "$HEALTH"
-# 部署时 compose 会连 postgres 一起重建，应用偶尔比库先起来、连不上而重启一次 ——
-# 那不是重启循环。判据取「重启次数不再增长」：真的在崩溃循环里时它会一直涨。
-RC1=$(docker inspect -f '{{.RestartCount}}' llm-relay)
+chk "应用恢复就绪（readyz 通过，数据库连得上）" "yes" "$READY"
+# 部署时应用偶尔比库先起来、连不上而重启一次 —— 那不是重启循环。
+# 判据取「重启次数不再增长」：真的在崩溃循环里时它会一直涨。
+RC1=$(systemctl show -p NRestarts --value llm-relay)
 sleep 6
-RC2=$(docker inspect -f '{{.RestartCount}}' llm-relay)
+RC2=$(systemctl show -p NRestarts --value llm-relay)
 chk "6 秒内没有再次重启（部署期最多容忍 1 次）" "$RC1" "$RC2"
 chk "重启次数不超过 1" "yes" "$( [ "$RC2" -le 1 ] && echo yes || echo no )"
 

@@ -10,6 +10,7 @@
 # 于是「模型名到底换没换」是可断言的，而不是靠猜。它同时按真实 Anthropic
 # 的行为拒绝畸形请求（rejected 计数），所以「转发成功」证明请求形状也对。
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 
 # 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
@@ -17,7 +18,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
 BASE="http://127.0.0.1:8888"
 API="$BASE/api/admin"
 MOCK="http://127.0.0.1:9998"
-P() { docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "$1"; }
+P() { db_psql -t -A -c "$1"; }
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

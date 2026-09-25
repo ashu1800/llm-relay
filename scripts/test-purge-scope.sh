@@ -7,8 +7,9 @@
 # 于是"__%"等价于"任意两个字符开头"，把用户全部真实日志一并删光，
 # 连用户的密钥记录也被同类写法误伤。
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 
-P() { docker exec -i llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "$1"; }
+P() { db_psql -t -A -c "$1"; }
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 pass=0; fail=0

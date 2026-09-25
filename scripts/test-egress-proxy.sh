@@ -5,6 +5,7 @@
 # 地址写成一个**解析不出来**的域名（xxx.invalid），再让测试代理把它改写到
 # mock 上游：只有走了代理的请求才可能成功，直连必然 DNS 失败。
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 
 # 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
@@ -12,7 +13,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
 
 API=${API:-http://127.0.0.1:8888/api/admin}
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PG="docker exec -i llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c"
+PG="db_psql -t -A -c"
 PROXY_PORT=18098
 FAKE_HOST=egress-probe.invalid
 MODEL=egress-proxy-test
@@ -46,11 +47,12 @@ trap cleanup EXIT
 cleanup
 
 bash "$ROOT/scripts/ensure-mock-upstream.sh" || exit 1
-UP_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' slow-upstream)
-GW=$(docker network inspect llm-relay_relay -f '{{(index .IPAM.Config 0).Gateway}}')
-echo "mock 上游 $UP_IP，容器侧代理地址 $GW:$PROXY_PORT"
+# mock 上游以宿主 node 进程跑在 127.0.0.1:9997，服务也在宿主回环上，
+# 所以代理与上游改写目标统一是 127.0.0.1（原先走 docker 网桥网关 +
+# 容器 IP 的两段地址已不需要）
+echo "mock 上游 127.0.0.1:9997，代理地址 127.0.0.1:$PROXY_PORT"
 
-MINI_PROXY_PORT=$PROXY_PORT MINI_PROXY_REWRITE="$FAKE_HOST=$UP_IP" \
+MINI_PROXY_PORT=$PROXY_PORT MINI_PROXY_REWRITE="$FAKE_HOST=127.0.0.1" \
   nohup python3 "$ROOT/scripts/mini-proxy.py" >/tmp/mini-proxy-egress.log 2>&1 &
 sleep 1
 
@@ -63,10 +65,10 @@ EGID=$(curl -s -X POST "$API/groups" -H 'Content-Type: application/json' \
   -d '{"name":"__egress_group__"}' \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 PID=$(curl -s -X POST "$API/proxies" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"__egress_proxy__\",\"protocol\":\"http\",\"host\":\"$GW\",\"port\":$PROXY_PORT}" \
+  -d "{\"name\":\"__egress_proxy__\",\"protocol\":\"http\",\"host\":\"127.0.0.1\",\"port\":$PROXY_PORT}" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 CID=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"__egress_channel__\",\"protocol\":\"openai-chat\",\"base_url\":\"http://$FAKE_HOST:9999/v1\",\"api_key\":\"k\",\"group_id\":$EGID,\"proxy_id\":$PID,\"models\":[{\"public_name\":\"$MODEL\",\"upstream_name\":\"$MODEL\"}]}" \
+  -d "{\"name\":\"__egress_channel__\",\"protocol\":\"openai-chat\",\"base_url\":\"http://$FAKE_HOST:9997/v1\",\"api_key\":\"k\",\"group_id\":$EGID,\"proxy_id\":$PID,\"models\":[{\"public_name\":\"$MODEL\",\"upstream_name\":\"$MODEL\"}]}" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 KEY=$(curl -s -X POST "$API/keys" -H 'Content-Type: application/json' -d '{"name":"__egress_key__"}' \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["key"])')

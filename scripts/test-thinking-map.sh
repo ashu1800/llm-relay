@@ -14,6 +14,7 @@
 #   anthropic 入站   → gemini 上游（跨协议档位换算）
 #   openai-chat 入站 → openai 兼容上游（跨协议归一出来的 off/auto 必须剔除）
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 
 # 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
@@ -21,7 +22,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
 BASE="http://127.0.0.1:8888"
 API="$BASE/api/admin"
 MOCK="http://127.0.0.1:9998"
-P() { docker exec llm-relay-postgres psql -U llmrelay -d llm_relay -t -A -c "$1"; }
+P() { db_psql -t -A -c "$1"; }
 
 ok=0; bad=0
 chk() {
