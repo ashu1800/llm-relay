@@ -48,6 +48,7 @@ package update
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -347,6 +348,77 @@ func ChecksumURL(assets []Asset) string {
 // 给 5 跳足够，同时防止一个恶意/错误的 Location 链把请求无限续下去。
 const maxRedirects = 5
 
+// 下载重试参数。
+//
+// 为什么必须重试：国内服务器访问 GitHub release 资产（302 之后的
+// release-assets.githubusercontent.com）是**间歇性**可达的。2026-09-25
+// 在 47.108.173.29 上实测：同一个 checksums.txt，6 次里只有 2 次成功，
+// 失败的那几次是 20~25 秒后超时（不是 DNS 错误、不是 4xx，就是连不上）。
+//
+// 没有重试时，用户在管理台点「一键更新」，三次里要失败两次 ——
+// 而每次都要等满超时。加了重试之后，单次失败只是多花几秒。
+//
+// 只重试**暂时性**失败（网络错误、5xx、超时）：
+// 404 说明这次发布没有那个产物（重试一万次也不会有），
+// 校验和不匹配说明文件真的不对（重试是掩盖问题），
+// 地址不在白名单是确定性的拒绝（重试浪费时间且可能绕过判断）。
+const maxDownloadAttempts = 3
+
+// retryBackoffBase 是重试之间的基准退避，按尝试次数线性递增（2s、4s）。
+//
+// 之所以是变量而不是常量：测试需要把它压到毫秒级，否则每跑一次重试
+// 测试都要真等 6 秒。生产代码从不修改它。
+var retryBackoffBase = 2 * time.Second
+
+// transientError 标记「这次失败值得重试」。
+//
+// 用类型而不是字符串匹配来判断：错误信息会被包好几层、会被人改文案，
+// 而「该不该重试」是语义判断，不能依赖文案。
+type transientError struct{ err error }
+
+func (e *transientError) Error() string { return e.err.Error() }
+func (e *transientError) Unwrap() error { return e.err }
+
+// transient 把错误标成可重试。
+func transient(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &transientError{err: err}
+}
+
+// isTransient 判断一个错误是否值得重试。
+func isTransient(err error) bool {
+	var t *transientError
+	return errors.As(err, &t)
+}
+
+// withRetry 执行 fn，遇到暂时性失败就重试。
+//
+// 退避是 2s、4s（线性递增）：国内这种「时通时断」的链路往往几秒后就恢复，
+// 而总等待（最多 6 秒）又短到用户不会觉得卡住。
+func withRetry[T any](ctx context.Context, what string, fn func() (T, error)) (T, error) {
+	var zero T
+
+	for attempt := 1; attempt <= maxDownloadAttempts; attempt++ {
+		v, err := fn()
+		if err == nil {
+			return v, nil
+		}
+		// 不可重试、或已经是最后一次：原样返回，保留最原始的错误信息
+		if !isTransient(err) || attempt == maxDownloadAttempts {
+			return zero, err
+		}
+
+		select {
+		case <-ctx.Done():
+			return zero, fmt.Errorf("%s 已取消: %w", what, ctx.Err())
+		case <-time.After(time.Duration(attempt) * retryBackoffBase):
+		}
+	}
+	return zero, fmt.Errorf("%s 重试 %d 次后仍未成功", what, maxDownloadAttempts)
+}
+
 // validateDownloadURL 校验一个下载地址是否可信。
 //
 // 两道关，缺一不可：
@@ -392,25 +464,26 @@ func validateDownloadURL(rawURL string) error {
 // 让 http.Client 自动跟随是不行的：那样只有第一个地址被校验过，
 // 之后的每一跳都是盲信 —— 一个被劫持的 302 就能把下载引到任意地址，
 // 而我们还在往磁盘上写一个「官方二进制」。
+//
+// 暂时性失败会重试（见 maxDownloadAttempts）。重试是安全的：每次尝试
+// 都从 writeLimited 重新 os.Create 截断，不会把两次下载拼成一个坏文件。
 func (c *Client) Download(ctx context.Context, rawURL, dest string, maxSize int64) error {
 	if maxSize <= 0 {
 		maxSize = maxArchiveSize
 	}
+	_, err := withRetry(ctx, "下载发布产物", func() (struct{}, error) {
+		return struct{}{}, c.downloadOnce(ctx, rawURL, dest, maxSize)
+	})
+	return err
+}
+
+func (c *Client) downloadOnce(ctx context.Context, rawURL, dest string, maxSize int64) error {
 	current := strings.TrimSpace(rawURL)
 
 	for hop := 0; hop <= maxRedirects; hop++ {
-		if err := validateDownloadURL(current); err != nil {
+		// 每一跳都重新过校验（checkDownloadTarget = 白名单 + 公网 IP）
+		if err := checkDownloadTarget(current); err != nil {
 			return err
-		}
-		u, err := url.Parse(current)
-		if err != nil {
-			return err
-		}
-		// 第二层：解析出的每个 IP 都必须是公网地址。
-		// 挡的是「白名单域名被解析到内网」这种形态（DNS 污染 / hosts 投毒），
-		// 以及把 github.com 指到 127.0.0.1 来读本机文件的尝试
-		if _, err := netguard.CheckHost(u.Hostname()); err != nil {
-			return fmt.Errorf("下载目标被拒绝: %w", err)
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, current, nil)
@@ -422,7 +495,9 @@ func (c *Client) Download(ctx context.Context, rawURL, dest string, maxSize int6
 
 		resp, err := c.fetcher.Do(req)
 		if err != nil {
-			return fmt.Errorf("下载失败: %w", err)
+			// 网络层错误（连不上/超时/被重置）：国内链路下这是最主要的一种失败。
+			// 归档有 8 MB，一次失败就整次更新失败，代价太大 —— 必须重试。
+			return transient(fmt.Errorf("下载失败: %w", err))
 		}
 
 		// 跳转：读出下一跳地址，关掉响应体后继续循环
@@ -441,8 +516,13 @@ func (c *Client) Download(ctx context.Context, rawURL, dest string, maxSize int6
 		}
 
 		if resp.StatusCode != http.StatusOK {
+			status := resp.StatusCode
 			_ = resp.Body.Close()
-			return fmt.Errorf("下载返回 %d", resp.StatusCode)
+			err := fmt.Errorf("下载返回 %d", status)
+			if status >= 500 {
+				return transient(err)
+			}
+			return err
 		}
 
 		err = writeLimited(resp, dest, maxSize)
@@ -476,7 +556,8 @@ func writeLimited(resp *http.Response, dest string, maxSize int64) error {
 		// 半成品必须删掉：留着它，下一轮校验和会报「不匹配」，
 		// 把「网络中断」伪装成「文件被篡改」，排查方向完全跑偏
 		_ = os.Remove(dest)
-		return fmt.Errorf("写入失败: %w", copyErr)
+		// 传输中断是链路问题，标成可重试（半成品已删，重试是干净的）
+		return transient(fmt.Errorf("写入失败: %w", copyErr))
 	}
 	if closeErr != nil {
 		_ = os.Remove(dest)
@@ -494,37 +575,111 @@ func writeLimited(resp *http.Response, dest string, maxSize int64) error {
 }
 
 // FetchChecksums 取校验和文件的原始内容。
+//
+// 与 Download 一样**手动跟随跳转**：GitHub 的 release 资产（包括
+// checksums.txt）都会 302 到 release-assets.githubusercontent.com 的签名
+// 地址 —— 实测确认过，「校验和地址不跳转」的假设不成立（v0.1.1 首次
+// 一键更新就是死在这：下载返回 302 被当成异常报错）。每一跳同样重跑
+// 白名单与 IP 校验，安全语义与 Download 完全一致。
 func (c *Client) FetchChecksums(ctx context.Context, rawURL string) ([]byte, error) {
 	if strings.TrimSpace(rawURL) == "" {
 		return nil, fmt.Errorf("没有校验和文件地址")
 	}
+	// 校验和文件很小，1MB 上限（正常只有几百字节到几 KB）
+	const maxChecksumSize = 1 << 20
+
+	return fetchSmallFile(ctx, c.api, strings.TrimSpace(rawURL), maxChecksumSize, checkDownloadTarget)
+}
+
+// checkDownloadTarget 是「这个地址能不能下」的完整判定：
+// 白名单域名 + 解析出的每个 IP 都必须是公网地址。
+//
+// 抽成一个函数是被测试逼出来的：跳转循环原本和这两道校验焊死在一起，
+// 而校验强制 https + 公网 IP，httptest 起的本地 http 服务器永远进不来，
+// 于是「302 能不能被正确跟随」这段逻辑根本无法被测试覆盖 —— 而它正是
+// v0.1.1 发布失败的地方。把校验做成参数后，测试可以注入宽松版本，
+// 真实覆盖循环本身；生产路径仍然调用这个函数，语义没有任何放松。
+func checkDownloadTarget(rawURL string) error {
 	if err := validateDownloadURL(rawURL); err != nil {
-		return nil, err
+		return err
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if _, err := netguard.CheckHost(u.Hostname()); err != nil {
-		return nil, fmt.Errorf("校验和地址被拒绝: %w", err)
+		return fmt.Errorf("下载目标被拒绝: %w", err)
 	}
+	return nil
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", apiUserAgent)
+// fetchSmallFile 手动跟随跳转抓取一个内容不大的文件。
+//
+// 每一跳都跑一遍 check —— 不是只在开头校验一次就闭眼跟随：
+// 一个被劫持的 302 就能把下载引到任意地址，而我们还在把它当官方产物用。
+//
+// 暂时性失败（网络错误 / 5xx / 读一半断了）会重试，见 maxDownloadAttempts。
+func fetchSmallFile(ctx context.Context, hc *http.Client, rawURL string, maxSize int64, check func(string) error) ([]byte, error) {
+	return withRetry(ctx, "下载校验和", func() ([]byte, error) {
+		return fetchSmallFileOnce(ctx, hc, rawURL, maxSize, check)
+	})
+}
 
-	// 校验和文件很小，用 api client（30 秒超时）足够，
-	// 而且它不跟随跳转 —— 校验和地址理论上不该跳转，跳了就当作异常
-	resp, err := c.api.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("下载校验和失败: %w", err)
+func fetchSmallFileOnce(ctx context.Context, hc *http.Client, rawURL string, maxSize int64, check func(string) error) ([]byte, error) {
+	current := rawURL
+
+	for hop := 0; hop <= maxRedirects; hop++ {
+		if err := check(current); err != nil {
+			return nil, err
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, current, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", apiUserAgent)
+
+		resp, err := hc.Do(req)
+		if err != nil {
+			// 网络层错误：连不上、超时、连接被重置 —— 都是典型的暂时性失败
+			return nil, transient(fmt.Errorf("下载失败: %w", err))
+		}
+
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			loc := resp.Header.Get("Location")
+			_ = resp.Body.Close()
+			if loc == "" {
+				return nil, fmt.Errorf("下载返回 %d 但没有给 Location", resp.StatusCode)
+			}
+			next, err := resp.Request.URL.Parse(loc)
+			if err != nil {
+				return nil, fmt.Errorf("跳转地址无法解析: %w", err)
+			}
+			current = next.String()
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			status := resp.StatusCode
+			_ = resp.Body.Close()
+			err := fmt.Errorf("下载返回 %d", status)
+			// 5xx 是服务端临时故障，值得重试；4xx 是确定性的
+			if status >= 500 {
+				return nil, transient(err)
+			}
+			return nil, err
+		}
+
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			// 读一半断了：典型的链路问题，重试往往能把文件拿全
+			return nil, transient(fmt.Errorf("读取响应失败: %w", readErr))
+		}
+		if int64(len(body)) > maxSize {
+			return nil, fmt.Errorf("文件超过上限 %d 字节", maxSize)
+		}
+		return body, nil
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("下载校验和返回 %d", resp.StatusCode)
-	}
-	// 1MB 上限：正常的 checksums.txt 只有几百字节到几 KB
-	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return nil, fmt.Errorf("跳转次数超过 %d 次，已中止", maxRedirects)
 }
