@@ -1,0 +1,362 @@
+name: Release
+
+# ============================================================
+#  发布流水线：打 tag 出正式产物
+#
+#  产物（三者必须互相对得上，命名是硬契约）：
+#    · 归档    llm-relay_0.1.2_linux_amd64.tar.gz（windows 是 .zip）
+#              内嵌可执行文件名必须是 llm-relay
+#    · 校验和  checksums.txt（sha256，两列格式）
+#    · 镜像    ghcr.io/ashu1800/llm-relay:0.1.2 与 :latest（amd64 + arm64）
+#
+#  为什么 VERSION 文件要经 artifact 在 job 之间传：
+#   prepare 把 tag 对应的版本号写进 backend/internal/version/VERSION，
+#   但下面每个 job 都会**重新检出代码** —— 重新检出会把这次未提交的修改
+#   冲掉。作为 artifact 传下去，才能真正做到「写一次、各 job 都用上」。
+# ============================================================
+
+on:
+  push:
+    # 只认 v 开头的 tag：仓库里还可能有其它用途的 tag，
+    # 那些不该触发一次正式发布。
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（形如 v0.1.2，必须是已存在的 tag）'
+        required: true
+        type: string
+
+# 同一次发布的多次触发不应该并行：两个 goreleaser 同时上传 Release 资产
+# 会互相覆盖或报 422。cancel-in-progress: false —— 宁可排队，
+# 也不要让正在推镜像的那次被掐断（会留下指向残缺 manifest 的 tag）。
+concurrency:
+  group: release-${{ github.repository }}-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+# 顶层只给读权限，需要的写权限按 job 单独授予（最小权限原则）
+permissions:
+  contents: read
+
+env:
+  # 镜像名写死而不是用 github.repository_owner 拼：
+  #   · GHCR 要求路径全小写，而 owner 是 Ashu1800（带大写）—— 直接拼会
+  #     得到 "invalid reference format" 这类报错
+  #   · 这个字符串同时也是后端更新器拼镜像地址的依据，写死才不会漂
+  IMAGE_NAME: ghcr.io/ashu1800/llm-relay
+
+jobs:
+  # ----------------------------------------------------------
+  # 1) prepare：校验 tag、解析版本号、把版本号写进 VERSION 文件
+  # ----------------------------------------------------------
+  prepare:
+    name: 校验 tag 并写入版本号
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+      sha: ${{ steps.plan.outputs.sha }}
+      date: ${{ steps.plan.outputs.date }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          # 取这次要发布的 tag 本身；手动触发时用输入的那个 tag
+          ref: ${{ inputs.tag || github.ref }}
+          # 需要完整历史：goreleaser 生成 changelog 要能走到上一个 tag
+          fetch-depth: 0
+
+      - name: 校验 tag 格式并写入 VERSION 文件
+        id: plan
+        env:
+          # 经 env 传值而不是把 ${{ }} 直接插进脚本里：
+          # 直接插值等于把输入拼进 shell（手动触发的输入尤其不可信）
+          INPUT_TAG: ${{ inputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # ---- 1. 决定要发布哪个 tag ----
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$REF_NAME"
+          fi
+          echo "本次发布的 tag：$TAG"
+
+          # ---- 2. 校验 tag 形状 ----
+          # 必须是 v + 三段数字，后面可跟预发布后缀：
+          #   v0.1.2         ✓ 正式版
+          #   v0.2.0-rc.1    ✓ 预发布
+          #   v0.1           ✗ 只有两段 —— 后端的 semver 解析要三段
+          #   0.1.2          ✗ 缺 v 前缀 —— 发布流程只认带 v 的 tag
+          # 之所以卡死格式：tag 既是 Release 名、又是归档名里的版本号、
+          # 还是镜像 tag，写错的代价是「发布成功但用户下载不到」。
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::tag 格式不合法：$TAG（应形如 v0.1.2 或 v0.2.0-rc.1）"
+            exit 1
+          fi
+
+          # ---- 3. 去掉 v 前缀 ----
+          # 归档名是 llm-relay_0.1.2_linux_amd64.tar.gz，**不带 v**。
+          # 后端的 semver 解析对 v 前缀是幂等的，但归档名不带 v，
+          # 所以下发给各 job 的版本号统一不带 v，两边就不会错位。
+          VERSION="${TAG#v}"
+          echo "解析出版本号：$VERSION"
+
+          # ---- 4. 写进 VERSION 文件 ----
+          # 这一步是「让 tag 内容自洽」：goreleaser 只注入 Commit/Date/BuildType，
+          # 不注入 Version（见 .goreleaser.yaml 的注释），Version 走的就是
+          # //go:embed VERSION 这条回落路径。文件不写对，从源码构建出来的
+          # 二进制就会报一个旧版本号。
+          printf '%s\n' "$VERSION" > backend/internal/version/VERSION
+
+          # 回读确认：写失败（目录不存在、权限问题）必须在这里就炸，
+          # 而不是等 goreleaser 打出一个版本号是 0.1.0 的包才发现
+          WRITTEN="$(tr -d '\r\n' < backend/internal/version/VERSION)"
+          if [ "$WRITTEN" != "$VERSION" ]; then
+            echo "::error::VERSION 文件写入失败：期望 $VERSION，实际 $WRITTEN"
+            exit 1
+          fi
+          echo "已写入 backend/internal/version/VERSION：$WRITTEN"
+
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "sha=$(git rev-parse HEAD)"
+            echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 上传 VERSION 文件供后续 job 使用
+        uses: actions/upload-artifact@v4
+        with:
+          name: version-file
+          path: backend/internal/version/VERSION
+          # 只用一次就够，不留存
+          retention-days: 1
+          if-no-files-found: error
+
+  # ----------------------------------------------------------
+  # 2) build-binaries：构建前端 + 跑测试 + goreleaser 出归档与 Release
+  #    （前端产物、测试、goreleaser 必须在同一个 job 里顺序执行：
+  #      //go:embed 是**编译期**把 frontend/dist 烙进二进制的，
+  #      先编译后拷前端只会得到一个嵌着空界面的包，而且不报任何错。）
+  # ----------------------------------------------------------
+  build-binaries:
+    name: 构建前端、跑测试并发布归档
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      COMMIT: ${{ needs.prepare.outputs.sha }}
+      BUILD_DATE: ${{ needs.prepare.outputs.date }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          # 必须检出 tag 对应的那个提交，且要完整历史给 goreleaser 算 changelog
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+
+      - name: 取回 prepare 写好的 VERSION 文件
+        uses: actions/download-artifact@v4
+        with:
+          name: version-file
+          # 下到包目录里，落点正好是 backend/internal/version/VERSION。
+          # 重新检出会覆盖未提交的修改，这一步是把它补回来。
+          path: backend/internal/version/
+
+      - name: 设置 Go 环境
+        uses: actions/setup-go@v5
+        with:
+          # 直接读 backend/go.mod 的 go 指令（当前是 1.25.0），
+          # 避免这里与 go.mod 各写一个版本号、日后漂移
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: 设置 Node 环境
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 构建前端
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          # npm ci 而不是 install：严格按 lockfile 装，可复现。
+          # 用 npm install 的话 CI 可能会解出一组与本地不同的依赖版本，
+          # 于是「本地能过、CI 挂」而且原因极难查。
+          npm ci
+          npm run build
+
+      - name: 把前端产物拷到后端 embed 的目录
+        run: |
+          set -euo pipefail
+          # 先删干净：//go:embed all:dist 会把目录下**所有**文件打进二进制，
+          # 上一次构建残留的旧 hash 资源不清掉，会一起被打包进去
+          # （镜像/二进物体积白白变大，且埋下「旧资源还在被访问」的隐患）。
+          rm -rf backend/internal/web/dist
+          cp -r frontend/dist backend/internal/web/dist
+          test -f backend/internal/web/dist/index.html
+          echo "前端产物已就位：$(find backend/internal/web/dist -type f | wc -l) 个文件"
+
+      - name: 跑后端测试（失败则中止发布）
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          # 发布前必须跑测试：一个挂了测试的 tag 一旦推上去，
+          # 下载它的用户拿到的就是坏产物，而 Release 是「已发布」状态，
+          # 事后只能补发新版本，无法收回。
+          go test ./...
+
+      - name: 用 goreleaser 构建并发布
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 显式告诉 goreleaser 当前 tag：
+          # 手动触发时是 detached HEAD，靠 git 推断可能失败或推错版本。
+          GORELEASER_CURRENT_TAG: ${{ needs.prepare.outputs.tag }}
+
+  # ----------------------------------------------------------
+  # 3) docker：构建并推送多架构镜像到 GHCR
+  #
+  #    为什么镜像不交给 goreleaser 的 dockers 段（见 .goreleaser.yaml 文件头）：
+  #    goreleaser 的 docker 构建上下文是一个只装着二进制的临时目录，
+  #    放不下本项目的多阶段 deploy/Dockerfile；而且归档要 BuildType=binary、
+  #    镜像要 BuildType=docker，同一个二进制装不下两种形态。
+  # ----------------------------------------------------------
+  docker:
+    name: 构建并推送多架构镜像
+    needs: [prepare, build-binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: 取回 prepare 写好的 VERSION 文件
+        uses: actions/download-artifact@v4
+        with:
+          name: version-file
+          path: backend/internal/version/
+
+      - name: 设置 QEMU（为 arm64 提供模拟执行）
+        uses: docker/setup-qemu-action@v3
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # GITHUB_TOKEN 就能推 GHCR（前提是 job 有 packages: write）。
+          # 不需要额外建 PAT。
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 计算镜像 tag
+        id: tags
+        run: |
+          set -euo pipefail
+          TAGS="${IMAGE_NAME}:${VERSION}"
+          # 预发布版（如 0.2.0-rc.1）**不打 latest**：
+          # latest 的语义是「最新稳定版」，而宿主侧更新器与
+          # docker-compose 默认拉的都是 latest —— 让它指向一个 rc
+          # 等于把候选版推给所有用户。
+          if [[ "$VERSION" != *-* ]]; then
+            TAGS="${TAGS}"$'\n'"${IMAGE_NAME}:latest"
+          else
+            echo "检测到预发布版本 $VERSION，本次不更新 latest 标签"
+          fi
+          {
+            echo "list<<__TAGS_EOF__"
+            echo "$TAGS"
+            echo "__TAGS_EOF__"
+          } >> "$GITHUB_OUTPUT"
+          echo "将推送以下标签："
+          echo "$TAGS"
+
+      - name: 构建并推送镜像
+        uses: docker/build-push-action@v6
+        with:
+          # 构建上下文是**仓库根**：deploy/Dockerfile 里 COPY frontend/ 与
+          # backend/ 都相对根目录（与 docker-compose.yml 的 context: .. 一致）。
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.list }}
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.version }}
+            COMMIT=${{ needs.prepare.outputs.sha }}
+            DATE=${{ needs.prepare.outputs.date }}
+            BUILD_TYPE=docker
+          # 用 GitHub Actions 的缓存后端，二次构建快很多
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ----------------------------------------------------------
+  # 4) sync-version-file：把版本号提交回主分支
+  #
+  #    目的：让**主分支上的 VERSION 文件**与刚发布的版本一致。
+  #    不这么做的后果：任何人从 main 源码构建（不注入 ldflags）时，
+  #    //go:embed 回落到的是一个旧版本号，界面上显示的版本与实际代码不符 ——
+  #    而「显示的版本是不是正在跑的这份代码」正是版本号唯一要回答的问题。
+  #
+  #    诚实说明：这一步改的是**主分支**，不会、也无法改写已经打好的 tag
+  #    （tag 指向的提交是不可变的）。所以它保证的是「此后 main 与最新发布对齐」，
+  #    而不是「tag 里的 VERSION 文件与 tag 名一致」。
+  # ----------------------------------------------------------
+  sync-version-file:
+    name: 把版本号提交回主分支
+    needs: [prepare, build-binaries]
+    # 只有发布真的成功了才回写：失败时回写会让 main 上的版本号
+    # 指向一个并不存在的 Release
+    if: ${{ needs.build-binaries.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 检出主分支
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: 同步 VERSION 文件
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          CURRENT="$(tr -d '\r\n' < backend/internal/version/VERSION || true)"
+          if [ "$CURRENT" = "$VERSION" ]; then
+            echo "VERSION 文件已经是 $VERSION，无需提交"
+            exit 0
+          fi
+
+          printf '%s\n' "$VERSION" > backend/internal/version/VERSION
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/internal/version/VERSION
+          # [skip ci]：这次提交只改一个版本号文件，没必要再跑一遍 CI
+          # （不跳过的话每次发布都会多触发一次全量检查）
+          git commit -m "chore: 同步 VERSION 到 ${VERSION} [skip ci]"
+          git push origin HEAD:${{ github.event.repository.default_branch }}

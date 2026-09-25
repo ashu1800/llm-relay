@@ -24,6 +24,8 @@ import (
 	"llm-relay/internal/relay"
 	"llm-relay/internal/secure"
 	"llm-relay/internal/store"
+	"llm-relay/internal/update"
+	"llm-relay/internal/version"
 )
 
 // 退出预算。三个数加起来必须小于 deploy/docker-compose.yml 里的
@@ -56,7 +58,6 @@ func run() error {
 
 	logger := newLogger(cfg.Log)
 	slog.SetDefault(logger)
-	api.Version = buildVersion()
 
 	// ---- 加密主密钥 ----
 	cipher, err := secure.NewCipher(cfg.Security.Secret)
@@ -136,6 +137,23 @@ func run() error {
 	// 被下一轮同步覆盖。宁可让人自己填，也不要有会漂移的假数据。
 	priceEngine := pricing.NewEngine(st.DB(), 5*time.Minute)
 
+	// ---- 版本更新 ----
+	//
+	// 宿主侧更新器只在 docker 部署下存在（它跑在宿主上、经 unix socket 通信）。
+	// 裸机部署下连不上是正常的，不该记成错误 —— 那种部署走 binary 自替换路径。
+	//
+	// 这里不做「启动时探测一次」的判断：更新器可能比本服务晚启动
+	// （systemd 单元之间没有严格顺序），启动时探测失败会让整个会话
+	// 都以为它不在场。可用性在真正发起升级请求时才知道（连不上会
+	// 得到 ErrUpdaterUnavailable）。
+	updaterRunner := update.NewSocketRunner()
+	updateSvc := update.NewService(st.DB(), updaterRunner, logger)
+	logger.Info("版本更新功能已就绪",
+		"version", version.Version,
+		"build_type", version.BuildType,
+		"can_apply", version.IsRelease(),
+	)
+
 	gin.SetMode(ginMode(cfg.Server.Mode))
 	engine := gin.New()
 	engine.Use(gin.Recovery(), requestLogger(logger))
@@ -161,6 +179,9 @@ func run() error {
 		GroupLimit:  groupLimit,
 		Live:        live,
 		Logger:      logger,
+
+		// 版本更新：Update 提供检测 / 应用 / 回滚的全套服务
+		Update: updateSvc,
 		// State 之前被清出过 Deps（「没有读取方，是路由分析页的残留」）。
 		// 现在读它的地方回来了：渠道列表把运行期状态（冷却剩余/连击/在途）
 		// 并进响应，让「熔断早已生效但谁也看不见」变成看得见 ——
@@ -220,7 +241,7 @@ func run() error {
 	go func() {
 		logger.Info("LLM Relay 已启动",
 			"addr", cfg.Server.Addr(),
-			"version", api.Version,
+			"version", version.Version,
 			"mode", cfg.Server.Mode,
 		)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -376,8 +397,3 @@ func envOr(key, fallback string) string {
 	}
 	return fallback
 }
-
-// version 由构建时注入：-ldflags "-X main.version=..."
-var version = "dev"
-
-func buildVersion() string { return version }

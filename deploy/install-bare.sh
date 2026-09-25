@@ -148,7 +148,33 @@ rm -rf "$REPO_DIR/backend/internal/web/dist"
 cp -r "$REPO_DIR/frontend/dist" "$REPO_DIR/backend/internal/web/dist"
 cd "$REPO_DIR/backend"
 export GOPROXY="$GOPROXY_VAL" GOSUMDB=off CGO_ENABLED=0
-go build -trimpath -ldflags="-s -w" -o /tmp/llm-relay ./cmd/server
+
+# 版本号与构建形态都要编进二进制。
+#
+# 版本号（Version）：界面上那枚徽标显示的、以及更新时用来比较的东西。
+# 从 git describe 取（带提交数与哈希尾巴），这样「同一个 tag 下的两次构建」
+# 也能区分开 —— 否则改了代码但没打新 tag 时，界面上的版本号会一动不动，
+# 看着像没部署成功。
+#
+# 构建形态（BuildType=binary）**必须显式注入**：后端在容器外探测时
+# 一律判为 "source"，而 source 是禁止一键更新的（避免用官方二进制
+# 覆盖开发者本地的构建物）。裸机部署恰恰是最该能自更新的那种 ——
+# 进程直接替换自己的可执行文件、再靠 systemd 拉起来。
+# 不在这里注入，这个功能在裸机部署上就永远不会生效。
+BARE_VERSION="$(git -C "$REPO_DIR" describe --tags --always --dirty 2>/dev/null || echo dev)"
+# git describe 在没有 tag 时只给短哈希，补个 v 前缀让两种形状一致
+[[ "$BARE_VERSION" != v* && "$BARE_VERSION" != dev ]] && BARE_VERSION="v$BARE_VERSION"
+BARE_COMMIT="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+BARE_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+log "构建版本：$BARE_VERSION（$BARE_COMMIT）"
+
+go build -trimpath \
+  -ldflags="-s -w \
+    -X llm-relay/internal/version.Version=$BARE_VERSION \
+    -X llm-relay/internal/version.Commit=$BARE_COMMIT \
+    -X llm-relay/internal/version.Date=$BARE_DATE \
+    -X llm-relay/internal/version.BuildType=binary" \
+  -o /tmp/llm-relay ./cmd/server
 
 # ---------------------------------------------------------------- 安装
 log "安装到 $INSTALL_DIR"

@@ -1,0 +1,142 @@
+# ============================================================
+#  GoReleaser 配置 —— 发布**归档**（二进制包）与校验和
+#
+#  发布产物命名是硬契约：后端更新器按固定规则拼下载 URL 与文件名，
+#  这里写错任何一个字符，用户点「一键更新」就是 404 或「归档里没有
+#  找到可执行文件」。三处契约分别是：
+#
+#    1. 归档名  llm-relay_<version>_<goos>_<goarch>.tar.gz
+#               <version> **不带 v 前缀**（tag 是 v0.1.2，文件名里是 0.1.2）
+#               windows 用 .zip，其余 tar.gz
+#    2. 归档内可执行文件名必须是 llm-relay（windows 是 llm-relay.exe）
+#    3. 校验和文件必须叫 checksums.txt，sha256，两列格式 <hash>  <filename>
+#
+#  关于 Docker 镜像（重要，别在这里加 dockers 段）：
+#  镜像由 .github/workflows/release.yml 用 docker/build-push-action 构建，
+#  本文件**刻意不配 `dockers`**。原因是 goreleaser 的 docker 构建上下文
+#  不是仓库根目录，而是一个临时目录，里面只有**刚编译好的二进制**（外加
+#  extra_files 显式带进去的文件）—— 官方文档原话是 "The build context
+#  itself is a temporary directory which contains the binaries and packages
+#  for each of the defined target platforms"。而 deploy/Dockerfile 是多阶段
+#  文件，要从源码树 COPY frontend/ 与 backend/ 自己编译，放进那个临时上下文
+#  里必然失败（找不到 frontend/package.json）。
+#  见 https://goreleaser.com/customization/package/dockers_v2/
+#
+#  另有一个更硬的理由：**同一个二进制装不下两种 BuildType**。
+#  归档里的二进制必须是 BuildType=binary（systemd 形态，可自我替换），
+#  镜像里的必须是 BuildType=docker（容器形态，由宿主侧 updater 拉镜像重建）。
+#  goreleaser 的一份 builds 产物同时喂给归档和镜像，硬塞只会二选一错一个。
+#  交给 workflow 分别构建，两边都能拿到正确的值。
+# ============================================================
+
+# goreleaser v2 配置格式（v1 的字段名在 v2 里已废弃）
+version: 2
+
+project_name: llm-relay
+
+before:
+  hooks:
+    # 只做依赖校验，不做 go mod tidy —— 发布流程不该顺手改 go.mod/go.sum，
+    # 那会让「发布用的代码」与「tag 指向的代码」出现差异。
+    - go mod download -C backend
+
+builds:
+  - id: llm-relay
+    # main 包在子目录里，所以工作目录设为 backend；
+    # 注意 ldflags 里的包路径仍然是 llm-relay/internal/version.*
+    # （那是 go.mod 里 module 名 + 包路径，与 dir 无关，别写成 ./internal/version）。
+    dir: backend
+    main: ./cmd/server
+    binary: llm-relay
+    # 刻意**不加** -tags embed：本项目后端 embed 的是 backend/internal/web/dist
+    # 目录，它就在源码树里，没有任何 build tag 守着（见 internal/web/embed.go）。
+    # 加了不存在的 tag 不报错但也没用，反而让后来人以为 embed 需要它。
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # windows/arm64 不在发布矩阵里（见任务约定的 5 个目标平台）。
+      # 不 ignore 的话 goreleaser 会多产一个没人用的归档。
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      # 版本号用 {{ .Version }}：goreleaser 给的就是**去掉 v 前缀**的 tag
+      # （tag v0.1.2 -> .Version = 0.1.2），与归档名的 <version> 天然一致。
+      # 后端的 semver 解析对 v 前缀是幂等的，但归档名不带 v，这里必须对齐。
+      - -X llm-relay/internal/version.Version={{ .Version }}
+      - -X llm-relay/internal/version.Commit={{ .Commit }}
+      - -X llm-relay/internal/version.Date={{ .Date }}
+      # 归档产物 = 官方预编译二进制 + systemd 形态：进程可自我替换，
+      # 界面因此允许一键更新（见 internal/version 的 BuildBinary 注释）。
+      - -X llm-relay/internal/version.BuildType=binary
+
+archives:
+  - id: default
+    # 归档名契约。goreleaser 默认会给名字塞进版本与平台，但默认模板带
+    # 分隔符与校验和之类的差异，所以显式钉死成后端期望的形状：
+    #   llm-relay_0.1.2_linux_amd64.tar.gz
+    # 用 >- （折叠块）而不是普通字符串：模板里字段多，折行更好读，
+    # >- 会把换行折成空格且不带结尾换行，产出的名字里不会有空格。
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    # 用 formats（复数、列表）而不是 format：单数形式自 goreleaser v2.6 起
+    # 已废弃，`goreleaser check` 会直接报 DEPRECATED。
+    formats: [tar.gz]
+    format_overrides:
+      # windows 用 zip —— 后端解压逻辑对 .zip 与 .tar.gz 是两套代码路径，
+      # 命名契约里也只有 windows 用 zip。
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+      # deploy/ 下的发布资产逐项列出，而不是写 deploy/*。
+      # 原因：本机的 deploy/data/ 是数据库卷目录（跑过部署的话有真实数据），
+      # glob 会把它整个打进归档 —— make release-snapshot 时会产出一个
+      # 几 GB 的 tar.gz，而里面装的是 postgres 的数据文件。
+      # CI 里该目录不存在，但本机快照会；列出具体文件两种场景都对。
+      - deploy/Dockerfile
+      - deploy/docker-compose.yml
+      - deploy/.env.example
+      - deploy/install.sh
+      - deploy/install-bare.sh
+      - deploy/restore.sh
+      # updater 的 systemd 单元模板必须打进归档。
+      #
+      # install.sh 第 730 行会去读 $INSTALL_DIR/deploy/llm-relay-updater.service
+      # 并做占位符替换；文件不在时那段逻辑只是 warn 后跳过 —— 不报错，
+      # 但**宿主侧更新器不会被注册**，于是管理台上的一键更新永远不可用。
+      # 对于「下载 release 归档 → 跑 install.sh」这种安装方式，
+      # 用户拿到的就是一个功能残缺的部署，而且失败得很安静。
+      - deploy/llm-relay-updater.service
+
+checksum:
+  # 名字必须是 checksums.txt：后端按这个名字拼 URL 拉校验和文件。
+  name_template: 'checksums.txt'
+  # sha256 且保持 goreleaser 默认的两列格式「<hash>  <文件名>」（两个空格）——
+  # 后端用 strings.Fields 切分后按 parts[1] == 文件名 匹配，列数或顺序变了就匹配不上。
+  # 这里显式写出来只是为了让契约在配置里可见，值就是默认值，不要改动。
+  algorithm: sha256
+
+# 发布到 GitHub Release。
+release:
+  # draft: false —— tag 推上去就直接发，符合「打 tag 即发布」的用法。
+  draft: false
+  # 预发布 tag（v0.2.0-rc.1 这种）自动标记为 prerelease，
+  # 这样「一键更新」拿到的 latest 不会指向一个 rc。
+  prerelease: auto
+  name_template: "LLM Relay {{ .Version }}"
+  # changelog 不配置，用 goreleaser 默认（按提交生成、过滤掉 docs/test 之类）。
+  # 本项目没有统一 conventional commits 前缀，默认过滤器可能产出较短的列表 ——
+  # 那是可接受的：Release 页面短一点，好过配置写错导致发布直接失败。
+
+# 说明：本文件不含 dockers / docker_manifests，镜像由 workflow 构建，理由见文件头。

@@ -21,6 +21,7 @@ import { message } from 'ant-design-vue'
 import { onLive } from '@/composables/useLive'
 import { startTabPulse } from '@/utils/tabPulse'
 import { moneyText } from '@/utils/money'
+import VersionBadge from '@/components/VersionBadge.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -84,21 +85,20 @@ const usingDefaultSecret = ref(false)
 // 服务绑在回环上时这是合理配置；一旦放到公网，管理接口等于对所有人敞开。
 const authDisabled = ref(false)
 
-// 后端版本号，显示在侧栏底部。
+// 后端版本号，显示在侧栏品牌下方。
 //
 // 它的用途很具体：**判断界面上看到的这个版本，是不是正在跑的那份代码**。
 // README 里写过「改了前端或后端必须重新部署才会在 8888 上生效」，
 // 但先前没有任何办法在界面上确认这件事 —— 改了代码、部署失败、还以为看到了新版。
+//
 // 版本号由构建时经 -ldflags 编进二进制（见 Dockerfile 与 install.sh），
 // 所以它回的一定是真正跑着的那份，不是某个配置文件里的声明。
 //
-// 取不到就整个不显示：空着一格版本号比不显示更容易让人以为哪里坏了。
-const appVersion = ref('')
-// 界面显示用的短版本号：v0.1.0-22-g6a7afa9-dirty → v0.1.0-22。
-// git describe 的尾巴都剥掉：短 hash 段（-g6a7afa9）与 -dirty（有未跟踪/
-// 未提交内容时部署脚本就会带上，界面不需要知道）。完整版本号仍在悬停
-// title 里，对照部署时够用。
-const appVersionShort = ref('')
+// 现在它由 VersionBadge 组件承担（见其注释）：那枚徽标除了显示版本，
+// 还是「检测更新 / 一键更新 / 回滚」的入口。原来这里只是一个只读的
+// <div class="brand-version">，两处显示同一个信息没有意义，所以直接替换。
+//
+// 取不到版本时整块不渲染：空着一格版本号比不显示更容易让人以为哪里坏了。
 
 // 侧边栏菜单：对齐参考站 console-menu-list 的项目与顺序，
 // 剔除其面向多用户的登录/工单/订单/兑换/礼品/邮件/公告模块。
@@ -148,19 +148,18 @@ onMounted(() => {
   startTabPulse()
   // 系统信息与窄屏初始化合在同一个 onMounted：原来有两个，各自请求一次
   // /system/info —— 每次进页面白打一个重复请求（窄屏适配改造时留下的）。
-  // 版本号搭这个请求顺路带回来，不额外发一次。
+  //
+  // 版本号曾经也搭这个请求顺路带回来。现在它由 VersionBadge 自己取
+  // （见 stores/version.ts 的 fetchInfo）：那个组件需要一个结构化的
+  // 版本对象（构建形态、是否 release、更新器是否在场），而 /system/info
+  // 只给一个字符串。两处都取会让侧栏发两个请求，所以这里不再管版本。
   api
-    .get<{ using_default_secret?: boolean; console_auth_enabled?: boolean; version?: string }>('/system/info')
+    .get<{ using_default_secret?: boolean; console_auth_enabled?: boolean }>('/system/info')
     .then((info) => {
       usingDefaultSecret.value = !!info.using_default_secret
       // 登录鉴权未启用时持续横幅提醒：只绑回环的旧部署不受影响，
       // 但公网部署下这就是把管理台裸奔给整个互联网
       authDisabled.value = info.console_auth_enabled === false
-      // 构建时没传 VERSION 会是 "dev"，照常显示 —— 它本身就是一个有用的信号
-      // （说明这次构建是本地随手构建的，不是 install.sh 产出的）
-      appVersion.value = (info.version || '').trim()
-      // hash 段与 -dirty 都不进侧栏，理由见 appVersionShort 的声明注释
-      appVersionShort.value = appVersion.value.replace(/-g[0-9a-f]+/i, '').replace(/-dirty$/i, '')
     })
     .catch(() => {
       // 拿不到系统信息不影响正常使用，静默即可
@@ -194,9 +193,7 @@ onUnmounted(() => {
                 收起侧栏时不显示（那一列只有 40px 宽，塞不下）；
                 窄屏下侧栏默认收起，所以它在窄屏是不可见的 —— 这是有意的，
                 窄屏空间该留给内容，查版本可以用 deploy/install.sh --verify。 -->
-            <div v-if="!collapsed && appVersion" class="brand-version" :title="'后端版本：' + appVersion">
-              {{ appVersionShort }}
-            </div>
+            <VersionBadge v-if="!collapsed" class="brand-version-slot" />
 
             <!-- 品牌区（身份信息）与菜单区（导航）的分界。收起态不显示：
                  那时上下都是纯图标，一条线反而显得挤 -->
@@ -354,37 +351,25 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* 版本号：品牌下方的一枚小徽标，不是一行裸文本。
-   全站的语言是「胶囊」——菜单项圆角 999，参考站的导航条也是圆角 999
-   + 1px 边框 + 次级文字色。版本号沿用同一语言才有归属感：
-   通栏的裸灰字悬在品牌和菜单之间，看着像漏了样式的残渣。
-   等宽字体的理由不变：版本号是标识符，逐字比对是它唯一的用途，
-   比例字体下 0/O、1/l 分不清。 */
-.brand-version {
+/* 版本徽标的定位槽。
+   徽标本体（胶囊外观、配色、弹出面板）都在 VersionBadge 组件里，
+   这里只负责它在侧栏里的位置与间距 —— 组件不该知道自己在哪个布局里。
+
+   与品牌名「LLM Relay」的左缘对齐，而不是与 LR 圆标对齐：
+   .brand 的内边距 4px + 圆标 32px + 列间距 8px = 44px。
+   改 .brand 的任何几何尺寸都要同步这两个 44px。 */
+.brand-version-slot {
   align-self: flex-start; /* 侧栏是 flex 列，默认会拉通栏：改回贴内容宽 */
-  /* 与品牌名「LLM Relay」的左缘对齐，而不是与 LR 圆标对齐：
-     .brand 的内边距 4px + 圆标 32px + 列间距 8px = 44px。
-     改 .brand 的任何几何尺寸都要同步这两个 44px。 */
   margin-left: 44px;
   margin-top: -6px;       /* 抵掉 .brand 的 margin-bottom，避免双倍间距 */
   margin-bottom: var(--gap);
-  padding: 2px 8px;
-  font-family: var(--font-family-mono);
-  font-size: 11px;
-  line-height: 1.3;
-  color: var(--color-text-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-pill);
-  /* 与 margin-left 配对：异常长串在这里截断省略，不会溢出侧栏 */
+  /* 与 margin-left 配对：异常长串在组件内部截断省略，不会溢出侧栏 */
   max-width: calc(100% - 44px);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* 分隔线：品牌区（身份信息）与菜单区（导航）的分界。
    1px 通栏细线用边框色，不再发明新的灰 —— 和输入框、卡片描边同源；
-   上方间距来自 .brand-version 的 margin-bottom，这里只管下方。 */
+   上方间距来自 .brand-version-slot 的 margin-bottom，这里只管下方。 */
 .sidebar-divider {
   height: 1px;
   margin-bottom: var(--gap);
@@ -526,27 +511,53 @@ onUnmounted(() => {
   text-overflow: ellipsis;
 }
 
-/* 底部一行：收起侧栏（占满剩余宽度）+ 主题切换。
+/* 底部三个动作：收起侧栏 / 退出登录 / 主题切换。
    主题按钮原来在右上角顶栏里，顶栏去掉后放到这里 —— 换主题是「跟界面有关」
    的操作，跟导航放一起比飘在内容区右上角更顺。
-   收起态（56px 宽）放不下一行两项，改成竖排两枚图标。 */
+
+   竖排，不挤一行 —— 这是 2026-09-25 站主截图反馈「收…」「退…」文字被截断的修复。
+   页脚可用宽 176px（192 侧栏 − 左右各 8 内边距），原来是一行三项：
+   `flex: 1` 的两枚文字按钮 + 32px 灯泡 + 2×4px 间距 → 每枚文字按钮只分到 68px。
+   而一枚「收起侧栏」的完整内容宽是 101px（左内边距 10 + 图标 15 + 间距 8 +
+   文字 58 + 右内边距 10），文字被压到 25px，于是截断成「收…」
+   （渲染态实测：label scrollWidth 58 > clientWidth 25，两枚按钮都是）。
+   两枚并排无论如何都放不下（101×2 + 32 + 8 = 242 > 176），所以改成竖排：
+   两枚文字按钮各占满整栏（101px 内容 + 75px 余量），文字不再参与宽度争抢。
+
+   灯泡仍然贴右缘：与它在这一行里时的位置一致，右缘和两枚胶囊齐平。
+   收起态本来就是竖排三枚居中图标（ui-spec 第 18 条钉着那三处的中心线），
+   从此展开/收起是同一套排布，只是展开态文字可见。 */
 .sidebar-footer {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 4px;
   padding-top: var(--gap);
 }
 
-.sidebar-footer .console-menu-item { flex: 1; min-width: 0; }
+/* 占满整栏：标签有 75px 余量，不会再被省略号截断。
+   flex 显式写 0 0 auto —— 列方向下 flex: 1 是**纵向**拉伸，会把按钮撑高 */
+.sidebar-footer .console-menu-item {
+  flex: 0 0 auto;
+  width: 100%;
+}
 
+.sidebar-footer .nav-icon-btn {
+  align-self: flex-end;
+}
+
+/* 收起态（56px 宽，内容区 40px）放不下文字，只留图标 —— 三枚图标居中，
+   中心线统一落到中轴 28px（=56/2），与上面的菜单图标、LR 圆标同一条线 */
 .console-sidebar.is-collapsed .sidebar-footer {
-  flex-direction: column;
+  align-items: center;
   gap: var(--gap);
 }
 
 .console-sidebar.is-collapsed .sidebar-footer .console-menu-item {
-  flex: 0 0 auto;
   width: 32px;
+}
+
+.console-sidebar.is-collapsed .sidebar-footer .nav-icon-btn {
+  align-self: center;
 }
 
 /* ---------- 内容区 ---------- */

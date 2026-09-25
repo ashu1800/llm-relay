@@ -11,6 +11,12 @@ deploy/data/
 # ===== Go =====
 /backend/llm-relay
 /backend/server
+# 宿主侧更新器的构建产物。install.sh 把它装到 $INSTALL_DIR，
+# 而本地直接 go build ./cmd/updater 会落在包目录里 —— 9MB 的二进制
+# 不该跟着源码走。
+/backend/updater
+/backend/updater.exe
+/backend/llm-relay-updater
 /out/
 *.test
 *.out
@@ -28,6 +34,13 @@ backend/internal/web/dist/*
 
 # ===== 浏览器调试档案（UI 逆向时产生）=====
 .chrome-profile/
+.chrome-cdp/
+
+# ===== 参考实现（只读对照，不入库）=====
+# 实现版本更新功能时克隆 sub2api 到本地做对照。它是**别人**的完整源码树
+# （几十 MB、含自己的 .git），留在工作区里会让任何全仓搜索都返回一半
+# 无关结果，而它对使用者的价值是零。
+.tmp-sub2api/
 
 # ===== 日志与临时文件 =====
 *.log

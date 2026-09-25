@@ -14,6 +14,8 @@ import (
 	"llm-relay/internal/relay"
 	"llm-relay/internal/secure"
 	"llm-relay/internal/store"
+	"llm-relay/internal/update"
+	"llm-relay/internal/version"
 	"llm-relay/internal/web"
 )
 
@@ -40,6 +42,13 @@ type Deps struct {
 	Gate        *relay.ConcurrencyGate
 	// GroupLimit 是分组级的每分钟额度，与密钥级限流是两套独立的口子
 	GroupLimit *relay.GroupLimiter
+
+	// Update 是版本更新服务（检测 / 下载 / 替换 / 回滚）。
+	// 为 nil 时更新相关的接口回 501，而 /system/version 仍然可用 ——
+	// 「我现在跑的是哪一版」不该依赖更新功能是否启用。
+	// 更新器是否在场不再有独立探测：/update/check 的 can_apply 与
+	// Apply 的错误映射（ErrUpdaterUnavailable）就是答案。
+	Update *update.Service
 }
 
 // Server 持有 HTTP 层状态。
@@ -146,6 +155,7 @@ func (s *Server) registerAdminRoutes(r *gin.Engine) {
 	admin := r.Group("/api/admin", sameOriginOnly(), s.requireConsoleAuth(), limitAdminBody)
 	{
 		admin.GET("/system/info", s.systemInfo)
+		registerSystemRoutes(admin, s)
 		registerChannelRoutes(admin, s)
 		registerGroupRoutes(admin, s)
 		registerKeyRoutes(admin, s)
@@ -224,8 +234,11 @@ func UsingDefaultSecret(secret string) bool { return secret == defaultSecret }
 
 func (s *Server) systemInfo(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"name":          "llm-relay",
-		"version":       Version,
+		"name": "llm-relay",
+		// version 保持「完整版本号」，install.sh --verify 读的就是它。
+		// 徽标用的短版本号与构建形态走 /system/version（version 包是
+		// 唯一事实来源），不在这里重复一份。
+		"version":       version.Version,
 		"port":          s.deps.Config.Server.Port,
 		"started_at":    s.startedAt.UTC().Format(time.RFC3339),
 		"payload_store": s.deps.Config.Relay.PayloadStorageMode,
@@ -236,6 +249,3 @@ func (s *Server) systemInfo(c *gin.Context) {
 		"console_auth_enabled": s.consoleAuthEnabled(),
 	})
 }
-
-// Version 由构建时注入。
-var Version = "dev"

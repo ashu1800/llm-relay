@@ -373,32 +373,51 @@ else
   fi
 fi
 
-# ---------- 5.5 升级前自动备份数据库 ----------
-# 启动时后端会自动执行迁移（含改列、删表）。迁移一旦执行就是单向的，
-# 出问题时没有备份只能靠重新录配置。所以只要旧库还在，就先把整库导出来。
-log "备份现有数据库（迁移前的安全网）"
-if docker ps --format '{{.Names}}' | grep -qx "${APP_NAME}-postgres"; then
-  BACKUP_DIR="${INSTALL_DIR}/backups"
-  mkdir -p "$BACKUP_DIR"
-  # 备份里有全部渠道的上游密钥（密文）、渠道配置与请求日志，
-  # 目录与文件都收窄到属主可读可进：原来的默认权限（0755 目录 + 0644 文件）
-  # 让同机任何用户都能把整库读走。
-  chmod 700 "$BACKUP_DIR"
-  BACKUP_FILE="$BACKUP_DIR/pre-migrate-$(date +%Y%m%d-%H%M%S).sql"
-  # 用 pg_dump 做逻辑备份：与数据库版本无关，恢复时不必先建同名容器
-  if docker exec "${APP_NAME}-postgres" pg_dump -U "${DB_USER:-llmrelay}" -d "${DB_NAME:-llm_relay}" > "$BACKUP_FILE" 2>/dev/null; then
-    gzip -f "$BACKUP_FILE"
-    chmod 600 "${BACKUP_FILE}.gz"
-    log "已备份到 ${BACKUP_FILE}.gz（$(du -h "${BACKUP_FILE}.gz" | cut -f1)）"
-    log "恢复方式：见 deploy/restore.sh（备份在未压缩前也可直接用 psql 导入）"
-    # 只留最近 10 份，避免长期升级把磁盘占满
-    ls -1t "$BACKUP_DIR"/pre-migrate-*.sql.gz 2>/dev/null | tail -n +11 | xargs -r rm -f
+# ---------- 5.5 升级前数据库备份（默认关闭）----------
+#
+# 2026-09-25 站主要求：**以后每次部署都不需要备份**，并清掉了历史备份。
+#
+# 原来的行为是「只要旧库还在就先整库导出」，理由是启动时后端会自动跑迁移
+#（含改列、删表），迁移单向、出错只能靠重录配置。但实际代价很大：
+#   · 这份库含请求报文，实测一次导出 9.4G（压缩后 2.4G），
+#     而 backups/ 里攒了 12 份历史备份共 29G —— 部署本身只要几秒，
+#     备份却要几十秒且长期吃掉磁盘
+#   · 目录里同时混着多个「策略版本」的备份（有的压了有的没压），
+#     真要回滚时还得先分辨哪份是哪份
+#   · 站主自己的判断是：这台机器的数据不值那份备份的麻烦
+#
+# 所以默认**不备份**。需要时显式打开：
+#   DB_BACKUP=yes bash deploy/install.sh
+#
+# 保留代码而不是删掉，是因为「默认不备份」与「永远不能备份」是两件事 ——
+# 真到了要改列/删表的迁移，一个开关就能把它拿回来。但不再自动清理旧备份：
+# 清理逻辑本身就是那个「攒了 29G」的来源，留一份就留一份，由人决定何时删。
+DB_BACKUP="${DB_BACKUP:-no}"
+if [[ "$DB_BACKUP" == "yes" ]]; then
+  log "备份现有数据库（迁移前的安全网）"
+  if docker ps --format '{{.Names}}' | grep -qx "${APP_NAME}-postgres"; then
+    BACKUP_DIR="${INSTALL_DIR}/backups"
+    mkdir -p "$BACKUP_DIR"
+    # 备份里有全部渠道的上游密钥（密文）、渠道配置与请求日志，
+    # 目录与文件都收窄到属主可读可进：原来的默认权限（0755 目录 + 0644 文件）
+    # 让同机任何用户都能把整库读走。
+    chmod 700 "$BACKUP_DIR"
+    BACKUP_FILE="$BACKUP_DIR/pre-migrate-$(date +%Y%m%d-%H%M%S).sql"
+    # 用 pg_dump 做逻辑备份：与数据库版本无关，恢复时不必先建同名容器
+    if docker exec "${APP_NAME}-postgres" pg_dump -U "${DB_USER:-llmrelay}" -d "${DB_NAME:-llm_relay}" > "$BACKUP_FILE" 2>/dev/null; then
+      gzip -f "$BACKUP_FILE"
+      chmod 600 "${BACKUP_FILE}.gz"
+      log "已备份到 ${BACKUP_FILE}.gz（$(du -h "${BACKUP_FILE}.gz" | cut -f1)）"
+      log "恢复方式：见 deploy/restore.sh（备份在未压缩前也可直接用 psql 导入）"
+    else
+      rm -f "$BACKUP_FILE"
+      warn "数据库备份失败，继续安装（升级风险自担）"
+    fi
   else
-    rm -f "$BACKUP_FILE"
-    warn "数据库备份失败，继续安装（升级风险自担）"
+    log "没有正在运行的数据库容器，跳过备份（首次安装）"
   fi
 else
-  log "没有正在运行的数据库容器，跳过备份（首次安装）"
+  log "跳过数据库备份（默认行为；需要时用 DB_BACKUP=yes 打开）"
 fi
 
 # ---------- 5.8 计算版本号并写进 .env ----------
@@ -479,6 +498,34 @@ fi
 log "构建镜像（首次构建较慢，请耐心等待）"
 cd "$INSTALL_DIR/deploy"
 docker compose --env-file "$ENV_FILE" build || die "docker compose 构建失败，请查看上面的日志"
+
+# ---------- 6.2 构建宿主侧更新器 ----------
+#
+# 这个小程序让容器里的管理台能够一键更新自己（拉新镜像 / 用源码重新构建
+# → 重建容器 → 健康检查 → 失败自动回滚）。它的存在理由是一件容器模型
+# 决定的事：**容器里的进程替换不了自己** —— 写进去的新文件会在下一次
+# 重建容器时消失，而重建正是这次更新要做的动作。所以改镜像只能从宿主下手。
+#
+# 编译失败**不中断安装**：更新器是「更好用」而不是「能用」的前提 ——
+# 没有它，服务照常跑，只是管理台上的更新入口会显示成
+# 「未检测到宿主侧更新器」并给出安装提示（见后端 update 包的 applyMode）。
+# 为它中断一次完整的部署是不划算的。
+UPDATER_OK=no
+if command -v go >/dev/null 2>&1; then
+  log "构建宿主侧更新器 llm-relay-updater"
+  if ( cd "$INSTALL_DIR/backend" && \
+       GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" GOSUMDB=off CGO_ENABLED=0 \
+       go build -trimpath -ldflags="-s -w" -o /tmp/llm-relay-updater ./cmd/updater ) 2>&1 | tail -5; then
+    install -m 0755 /tmp/llm-relay-updater "$INSTALL_DIR/llm-relay-updater"
+    rm -f /tmp/llm-relay-updater
+    UPDATER_OK=yes
+    ok "更新器已构建：$INSTALL_DIR/llm-relay-updater"
+  else
+    warn "更新器编译失败，管理台将无法一键更新（服务本身不受影响）"
+  fi
+else
+  warn "未找到 go，跳过更新器构建；管理台将显示「未检测到宿主侧更新器」"
+fi
 
 # ---------- 6.5 切换前预检新镜像（不碰线上端口、不碰线上数据库）----------
 # 直接切过去再检查「起没起来」是不够的：新镜像如果启动就崩（迁移写错、
@@ -652,6 +699,75 @@ if ! systemctl show -p ExecStop --value llm-relay.service 2>/dev/null | grep -q 
   fi
 fi
 
+# ---------- 7.2 注册宿主侧更新器服务 ----------
+#
+# 让容器里的管理台能一键更新自己。它是宿主上的一个常驻小服务，
+# 监听 /run/llm-relay-updater.sock，收到请求后执行
+# 「取新版本 → 重建容器 → 健康检查 → 失败自动回滚」。
+#
+# 更新策略按部署形态定：
+#
+#   build  源码就在这台机器上（install.sh 的部署方式）。更新 = git pull
+#          + docker compose build。这是本项目的默认形态 —— 源码目录
+#          是 /opt/llm-relay，而 docker-compose 里 app 的 build context
+#          就是它。
+#   image  从远端镜像仓库拉取。适合「镜像来自 GHCR、机器上不留源码」
+#          的部署，用 RELAY_UPDATE_STRATEGY=image 显式打开。
+#
+# 判错的后果是「点更新成功但版本没变」，所以这里默认取 build ——
+# 它对应本脚本实际做出来的那种部署。
+UPDATER_STRATEGY="${RELAY_UPDATE_STRATEGY:-build}"
+UPDATER_IMAGE="${RELAY_UPDATE_IMAGE:-llm-relay:local}"
+# 发布源仓库。strategy=build 时更新器会从这里下载源码归档并重新构建。
+# 允许覆盖是因为可能有 fork 或私有镜像（此时通常也会一起改 strategy）。
+UPDATER_REPO="${RELAY_UPDATE_REPO:-ashu1800/llm-relay}"
+
+if [[ "$UPDATER_OK" == "yes" ]]; then
+  log "注册 llm-relay-updater.service（策略：$UPDATER_STRATEGY）"
+  # 单元模板在 deploy/llm-relay-updater.service，占位符在这里替换。
+  # 用占位符而不是让模板带 shell 展开：systemd 不认 ${VAR:-默认值}
+  # 那种写法，会把它原样当成参数值。
+  UPDATER_UNIT_SRC="$INSTALL_DIR/deploy/llm-relay-updater.service"
+  if [[ -f "$UPDATER_UNIT_SRC" ]]; then
+    sed -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" \
+        -e "s|__STRATEGY__|$UPDATER_STRATEGY|g" \
+        -e "s|__IMAGE__|$UPDATER_IMAGE|g" \
+        -e "s|__REPO__|$UPDATER_REPO|g" \
+        "$UPDATER_UNIT_SRC" > /etc/systemd/system/llm-relay-updater.service
+    if grep -q '__INSTALL_DIR__\|__STRATEGY__\|__IMAGE__\|__REPO__' /etc/systemd/system/llm-relay-updater.service; then
+      warn "更新器单元里仍有未替换的占位符，跳过安装"
+      UPDATER_OK=no
+    else
+      systemctl daemon-reload
+      systemctl enable llm-relay-updater.service >/dev/null 2>&1 || true
+      # restart 而不是 start：单元文件刚被重写过，而 enable --now
+      # 对已激活的单元是空操作，会导致新参数不生效（与上面
+      # llm-relay.service 那段踩过的是同一个坑）
+      if systemctl restart llm-relay-updater.service 2>/dev/null; then
+        # 等 socket 出现再判定成功。只看 "systemctl is-active" 是不够的：
+        # 服务可能活着但 socket 建失败了（目录权限、路径被占）
+        UPDATER_READY=no
+        for _ in $(seq 1 10); do
+          [[ -S /run/llm-relay-updater.sock ]] && { UPDATER_READY=yes; break; }
+          sleep 1
+        done
+        if [[ "$UPDATER_READY" == "yes" ]]; then
+          ok "更新器已就绪：/run/llm-relay-updater.sock"
+        else
+          warn "更新器进程起来了，但 socket 未出现；查看：journalctl -u llm-relay-updater -n 30"
+          UPDATER_OK=no
+        fi
+      else
+        warn "更新器服务启动失败；查看：journalctl -u llm-relay-updater -n 30"
+        UPDATER_OK=no
+      fi
+    fi
+  else
+    warn "找不到单元模板 $UPDATER_UNIT_SRC，跳过更新器安装"
+    UPDATER_OK=no
+  fi
+fi
+
 # 切换期间用探针量一次真实中断时长：/healthz 每 100ms 打一次，
 # 统计最长的连续失败窗口（探测间隔本身有误差，报的是上界）。
 # 同时记下数据库容器的身份：切换后要对得上，才说明「只换了 app」。
@@ -815,6 +931,14 @@ if [[ "${PG_UNTOUCHED:-no}" == "yes" ]]; then
 else
   echo " 数据库     : 容器发生了重启 —— 若并非所愿，检查是否有人手动 down 过"
 fi
+# 更新器状态：它决定管理台里那个「一键更新」按钮能不能用。
+# 装失败不影响服务本身，所以这里如实报告而不是报警告性错误。
+if [[ "${UPDATER_OK:-no}" == "yes" ]]; then
+  echo " 在线更新   : 已启用（策略：${UPDATER_STRATEGY:-build}）"
+  echo "              在管理台左侧栏点版本号 → 检测到新版本时可直接一键更新"
+else
+  echo " 在线更新   : 不可用 —— 管理台会显示原因与修复方式（不影响服务运行）"
+fi
 if [[ -n "${DOWNTIME_MS:-}" && "$DOWNTIME_MS" != "0" ]]; then
   echo " 本次切换   : 最长中断约 ${DOWNTIME_MS}ms（/healthz 每 100ms 探测一次，含探测误差）"
 elif [[ "${DOWNTIME_MS:-}" == "0" ]]; then
@@ -855,4 +979,8 @@ echo "   systemctl status llm-relay"
 echo "   systemctl restart llm-relay"
 echo "   cd $INSTALL_DIR/deploy && docker compose logs -f app"
 echo "   cd $INSTALL_DIR/deploy && docker compose down"
+if [[ "${UPDATER_OK:-no}" == "yes" ]]; then
+  echo "   systemctl status llm-relay-updater      # 在线更新器（管理台一键更新靠它）"
+  echo "   journalctl -u llm-relay-updater -f      # 更新过程中的实时日志"
+fi
 echo "============================================================"

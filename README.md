@@ -156,6 +156,13 @@
   默认 7 天），轮换密钥即全体下线；登录接口带按 IP 的暴力破解限流，
   WebSocket 实时推送与全部管理接口同受保护。未设置该密钥时鉴权关闭
   （只绑回环的本地部署不受影响），启动日志与界面横幅持续提醒
+- **在线版本检查与一键更新**：侧栏品牌下方常驻一枚版本徽标，点开可看到
+  当前版本、检测新版本、一键更新与回滚。按部署形态自动选择更新方式 ——
+  容器部署由宿主侧更新器（`llm-relay-updater`，走 unix socket）代为
+  「取新版本 → 重建容器 → 健康检查 → 失败自动回滚」，二进制部署则直接
+  替换自己的可执行文件后由 systemd 拉起；源码构建只提示不自动更新。
+  检测结果服务端缓存 20 分钟，且**检测不成功时明说「未能确认」**，
+  不会把一次失败的请求显示成「已是最新」。详见「在线更新」一节
 - **无充值 / 无金额系统**：金额只做成本感知，不参与任何扣减
 
 ## 目录结构
@@ -164,6 +171,7 @@
 llm-relay/
 ├── backend/                    Go 1.25 + Gin 后端
 │   ├── cmd/server/             程序入口
+│   ├── cmd/updater/            宿主侧更新器（容器一键更新靠它，见「在线更新」）
 │   └── internal/
 │       ├── api/                HTTP 路由与处理
 │       ├── config/             配置加载（YAML + 环境变量覆盖）
@@ -173,10 +181,12 @@ llm-relay/
 │       ├── pricing/            单价解析与成本计算
 │       ├── proxy/              出站代理（socks5/http/https）与连通性测试
 │       ├── secure/             AES-GCM 加密与密钥哈希
+│       ├── version/            版本号与构建形态（单一来源，见「版本号」）
+│       ├── update/             版本检测、下载校验、自替换与回滚
 │       └── web/                前端产物 embed
 ├── frontend/                   Vue 3 + Vite + Ant Design Vue 4
 │   └── src/
-│       ├── components/         MainLayout / PanelCard / StatCard / PageToolbar
+│       ├── components/         MainLayout / PanelCard / StatCard / VersionBadge
 │       ├── views/              各功能页面
 │       ├── stores/             主题等状态
 │       └── styles/theme.css    设计令牌（实测自参考站）
@@ -185,10 +195,17 @@ llm-relay/
 │   ├── docker-compose.yml      app + postgres
 │   ├── .env.example            部署配置模板
 │   ├── install.sh              一键部署脚本（Docker）
-│   └── install-bare.sh         无 Docker 部署脚本（systemd 直跑）
+│   ├── install-bare.sh         无 Docker 部署脚本（systemd 直跑）
+│   ├── llm-relay.service       app 的 systemd 单元
+│   └── llm-relay-updater.service  宿主侧更新器的 systemd 单元
+├── .github/workflows/
+│   ├── release.yml             tag 触发：归档 + Release + 多架构镜像
+│   └── ci.yml                  push/PR：后端 vet+test、前端 type-check+build
+├── Makefile                    version / build / test / release-snapshot
 ├── scripts/
 │   ├── capture-ui.mjs          CDP 抓取参考站计算样式
 │   ├── capture-layout.mjs      CDP 深度抓取 DOM 与 class 规格
+│   ├── verify-version-ui.mjs   CDP 验证版本徽标与更新面板
 │   └── screenshot.mjs          CDP 页面截图
 └── docs/
     ├── ui-spec.md              UI 规格书（实测数据）
@@ -337,8 +354,16 @@ Ctrl+C、SSH 断开、或被关机信号打断时，都会打印一份当前状�
 
 ### 版本号
 
-版本号的**单一来源是 git**，不是手写常量 —— 手写的迟早和实际代码对不上，
-而「界面上显示的版本是不是正在跑的那份代码」正是它唯一要回答的问题。
+版本号的**单一来源是 `backend/internal/version` 包**，按优先级取三处：
+
+| 优先级 | 来源 | 用在什么场合 |
+|---|---|---|
+| 1 | `-ldflags -X llm-relay/internal/version.Version=...` | 正式发布、`install.sh` 部署、`make build` |
+| 2 | `//go:embed VERSION` 文件 | 直接 `go build` 时兜底，值形如 `0.1.0` |
+| 3 | `dev` | 以上都没有 |
+
+必须有兜底：手写的版本常量迟早和实际代码对不上，而「界面上显示的版本
+是不是正在跑的那份代码」正是它唯一要回答的问题。
 
 `install.sh` 在部署时用 `git describe` 算出版本号，写进 `.env` 的 `VERSION`，
 经 `docker-compose` 的 build arg 传到 `Dockerfile` 的 `-ldflags`，编进二进制。
@@ -355,10 +380,8 @@ Ctrl+C、SSH 断开、或被关机信号打断时，都会打印一份当前状�
 | `unknown` | 不是 git 仓库（例如拿一份导出源码去部署） |
 
 带提交数与哈希是有意的：否则改了代码但没打新 tag 时，版本号会一动不动，
-看着像部署没成功。
-
-显示位置在侧栏品牌下方（等宽字体，长版本号截断 + 悬停看全），取不到就不显示。
-它是搭已有的 `/system/info` 请求顺路带回来的，不额外发请求。
+看着像部署没成功。界面上显示的是「简写」形式（`v0.1.0-3`，去掉
+`-g<hash>-dirty` 这些构建细节），悬停可看完整值。
 
 确认线上版本：
 
@@ -369,6 +392,159 @@ curl -s -c /tmp/jar -X POST http://127.0.0.1:8888/api/admin/auth/login \
 curl -s -b /tmp/jar http://127.0.0.1:8888/api/admin/system/info | python3 -m json.tool
 ```
 
+## 在线更新
+
+管理台侧栏品牌下方那枚版本徽标就是更新入口。点开它可以看到当前版本、
+检测新版本、一键更新、以及回滚。
+
+### 三种部署形态，三种更新方式
+
+版本徽标旁边的「更新」能力**取决于这份程序是怎么部署的**。后端启动时
+自动判定形态（容器里看到 `/.dockerenv` 即判为 `docker`），也可以由
+构建时的 `-ldflags` 显式指定：
+
+| 形态 | 判定方式 | 一键更新 | 原因 |
+|---|---|---|---|
+| `docker` | 容器内自动识别 | 由**宿主侧更新器**代为执行 | 容器里的进程换不掉自己的镜像 |
+| `binary` | `install-bare.sh` 显式注入 | 直接替换自己的可执行文件 | 有文件系统权限，`systemd` 负责拉起 |
+| `source` | 兜底 | **不允许** | 避免用官方二进制覆盖开发者本地的构建产物 |
+
+`source` 形态下界面会说明原因并给出命令，而不是显示一个点了没反应的按钮。
+
+### 为什么容器更新需要宿主侧更新器
+
+一个容器里的进程没有办法更新自己：它可以下载新版本、可以写文件，
+但**那些改动会在下一次重建容器时全部消失** —— 而重建容器正是这次更新
+要做的动作。这是容器模型本身决定的，不是实现上的偷懒。
+
+所以 `install.sh` 会在宿主机上装一个常驻小程序 `llm-relay-updater`
+（systemd 服务 `llm-relay-updater.service`），它监听
+`/run/llm-relay-updater.sock`，收到请求后执行：
+
+```
+记录当前镜像（回滚依据）→ 取新版本 → 重建容器 → 健康检查 → 失败自动回滚
+```
+
+「失败自动回滚」是这套流程里最重要的一环：一次坏的更新如果留在原地，
+用户面对的是一个起不来的服务，而修复它需要登上服务器 —— 那正是这个
+功能想避免的场景。
+
+### 两种更新策略
+
+| 策略 | 做什么 | 适用 |
+|---|---|---|
+| `build`（默认） | 下载目标版本的**源码归档** → 覆盖源码 → `docker compose build` → 重建 | 源码就在这台机器上（`install.sh` 的部署方式） |
+| `image` | `docker pull` 新镜像 → 重建 | 镜像来自 GHCR、机器上不留源码 |
+
+用 `build` 而不是 `git pull` 是有原因的：安装目录里**没有 `.git`**
+（`install.sh` 把源码 tar 过去时显式排除了它，避免让构建上下文变大）。
+而且 tarball 是**不可变**的 —— 它对应一个确切的 tag，而 `git pull`
+拿到的是分支最新提交，「我更新到了哪一版」的答案会随时间变化。
+
+> **重建时必须显式传入目标版本号。** compose 文件里 `build.args.VERSION`
+> 的插值来源是安装目录的 `deploy/.env`，而那个文件是 `install.sh` 写的，
+> 更新器刻意不动它（里面有数据库密码与主密钥）。不覆盖的话会是这样：
+> 新镜像里编的还是**更新前**的版本号 → 界面版本号纹丝不动 →
+> 「已是最新」判断永远为 false → 用户每次点更新都真的重建一遍（几分钟），
+> 却看不出任何变化。
+>
+> 更新器的做法是用环境变量覆盖插值（compose 的优先级是
+> 进程环境 > `.env` 文件），而不是去改 `.env`。这个缺陷只有等仓库
+> 真正发布过之后才会暴露 —— 在那之前更新在第一步就失败了。
+
+策略由 `install.sh` 按部署形态写好，也可在服务器上覆盖：
+
+```bash
+# 换成从镜像仓库更新
+RELAY_UPDATE_STRATEGY=image RELAY_UPDATE_IMAGE=ghcr.io/ashu1800/llm-relay:latest \
+  bash /opt/llm-relay/deploy/install.sh
+```
+
+### 检测与限额
+
+检测走 GitHub Releases API。**未配 token 时限额只有每小时 60 次**，
+因此：
+
+- 只在打开面板时才检测，关闭状态下不发请求；
+- 结果在服务端缓存 20 分钟（点刷新可跳过缓存）；
+- 上游是 GitHub 不可达时，面板显示「未能确认是否最新」——
+  不会谎称「已是最新」。这个区分很重要：前者要你去看网络，
+  后者让你安心走开。
+
+如果所在网络访问 GitHub 不稳定，可以在 `系统设置 → 版本更新` 里配
+代理或填一个 token（token 只发往 `api.github.com`，跨域重定向时会被
+主动剥掉）。
+
+### 回滚
+
+| 形态 | 依据 | 说明 |
+|---|---|---|
+| `docker` | 更新器在动手前打上的**回滚标签**（`llm-relay:rollback`） | 跨更新器重启依然可用，也不受镜像回收影响 |
+| `binary` | 可执行文件旁的 `.backup` 文件 | 回滚本身也可撤销（会留 `.rollback-from`） |
+
+容器形态为什么需要一个标签，而不是「记下旧镜像的 ID」—— 这一点是实测
+才发现的，值得写下来：
+
+> Docker 29 默认用 containerd snapshotter。`docker compose build` 把
+> `llm-relay:local` 这个 tag 指向新镜像之后，**旧镜像会被回收**：
+> 容器因为持有自己的快照仍能继续跑（服务看着没事），但
+> `docker image inspect <旧 ID>` 从此失败，
+> `RELAY_IMAGE=<旧 ID> docker compose up` 直接报 `No such image`。
+>
+> 也就是说：如果回滚依据是一个裸的 content ID，那句
+> 「更新失败，正在自动回滚」**注定失败** —— 而这恰恰是它最该起作用的时刻。
+
+标签是对镜像的一次引用，有引用的镜像不会被回收；而且它是一个稳定的
+**名字**，不受后续 tag 重新指向的影响。用固定的标签名（而不是带时间戳的）
+是有意的：每次更新覆盖它，于是它始终精确表示「上一个版本」，也不会让
+镜像无限堆积。
+
+同理，容器的回滚依据**刻意不落盘成状态文件**：一个能在「更新到一半断电」
+后幸存的文件，会留下一条指向未知状态的记录，而那比没有记录更危险。
+镜像标签是 Docker 自己管理的引用，天然满足「要么在、要么不在」。
+
+面板里还会列出「比当前版本旧、且非预发布」的历史版本，可以选一个回滚。
+若自动更新不可用（没有更新器），那里会给出可复制的命令。
+
+### 版本号是怎么进到镜像里的
+
+宿主侧更新器需要回答两个问题：「当前跑的是哪一版」、「新镜像建对了没有」。
+答案是镜像标签 `org.opencontainers.image.version` 与 `/app/version.txt`
+（同一个值，见 `deploy/Dockerfile`），**不经过 HTTP**：
+
+- 那张标签不需要任何凭据。早先的实现读 `/api/admin/system/version`，
+  而那个接口要登录 —— 更新器没有会话，实测 401，于是
+  「已是最新，无需重建」这条捷径从来没生效过。
+- 更要紧的是，问 HTTP 等于问一个**可能正躺着**的服务。更新器最需要
+  知道版本的时刻恰恰是服务起不来的时候，那时 HTTP 必然不通。
+
+更新器在重建前后各读一次标签，因此它能确认「新镜像确实带着目标版本号」。
+少了这一步，一个把版本号编错的更新会一路走到「更新完成」并显示那个
+纹丝不动的版本号 —— 用户唯一的感受是「点了没用」，而日志里全是成功。
+
+### 发布流程（本仓库维护者）
+
+```bash
+git tag -a v0.1.2 -m "v0.1.2" && git push origin v0.1.2
+```
+
+tag 触发 `.github/workflows/release.yml`，它会：
+
+1. 跑测试，并把版本号写进 `backend/internal/version/VERSION`；
+2. 用 goreleaser 构建 5 个平台的归档 + `checksums.txt`，创建 Release；
+3. 构建多架构镜像推到 `ghcr.io/ashu1800/llm-relay`（`:v0.1.2` 与 `:latest`）；
+4. 把 `VERSION` 回写到主分支，让下次构建的兜底版本号跟上。
+
+产物命名是硬契约，更新器按它拼下载地址：
+
+```
+llm-relay_<版本>_<系统>_<架构>.tar.gz     # windows 用 .zip，版本号不带 v
+  └── llm-relay / llm-relay.exe          # 归档内只有这一个可执行文件
+checksums.txt                            # sha256，两空格分隔
+```
+
+也可以在本机试跑：`make release-snapshot`（需先装 goreleaser）。
+
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |
@@ -378,6 +554,9 @@ curl -s -b /tmp/jar http://127.0.0.1:8888/api/admin/system/info | python3 -m jso
 | `USE_PROXY` | `auto` | `auto` / `yes` / `no` |
 | `UPSTREAM_SOCKS` | 见脚本 | socks5 上游（优先使用） |
 | `UPSTREAM_HTTP` | 见脚本 | http 代理（备用） |
+| `RELAY_UPDATE_STRATEGY` | `build` | 宿主侧更新器的更新策略：`build` / `image` |
+| `RELAY_UPDATE_IMAGE` | `llm-relay:local` | `image` 策略下要拉取的镜像名 |
+| `RELAY_UPDATE_REPO` | `ashu1800/llm-relay` | 发布源仓库（`owner/name`） |
 
 ## 无 Docker 部署
 
@@ -701,7 +880,24 @@ node .shots/verify-live-status.mjs          # 实时状态行：首屏「实时 
 node .shots/verify-live-disconnect.mjs      # 断线指示的另一半：杀掉实例后灯必须真的转红
                                             # （用写死的绿灯也能骗过上一项），拉起来后自动恢复
 node .shots/verify-ws-heartbeat.mjs 8899 60 # 心跳帧本身：60 秒窗口内按 25 秒节拍到达、
-                                            # 是空帧、不超上界（走服务的临时实例，见下）
+                                            # 是空帧、不超上限（走服务的临时实例，见下）
+node scripts/verify-version-ui.mjs          # 版本徽标与更新面板：徽标可见、只出现一次版本号、
+                                            # 面板 teleport 到 body 后不再被侧栏的 overflow 裁掉、
+                                            # 展开回滚区后仍在视口内、正文可滚动、
+                                            # 且「检测失败」时不许出现绿勾与「已是最新」
+bash scripts/drill-rollback.sh              # 回滚端到端（**会重建镜像与容器**，别在意的机器上跑）：
+                                            # 切到一个「有问题的新版」→ 经 unix socket 调
+                                            # POST /rollback → 断言容器真的回到回滚标签所指的
+                                            # 镜像、版本号一致、服务健康；跑完自动把
+                                            # llm-relay:local 恢复成真实版本
+bash scripts/verify-release-artifacts.sh    # 产物命名契约（**本机需装 goreleaser**，会真跑一次
+                                            # snapshot 构建）：归档名必须是
+                                            # llm-relay_<版本>_<系统>_<架构>.tar.gz（windows 用
+                                            # .zip）、内含可执行文件 llm-relay、checksums.txt 是
+                                            # sha256 两列格式、且 deploy/ 下 install.sh 要用到的
+                                            # 文件（含 llm-relay-updater.service）都在归档里。
+                                            # 这个契约跨 Go 模板 / YAML / shell 三处，读配置看不出
+                                            # 对错 —— 一旦漂了，第一次发布时所有平台的下载都会 404
 node .shots/verify-focus-ring.mjs           # 键盘焦点环：Tab 走查 6 个路由，断言全部落点
                                             # 只有一套环、没有一个是看不见的（画在 0×0 或
                                             # opacity:0 的元素上就算看不见），且环色对 halo
@@ -721,15 +917,26 @@ node .shots/verify-multiplier-precision.mjs # 倍率四位小数（界面侧）�
                                             # 定价胶囊 → 固定倍率框键入 0.1875 → **失焦**
                                             # 后仍是 0.1875（老代码在这里被舍成 0.19）
 
-# 量「差几像素」的那几处对齐（ui-spec 第 18 条）。这类问题肉眼看得见、说清很难，
+# 量「差几像素」的那几处对齐（ui-spec 第 18、19 条）。这类问题肉眼看得见、说清很难，
 # 所以脚本直接把盒模型摊开：左右留白各是多少、中心线落在哪
-node .shots/measure-sidebar.mjs             # 收起态侧栏：图标 / 圆标 / 底部两枚按钮的中心线
+node .shots/measure-sidebar.mjs             # 侧栏：图标 / 圆标 / 底部三枚按钮的中心线
                                             # 是否都落在中轴（窄视口下侧栏默认收起，脚本先看状态）
 node .shots/measure-think-pill.mjs max      # 思考档位胶囊**真正渲染出去**的颜色与对比度
                                             # （三处 color-mix 都从基色算出来，只看基色看不出结果），
                                             # 浅深两个主题各截一张图
 node .shots/check-table-tags.mjs            # 各列表页 td 里的标签是否居中 —— antd 给 .ant-tag
                                             # 默认带了 8px 右边距，单标签格会因此偏左 4px
+node .shots/verify-sidebar-footer.mjs       # 侧栏底部两枚文字按钮不被截断（2026-09-25 站主截图
+                                            # 反馈的「收…」「退…」）：展开态标签 scroll ≤ client
+                                            # 且容得下文字实宽、两枚等宽左缘对齐；收起态三枚
+                                            # 图标中心线都落在中轴（ui-spec 第 19 条）
+node .shots/verify-sidebar-theme-btn.mjs    # 页脚三个动作的命中区：灯泡 / 收起侧栏 / 退出登录
+                                            # 用 CDP 真实鼠标事件点，断言命中的不是被邻居盖住的
+                                            # 图层，且点灯泡真的切换主题并落盘
+node .shots/repro-sidebar-footer.mjs        # 页脚盒模型摊开（量「差几像素」时用）：
+                                            # 每个按钮的宽度 / 标签 client 与 scroll / 是否截断
+node .shots/verify-sidebar-short.mjs        # 矮视口（420/520/620 高）下页脚变高没有顶掉菜单：
+                                            # 菜单与页脚不重叠、滚到底三枚动作都在视口内
 ```
 
 三者都会往 `request_logs` 插探针行（trace_id 前缀 `logfx-probe` /

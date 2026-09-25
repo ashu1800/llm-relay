@@ -6,15 +6,99 @@ import {
   DownloadOutlined, UploadOutlined
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
+import { versionApi, type UpdateConfig } from '@/api/version'
 import DataState from '@/components/DataState.vue'
 import LogFxPreview from '@/components/LogFxPreview.vue'
 import { useLogFxStore } from '@/stores/logFx'
+import { useVersionStore } from '@/stores/version'
 import { fmtTime } from '@/utils/fmtTime'
 
 // 请求日志的入场动效：这一个不是只读的运行参数，而是可以在这里改的浏览器本地偏好
 // （存 localStorage，与主题、每页条数同一口径）。档位表与持久化都在 utils/effects.ts，
 // store 是看板那一块与这一页共用的同一个实例，所以在这里点一下，回看板立刻生效。
 const logFx = useLogFxStore()
+
+// ---- 版本更新设置 ----
+//
+// 这里改的是「检测更新」这个行为本身：开关、发布源、出站代理、GitHub token。
+// 保存后要让版本 store 重新拉一次状态（徽标的可用性可能变了），
+// 并清掉已缓存的检测结果 —— 换了仓库却还显示旧仓库的结论会很误导。
+const versionStore = useVersionStore()
+const updateCfg = ref<UpdateConfig | null>(null)
+const updateSaving = ref(false)
+const updateMsg = ref('')
+const updateForm = ref({ enabled: true, repo: '', proxy: '', token: '' })
+
+async function loadUpdateCfg() {
+  try {
+    const cfg = await versionApi.getConfig()
+    updateCfg.value = cfg
+    updateForm.value = {
+      enabled: cfg.enabled,
+      repo: cfg.repo,
+      proxy: cfg.proxy,
+      // token 永不回显：后端只回 has_token 这个布尔位。
+      // 留空表示「不修改」，而不是「清空」—— 两者的区别见下面 clearUpdateToken
+      token: ''
+    }
+  } catch {
+    // 更新服务可能整体不可用（例如二进制/源码部署时被关掉）。
+    // 这里不报错：这一页还有别的设置，为一个可选功能打断整页不合理
+    updateCfg.value = null
+  }
+}
+
+async function saveUpdateCfg() {
+  updateSaving.value = true
+  updateMsg.value = ''
+  try {
+    await versionApi.saveConfig({
+      enabled: updateForm.value.enabled,
+      repo: updateForm.value.repo.trim(),
+      proxy: updateForm.value.proxy.trim(),
+      // 空串不发出去：后端按「字段缺失 = 不修改」处理，这样
+      // 「没动 token 输入框」就不会把已配置的 token 清掉
+      ...(updateForm.value.token.trim() ? { token: updateForm.value.token.trim() } : {})
+    })
+    updateMsg.value = '已保存'
+    await loadUpdateCfg()
+    // 换了仓库或代理之后，之前那份检测结果已经不适用了
+    versionStore.clearCheck()
+    void versionStore.fetchInfo()
+    message.success('版本更新设置已保存')
+  } catch (e: any) {
+    updateMsg.value = ''
+    message.error(e?.message || '保存失败')
+  } finally {
+    updateSaving.value = false
+  }
+}
+
+async function clearUpdateToken() {
+  updateSaving.value = true
+  updateMsg.value = ''
+  try {
+    // 显式传空串表达「清掉它」。
+    //
+    // 这里必须用空串而不是 null：Go 把 JSON 的 null 和「字段不存在」都
+    // 解析成 nil 指针，服务端区分不了，于是 null 会被当成「不修改」，
+    // 清除操作静默失效 —— 界面上会看到「已清除」的提示，而 token 还在。
+    await versionApi.saveConfig({
+      enabled: updateForm.value.enabled,
+      repo: updateForm.value.repo.trim(),
+      proxy: updateForm.value.proxy.trim(),
+      token: ''
+    })
+    updateForm.value.token = ''
+    updateMsg.value = 'Token 已清除'
+    await loadUpdateCfg()
+    message.success('Token 已清除')
+  } catch (e: any) {
+    message.error(e?.message || '清除失败')
+  } finally {
+    updateSaving.value = false
+  }
+}
 
 const loading = ref(false)
 // 这一页加载的是「多项设置」而不是列表，没有 length 可数，
@@ -184,7 +268,12 @@ function sumOf(m: Record<string, number>) {
   return Object.values(m).reduce((a, b) => a + b, 0)
 }
 
-onMounted(load)
+onMounted(() => {
+  void load()
+  // 更新设置独立加载：更新服务可能整体不可用（源码部署等），
+  // 那种情况下其余设置仍应正常显示
+  void loadUpdateCfg()
+})
 </script>
 
 <template>
@@ -323,6 +412,69 @@ onMounted(load)
         会话时长可用 <span class="mono">RELAY_SESSION_TTL</span>（Go duration 写法，默认 168h，上限 720h）调整。
         经 HTTPS 反代部署时登录 Cookie 自动附加 Secure 标志。
       </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title">版本更新</div>
+      <!-- 更新检测的来源与凭据。侧栏那枚版本徽标是操作入口，
+           这里是它背后的设置 —— 为什么需要设置见下面的说明文字。 -->
+      <div v-if="!updateCfg" class="dim">正在加载…</div>
+      <template v-else>
+        <div class="auth-line">
+          <a-tag :color="updateCfg.enabled ? 'green' : 'default'">
+            {{ updateCfg.enabled ? '检测已启用' : '检测已关闭' }}
+          </a-tag>
+          <a-tag :color="updateCfg.has_token ? 'green' : 'orange'">
+            {{ updateCfg.has_token ? '已配 Token' : '未配 Token（限额 60 次/时）' }}
+          </a-tag>
+          <span class="mono dim">{{ updateCfg.repo }}</span>
+        </div>
+
+        <a-form layout="vertical" class="upd-form" @submit.prevent="saveUpdateCfg">
+          <a-form-item label="检测新版本">
+            <a-switch v-model:checked="updateForm.enabled" />
+            <span class="dim upd-hint">关闭后不发任何外部请求，版本徽标只显示当前版本</span>
+          </a-form-item>
+
+          <a-form-item label="发布源仓库">
+            <a-input v-model:value="updateForm.repo" :placeholder="updateCfg.repo_default" class="mono" />
+            <span class="dim upd-hint">形如 owner/name。换成本仓库的 fork 时填这里</span>
+          </a-form-item>
+
+          <a-form-item label="出站代理（可选）">
+            <a-input v-model:value="updateForm.proxy" placeholder="socks5://127.0.0.1:1080 或 http://…" class="mono" />
+            <span class="dim upd-hint">
+              留空即直连。国内网络访问 GitHub 不稳定时填它，
+              更新时的下载也走同一个代理
+            </span>
+          </a-form-item>
+
+          <a-form-item label="GitHub Token（可选）">
+            <a-input-password
+              v-model:value="updateForm.token"
+              :placeholder="updateCfg.has_token ? '已配置，留空则不修改' : 'ghp_… 或 github_pat_…'"
+              class="mono"
+            />
+            <span class="dim upd-hint">
+              只为提高 API 限额（匿名每小时 60 次）。它<strong>只发往 api.github.com</strong>：
+              请求被重定向到别的域名时会被主动剥掉，因此不必担心它跟着跳到别处
+            </span>
+          </a-form-item>
+
+          <div class="upd-actions">
+            <a-button type="primary" :loading="updateSaving" @click="saveUpdateCfg">保存</a-button>
+            <a-button
+              v-if="updateCfg.has_token"
+              danger
+              :loading="updateSaving"
+              @click="clearUpdateToken"
+            >
+              清除 Token
+            </a-button>
+            <span v-if="updateMsg" class="dim">{{ updateMsg }}</span>
+          </div>
+        </a-form>
+      </template>
     </section>
 
     <section class="panel">
@@ -489,4 +641,15 @@ onMounted(load)
   background: var(--color-bg); font-size: 12px; line-height: 1.8;
   color: var(--color-text-secondary);
 }
+
+/* ---- 版本更新设置 ---- */
+/* 表单限制最大宽度：这几个输入框（代理地址、token）都很长，
+   在宽屏上让它们横跨整个面板既难读，也让人以为要填很多东西 */
+.upd-form { max-width: 560px; }
+.upd-form :deep(.ant-form-item) { margin-bottom: 14px; }
+.upd-form :deep(.ant-form-item-label) { padding-bottom: 2px; }
+/* 提示文字要单独占一行。它跟在控件后面，而 .dim 是 12px 的行内元素 ——
+   不换行的话会紧贴在输入框右侧，与它的说明对象脱开 */
+.upd-hint { display: block; margin-top: 4px; line-height: 1.7; }
+.upd-actions { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
 </style>

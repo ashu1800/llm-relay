@@ -59,7 +59,14 @@ services:
       dockerfile: deploy/Dockerfile
       args:
         VERSION: ${VERSION:-dev}
-    image: llm-relay:local
+    # 镜像名走变量，默认值就是原来的 llm-relay:local。
+    #
+    # 之所以要能覆盖：宿主侧更新器回滚时需要用**旧镜像**重建容器，
+    # 而它不被允许修改这个 compose 文件（一个后台服务去改站主维护的
+    # 配置文件，会让「文件内容」与「谁改的」变得难以追溯）。
+    # 有了这个变量，更新器就能用 RELAY_IMAGE=<旧镜像 ID> 重建，
+    # 而文件本身一个字节都不动。
+    image: ${RELAY_IMAGE:-llm-relay:local}
     container_name: llm-relay
     restart: unless-stopped
     # host 网络模式 —— 这是为了根治「每次部署后浏览器打不开 localhost:8888」。
@@ -135,6 +142,33 @@ services:
     # 默认 127.0.0.1 与原先 ports 的回环绑定同义。
     volumes:
       - ./data/relay:/data
+      # 宿主侧更新器的 unix socket。
+      #
+      # 这是「容器里点一下就能更新自己」的全部机制：管理台经这个 socket
+      # 请宿主上的 llm-relay-updater 去拉镜像、重建容器。容器内的进程
+      # 替换不了自己（见 backend/cmd/updater 的包注释），所以这件事
+      # 只能由宿主的进程来做。
+      #
+      # 挂载**单个文件**而不是 /run 整个目录：容器只需要这一个入口，
+      # 给它整个 /run 会让容器看到宿主上其它服务的 socket。
+      #
+      # 宿主上这个文件由 llm-relay-updater.service 创建（见 install.sh）。
+      # 它的权限是 0666（见该服务的 -socket-mode 参数）——之所以放宽到
+      # 人人可写，是因为容器里的 relay 用户（uid 100）与宿主上的
+      # llm-relay-updater 用户 uid 对不上，用 0660 + 固定组名在两边
+      # 无法可靠对齐（宿主的组 ID 取决于创建顺序）。
+      #
+      # 权限的边界在哪里：这个 socket 只在宿主上、且只暴露「升级到最新版」
+      # 与「退回上一版」两个固定动作，不接受任何参数（镜像名、compose 路径
+      # 都在更新器启动时写死）。也就是说，能连上它的人最多只能让服务
+      # 更新或回滚 —— 这两件事本来就是站主自己会做的事。
+      # 这比「把 /var/run/docker.sock 挂进容器」安全得多：后者等于
+      # 把整个 Docker 控制面（能起特权容器、能读宿主任意文件）交出去。
+      #
+      # 更新器没装时 docker 会在挂载源位置建一个目录（对不存在的挂载源
+      # 的默认行为），表现为服务里探活失败 —— 那是正确的降级：
+      # 更新功能不可用，其它一切照常。
+      - /run/llm-relay-updater.sock:/run/llm-relay-updater.sock
     # 同 postgres：不限的话 json-file 会无限增长
     logging:
       driver: json-file

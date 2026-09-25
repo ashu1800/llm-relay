@@ -27,6 +27,14 @@ export class ApiError extends Error {
 const NETWORK_ERROR = '无法连接到后端服务，请确认服务正在运行（默认 http://127.0.0.1:8888）'
 const TIMEOUT_ERROR = '请求超时（15 秒无响应），后端可能正忙，请稍后重试'
 
+// 超时提示要带上真实的上限：更新接口用的是分钟级超时，
+// 沿用「15 秒」那句会让人以为超时时间被改短了
+function timeoutError(timeoutMs?: number): string {
+  if (!timeoutMs || timeoutMs === REQUEST_TIMEOUT_MS) return TIMEOUT_ERROR
+  const secs = Math.round(timeoutMs / 1000)
+  return `请求超时（${secs} 秒无响应）。更新与回滚是异步任务，若已启动可在进度里继续查看`
+}
+
 // 全局 401 收口。
 //
 // 登录上线后，管理接口的任何 401 都意味着「没有会话或会话已过期」，
@@ -39,7 +47,7 @@ export function setOnUnauthorized(fn: () => void) {
   onUnauthorized = fn
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, timeoutMs?: number): Promise<T> {
   let res: Response
   try {
     res = await fetch(BASE + path, {
@@ -51,11 +59,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       // 调用方显式传了 signal 就尊重它；否则给一个兜底超时。
       // AbortSignal.timeout 到期抛的是 name 为 TimeoutError 的 DOMException，
       // 与手动 abort 的 AbortError 是两个名字，可以区分提示。
-      signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      signal: init?.signal ?? AbortSignal.timeout(timeoutMs ?? REQUEST_TIMEOUT_MS)
     })
   } catch (e: any) {
     const timedOut = e?.name === 'TimeoutError'
-    throw new ApiError(timedOut ? TIMEOUT_ERROR : NETWORK_ERROR, 0)
+    throw new ApiError(timedOut ? timeoutError(timeoutMs) : NETWORK_ERROR, 0)
   }
   const text = await res.text()
   let data: any = null
@@ -77,9 +85,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  get: <T>(path: string) => request<T>(path),
-  post: <T>(path: string, body: unknown) =>
-    request<T>(path, { method: 'POST', body: JSON.stringify(body) }),
+  // get 也接受自定义超时：检测更新要真的访问 api.github.com，
+  // 国内直连时十几秒是常态，用 15 秒默认值会把「网络慢」表现成「检测失败」。
+  get: <T>(path: string, timeoutMs?: number) => request<T>(path, undefined, timeoutMs),
+  post: <T>(path: string, body: unknown, timeoutMs?: number) =>
+    request<T>(path, { method: 'POST', body: JSON.stringify(body) }, timeoutMs),
   put: <T>(path: string, body: unknown) =>
     request<T>(path, { method: 'PUT', body: JSON.stringify(body) }),
   del: <T>(path: string) => request<T>(path, { method: 'DELETE' })

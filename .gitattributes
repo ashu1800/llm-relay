@@ -17,6 +17,11 @@
 Dockerfile text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+# systemd 单元同样是 Linux 侧的文件，而且 CRLF 对它是**硬故障**：
+# systemd 会拒绝解析带 \r 的行（报 "Invalid argument" 之类），
+# 于是 llm-relay-updater.service 装不上、一键更新静默失效。
+# 它无扩展名，不声明就会走 core.autocrlf。
+*.service text eol=lf
 
 # 无扩展名但这几个是文本：不声明的话 autocrlf=true 会把它们在检出时
 # 转成 CRLF（git add 时会警告「LF will be replaced by CRLF」）。
@@ -27,6 +32,19 @@ go.sum text eol=lf
 .gitignore text eol=lf
 # deploy/.env.example 同理（.env 本体不入库，不需要声明）
 .env.example text eol=lf
+
+# Makefile 必须钉 LF。它同样是「无扩展名 + 由 Linux 侧工具读」的文件，
+# 而 CRLF 对 make 的破坏是**静默的**：制表符后的 ^M 会被当成命令的一部分，
+# 更隐蔽的是 $(shell ...) 的返回值会带上 \r ——
+#   VERSION ?= $(shell sh scripts/resolve-version.sh)
+# 检出成 CRLF 后 VERSION 会变成 "0.1.0\r"，拼进 -ldflags 就是一个带回车
+# 的版本号，界面上看不出来、下载 URL 却会 404。
+# 已实测：CRLF 的 Makefile 里 $(shell echo x) 求值结果是空而不是 x。
+Makefile text eol=lf
+
+# 版本文件同理：后端 //go:embed 它、构建脚本 tr -d '\r\n' 读它，
+# 带 \r 的版本号会一路带进二进制。
+backend/internal/version/VERSION text eol=lf
 
 # 其余文本文件统一走 LF。
 #
