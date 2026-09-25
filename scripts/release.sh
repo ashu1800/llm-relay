@@ -28,17 +28,14 @@
 #    4. 推送 main    tag 必须指向远端已有的提交
 #    5. 打 tag 推送  触发 .github/workflows/release.yml
 #    6. 观察流水线   gh run watch 直到全部 job 结束
-#    7. 验证产物     Release 归档 + checksums.txt 在场（镜像为可选项）
+#    7. 验证产物     Release 归档 + checksums.txt 在场
 #
 #  # 部署形态与产物的关系
 #
-#  release.yml 产出两种东西：
-#    · goreleaser 归档（binary 通道用）：裸机 / systemd 部署的一键更新来源，
-#      命名契约 llm-relay_<version>_<goos>_<goarch>.tar.gz 必须严格保持，
-#      更新器按它拼下载 URL。
-#    · GHCR 镜像（docker 通道用）：docker 形态部署的更新来源。
-#    两者都在流水线里构建；本脚本只验证 binary 通道必需的归档与校验和，
-#    镜像可达性作为附加检查（失败只警告，因为 docker 形态不是当前主用形态）。
+#  release.yml 产出 goreleaser 归档：裸机 / systemd 部署的安装与
+#  一键更新共用同一份产物，命名契约 llm-relay_<version>_<goos>_<goarch>.tar.gz
+#  必须严格保持，install.sh 与更新器都按它拼下载 URL。
+#  本脚本负责验证归档与校验和真的在 Release 上。
 #
 #  # 失败语义
 #
@@ -59,7 +56,6 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 REPO="ashu1800/llm-relay"
-IMAGE_NAME="ghcr.io/ashu1800/llm-relay"
 BRANCH="main"
 
 log()  { printf '\033[1;36m[release]\033[0m %s\n' "$*"; }
@@ -180,7 +176,7 @@ case "$BUMP" in
 esac
 
 NEW_TAG="v$NEW_VERSION"
-# 预发布版不打 latest 镜像标签、不被自动更新拉到（release.yml 的约定）：
+# 预发布版不被自动更新拉到（goreleaser prerelease: auto 的约定）：
 # rc 的语义是「候选」，把它推给所有实例等于拿生产环境做测试。
 IS_PRE_RELEASE=0
 case "$NEW_VERSION" in *-*) IS_PRE_RELEASE=1 ;; esac
@@ -284,14 +280,6 @@ gh release download "$NEW_TAG" --repo "$REPO" --pattern "$ARCHIVE" --dir /tmp/ll
   && tar -tzf "/tmp/llm-relay-release-verify/$ARCHIVE" | grep -Fx "llm-relay" \
   || warn "无法本地验证归档内容（可能本机不是 linux/amd64 或网络受限），跳过"
 rm -rf /tmp/llm-relay-release-verify 2>/dev/null || true
-
-# 镜像检查：docker 形态的更新来源。当前主形态是裸二进制，
-# 所以失败只警告不拦发布。
-if docker manifest inspect "$IMAGE_NAME:$NEW_VERSION" >/dev/null 2>&1; then
-  ok "GHCR 镜像已发布：$IMAGE_NAME:$NEW_VERSION"
-else
-  warn "GHCR 镜像 $IMAGE_NAME:$NEW_VERSION 暂不可见（docker 通道受影响，binary 通道不受影响）"
-fi
 
 # ---------------------------------------------------------------
 # 完成

@@ -168,22 +168,29 @@ fi
 
 echo
 echo "### 8. 归档里的 deploy/ 是否完整"
-# install.sh 会读 deploy/llm-relay-updater.service 来注册宿主侧更新器。
-# 归档缺了它，那段逻辑只是 warn 后跳过 —— **不报错**，但一键更新永远不可用。
+# install.sh 从 Release 归档解包安装，deploy/ 下这三个文件随归档走：
+# .env.example 是手动部署的说明模板，restore.sh 是备份恢复的入口。
 # 这类「缺一个文件就悄悄少一个功能」的缺口必须由脚本守住。
 #
 # 先把清单存进变量，不要用 `tar | grep -q`：脚本开了 pipefail，
 # 而 grep -q 一匹配上就退出，会让还在写的 tar 收到 SIGPIPE 而以 141 结束，
 # 于是整条管道判定为失败 —— 明明匹配上了却报「不在归档里」。实测踩过。
 ARCHIVE_LIST=$(tar -tzf "$SAMPLE")
-for f in Dockerfile docker-compose.yml .env.example install.sh install-bare.sh \
-         restore.sh llm-relay-updater.service; do
+for f in .env.example install.sh restore.sh; do
   if printf '%s\n' "$ARCHIVE_LIST" | grep -qx "deploy/$f"; then
     echo "  ✓ deploy/$f"
   else
     echo "  ✗ deploy/$f 不在归档里"; rc=1
   fi
 done
+
+echo
+echo "### 9. 主密钥轮换工具"
+if printf '%s\n' "$ARCHIVE_LIST" | grep -qx 'rotate-secret'; then
+  echo "  ✓ 含 rotate-secret（scripts/rotate-secret.sh 调它）"
+else
+  echo "  ✗ 归档里没有 rotate-secret（主密钥轮换脚本会找不到工具）"; rc=1
+fi
 
 echo
 [ $rc -eq 0 ] && echo "ALL_PASS" || echo "HAS_FAILURE"

@@ -3,11 +3,14 @@ name: Release
 # ============================================================
 #  发布流水线：打 tag 出正式产物
 #
-#  产物（三者必须互相对得上，命名是硬契约）：
+#  产物（两者必须互相对得上，命名是硬契约）：
 #    · 归档    llm-relay_0.1.2_linux_amd64.tar.gz（windows 是 .zip）
 #              内嵌可执行文件名必须是 llm-relay
 #    · 校验和  checksums.txt（sha256，两列格式）
-#    · 镜像    ghcr.io/ashu1800/llm-relay:0.1.2 与 :latest（amd64 + arm64）
+#
+#  这两个产物同时服务两个入口：deploy/install.sh 下载安装，
+#  与装好后管理台里的「一键更新」（二进制自替换）—— 同一份归档，
+#  命名错了两边一起 404。
 #
 #  为什么 VERSION 文件要经 artifact 在 job 之间传：
 #   prepare 把 tag 对应的版本号写进 backend/internal/version/VERSION，
@@ -38,13 +41,6 @@ concurrency:
 # 顶层只给读权限，需要的写权限按 job 单独授予（最小权限原则）
 permissions:
   contents: read
-
-env:
-  # 镜像名写死而不是用 github.repository_owner 拼：
-  #   · GHCR 要求路径全小写，而 owner 是 Ashu1800（带大写）—— 直接拼会
-  #     得到 "invalid reference format" 这类报错
-  #   · 这个字符串同时也是后端更新器拼镜像地址的依据，写死才不会漂
-  IMAGE_NAME: ghcr.io/ashu1800/llm-relay
 
 jobs:
   # ----------------------------------------------------------
@@ -256,92 +252,7 @@ jobs:
           GORELEASER_CURRENT_TAG: ${{ needs.prepare.outputs.tag }}
 
   # ----------------------------------------------------------
-  # 3) docker：构建并推送多架构镜像到 GHCR
-  #
-  #    为什么镜像不交给 goreleaser 的 dockers 段（见 .goreleaser.yaml 文件头）：
-  #    goreleaser 的 docker 构建上下文是一个只装着二进制的临时目录，
-  #    放不下本项目的多阶段 deploy/Dockerfile；而且归档要 BuildType=binary、
-  #    镜像要 BuildType=docker，同一个二进制装不下两种形态。
-  # ----------------------------------------------------------
-  docker:
-    name: 构建并推送多架构镜像
-    needs: [prepare, build-binaries]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    env:
-      VERSION: ${{ needs.prepare.outputs.version }}
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-
-      - name: 取回 prepare 写好的 VERSION 文件
-        uses: actions/download-artifact@v4
-        with:
-          name: version-file
-          path: backend/internal/version/
-
-      - name: 设置 QEMU（为 arm64 提供模拟执行）
-        uses: docker/setup-qemu-action@v3
-
-      - name: 设置 Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: 登录 GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          # GITHUB_TOKEN 就能推 GHCR（前提是 job 有 packages: write）。
-          # 不需要额外建 PAT。
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 计算镜像 tag
-        id: tags
-        run: |
-          set -euo pipefail
-          TAGS="${IMAGE_NAME}:${VERSION}"
-          # 预发布版（如 0.2.0-rc.1）**不打 latest**：
-          # latest 的语义是「最新稳定版」，而宿主侧更新器与
-          # docker-compose 默认拉的都是 latest —— 让它指向一个 rc
-          # 等于把候选版推给所有用户。
-          if [[ "$VERSION" != *-* ]]; then
-            TAGS="${TAGS}"$'\n'"${IMAGE_NAME}:latest"
-          else
-            echo "检测到预发布版本 $VERSION，本次不更新 latest 标签"
-          fi
-          {
-            echo "list<<__TAGS_EOF__"
-            echo "$TAGS"
-            echo "__TAGS_EOF__"
-          } >> "$GITHUB_OUTPUT"
-          echo "将推送以下标签："
-          echo "$TAGS"
-
-      - name: 构建并推送镜像
-        uses: docker/build-push-action@v6
-        with:
-          # 构建上下文是**仓库根**：deploy/Dockerfile 里 COPY frontend/ 与
-          # backend/ 都相对根目录（与 docker-compose.yml 的 context: .. 一致）。
-          context: .
-          file: deploy/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.tags.outputs.list }}
-          build-args: |
-            VERSION=${{ needs.prepare.outputs.version }}
-            COMMIT=${{ needs.prepare.outputs.sha }}
-            DATE=${{ needs.prepare.outputs.date }}
-            BUILD_TYPE=docker
-          # 用 GitHub Actions 的缓存后端，二次构建快很多
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  # ----------------------------------------------------------
-  # 4) sync-version-file：把版本号提交回主分支
+  # 3) sync-version-file：把版本号提交回主分支
   #
   #    目的：让**主分支上的 VERSION 文件**与刚发布的版本一致。
   #    不这么做的后果：任何人从 main 源码构建（不注入 ldflags）时，

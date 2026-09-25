@@ -11,22 +11,8 @@
 #    2. 归档内可执行文件名必须是 llm-relay（windows 是 llm-relay.exe）
 #    3. 校验和文件必须叫 checksums.txt，sha256，两列格式 <hash>  <filename>
 #
-#  关于 Docker 镜像（重要，别在这里加 dockers 段）：
-#  镜像由 .github/workflows/release.yml 用 docker/build-push-action 构建，
-#  本文件**刻意不配 `dockers`**。原因是 goreleaser 的 docker 构建上下文
-#  不是仓库根目录，而是一个临时目录，里面只有**刚编译好的二进制**（外加
-#  extra_files 显式带进去的文件）—— 官方文档原话是 "The build context
-#  itself is a temporary directory which contains the binaries and packages
-#  for each of the defined target platforms"。而 deploy/Dockerfile 是多阶段
-#  文件，要从源码树 COPY frontend/ 与 backend/ 自己编译，放进那个临时上下文
-#  里必然失败（找不到 frontend/package.json）。
-#  见 https://goreleaser.com/customization/package/dockers_v2/
-#
-#  另有一个更硬的理由：**同一个二进制装不下两种 BuildType**。
-#  归档里的二进制必须是 BuildType=binary（systemd 形态，可自我替换），
-#  镜像里的必须是 BuildType=docker（容器形态，由宿主侧 updater 拉镜像重建）。
-#  goreleaser 的一份 builds 产物同时喂给归档和镜像，硬塞只会二选一错一个。
-#  交给 workflow 分别构建，两边都能拿到正确的值。
+#  归档里的二进制注入 BuildType=binary（systemd 形态，可自我替换），
+#  deploy/install.sh 下载的正是这些归档 —— 部署与自更新共用同一份产物。
 # ============================================================
 
 # goreleaser v2 配置格式（v1 的字段名在 v2 里已废弃）
@@ -79,6 +65,21 @@ builds:
       # 界面因此允许一键更新（见 internal/version 的 BuildBinary 注释）。
       - -X llm-relay/internal/version.BuildType=binary
 
+  # rotate-secret 是主密钥轮换工具（scripts/rotate-secret.sh 调它）。
+  # 单独成一个 build 才能进归档：goreleaser 的一个 build 只有一个 main。
+  # 它只在服务器上有意义，所以只编 linux 两个架构 —— darwin/windows 的
+  # 归档里不会出现它，也不该出现。
+  - id: rotate-secret
+    dir: backend
+    main: ./cmd/rotate-secret
+    binary: rotate-secret
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: [-s -w]
+
 archives:
   - id: default
     # 归档名契约。goreleaser 默认会给名字塞进版本与平台，但默认模板带
@@ -104,20 +105,9 @@ archives:
       # glob 会把它整个打进归档 —— make release-snapshot 时会产出一个
       # 几 GB 的 tar.gz，而里面装的是 postgres 的数据文件。
       # CI 里该目录不存在，但本机快照会；列出具体文件两种场景都对。
-      - deploy/Dockerfile
-      - deploy/docker-compose.yml
       - deploy/.env.example
       - deploy/install.sh
-      - deploy/install-bare.sh
       - deploy/restore.sh
-      # updater 的 systemd 单元模板必须打进归档。
-      #
-      # install.sh 第 730 行会去读 $INSTALL_DIR/deploy/llm-relay-updater.service
-      # 并做占位符替换；文件不在时那段逻辑只是 warn 后跳过 —— 不报错，
-      # 但**宿主侧更新器不会被注册**，于是管理台上的一键更新永远不可用。
-      # 对于「下载 release 归档 → 跑 install.sh」这种安装方式，
-      # 用户拿到的就是一个功能残缺的部署，而且失败得很安静。
-      - deploy/llm-relay-updater.service
 
 checksum:
   # 名字必须是 checksums.txt：后端按这个名字拼 URL 拉校验和文件。
@@ -138,5 +128,3 @@ release:
   # changelog 不配置，用 goreleaser 默认（按提交生成、过滤掉 docs/test 之类）。
   # 本项目没有统一 conventional commits 前缀，默认过滤器可能产出较短的列表 ——
   # 那是可接受的：Release 页面短一点，好过配置写错导致发布直接失败。
-
-# 说明：本文件不含 dockers / docker_manifests，镜像由 workflow 构建，理由见文件头。
