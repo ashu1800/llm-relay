@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // ErrNoBackup 表示没有可回滚的备份。
@@ -75,10 +76,17 @@ func ReplaceSelf(exePath, newBinary string) error {
 	if _, err := os.Stat(newBinary); err != nil {
 		return fmt.Errorf("待安装的文件不存在: %w", err)
 	}
-	// 同目录校验：不同目录意味着可能跨文件系统，rename 不再原子
-	if filepath.Dir(exePath) != filepath.Dir(newBinary) {
-		return fmt.Errorf("待安装文件必须位于目标同目录（保证重命名是原子操作）：%s 不在 %s 下",
-			newBinary, filepath.Dir(exePath))
+	// 同目录校验：不同目录意味着可能跨文件系统，rename 不再原子。
+	// 允许目标是 exe 所在目录的**子目录** —— TempDir 就建在那里，同一棵
+	// 目录树的成员在同一文件系统上，rename 依然是原子的。用 filepath.Rel
+	// 而不是前缀比较：后者会把兄弟目录（/opt/llm-relay-evil）误判为在树内。
+	exeDir := filepath.Dir(exePath)
+	newDir := filepath.Dir(newBinary)
+	if newDir != exeDir {
+		if rel, err := filepath.Rel(exeDir, newDir); err != nil || strings.HasPrefix(rel, "..") {
+			return fmt.Errorf("待安装文件必须位于目标同目录（保证重命名是原子操作）：%s 不在 %s 下",
+				newBinary, exeDir)
+		}
 	}
 	if exePath == newBinary {
 		return fmt.Errorf("源与目标相同，无需替换")
