@@ -174,13 +174,21 @@ jobs:
         run: |
           set -euo pipefail
           # goreleaser 拒绝在**脏工作树**里构建。上一步用 artifact 覆盖
-          # VERSION 后，git status 会报 M —— 但这个改动正是发布需要的
+          # VERSION 后，普通 git status 会报 M —— 但这个改动正是发布需要的
           # （它是版本号的 embed 兜底），且真正生效的注入走的是 goreleaser
           # 的 -ldflags（见 .goreleaser.yaml），两者取的是同一个值。
-          # assume-unchanged 让 git 忽略这一处，不提交、也不改内容。
+          #
+          # 注意不能用 --porcelain 来「检查还有没有别的脏文件」：
+          # porcelain 不理会 assume-unchanged 标记（v0.1.1 第二次发布实测
+          # 踩过，它把刚屏蔽的 VERSION 又列了出来，守卫把自己挡住了）。
+          # 普通 git status 会尊重该标记，所以这里用它做差集检查：
+          # 「除 VERSION 外不允许再有脏文件」。
           git update-index --assume-unchanged backend/internal/version/VERSION
-          git status --porcelain --untracked-files=no && \
-            { echo "::error::工作树仍有其它脏文件，goreleaser 会拒绝构建"; exit 1; } || true
+          if [ -n "$(git status --untracked-files=no --porcelain 2>/dev/null | grep -v 'VERSION' || true)" ]; then
+            git status --untracked-files=no
+            echo "::error::工作树仍有 VERSION 之外的脏文件，goreleaser 会拒绝构建"
+            exit 1
+          fi
 
       - name: 设置 Go 环境
         uses: actions/setup-go@v5
