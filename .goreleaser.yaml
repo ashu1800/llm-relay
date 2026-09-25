@@ -67,16 +67,21 @@ builds:
 
   # rotate-secret 是主密钥轮换工具（scripts/rotate-secret.sh 调它）。
   # 单独成一个 build 才能进归档：goreleaser 的一个 build 只有一个 main。
-  # 它只在服务器上有意义，所以只编 linux 两个架构 —— darwin/windows 的
-  # 归档里不会出现它，也不该出现。
+  # 平台矩阵与 llm-relay 完全一致是 goreleaser 的硬约束——「各平台归档里的
+  # 二进制数量必须一致」（multiple-binaries-archive），少编一个平台就会让
+  # darwin/windows 的归档比 linux 少一个文件、发布直接失败。darwin/windows
+  # 上这个工具用不到，多出来的几 MB 是可接受的代价。
   - id: rotate-secret
     dir: backend
     main: ./cmd/rotate-secret
     binary: rotate-secret
     env:
       - CGO_ENABLED=0
-    goos: [linux]
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
     flags: [-trimpath]
     ldflags: [-s -w]
 
