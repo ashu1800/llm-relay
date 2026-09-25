@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/precompress.mjs dist",
+    "build:only": "vite build",
+    "precompress": "node scripts/precompress.mjs dist",
     "type-check": "vue-tsc --noEmit",
     "check": "node scripts/check-contracts.mjs",
     "verify": "npm run type-check && npm run check && npm run build",

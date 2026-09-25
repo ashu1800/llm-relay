@@ -173,33 +173,17 @@ func (s *Server) registerAdminRoutes(r *gin.Engine) {
 }
 
 // registerStatic 挂载嵌入的前端资源，并为前端路由提供 SPA 回退。
+//
+// 发送策略（预压缩 / 长缓存 / ETag 校验）都在 static.go 里，这里只负责接线。
+// 原先直接用 http.FileServer 是「能发出去就行」：实测产物 1.6 MB 全部原样传、
+// 且没有任何缓存头，浏览器每次刷新都要重新下载一遍。
 func (s *Server) registerStatic(r *gin.Engine) {
 	dist, err := web.Dist()
 	if err != nil {
 		return
 	}
-	indexHTML, indexErr := fsReadFile(dist, "index.html")
-	fileServer := http.FileServer(http.FS(dist))
-
-	r.NoRoute(func(c *gin.Context) {
-		p := c.Request.URL.Path
-		if isAPIPath(p) {
-			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "接口不存在", "type": "not_found_error"}})
-			return
-		}
-		if rel := trimLeadingSlash(p); rel != "" {
-			if f, err := dist.Open(rel); err == nil {
-				_ = f.Close()
-				fileServer.ServeHTTP(c.Writer, c.Request)
-				return
-			}
-		}
-		if indexErr != nil {
-			c.String(http.StatusOK, "前端资源尚未构建")
-			return
-		}
-		c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
-	})
+	assets := newStaticAssets(dist, s.deps.Logger)
+	r.NoRoute(assets.handler())
 }
 
 // healthz 只表示进程存活，不依赖任何外部组件。

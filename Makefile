@@ -47,7 +47,7 @@ GO_LDFLAGS := -s -w \
 	-X llm-relay/internal/version.Commit=$(COMMIT) \
 	-X llm-relay/internal/version.Date=$(DATE)
 
-.PHONY: help version build build-embed test release-snapshot
+.PHONY: help version build build-embed test release release-snapshot
 
 # 默认目标：列出所有可用目标
 help:
@@ -57,6 +57,7 @@ help:
 	@printf '  %-18s %s\n' "make build"            "编译后端（不嵌前端），产物 backend/bin/llm-relay"
 	@printf '  %-18s %s\n' "make build-embed"      "先编译前端再拷贝产物并编译后端（完整可发布形态）"
 	@printf '  %-18s %s\n' "make test"             "跑后端全部测试（go test ./...）"
+	@printf '  %-18s %s\n' "make release"          "发布新版本（转发给 scripts/release.sh，如 make release VERSION_ARG=patch）"
 	@printf '  %-18s %s\n' "make release-snapshot" "本地跑 goreleaser 快照，产物在 dist/"
 	@echo ""
 	@echo "当前解析值：VERSION=$(VERSION)  COMMIT=$(COMMIT)  DATE=$(DATE)"
@@ -93,6 +94,14 @@ build-embed:
 # 后端测试。发布前 CI 会跑同一条命令（失败即中止发布）。
 test:
 	@cd $(BACKEND_DIR) && go test ./...
+
+# 发布新版本。只做转发，逻辑在 scripts/release.sh（单一实现，避免两处漂移）。
+# 用法：make release VERSION_ARG=patch | minor | major | v0.1.5
+#        （也可附加 DRY_RUN=1 看将要做的事）
+VERSION_ARG ?= patch
+DRY_RUN ?=
+release:
+	@bash scripts/release.sh $(VERSION_ARG) $(if $(DRY_RUN),--dry-run)
 
 # 本地 goreleaser 快照：产出与正式发布同构的归档，但不打 tag、不推送。
 # 这是发布前唯一能在本机验证「归档名/校验和/内嵌文件名」三处契约的办法。

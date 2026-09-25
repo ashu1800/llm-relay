@@ -23,7 +23,7 @@
 // 仍用 PanelCard，不传 title 时它不会渲染标题栏。
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { CopyOutlined, ProfileOutlined, ArrowUpOutlined } from '@ant-design/icons-vue'
+import { CopyOutlined, ProfileOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import PanelCard from '@/components/PanelCard.vue'
@@ -729,9 +729,6 @@ async function load(opts: { silent?: boolean } = {}) {
   if (!silent) {
     freshIds.value.clear()
     fxTargets.value = []
-    // 非静默重取会把整屏换掉，服务端返回的这批里已经包含挂起的那几行 ——
-    // 再留着它们等于同一批记录在列表里出现两次（P1-6）
-    pendingLogs.value = []
   }
   // silent 是实时推送独有的路径（useLive.createThrottledLiveReloader 是唯一调用点），
   // 所以「多出来的行」必然是刚入库的那几条，不会是筛选切换带来的整屏替换
@@ -764,9 +761,6 @@ async function load(opts: { silent?: boolean } = {}) {
 
 function search() {
   page.value = 1
-  // 条件变了（深链、翻页、刷新）就作废挂起的行：它们的「新」是相对
-  // 上一个视角说的，换一批数据之后再落地会把毫不相干的记录插到最前面
-  pendingLogs.value = []
   load()
 }
 
@@ -1066,97 +1060,117 @@ onLive('logs', (items: RequestLog[]) => {
   // 列表不带时间范围，新日志必然属于「全部最新」，直接插即可
   const fresh = items.filter((it) => !rows.value.some((r) => r.id === it.id))
   if (!fresh.length) return
-  // 用户正在读的时候不插（2026-09-24 UI 审评 P1-6）：一行 44/45px，
-  // 一次插入就把正在读的那一行整体顶下去一整行 —— 鼠标没动，指的那一行
-  // 已经换人，此时点「详情」打开的可能是上一条请求。改成挂起，
-  // 由工具条上的「N 条新日志」按钮落地（见 pendingLogs）。
-  if (shouldHoldInsert()) {
-    pendingLogs.value = [...fresh.reverse(), ...pendingLogs.value]
-    return
-  }
   insertFresh(fresh)
 })
 
-// ---- 实时插行的「挂起」机制（P1-6，2026-09-24）----
+// ---- 实时插行：新行直接进列表，并自己把「正在读的那一行」稳住 ----
 //
-// 问题：新行 unshift 到头部，表体内容整体下移一行（44/45px 实测），
-// 而滚动位置不变 —— 用户正在读的那一行被顶走了，鼠标指着的已经不是刚才那条。
+// 2026-09-25 移除「挂起 + 有 N 条新日志，点击查看」那套（原 P1-6，9e9f3b4）。
 //
-// 什么时候要挂起（三条任一成立）：
-//   1. 表体已经向下滚过（scrollTop > 1）—— 用户明确在看中间某一段；
-//   2. 鼠标正停在表体上 —— 他随时可能点那一行（顶走的话点中的是别的行）；
-//   3. 详情抽屉开着 —— 抽屉是盖在列表上的，但用户的注意力在列表刚才那一行上。
+// 它想解决的问题是真的：新行 unshift 到头部，表体内容整体下移一行（44/45px
+// 实测），而滚动位置不变 —— 鼠标没动，指的那一行已经换人。但那套做法的判据
+// 是「表体滚过、鼠标停在表体上、详情抽屉开着」，任一成立就挂起，而**放手只发生
+// 在滚动、鼠标移出表体、抽屉关闭这三个时刻**。于是最常见的姿势 —— 鼠标停在
+// 列表上不动（正看着某一行，或在等新行出现）—— 会一直命中「悬停」这一条：
+// 新行只攒不落，工具条上挂着「有 N 条新日志」，列表却纹丝不动。用户把鼠标
+// 挪开一下才刷新，正是这个原因（站主 2026-09-25 截图反馈「只显示提示，
+// 但是列表不更新，鼠标动一下才更新」）。
 //
-// 三者都不成立时（列表停在顶部、鼠标不在、抽屉关着）就直接插：
-// 那是「盯着最新发生了什么」的常态，此时用户要的正是立刻看到新行。
+// 新行插到头部**必然**让内容下移一行，这是「最新在最上面」的定义决定的；
+// 挂起换来的「不顶走」代价是面板失去实时性，而后者才是它存在的理由。
+// 所以现在直接插，位置稳定由下面的 captureAnchor / restoreAnchor 用 JS 显式做。
 //
-// 为什么不是「只要不在顶部就不插」：列表默认就在顶部，多数时候直接插
-// 才是对的；把常态也挂起会让这个面板失去「实时」的意义。
-const pendingLogs = ref<RequestLog[]>([])
-const hoveringTable = ref(false)
-
-function tableBody(): HTMLElement | null {
-  return tableWrap.value?.querySelector<HTMLElement>('.ant-table-body') ?? null
-}
-
-function shouldHoldInsert(): boolean {
-  if (detailOpen.value) return true
-  if (hoveringTable.value) return true
-  const body = tableBody()
-  return !!body && body.scrollTop > 1
-}
-
-/** 把新行插到第一行并做入场动画（原路径，抽出来给「落地」复用）。 */
+// 为什么不用浏览器原生的滚动锚定（overflow-anchor）。试过，也实测过它在这张表上
+// **不生效**，所以不能把注释写成「交给浏览器」：
+//   · 最小复现页（div 行 / table 行）在有余量时顶部插入 → Chrome 会补偿
+//     scrollTop（Δ 一行），被跟踪的行位置不动；
+//   · 同一套判据放进本项目的日志表（纯 DOM 插入、绕过 Vue；余量 344px 充足；
+//     祖先链上没有任何 overflow-anchor:none）→ scrollTop 不变、被跟踪的行
+//     下移 44px，即**没有补偿**。
+//   · 逐个排除过固定列 sticky、table-layout、.log-table 的 overflow:hidden、
+//     强制 overflow-anchor:auto 四种因素，全部仍然不补偿 —— 具体成因在
+//     Chromium 内部，不宜再猜。
+// 结论：与其依赖一个在这张表上被证伪的浏览器行为，不如自己量、自己补 ——
+// 下面这段是确定性的，且不依赖任何浏览器内部策略。
+//
+// 锚点的选取与「用户正在读哪一行」对齐：取视口内**第一个仍可见的行**
+// （含只露出一半的），记住它相对表体顶部的偏移；渲染完成后把 scrollTop 补偿
+// 回去，这一行就还停在原来的位置。
+//
+// 只在用户已经滚动过（scrollTop > 0）时才补偿：停在顶部时用户要看的正是
+// 「刚进来的那几条」，把视口往下推 44px 反而把它们藏起来了。
 function insertFresh(fresh: RequestLog[]) {
+  const body = tableBodyEl()
+  // 插行前先量锚点（此刻 DOM 还是旧的）
+  const anchor = body ? captureAnchor(body) : null
+
   rows.value = [...[...fresh].reverse(), ...rows.value].slice(0, pageSize.value)
   total.value += fresh.length
   markFresh(fresh.map((r) => r.id))
+
+  if (body && anchor) restoreAnchor(body, anchor)
 }
 
-// 挂起的行落到列表里。点按钮 = 用户明确要求看新行，所以先滚回顶部
-// 再插 —— 否则插完他仍然停在原来那一屏，会觉得「点了没反应」。
-function applyPendingLogs() {
-  const fresh = pendingLogs.value
-  pendingLogs.value = []
-  insertFresh(fresh)
-  const body = tableBody()
-  if (body) body.scrollTop = 0
+type RowAnchor = { key: string; top: number }
+type MaybeRowAnchor = RowAnchor | null
+
+function tableBodyEl(): HTMLElement | null {
+  return tableWrap.value?.querySelector<HTMLElement>('.ant-table-body') ?? null
+}
+
+/** 量出「视口内第一个可见行」的 key 与它相对表体顶部的偏移 */
+function captureAnchor(body: HTMLElement): MaybeRowAnchor {
+  if (body.scrollTop <= 0) return null
+  const base = body.getBoundingClientRect()
+  const trs = body.querySelectorAll<HTMLElement>('tr[data-row-key]')
+  for (const tr of trs) {
+    const r = tr.getBoundingClientRect()
+    // 第一个「下边缘还在表体顶边之下」的行 = 视口里最上面那一行（可能只露一半）
+    if (r.bottom > base.top) {
+      const key = tr.getAttribute('data-row-key')
+      if (!key) return null
+      return { key, top: Math.round(r.top - base.top) }
+    }
+  }
+  return null
 }
 
 /**
- * 挂起的行该不该自己落地。
+ * 把锚点行还原到插入前的位置。
  *
- * 三个时机各对应一种「用户不再盯着那几行了」：滚回顶部（他准备看最新的）、
- * 鼠标离开表体（不再指着某一行）、抽屉关掉（注意力回到列表）。
- * 条件与挂起时用的是同一个判据（shouldHoldInsert），所以不会出现
- * 「刚放手又立刻挂起」的抖动。
+ * 分两拍做而不是一个 nextTick：antd 的表格在数据变化后要跨若干次渲染才把
+ * 行摆到位（实测 nextTick 时高度已变但行位置偶尔仍是旧的）。第一拍在
+ * nextTick 后量，量不到那一行（或偏移还没变）就等下一帧再量一次 ——
+ * 补偿必须发生在**浏览器已经按新布局排完**之后，早一步算出来的差值没有意义。
  */
-function maybeReleasePending() {
-  if (!pendingLogs.value.length) return
-  if (shouldHoldInsert()) return
-  applyPendingLogs()
+function restoreAnchor(body: HTMLElement, anchor: RowAnchor, attempt = 0) {
+  const apply = () => {
+    const tr = body.querySelector<HTMLElement>(`tr[data-row-key="${anchor.key}"]`)
+    if (!tr) {
+      // 行被挤出了当前页（理论上不会：锚点在视口顶部，而插行只从**尾部**裁剪）
+      return
+    }
+    const base = body.getBoundingClientRect()
+    const now = Math.round(tr.getBoundingClientRect().top - base.top)
+    const delta = now - anchor.top
+    if (delta !== 0) {
+      // 夹住上下界：贴底时补偿不足一行是正常的（没有余量可补），
+      // 不夹的话 scrollTop 会被设成一个越界值、被浏览器改回来，白算一次
+      const max = body.scrollHeight - body.clientHeight
+      body.scrollTop = Math.min(Math.max(body.scrollTop + delta, 0), max)
+    }
+  }
+  nextTick(() => {
+    apply()
+    // 第二拍兜底：第一次量到的偏移若还没落定，下一帧再补一次差值
+    if (attempt === 0) {
+      requestAnimationFrame(() => nextTick(() => restoreAnchor(body, anchor, 1)))
+    }
+  })
 }
 
-// 滚动/改窗口时除了更新两侧渐隐，还要看一眼挂起的行能不能落地 ——
-// 两件事都由「表体的滚动位置」驱动，挂在同一个监听上。
 function onScrollOrResize() {
   syncScrollHints()
-  maybeReleasePending()
-}
-
-// 抽屉关掉 = 用户看完了详情，注意力回到列表，挂起的行可以落地了
-watch(detailOpen, (open) => {
-  if (!open) maybeReleasePending()
-})
-
-// 鼠标进出表体。进入只是「记住他在里面」（挂起新行），
-// 离开才可能让挂起的行落地 —— 所以这里只改状态再问一次能不能放手。
-function onTableEnter() {
-  hoveringTable.value = true
-}
-function onTableLeave() {
-  hoveringTable.value = false
-  maybeReleasePending()
 }
 
 onMounted(() => {
@@ -1236,22 +1250,6 @@ onMounted(() => {
          用户看到 ¥ 排在 $ 后面会以为坏了。role=status 让读屏也听得到。 -->
     <div v-if="costSortHint" class="sort-hint" role="status">{{ costSortHint }}</div>
 
-    <!-- 挂起的新日志（P1-6）。只在「用户正在读」时出现：表体滚过、
-         鼠标停在表体上、或详情抽屉开着。此时把新行攒着并在这里报数 ——
-         直接插会把正在读的那一行顶下去一整行（44/45px 实测），
-         鼠标没动而指的那一行已经换人，点「详情」打开的可能是上一条请求。
-         按钮是他的「我看完了，给我看新的」：点了才落地并滚回顶部。 -->
-    <div v-if="pendingLogs.length" class="pending-bar">
-      <button
-        type="button"
-        class="pending-btn"
-        :aria-label="`有 ${pendingLogs.length} 条新日志，点击查看`"
-        @click="applyPendingLogs()"
-      >
-        <ArrowUpOutlined aria-hidden="true" />
-        有 {{ pendingLogs.length }} 条新日志，点击查看
-      </button>
-    </div>
     <DataState
       :error="loadError"
       :has-data="rows.length > 0"
@@ -1289,8 +1287,6 @@ onMounted(() => {
         :data-fx="logFx.fx"
         :data-hint-l="canScrollLeft ? '1' : '0'"
         :data-hint-r="canScrollRight ? '1' : '0'"
-        @mouseenter="onTableEnter"
-        @mouseleave="onTableLeave"
       >
         <NewLogEffect :mode="logFx.fx" :targets="fxTargets" />
         <a-table
@@ -2074,16 +2070,17 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
 
-  /* 滚动锚定的兜底（P1-6）。挂起机制已经覆盖了「用户正在读」的三种情形，
-     但它靠 JS 判断，判据之外的变化（浏览器自己重排、字体加载完成、
-     行高从 44 变 45）仍可能让内容跳一下。overflow-anchor 让浏览器把
-     当前可见的第一行当作锚点、内容变化时自动补偿滚动位置 ——
-     它不替代上面的挂起（新行插到头部时锚点补偿仍会让「正在读的行」
-     从视口位置移动），只是多一层保险。
+  /* 滚动锚定：**保留但是不要依赖它**。
+     2026-09-25 实测：Chrome 的原生锚点补偿在最小页面（div 行 / table 行）
+     上有效，但在本项目的日志表上**不生效** —— 纯 DOM 顶部插入（绕过 Vue）、
+     余量 344px 充足、祖先链上无 overflow-anchor:none，scrollTop 仍不变、
+     被跟踪的行下移 44px；又逐个排除了固定列 sticky、table-layout、
+     .log-table 的 overflow:hidden，均无改善。成因在 Chromium 内部，不再猜。
 
-     为什么写在 .log-table 而不是 .ant-table-body：锚定要作用在**产生滚动**的
-     那个盒子上，而这里真正滚的是 .ant-table-body（它自己有 overflow: auto）。
-     见下面那条 :deep 规则 —— 属性在那边设。 */
+     所以「正在读的那一行不被顶走」由 insertFresh 里的 captureAnchor /
+     restoreAnchor 用 JS 显式完成（量锚点 → 插行 → 按差值补 scrollTop）。这里保留 auto
+     只是不主动关掉浏览器这一层：它在别的场景（字体加载、行高微调导致的重排）
+     仍可能帮上忙，而把它设成 none 只会白白丢掉那点好处。 */
 }
 .log-table :deep(.ant-table-body) {
   overflow-anchor: auto;
@@ -2184,41 +2181,6 @@ onMounted(() => {
   margin-bottom: 6px;
   font-size: 12px;
   color: var(--color-text-secondary);
-}
-
-/* ---- 挂起的新日志提示条（P1-6）----
-   出现在工具条与表格之间，只在真的攒了行的时候渲染（v-if），
-   所以没有新行时它一个像素都不占。
-   配色用主色实心块那一对（--solid-primary-*）：它是个明确的行动号召，
-   而 --solid-primary-* 是全站唯一保证「底色与其上文字」都达标的一对
-   （浅色 4.84:1 / 深色 6.98:1）—— 不能自己拼 background + #fff。 */
-.pending-bar {
-  flex: none;
-  display: flex;
-  justify-content: center;
-  margin-bottom: 6px;
-}
-.pending-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 14px;
-  border: none;
-  border-radius: 14px;
-  background: var(--solid-primary-bg);
-  color: var(--solid-primary-fg);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1;
-  cursor: pointer;
-  transition: transform 0.15s ease;
-}
-.pending-btn:hover {
-  transform: translateY(-1px);
-}
-.pending-btn:active {
-  transform: translateY(0) scale(0.98);
 }
 
 /* ---- 列表小工具条（实时状态 P1-10 +「仅失败」开关 P1-8）----

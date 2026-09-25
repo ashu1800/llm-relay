@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # ============================================================
-#  LLM Relay 一键部署脚本（WSL2 / Ubuntu 24.04）
+#  LLM Relay 一键部署脚本 —— Docker 形态（遗留，备选）
+#
+#  当前主形态是「裸二进制 + systemd」（deploy/install-bare.sh）：
+#  它的一键更新走 binary 通道（下载归档 → 原子替换 → systemd 拉起），
+#  1~2 分钟完成，不需要在服务器上装构建工具链。本脚本对应的 Docker
+#  形态仍然完整可用（含宿主侧更新器），适合明确需要容器隔离的部署；
+#  两种形态的取舍见 README「部署」章节。
 #
 #  用法（二选一）：
 #    sudo bash install.sh                 # 常规：用 sudo
