@@ -31,6 +31,13 @@
               : 'light'
           }
           document.documentElement.setAttribute('data-theme', saved)
+          // 深色质感档位（classic / oled）一起带上：OLED 用户刷新时
+          // 若漏了这个属性，首帧是深灰底、下一帧才跳成纯黑 —— 闪一下。
+          // 浅色下这个属性没有任何样式命中，带着无害。
+          var darkStyle = localStorage.getItem('llm-relay-darkstyle')
+          if (darkStyle === 'oled' || darkStyle === 'classic') {
+            document.documentElement.setAttribute('data-darkstyle', darkStyle)
+          }
         } catch (e) {
           // localStorage 在隐私模式下会抛异常。取不到偏好不算错误，
           // 用默认的浅色继续渲染即可 —— 绝不能让这段脚本阻断页面。

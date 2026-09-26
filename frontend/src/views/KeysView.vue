@@ -6,6 +6,7 @@ import {
   ReloadOutlined,
   DeleteOutlined,
   CopyOutlined,
+  CheckOutlined,
   EditOutlined,
   KeyOutlined,
   DashboardOutlined,
@@ -14,6 +15,7 @@ import {
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import { useFormValidate } from '@/composables/useFormValidate'
+import { useCopyFeedback } from '@/composables/useCopyFeedback'
 import DataState from '@/components/DataState.vue'
 import GroupTag from '@/components/GroupTag.vue'
 import { writeClipboard } from '@/utils/clipboard'
@@ -141,6 +143,10 @@ function tooltipOf(record: APIKey) {
 // 写剪贴板的实现提取到了 utils/clipboard.ts（日志详情的 Trace ID 复制
 // 也要用）：降级路径只维护一份，别处出问题只改一处。
 
+// 复制成功的原位反馈（图标变形为对勾，见 useCopyFeedback 的说明）：
+// 三处复制（密钥胶囊 / BaseURL 胶囊 / 新建弹窗明文）共用一个状态
+const { copiedKey: copiedWhat, markCopied } = useCopyFeedback()
+
 async function copyRowKey(record: APIKey) {
   const info = await ensureKey(record)
   if (!info) return
@@ -149,7 +155,7 @@ async function copyRowKey(record: APIKey) {
     Modal.info({ title: '看不到这把密钥的明文', content: info.reason || '明文不可用', width: 460 })
     return
   }
-  if (await writeClipboard(info.key)) message.success('已复制完整密钥')
+  if (await writeClipboard(info.key)) markCopied('key-' + record.id)
   else message.warning('复制失败，请在悬浮提示里手动选择复制')
 }
 
@@ -164,7 +170,7 @@ const baseUrl = window.location.origin + '/v1'
 async function copyBaseUrl() {
   // 与复制密钥共用 writeClipboard：http 下 clipboard API 不可用、
   // 以及 writeText 被挂起等授权这两种情况它都处理过了
-  if (await writeClipboard(baseUrl)) message.success('已复制 BaseURL')
+  if (await writeClipboard(baseUrl)) markCopied('baseurl')
   else message.warning('复制失败，请手动选择复制')
 }
 
@@ -320,7 +326,7 @@ async function save() {
 }
 
 async function copyKey() {
-  if (await writeClipboard(createdKey.value)) message.success('已复制到剪贴板')
+  if (await writeClipboard(createdKey.value)) markCopied('created')
   else message.warning('复制失败，请手动选择复制')
 }
 
@@ -377,7 +383,9 @@ onMounted(() => {
           <span class="baseurl-pill" @click="copyBaseUrl">
             <span class="baseurl-label">BaseURL</span>
             <span class="baseurl-text">{{ baseUrl }}</span>
-            <CopyOutlined class="baseurl-copy" />
+            <!-- 复制成功 0.9s 内图标原位变形为绿色对勾（与密钥胶囊同一套反馈） -->
+            <CheckOutlined v-if="copiedWhat === 'baseurl'" class="baseurl-copy is-copied" />
+            <CopyOutlined v-else class="baseurl-copy" />
           </span>
         </a-tooltip>
         <div class="toolbar-spacer" />
@@ -415,7 +423,10 @@ onMounted(() => {
               <span class="key-pill" @click="copyRowKey(record)">
                 <KeyOutlined />
                 <span class="key-text">{{ record.key_prefix }}…</span>
-                <CopyOutlined class="key-copy" />
+                <!-- 复制成功 0.9s 内图标原位变形为绿色对勾：复制发生在
+                     这颗胶囊上，反馈也留在这里，不再打断视线去顶部弹消息 -->
+                <CheckOutlined v-if="copiedWhat === 'key-' + record.id" class="key-copy is-copied" />
+                <CopyOutlined v-else class="key-copy" />
               </span>
             </a-tooltip>
           </template>
@@ -576,7 +587,11 @@ onMounted(() => {
       />
       <div v-if="createdKey" class="key-box">
         <code>{{ createdKey }}</code>
-        <a-button size="small" @click="copyKey"><CopyOutlined /> 复制</a-button>
+        <a-button size="small" @click="copyKey">
+          <CheckOutlined v-if="copiedWhat === 'created'" class="btn-copy-ok" />
+          <CopyOutlined v-else />
+          {{ copiedWhat === 'created' ? '已复制' : '复制' }}
+        </a-button>
       </div>
     </a-modal>
   </div>
@@ -618,6 +633,19 @@ onMounted(() => {
 }
 .baseurl-copy { flex: none; opacity: 0.55; transition: opacity 0.2s ease; }
 .baseurl-pill:hover .baseurl-copy { opacity: 1; color: var(--color-primary); }
+/* ---- 复制成功的原位变形（三处复制共用这套观感）----
+   图标换成绿色对勾并做一次小弹出；颜色用 --text-green（正文级语义色，
+   白底 5.13:1 / 暗色卡片 6.22:1），成功也是要被读到的一档信息。
+   opacity/color 带 !important 是刻意的：胶囊上的对勾平时 opacity:0
+   （悬停才显示）、悬停时还会染成主色，而复制刚发生时用户已点完、
+   指针多半已移开，反馈必须此刻可见、且必须是成功色 —— 普通权重压不过
+   那两条悬停规则。keyframes（copy-pop）在 theme.css 全局层，与日志详情共用 */
+.is-copied {
+  color: var(--text-green) !important;
+  opacity: 1 !important;
+  animation: copy-pop 0.22s cubic-bezier(0.2, 0, 0, 1);
+}
+.btn-copy-ok { color: var(--text-green); animation: copy-pop 0.22s cubic-bezier(0.2, 0, 0, 1); }
 .muted { color: var(--color-text-secondary); }
 /* 密钥胶囊：与分组胶囊同一套视觉语言（浅底 + 圆角 + 同色文字），
    但用等宽字体 —— 密钥是代码类内容，逐字符比对时等宽好读得多 */

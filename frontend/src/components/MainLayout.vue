@@ -368,8 +368,10 @@ onUnmounted(() => {
 }
 
 /* 窄屏下进一步收紧内容边距：宽度本来就紧张，8px 的四周留白
-   在 360px 的屏幕上等于白白吃掉 4% 的可视宽度 */
-@media (max-width: 600px) {
+   在 360px 的屏幕上等于白白吃掉 4% 的可视宽度。
+   640 是全站断点基准的最小一档（见 theme.css「响应式断点」一节），
+   原来是 600 —— 对齐后 600-640 区间的手机也提前收到紧凑边距。 */
+@media (max-width: 640px) {
   .content-inner { padding: 4px; }
   /* 侧栏收起态的 56px 在手机上仍偏宽，收到 44px */
   .console-sidebar.is-collapsed { width: 44px; flex-basis: 44px; }
@@ -444,6 +446,11 @@ onUnmounted(() => {
   text-align: left;
   cursor: var(--cursor-hand);
   transition: background 0.2s var(--ease-expo), color 0.2s var(--ease-expo);
+}
+
+.console-menu-item:not(:disabled):active {
+  transform: scale(0.96);
+  transition: transform 0.08s ease;
 }
 
 /* 实测选中态：主色 20% 透明底 + 主色文字

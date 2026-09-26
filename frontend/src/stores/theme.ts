@@ -3,7 +3,16 @@ import { ref, watch } from 'vue'
 
 type ThemeMode = 'light' | 'dark'
 
+/**
+ * 深色的质感档位（2026-09-27）：classic 是原有深灰，oled 是「深空纯黑」
+ * 表面叠加层（见 theme.css 的 oled 块）。它不是第三套主题 —— 文字、
+ * 语义色、光标全部沿用深色主题，只换表面四件套，所以独立存一个键、
+ * 以 <html data-darkstyle> 属性表达，浅色下那层选择器不命中、零副作用。
+ */
+type DarkStyle = 'classic' | 'oled'
+
 const STORAGE_KEY = 'llm-relay-theme'
+const DARK_STYLE_KEY = 'llm-relay-darkstyle'
 
 // 主题切换只做一件事：在 <html> 上设置 data-theme 属性。
 //
@@ -25,20 +34,37 @@ const STORAGE_KEY = 'llm-relay-theme'
 export const useThemeStore = defineStore('theme', () => {
   const mode = ref<ThemeMode>(readStoredMode())
   const isDark = ref(mode.value === 'dark')
+  const darkStyle = ref<DarkStyle>(readStoredDarkStyle())
 
   function apply(next: ThemeMode) {
     document.documentElement.setAttribute('data-theme', next)
+    // 质感档位常驻：浅色下 oled 那层选择器不命中，写了也没有副作用；
+    // 而常驻写法让「浅色 ↔ 深色(oled)」来回切换时不需要在这里补属性
+    document.documentElement.setAttribute('data-darkstyle', darkStyle.value)
     isDark.value = next === 'dark'
     // 浏览器外壳（地址栏/状态栏）跟着主题换色：不更新的话深色主题下
-    // 一圈米色非常突兀。meta 在 index.html 里带主色初值，这里只做跟随
+    // 一圈米色非常突兀。meta 在 index.html 里带主色初值，这里只做跟随；
+    // OLED 档的深色外壳要跟到纯黑，否则地址栏一圈 #202020 灰得扎眼
     const meta = document.querySelector('meta[name="theme-color"]')
     if (meta) {
-      meta.setAttribute('content', next === 'dark' ? '#202020' : '#c87864')
+      const darkShell = darkStyle.value === 'oled' ? '#0a0a0a' : '#202020'
+      meta.setAttribute('content', next === 'dark' ? darkShell : '#c87864')
     }
   }
 
   function toggle() {
     mode.value = mode.value === 'dark' ? 'light' : 'dark'
+  }
+
+  /**
+   * 选深色质感档位。浅色/深色本身仍从看板右上角的灯泡切换；
+   * 这里选的是「深色长什么样」—— 所以选定后若当前是浅色，
+   * 直接切到深色让选择立刻看得见（选了却看不见等于没选上）。
+   */
+  function setDarkStyle(s: DarkStyle) {
+    darkStyle.value = s
+    if (mode.value !== 'dark') toggle()
+    else apply('dark')
   }
 
   /**
@@ -89,7 +115,16 @@ export const useThemeStore = defineStore('theme', () => {
     { immediate: true }
   )
 
-  return { mode, isDark, apply, toggle, toggleWithBurst }
+  // 质感档位单独持久化：换主题（浅↔深）不该把它一起冲掉
+  watch(darkStyle, (v) => {
+    try {
+      localStorage.setItem(DARK_STYLE_KEY, v)
+    } catch {
+      // 同上：存不下只影响「下次还记不记得」
+    }
+  })
+
+  return { mode, isDark, darkStyle, apply, toggle, toggleWithBurst, setDarkStyle }
 })
 
 // readStoredMode 读取并校验本地存储里的主题。
@@ -112,4 +147,17 @@ function readStoredMode(): ThemeMode {
     return 'dark'
   }
   return 'light'
+}
+
+// readStoredDarkStyle 与 readStoredMode 同一套校验逻辑：
+// 非法值（手改的脏数据）回落 classic，绝不让一个没有对应样式块的档位
+// 写到 <html> 上 —— 那会让叠加层永远不命中、选择等于失效。
+function readStoredDarkStyle(): DarkStyle {
+  try {
+    const raw = localStorage.getItem(DARK_STYLE_KEY)
+    if (raw === 'oled' || raw === 'classic') return raw
+  } catch {
+    // 忽略：回落默认档
+  }
+  return 'classic'
 }

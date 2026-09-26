@@ -29,6 +29,9 @@ backend/internal/web/dist/*
 # ===== 浏览器调试档案（UI 逆向时产生）=====
 .chrome-profile/
 .chrome-cdp/
+# Playwright MCP 的持久化浏览器配置：里面存着登录过的会话 Cookie
+# （console_session），与 .chrome-profile 同一性质的凭据，绝不入库。
+.playwright-mcp/
 
 # ===== 参考实现（只读对照，不入库）=====
 # 实现版本更新功能时克隆 sub2api 到本地做对照。它是**别人**的完整源码树

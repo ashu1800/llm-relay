@@ -29,7 +29,7 @@
      docs/ui-spec.md 里仍按原样记录着参考站的值，那是描述参考站而非本项目的令牌表。 */
   --color-bg: #f8f5ee;
   --color-fg: #ffffff;
-  --color-fg-shadow: 0 0 0.5rem 0 rgba(0, 0, 0, 0.1);
+  --color-fg-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 4px 12px 0 rgba(0, 0, 0, 0.04);
   --color-text: #303030;
   /* 次要文字。alpha 从 0.65 提到 0.70 是**修复**不是调色（2026-09-24 UI 审评）：
      0.65 在三种底色上全部低于 WCAG AA 正文要求的 4.5:1 ——
@@ -177,6 +177,20 @@
   --radius-control: 6px;
   --radius-pill: 999px;
 
+  /* ---- 响应式断点基准（2026-09-27 收口）----
+     CSS 自定义属性不能用在 @media 条件里，断点无法做成变量，
+     这里以文档形式钉一份刻度，各组件的 media query 向它对齐：
+
+       640px   手机（紧凑边距、44px 图标侧栏 …… MainLayout）
+       768px   平板竖屏（概览卡退一列 …… DashboardView）
+       1024px  预留（当前无使用方）
+       1200px  小笔记本（概览卡退两列 …… DashboardView）
+       1536px  预留（当前无使用方）
+
+     一个刻意的例外：侧栏自动折叠在 900px（MainLayout 的 NARROW 常量），
+     不在刻度上 —— 那是功能断点：内容区的表格在 900 以下连两列都摆不下，
+     提前折叠换来的空间比刻度整齐更重要。改断点时先读这条再动手。 */
+
   /* ---- 字体 ---- */
   /* 界面正文：现代无衬线中文。
      参考站的观感来自它自带的 Web 字体 Harding，那份字体是商业授权、无法随本项目分发；
@@ -294,7 +308,7 @@
 :root[data-theme='dark'] {
   --color-bg: #202020;
   --color-fg: #303030;
-  --color-fg-shadow: 0 0 0.5rem 0 rgba(0, 0, 0, 0.8);
+  --color-fg-shadow: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 4px 20px -2px rgba(0, 0, 0, 0.6);
   --color-text: #c8c8c8;
   /* 与浅色主题同一个 alpha（0.70）：暗色卡片 #303030 上合成 rgb(154,154,154)
      → 4.69:1，过 AA。0.65 时是 4.30:1，不达标。 */
@@ -368,6 +382,32 @@
   --text-terracotta: #e59a80; /* 5.82:1 */
   --text-blue: #4dd0e1;       /* 7.18:1 */
   --text-gray: #9aa1ac;       /* 5.07:1 */
+}
+
+/* ---- 深空纯黑（OLED）：深色主题的「表面叠加层」（2026-09-27）----
+   不是第三套主题：文字、语义色、焦点环、光标、实心主色对全部沿用
+   上面深色块的定义，这一层只把「表面四件套」换成 OLED 档 ——
+   页面底 #0a0a0a / 卡片 #141414 / 边框 / 阴影，为夜间长时间盯盘与
+   OLED 屏省电服务（纯黑像素不发光）。
+
+   对比度不降反升：深色块的文字色都是按 #303030 挑的，表面换到更深的
+   #141414 后每一档的比值都在放大（次要文字 4.69 → 5.88:1，
+   红 5.42 → 7.5:1），无需另配一套文字色。
+
+   选择器刻意写成 [data-darkstyle] 在前：check-contracts 用
+   ":root[data-theme='dark']" 这个子串锚定深色块，把它放在前半段
+   会让 indexOf 提前命中本块、把叠加层误当成深色块去比对光标令牌。
+   两个属性选择器顺序不影响特异性，只影响那个字符串锚。
+
+   data-darkstyle 属性由 theme store 常驻写在 <html> 上（浅色下
+   本块选择器不命中、零副作用），浅深切换因此不需要补写属性。 */
+:root[data-darkstyle='oled'][data-theme='dark'] {
+  --color-bg: #0a0a0a;
+  --color-fg: #141414;
+  --color-border: #2e2e2e;
+  /* 纯黑底上投影几乎不可见：轮廓换更亮一档的白描边承扛起「卡片边界」 */
+  --color-fg-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 4px 20px -2px rgba(0, 0, 0, 0.85);
+  --scrollbar-thumb: rgba(110, 110, 110);
 }
 
 html, body, #app {
@@ -641,6 +681,28 @@ a:hover { opacity: 0.85; }
 
 .ant-btn-primary {
   box-shadow: none;
+}
+
+/* 按钮微弹簧触觉反馈（Micro Bounce） */
+.ant-btn:not(:disabled):active {
+  transform: scale(0.97);
+  transition: transform 0.08s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.table-icon-btn.ant-btn:not(:disabled):active {
+  transform: scale(0.92);
+}
+
+/* ---- 复制成功的原位对勾弹出（copy-pop，2026-09-27）----
+   密钥页（密钥胶囊 / BaseURL 胶囊 / 新建弹窗）与日志详情抽屉（Trace ID /
+   错误原文）的复制反馈共用这一个动画。keyframes 放全局层、两处 scoped
+   样式只写各自的类并引用这个名字：在各自文件里再定义一份，产物里就是
+   两段逐字相同的帧序列（scoped 块里的 keyframes 名会被编译器加哈希后缀，
+   动画本体却一模一样）。动画名是模板引用的契约，不要改。 */
+@keyframes copy-pop {
+  0% { transform: scale(0.4); opacity: 0; }
+  60% { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
 }
 
 /* ---- 全站统一的键盘焦点环（2026-09-24 UI 审评 P1-7）----

@@ -80,6 +80,7 @@ onUnmounted(() => {
 
 <style scoped>
 .summary-card {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 16px;
@@ -88,6 +89,30 @@ onUnmounted(() => {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-panel);
   box-shadow: var(--color-fg-shadow);
+  overflow: hidden;
+  /* 悬停换阴影、热度档换边框色，都走 0.2s 过渡；卡片本身没有位移，
+     不需要 transform 参与 */
+  transition: box-shadow 0.2s var(--ease-expo), border-color 0.2s ease;
+}
+
+/* 顶部微渐变色光晕，营造精致的仪器质感 */
+.summary-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--tone-color) 45%, transparent), transparent);
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.summary-card:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 8px 24px -4px rgba(0, 0, 0, 0.08);
+}
+:root[data-theme='dark'] .summary-card:hover {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 8px 28px -4px rgba(0, 0, 0, 0.7);
 }
 
 /* 每种色调只在这里定义一次，图标与数值共用。

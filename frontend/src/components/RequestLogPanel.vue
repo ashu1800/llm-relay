@@ -23,13 +23,14 @@
 // 仍用 PanelCard，不传 title 时它不会渲染标题栏。
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { CopyOutlined, ProfileOutlined } from '@ant-design/icons-vue'
+import { CheckOutlined, CopyOutlined, ProfileOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import PanelCard from '@/components/PanelCard.vue'
 import GroupTag from '@/components/GroupTag.vue'
 import ChannelIcon from '@/components/ChannelIcon.vue'
 import { onLive, createThrottledLiveReloader } from '@/composables/useLive'
+import { useCopyFeedback } from '@/composables/useCopyFeedback'
 import NewLogEffect, { type FxTarget } from '@/components/NewLogEffect.vue'
 import { useLogFxStore } from '@/stores/logFx'
 import { costText, symbolOf } from '@/utils/money'
@@ -258,29 +259,54 @@ const CELL_PAD = 16
 const CELL_BREATH = 6
 
 /**
- * 把容器比「内容紧宽合计」宽出来的余量**均摊**进每一列。
+ * 宽屏余量分摊的**权重**（2026-09-27 感官升级）。
  *
- * 之前的做法（2026-09-26 上午）是让「密钥」与「操作」之间那列不绑宽度的
- * 弹性列独吞余量：其余十列确实按声明宽 1:1 渲染了，但 1920 视口下 582px
- * 全堆在一处 —— 密钥与操作之间空出一整条，密密麻麻的数据列后面跟着一片
- * 空白，比余量分散到各列时更刺眼（站主当日截图反馈的正是这条）。
- * 参考站的同款日志表是整表均匀留白、没有集中空洞（.shots/light-logs.png），
- * 均摊正是它的形态。
+ * 等额分摊（每列 +leftover/10）对短列是浪费：status / action 两列是
+ * COL_BOUNDS 里写死的固定宽（[64,64]），内容是一枚胶囊、一个图标按钮，
+ * 拉宽它们只会让一枚小胶囊周围空出一圈，而最需要宽度的模型/渠道/密钥
+ * 三列（唯一会 ellipsis 截断的三列）只多拿到同样的一份。于是改为加权：
+ *   · 固定窄列（status / action）份额为 0 —— 永远按声明宽渲染；
+ *   · 三个会截断的长文本列（model / channel / key）权重 ×2；
+ *   · 其余数值列权重 1。
+ * 各列份额 = leftover × wᵢ / Σw，Σ份额 仍恰好等于 leftover，
+ * 「合计 = 容器可用宽、不出现假横向滚动」的不变量不变；
+ * 「实际宽 = 声明宽 + 份额 ≥ 声明宽（只增不减）」也不变。
+ */
+const DISTRIBUTE_WEIGHT: Record<ColKey, number> = {
+  time: 1,
+  model: 2,
+  channel: 2,
+  tokens: 1,
+  elapsed: 1,
+  cost: 1,
+  speed: 1,
+  status: 0,
+  key: 2,
+  action: 0
+}
+
+/** Σw（权重合计，13）：distribute 的单位份额 = leftover / Σw，先算好存起来 */
+const WEIGHT_SUM = COL_KEYS.reduce((s, k) => s + DISTRIBUTE_WEIGHT[k], 0)
+
+/**
+ * 把容器比「内容紧宽合计」宽出来的余量**摊**进列里。
  *
- * 所以现在每列分到 leftover/10：内容仍居中，多出来的部分读起来是
- * 「更宽的呼吸」而不是一处断裂。分摊是**等额**的而不是按列宽比例的 ——
- * 按比例就是 Chrome 原生行为（上午实测 ×1.59），宽列多占、窄列少占，
- * 空白量随列宽拉开差距，站主 2026-09-24 反馈的「渠道列富余很多」
- * 正是那个比例差。等额分摊让每列的绝对空白一致。
+ * 历史（2026-09-26，两刀）：
+ *   上午：弹性列（不绑 width 的那列）独吞余量 → 1920 视口下 582px 全堆一处，
+ *   密钥与操作之间空出一整条（站主当日截图反馈）。
+ *   下午：改为**等额**摊给每一列（leftover/10），空白均匀、无集中空洞 ——
+ *   参考站的同款日志表正是整表均匀留白的形态（.shots/light-logs.png）。
+ *
+ * 2026-09-27 起再改为**加权**等价形态（DISTRIBUTE_WEIGHT）：等额解决了
+ * 「集中空洞」，但对固定窄列是浪费 —— status/action 的内容是一枚胶囊、
+ * 一个图标按钮，拉宽只产生空白；真正会 ellipsis 截断的 model/channel/key
+ * 才是余量的去向。加权后空白仍然分散在各列（不会回到集中空洞），
+ * 只是长文本列多拿、固定列不拿。
  *
  * 分摊后各列实际宽 = 声明宽 + 份额，仍满足「声明 ≥ 内容所需」的不变量
- * （只增不减），内容不会被截断；scroll.x 取新的合计，恰好等于容器宽，
- * 表格不再有横向滚动，弹性列只剩浮点零头（亚像素）可吸收 —— 它仍留着，
- * 窄窗口（内容比容器宽）时它收 0、不留缝的职责不变。
- *
- * 为什么不设上限（比如每列最多 +40）：设了上限，超宽视口下多出来的部分
- * 又会回流到弹性列、重新出现一条空洞 —— 与不摊等价。均摊到每一列之后
- * 再宽的窗口也只是「整体更松」，不会出现集中空白。
+ * （只增不减），内容不会被截断；Σ份额 = leftover，scroll.x 取新的合计
+ * 恰好等于容器宽，表格不再有横向滚动，弹性列只剩浮点零头（亚像素）可吸收
+ * —— 它仍留着，窄窗口（内容比容器宽）时它收 0、不留缝的职责不变。
  *
  * 返回是否有列宽被写掉：调用方据此决定要不要在重渲染后重新量位置
  * （亮带、滚动提示）。均摊的写入要经 Vue 重渲染才落到 DOM —— 同一帧里
@@ -295,12 +321,15 @@ function distribute(): boolean {
   if (!avail) return false
   const declared = COL_KEYS.reduce((sum, k) => sum + baseW[k], 0)
   const leftover = avail - declared
-  const share = leftover > 0 ? leftover / COL_KEYS.length : 0
+  // 加权分摊（权重表见 DISTRIBUTE_WEIGHT 的说明）：单位份额 = leftover / Σw，
+  // 各列拿「单位份额 × 自己的权重」，权重 0 的列完全不拉伸。
+  // Σ(份额) = leftover × Σw / Σw = leftover，合计仍恰好等于容器可用宽。
+  const unit = leftover > 0 ? leftover / WEIGHT_SUM : 0
   let changed = false
   for (const key of COL_KEYS) {
-    const want = baseW[key] + share
+    const want = baseW[key] + unit * DISTRIBUTE_WEIGHT[key]
     // 同值不写：resize 事件连发时每帧都进来，写同样的值不该触发整表重渲染
-    // （浮点份额同一容器宽下算出的值逐位相同，比较是安全的）
+    // （同一容器宽下算出的值逐位相同，比较是安全的）
     if (colW.value[key] !== want) {
       colW.value[key] = want
       changed = true
@@ -374,9 +403,38 @@ function remeasureColumns() {
   }
 }
 
+/**
+ * rAF 节流器（2026-09-27 性能收口）：scroll / resize 事件的触发频率高于
+ * 帧率（Windows 上鼠标滚轮一格能连发十几个 scroll），而经它节流的处理
+ * 全是「读几何」—— 逐事件跑等于每次强制布局，滚动一快就掉帧。
+ * 合并到每帧最多一次，且 rAF 回调跑在本帧 paint 之前：亮带位置仍然
+ * 与滚动同步呈现，只是不再为中间态白算。cancel 供卸载时摘除挂起的帧。
+ */
+function rafThrottle(fn: () => void): (() => void) & { cancel: () => void } {
+  let raf = 0
+  const schedule = () => {
+    if (!raf) raf = requestAnimationFrame(() => {
+      raf = 0
+      fn()
+    })
+  }
+  schedule.cancel = () => {
+    if (raf) cancelAnimationFrame(raf)
+    raf = 0
+  }
+  return schedule
+}
+
 // 列宽在 rows 变化后重算：翻页 / 换筛选 / 首屏的整批替换，以及实时推送插行
-// （后者也走这里，阈值负责把抖动挡在外面）
-watch(rows, () => nextTick(remeasureColumns))
+// （后者也走这里，阈值负责把抖动挡在外面）。
+//
+// 排进 rAF 而不是直接 nextTick（2026-09-27 性能收口）：直播高峰一秒能推
+// 多批，每批都整表量一遍几何（getBoundingClientRect × 列数 × 行数）会让
+// 主线程一直在强制布局。Vue 的 flush 是微任务、一帧内可能连着好几轮，
+// rAF 把同一帧里的多轮触发合并成帧首一次 —— 代价是测量晚半帧（推送行
+// 先渲染、下一帧才定列宽），对 2px 阈值的自适应列宽完全无感。
+const remeasureRaf = rafThrottle(remeasureColumns)
+watch(rows, () => remeasureRaf())
 
 // ---- 新日志的扫光（那条彩虹只为「刚插进来的行」而闪）----
 //
@@ -433,18 +491,21 @@ function repositionBeams() {
 // 亮带飞行的那 2 秒里，用户可能滚动列表（新行被顶上去）或改窗口大小：
 // 位置得跟着重算，否则亮带会停在旧位置 —— 扫光只有两秒，但「停错地方」比不闪更糟。
 // scroll 用 capture：滚动事件不冒泡，而真正滚的是表格内部的 .ant-table-body。
+// 挂的是 rAF 节流版：滚轮连发的事件合并到每帧一次定位。
 let beamWatchAttached = false
+const repositionBeamsRaf = rafThrottle(repositionBeams)
 function attachBeamWatch() {
   if (beamWatchAttached) return
   beamWatchAttached = true
-  window.addEventListener('scroll', repositionBeams, true)
-  window.addEventListener('resize', repositionBeams)
+  window.addEventListener('scroll', repositionBeamsRaf, true)
+  window.addEventListener('resize', repositionBeamsRaf)
 }
 function detachBeamWatch() {
   if (!beamWatchAttached) return
   beamWatchAttached = false
-  window.removeEventListener('scroll', repositionBeams, true)
-  window.removeEventListener('resize', repositionBeams)
+  window.removeEventListener('scroll', repositionBeamsRaf, true)
+  window.removeEventListener('resize', repositionBeamsRaf)
+  repositionBeamsRaf.cancel()
 }
 watch(
   fxTargets,
@@ -488,6 +549,10 @@ function syncScrollHints() {
   canScrollLeft.value = body.scrollLeft > 1
   canScrollRight.value = body.scrollLeft < body.scrollWidth - body.clientWidth - 1
 }
+
+// 滚动提示的 rAF 节流版（节流器的说明见 remeasureColumns 下方的 rafThrottle）：
+// 挂到 scroll 捕获监听上，滚轮连发的事件合并成每帧判一次两侧有没有被盖住。
+const syncScrollHintsRaf = rafThrottle(syncScrollHints)
 
 // ---- 新日志入场动效：档位来自系统设置，立刻生效（store 是同一个实例）----
 //
@@ -752,11 +817,48 @@ function onlyThisTrace() {
 // 复制 Trace ID：排障时它要被贴进日志搜索、聊天工具或上游工单，
 // 24 位十六进制手动划选又慢又容易断行漏字符。
 // 降级路径与密钥复制共用 utils/clipboard.ts（http 非 localhost 环境照常可用）。
+// 成功反馈走原位对勾变形（与密钥页同一套 useCopyFeedback），不再弹顶部消息。
+const { copiedKey: copiedWhat, markCopied } = useCopyFeedback()
+
 async function copyTraceId() {
   if (!current.value) return
-  if (await writeClipboard(current.value.trace_id)) message.success('已复制 Trace ID')
+  if (await writeClipboard(current.value.trace_id)) markCopied('trace')
   else message.warning('复制失败，请手动选择复制')
 }
+
+/** 错误原文一键复制：报障时它要原样贴进工单/聊天，划选长报文又慢又容易漏 */
+async function copyError() {
+  if (!current.value?.error) return
+  if (await writeClipboard(current.value.error)) markCopied('err')
+  else message.warning('复制失败，请手动选择复制')
+}
+
+/**
+ * 详情抽屉的耗时瀑布（2026-09-27）：三个阶段各一条水平条，长度按占总耗时的比例。
+ * 一眼看出「这次到底慢在哪一段」—— 首字条占满而握手条极短，慢的就是模型生成；
+ * 反过来握手条占一半，问题在网络/代理。条色沿用列表里的耗时分级（同色同义）。
+ */
+function latencyWaterfall(row: RequestLog) {
+  const total = row.total_ms || 0
+  const rows: { label: string; pct: number; cls: string; text: string }[] = []
+  const push = (label: string, ms: number | null | undefined, kind: 'first' | 'total') => {
+    if (!ms || ms <= 0) return
+    rows.push({
+      label,
+      pct: total > 0 ? Math.min(100, (ms / total) * 100) : 0,
+      cls: latencyClass(ms, kind),
+      text: fmtMs(ms)
+    })
+  }
+  push('上游握手', row.upstream_ms, 'first')
+  push('首字', row.first_byte_ms, 'first')
+  push('总共', row.total_ms, 'total')
+  return rows
+}
+
+/** 抽屉当前那条日志的瀑布行：computed 缓存，模板的 v-if（画不画）与
+ *  v-for（画什么）共用同一份结果，不再每次渲染都重新算两遍 */
+const waterfallRows = computed(() => (current.value ? latencyWaterfall(current.value) : []))
 
 // 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
 // 表格紧接着显示「暂无数据」，用户会以为这段时间本来就没有调用
@@ -887,6 +989,14 @@ function statusColor(code: number) {
   if (code === 429) return 'orange'
   if (code >= 400) return 'red'
   return 'default'
+}
+
+/** 状态徽标的悬停说明：颜色不是唯一线索（读屏与色觉障碍下同样可分辨） */
+function statusTitle(code: number) {
+  if (code >= 200 && code < 300) return '2xx：调用成功'
+  if (code === 429) return '429：触发限流（本站限速或上游拒绝）'
+  if (code >= 400) return code + '：调用失败，详情看「错误」一栏'
+  return code + '：非成功响应'
 }
 
 // 命中率分母为全部输入 = 未命中 + 命中 + 缓存写入，与看板口径保持一致
@@ -1094,9 +1204,12 @@ onUnmounted(() => {
   fxTargets.value = []
   detachBeamWatch()
   // 横向滚动边界提示（滚动走捕获）与余量重摊（改窗口）的两个监听，
-  // 摘的就是挂上去的那两个引用
-  window.removeEventListener('scroll', syncScrollHints, true)
-  window.removeEventListener('resize', onResize)
+  // 摘的就是挂上去的那两个引用；挂起的 rAF 帧与待测量的帧一并取消
+  window.removeEventListener('scroll', syncScrollHintsRaf, true)
+  window.removeEventListener('resize', onResizeRaf)
+  syncScrollHintsRaf.cancel()
+  onResizeRaf.cancel()
+  remeasureRaf.cancel()
 })
 
 onLive('logs', (items: RequestLog[]) => {
@@ -1228,10 +1341,15 @@ function restoreAnchor(body: HTMLElement, anchor: RowAnchor, attempt = 0) {
 // 读到的都是旧列宽（resize 一事件一帧地连发，每帧都差一拍）。所以
 // 两个读取都排到 nextTick —— 没写列宽时 nextTick 里量到的也是新布局，
 // 代价只是一次微任务。
+//
+// 挂到 window 的是 rAF 节流版（节流器的说明见 remeasureColumns 下方的
+// rafThrottle）：resize 事件连发时每帧最多重摊一次，distribute 里的
+// clientWidth 读取不再逐事件强制布局。
 function onResize() {
   if (distribute()) nextTick(repositionBeams)
   nextTick(syncScrollHints)
 }
+const onResizeRaf = rafThrottle(onResize)
 
 onMounted(() => {
   // 分组表与渠道图标由看板取好传下来，这里只负责取列表。
@@ -1255,8 +1373,8 @@ onMounted(() => {
   // 但 window 捕获监听不依赖拿到它。而轮询版有个真实风险：表体若在 2 秒后才
   // 出现（后端慢、首屏加载失败重试），监听就永远挂不上，阴影从此不再更新。
   // 删掉。
-  window.addEventListener('scroll', syncScrollHints, true)
-  window.addEventListener('resize', onResize)
+  window.addEventListener('scroll', syncScrollHintsRaf, true)
+  window.addEventListener('resize', onResizeRaf)
   nextTick(syncScrollHints)
 })
 </script>
@@ -1540,7 +1658,17 @@ onMounted(() => {
           :show-sorter-tooltip="false"
         >
           <template #default="{ record }">
-            <a-tag :color="statusColor(record.status_code)">{{ record.status_code }}</a-tag>
+            <!-- 状态徽标（2026-09-27 感官升级）：带前置指示点的轻质药丸取代 a-tag ——
+                 成功是安静的静态绿点、429 慢呼吸、5xx 快闪。动画只留给异常：
+                 一屏几十行 2xx，若绿点也闪，整个列表都在噪动。 -->
+            <span
+              class="status-pill"
+              :class="'is-' + statusColor(record.status_code)"
+              :title="statusTitle(record.status_code)"
+            >
+              <i class="dot" aria-hidden="true" />
+              {{ record.status_code }}
+            </span>
           </template>
         </a-table-column>
         <!-- 密钥跟着状态收尾：它们本来就是一问一答（哪把密钥、结果如何） -->
@@ -1604,7 +1732,9 @@ onMounted(() => {
         <a-descriptions-item label="Trace ID">
           {{ current.trace_id }}
           <a-button type="link" size="small" class="trace-link" @click="copyTraceId">
-            <CopyOutlined /> 复制
+            <CheckOutlined v-if="copiedWhat === 'trace'" class="trace-copy-ok" />
+            <CopyOutlined v-else />
+            {{ copiedWhat === 'trace' ? '已复制' : '复制' }}
           </a-button>
           <a-button type="link" size="small" class="trace-link" @click="onlyThisTrace">
             只看这条链路
@@ -1678,6 +1808,16 @@ onMounted(() => {
           <span v-if="tokPerSec(current)">
             · 速度 <span :title="speedTitle(current)">{{ tokPerSec(current) }} tok/s</span>
           </span>
+          <!-- 时序瀑布：条长 = 该阶段占总耗时的比例，条色沿用耗时分级 -->
+          <div v-if="waterfallRows.length" class="wf">
+            <div v-for="r in waterfallRows" :key="r.label" class="wf-row">
+              <span class="wf-label">{{ r.label }}</span>
+              <span class="wf-track">
+                <i class="wf-bar" :class="r.cls" :style="{ width: r.pct + '%' }" />
+              </span>
+              <span class="wf-val">{{ r.text }}</span>
+            </div>
+          </div>
         </a-descriptions-item>
         <a-descriptions-item label="费用">
           <!-- 与列表同一个规则（utils/money.ts 的 costText）。
@@ -1697,6 +1837,14 @@ onMounted(() => {
           {{ multiplierSourceText(current) }}
         </a-descriptions-item>
         <a-descriptions-item v-if="current.error" label="错误">
+          <div class="err-head">
+            <span class="err-head-text">上游返回的原始错误</span>
+            <a-button type="link" size="small" class="trace-link" @click="copyError">
+              <CheckOutlined v-if="copiedWhat === 'err'" class="trace-copy-ok" />
+              <CopyOutlined v-else />
+              {{ copiedWhat === 'err' ? '已复制' : '复制' }}
+            </a-button>
+          </div>
           <pre class="err-box">{{ current.error }}</pre>
         </a-descriptions-item>
       </a-descriptions>
@@ -1792,6 +1940,74 @@ onMounted(() => {
 /* 详情里的「只看这条链路」：贴着 trace_id 放，弱化成次要操作，
    别让人以为它是个必须点的按钮 */
 .trace-link { margin-left: 8px; font-size: 12px; }
+/* 复制成功时按钮内图标变形为绿色对勾（与密钥页同一套观感，见 useCopyFeedback；
+   copy-pop 的 keyframes 在 theme.css 全局层，与密钥页共用同一个） */
+.trace-copy-ok {
+  color: var(--text-green);
+  animation: copy-pop 0.22s cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* ---- 详情抽屉的耗时瀑布（2026-09-27）----
+   三行水平条：标签 / 轨道 / 数值。轨道底用次要色 12% 的浅槽，
+   条色取该阶段的耗时分级色（与列表里同一个 lat-* 类，currentColor 上色）。
+   grid 定宽三轨：标签与数值不随条长漂移，上下三行严格对齐才读得出比例。 */
+.wf {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  margin-top: 8px;
+}
+.wf-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) 72px;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  line-height: 16px;
+}
+.wf-label {
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+.wf-track {
+  position: relative;
+  height: 6px;
+  border-radius: 3px;
+  /* 浅槽：让「条长」有分母可读 —— 没有槽，半长与全长没有区别 */
+  background: color-mix(in oklab, var(--color-text-secondary) 12%, transparent);
+  overflow: hidden;
+}
+.wf-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: 3px;
+  background: currentColor;
+  /* 条长变化时的过渡：翻到上一条/下一条日志时比例条平滑重排 */
+  transition: width 0.3s var(--ease-expo);
+}
+.wf-val {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+/* 错误区的小标题行：说明 + 复制按钮。报障场景下这行字能省掉
+   「这一坨是什么」的疑问，复制按钮则免去长报文的划选 */
+.err-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+  margin-bottom: 4px;
+}
+.err-head-text {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
 
 /* 模型、密钥、分组三列各是一个胶囊，用的是同一个组件（components/GroupTag.vue）
    与同一个颜色 —— 该请求所属分组的颜色。
@@ -1959,6 +2175,62 @@ onMounted(() => {
 }
 :root[data-theme='dark'] .think-pill {
   color: color-mix(in oklab, var(--tp) 55%, white);
+}
+
+/* ---- 状态徽标（2026-09-27 感官升级）----
+   前置指示点 + 轻质药丸，取代 a-tag。形态与 think-pill / stream-pill 同族
+   （描边 + 13% 淡底 + 圆角 + 12px），描边/底/文字的混合比例也沿用同一套
+   验证过的对比度处理（浅色混黑 60%、深色混白 55%）。
+
+   指示点的节奏按语义分级 —— 动画是「需要注意」的语言，不是装饰：
+     green  静止（一屏几十行 2xx，绿点集体呼吸整个表都在噪动）
+     orange 慢呼吸（429：被限流了，值得余光注意到）
+     red    快闪（5xx：失败了，必须第一时间被看到）
+   default（非 2xx/429/4xx 的奇数值）与 green 一样静止、走中性灰。 */
+.status-pill {
+  --sp: var(--color-gray);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 5px;
+  border-radius: var(--radius-control);
+  border: 1px solid color-mix(in oklab, var(--sp) 32%, transparent);
+  background: color-mix(in oklab, var(--sp) 13%, transparent);
+  color: color-mix(in oklab, var(--sp) 60%, black);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+  white-space: nowrap;
+  vertical-align: middle;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+.status-pill.is-green { --sp: var(--color-green); }
+.status-pill.is-orange { --sp: var(--color-orange); }
+.status-pill.is-red { --sp: var(--color-red); }
+:root[data-theme='dark'] .status-pill {
+  color: color-mix(in oklab, var(--sp) 55%, white);
+}
+.status-pill .dot {
+  flex: 0 0 4px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.status-pill.is-orange .dot {
+  animation: status-breathe 2.6s ease-in-out infinite;
+}
+.status-pill.is-red .dot {
+  animation: status-blink 1.1s ease-in-out infinite;
+}
+@keyframes status-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@keyframes status-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.15; }
 }
 
 /* 速度列（2026-09-21）：每秒词元输出速度，流式行在数值前带「流」胶囊。

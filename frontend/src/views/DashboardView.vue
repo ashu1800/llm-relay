@@ -361,7 +361,13 @@ const costHint = computed(() => {
   const text = rest.map((c) => moneyText(summary.value?.costs?.[c], c)).join(' / ')
   return '另有 ' + text
 })
-const rateValue = computed(() => (summary.value ? summary.value.success_rate * 100 : null))
+// success_rate 必须是数字才交给补间：后端万一回了缺字段的 200（或旧版本
+// 没有这个字段），undefined * 100 = NaN， AnimatedNumber 会把「NaN%」
+// 当成真值滚给用户看 —— 那比空着更糟。缺了就回 null（显示 --）。
+const rateValue = computed(() => {
+  const r = summary.value?.success_rate
+  return typeof r === 'number' && Number.isFinite(r) ? r * 100 : null
+})
 
 // 实时数值：服务端**有新日志就立刻**算一次今日汇总，变了才推；
 // 没流量时另有一条 2 秒的兜底节拍（见 backend/internal/api/live.go）。
@@ -769,14 +775,17 @@ onMounted(async () => {
 .dashboard :deep(.ds-alert) { margin: 0 0 var(--gap); }
 
 /* 窄屏：卡片从四列退到两列，再退到一列。
-   退档是为了不把卡片压到读不出数字，而不是为了塞下更多卡。 */
-@media (max-width: 1100px) {
+   退档是为了不把卡片压到读不出数字，而不是为了塞下更多卡。
+   断点走全站基准（见 theme.css「响应式断点」一节）：1200 四张每张
+   只剩 ~270px、数字开始换行，退两列；768（平板竖屏）以下退一列。
+   原来是 1100/700，与基准刻度对齐后各档行为不变、只差半档余量。 */
+@media (max-width: 1200px) {
   .summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
-@media (max-width: 700px) {
+@media (max-width: 768px) {
   .summary-grid {
     grid-template-columns: minmax(0, 1fr);
   }
