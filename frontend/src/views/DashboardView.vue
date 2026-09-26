@@ -628,7 +628,6 @@ onMounted(async () => {
       :groups="filterGroups"
       :channels="filterChannels"
       @update:trace-id="traceId = $event"
-      @update:status-class="statusClass = $event"
     />
 
     <!-- 昨日战报：每天第一次打开看板时自弹（含里程碑彩带判定），

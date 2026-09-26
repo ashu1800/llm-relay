@@ -29,7 +29,7 @@ import DataState from '@/components/DataState.vue'
 import PanelCard from '@/components/PanelCard.vue'
 import GroupTag from '@/components/GroupTag.vue'
 import ChannelIcon from '@/components/ChannelIcon.vue'
-import { onLive, createThrottledLiveReloader, liveConnected } from '@/composables/useLive'
+import { onLive, createThrottledLiveReloader } from '@/composables/useLive'
 import NewLogEffect, { type FxTarget } from '@/components/NewLogEffect.vue'
 import { useLogFxStore } from '@/stores/logFx'
 import { costText, symbolOf } from '@/utils/money'
@@ -48,10 +48,10 @@ const props = defineProps<{
   channels: Channel[]
 }>()
 
-// 「只看这条链路」是详情抽屉里的入口，改的是看板持有的那个条件，所以只能往上抛
+// 「只看这条链路」是详情抽屉里的入口，改的是看板持有的那个条件，所以只能往上抛。
+// （statusClass 没有往上抛的入口了：面板顶部的「仅失败」开关 2026-09-26 移除。）
 const emit = defineEmits<{
   (e: 'update:traceId', v: string): void
-  (e: 'update:statusClass', v: string): void
 }>()
 
 // 分组表：日志里的模型、密钥、分组三处标签共用该请求所属分组的颜色。
@@ -653,39 +653,9 @@ function onlyThisTrace() {
   detailOpen.value = false
 }
 
-// 「仅失败」切换（2026-09-24 UI 审评 P1-8）：面板一直支持 status_class=error，
-// 但此前唯一的入口是手改 URL —— 而失败排查恰恰是这类工具的第一需求。
-// 条件与深链、看板工具栏那个小标签共享同一个 ref（由看板持有），
-// 所以这里只往上抛；watch 在 props 上，状态一变列表自动重取并回第一页。
-// 只做 error 一档：success 深链仍可从 URL 进来（看板 applyUrlFilters 认它），
-// 但不值得为「只看成功」做一个常驻开关 —— 排障找的是坏的，不是好的。
-function toggleFailOnly() {
-  emit('update:statusClass', props.statusClass === 'error' ? '' : 'error')
-}
-
-// ---- 实时连接状态（2026-09-24 UI 审评 P1-10）----
-//
-// useLive.ts 早就导出了 liveConnected，但全仓 0 引用：WebSocket 断了，界面照旧
-// 显示旧数据、数字不再跳动，而用户分不清这是「没有流量」还是「连接死了」——
-// 「实时」二字因此不可信。这里把它接出来，与「最后更新」时间戳一起显示：
-//
-//   链路正常 → 绿点 +「实时 · 最后更新 10:13:23」
-//   断开重连 → 红点 +「已断开，正在重连 · 最后更新 10:13:23」
-//
-// 时间戳只在**数据或推送真的到达**时刷新（load 成功、收到 logs 帧），不是每秒
-// 走的表：它要回答的正是「我看到的这屏有多旧」，所以静默时段停住不动才是对的。
-// 断线时它同时说明了两件事 —— 界面上的数据停在哪个时刻，以及为什么不再动。
-//
-// everConnected 是为了首屏：订阅刚建立、握手还没完成的那几百毫秒里
-// liveConnected 仍是 false，直接显示「已断开」会闪一下假警报。
-const everConnected = ref(false)
-watch(liveConnected, (v) => {
-  if (v) everConnected.value = true
-})
-const lastLiveAt = ref('')
-function touchLive() {
-  lastLiveAt.value = fmtTimeCompact(new Date().toISOString())
-}
+// 「仅失败」切换按钮 2026-09-26 应站主要求移除（连同一行的实时状态显示）。
+// 面板仍支持 status_class=error 深链：入口只剩 URL 与看板工具栏那个可关闭的小标签，
+// 条件仍由看板持有，watch 在 props 上，状态一变列表自动重取并回第一页。
 
 // 复制 Trace ID：排障时它要被贴进日志搜索、聊天工具或上游工单，
 // 24 位十六进制手动划选又慢又容易断行漏字符。
@@ -739,9 +709,6 @@ async function load(opts: { silent?: boolean } = {}) {
     if (seq !== loadSeq) return
     rows.value = res.items || []
     total.value = res.total || 0
-    // 数据真的到了才刷新「最后更新」（P1-10）：它是「这屏有多旧」的判据，
-    // 不能因为一次失败的静默重取而跳到当前时间
-    touchLive()
     // 首屏落地：从这一刻起，实时推送标出来的行才真的是「新来的」
     if (!silent) loadedOnce = true
     if (before) markFresh(rows.value.filter((r) => !before.has(r.id)).map((r) => r.id))
@@ -1008,29 +975,22 @@ const pagination = computed(() => ({
 // 3. 翻了页 —— 什么都不做：重取会让用户正在看的第二页变成另外一批行。
 const liveReloader = createThrottledLiveReloader(() => load({ silent: true }))
 
-// ---- 日志队列水位（服务端 health 推送）----
+// ---- 日志队列丢弃告警（服务端 health 推送）----
 //
 // 看板上的所有数字都出自日志这条异步写入队列；队列满时服务端会静默丢日志
 // （只有后端日志里一条 warn），统计因此「看起来正常」地少算。
-// 服务端把丢弃计数与队列水位做成 health 帧推过来：平时低调显示水位，
-// 一旦真的丢了，这里必须第一个喊出来 —— 在你怀疑「数字怎么对不上」之前。
+// 常驻的水位条 2026-09-26 应站主要求移除了，但「真的丢了必须第一时间喊出来」
+// 还在：丢弃计数新增时弹一条 error —— 要在你怀疑「数字怎么对不上」之前提醒你。
 type LogQueueInfo = { queued: number; capacity: number; dropped: number }
-const queueInfo = ref<LogQueueInfo | null>(null)
+let lastDropped = 0
 let lastDroppedAlert = 0
 
 onLive('health', (data: LogQueueInfo) => {
-  // 与 logs 帧同理：health 帧是服务端统计循环的固定节拍，
-  // 它到了就说明这条链路还在（P1-10 的「最后更新」用它兜底：没有日志流量时
-  // 时间戳仍会跳，于是「链路活着」与「没有新请求」两件事分得开）
-  touchLive()
-  const prev = queueInfo.value
-  queueInfo.value = data
-  // 丢弃新增：弹一条 error。持续丢弃时不刷屏 —— 同一场告警 10 秒内只弹一条，
-  // 但状态条保持红色，肉眼不会漏
-  if (prev && data.dropped > prev.dropped && Date.now() - lastDroppedAlert > 10000) {
+  if (data.dropped > lastDropped && Date.now() - lastDroppedAlert > 10000) {
     lastDroppedAlert = Date.now()
-    message.error(`日志队列已满：新增 ${data.dropped - prev.dropped} 条统计被丢弃，看板数字暂时不完整`)
+    message.error(`日志队列已满：新增 ${data.dropped - lastDropped} 条统计被丢弃，看板数字暂时不完整`)
   }
+  lastDropped = data.dropped
 })
 
 onUnmounted(() => {
@@ -1047,9 +1007,6 @@ onUnmounted(() => {
 })
 
 onLive('logs', (items: RequestLog[]) => {
-  // 收到任何一帧都说明链路还活着（空帧也算）——「最后更新」因此是
-  // 「最后收到实时推送的时刻」，断线时它停住的那一刻正是界面开始失效的时刻
-  touchLive()
   if (!Array.isArray(items) || !items.length) return
   if (page.value !== 1) return
   const filtered = !!props.traceId || !!props.statusClass
@@ -1206,44 +1163,9 @@ onMounted(() => {
        但不传 title、也不传 extra：标题栏会说一遍表头已经说清的事，还占 40px；
        去掉之后表体刚好能多放一整行。 -->
   <PanelCard>
-    <!-- 列表自己的小工具条。上面看板的工具栏只服务概览卡（列表不吃那四个筛选），
-         而「仅失败」是**列表自己的**条件 —— 入口长在列表旁边，看着列表点它，
-         眼睛不用跑（2026-09-24 UI 审评 P1-8：此前唯一入口是手改 URL 深链）。
-         这一行刻意做薄（26px）：面板标题栏当年就是为省 40px 被拿掉的，
-         这里不能再吃回去。左边留给将来的实时状态（P1-10），现在先空着。 -->
-    <div class="list-bar">
-      <!-- 实时状态（P1-10）：链路是否活着 + 界面数据最后刷新的时刻。
-           放左侧是因为它是这一屏所有数字的前提 —— 先可信，再读数。 -->
-      <div
-        class="live-status"
-        :class="{ off: everConnected && !liveConnected }"
-        role="status"
-        aria-live="polite"
-        :title="
-          liveConnected
-            ? '实时推送链路正常；这个时间随服务端推送刷新，断线时它会停住'
-            : '与后端的实时连接已断开，正在自动重连；下面的数据停在上面的时刻'
-        "
-      >
-        <span class="live-dot" aria-hidden="true"></span>
-        <template v-if="!everConnected">连接中…</template>
-        <template v-else>
-          {{ liveConnected ? '实时' : '已断开，正在重连' }}
-          <span v-if="lastLiveAt" class="live-at">· 最后更新 {{ lastLiveAt }}</span>
-        </template>
-      </div>
-      <button
-        type="button"
-        class="fail-toggle"
-        :class="{ on: statusClass === 'error' }"
-        :aria-pressed="statusClass === 'error'"
-        title="只显示失败的请求；再次点击恢复全量"
-        @click="toggleFailOnly()"
-      >
-        <span class="fail-dot" aria-hidden="true"></span>
-        仅失败
-      </button>
-    </div>
+    <!-- 面板顶部不再有任何工具条（2026-09-26 应站主要求移除）：实时状态行与
+         「仅失败」开关都删了 —— 排障条件只剩两个深链 ?trace_id= / ?status_class=，
+         激活时看板工具栏会显示可关闭的小标签，入口在那里。 -->
 
     <!-- 排序生效时的口径说明（P1-9）。只对「费用」这一列出现：
          站里不做汇率换算，后端会先按币种分组再排金额，不说清的话
@@ -1537,22 +1459,9 @@ onMounted(() => {
         </a-table>
       </div>
 
-      <!-- 日志队列水位：服务端每次统计醒来时把丢弃计数与队列占用量推过来
-           （见 live.go 的 health 帧）。放在表格之下、面板最底部 ——
-           它是这一屏的「仪表地基」状态，不是每天要看的内容；
-           丢弃发生过就保持红色，悬停可见累计数与含义 -->
-      <div v-if="queueInfo" class="queue-status" :class="{ 'queue-alert': queueInfo.dropped > 0 }">
-        <span
-          class="queue-dot"
-          :title="
-            queueInfo.dropped > 0
-              ? '已累计丢弃 ' + queueInfo.dropped + ' 条日志（队列满或服务退出），看板统计因此偏小'
-              : '日志写入队列健康，无丢弃'
-          "
-        />
-        日志队列 {{ queueInfo.queued }}/{{ queueInfo.capacity }}
-        <span v-if="queueInfo.dropped > 0" class="queue-dropped">已丢 {{ queueInfo.dropped }}</span>
-      </div>
+      <!-- 日志队列水位条 2026-09-26 应站主要求移除（不再常驻显示「日志队列」标签）。
+           队列满导致丢统计时仍会弹一次性 error 提示（见 onLive('health')），
+           只是界面上不再有常驻水位。 -->
     </DataState>
 
     <a-drawer v-model:open="detailOpen" title="调用详情" :width="'min(720px, 94vw)'">
@@ -2121,57 +2030,8 @@ onMounted(() => {
   flex: 1 1 auto;
 }
 
-/* ---- 日志队列水位 ----
-   12px 小字，与分页组件同一行（左侧）—— 它和「共 N 条 / 页码」都是表格的
-   地基信息。原来靠 `margin: -28px` 把它硬拉上分页那一行，那个 28 是按
-   「分页块高 32」算的，而实测分页块只有 24px —— 于是它并没有落到分页那一行，
-   而是压在分页**下方**并与它重叠：390px 视口下「共 25152 条」被这一行盖住，
-   两块文字直接叠在一起（2026-09-24 UI 审评实测，gapY = -28.1px，
-   1440/1055/390 三个宽度都重叠）。
-
-   现在不猜高度了：给分页组件加一条下外边距，把这一行**推到分页下面**
-   （见下面的 .ant-pagination 规则），负边距整个删掉。
-   同一行放不下时的表现也从「重叠」变成「换行」—— 这是布局该有的行为。 */
-.queue-status {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  width: fit-content;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  font-variant-numeric: tabular-nums;
-}
-
-/* 分页与队列水位之间的间距。用 margin-bottom 而不是水位上的负 margin：
-   间距是分页「下方」的属性，写在下游元素上就会在分页高度变化时失准
-   （上面那个 -28px 就是这么坏的）。 */
-.log-table :deep(.ant-pagination) {
-  margin-bottom: 6px;
-}
-
-.queue-dot {
-  width: 8px;
-  height: 8px;
-  flex: none;
-  border-radius: 50%;
-  /* 正常态：低调的绿。跟渠道列表「可用」同一个语义色 */
-  background: var(--color-green);
-}
-
-/* 丢过日志就整条转红并保持：红色是「统计曾经不完整」的持续提醒，
-   不是瞬时闪烁 —— 这个状态只能靠服务重启清零（计数在内存里） */
-.queue-status.queue-alert {
-  color: var(--color-red);
-  font-weight: 500;
-}
-.queue-status.queue-alert .queue-dot {
-  background: var(--color-red);
-}
-.queue-dropped {
-  font-weight: 600;
-}
+/* 日志队列水位条与列表小工具条（实时状态 +「仅失败」开关）2026-09-26 应站主要求
+   移除，下面的样式随之删除；分页此前为给水位条让位加的 margin-bottom 一并撤掉。 */
 
 /* ---- 排序口径说明（P1-9）----
    只在「费用」排序生效时出现的一行小字。12px 次要色（--color-text-secondary
@@ -2183,105 +2043,4 @@ onMounted(() => {
   color: var(--color-text-secondary);
 }
 
-/* ---- 列表小工具条（实时状态 P1-10 +「仅失败」开关 P1-8）----
-   一行 flex、26px 高：左边实时状态，右边「仅失败」开关。
-   面板外壳（PanelCard → DataState → .panel-body）是纵向 flex，
-   这一行 flex:none，表体的 100% 弹性高度自动让位 —— 与「顶上多出一条
-   默认密钥告警」同一机制，不需要重算任何高度。 */
-.list-bar {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--gap);
-  min-height: 26px;
-  margin-bottom: 4px;
-}
-
-/* 实时状态：绿点 +「实时 · 最后更新 HH:mm:ss」。断线时整行转红并换文案。
-   文字色用 --text-red（白底 5.44:1 / 暗色 5.42:1）而不是 --color-red ——
-   后者当正文不达 AA，这条恰恰是最需要看清的一句。
-   圆点是第二个线索（正常绿 / 断线红），文案是第三个：色觉障碍下同样分得清。 */
-.live-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  font-variant-numeric: tabular-nums;
-}
-.live-status.off {
-  color: var(--text-red);
-  font-weight: 500;
-}
-.live-dot {
-  width: 8px;
-  height: 8px;
-  flex: none;
-  border-radius: 50%;
-  background: var(--color-green);
-}
-.live-status.off .live-dot {
-  background: var(--color-red);
-}
-/* 「最后更新」比前面那半句再淡一档：它是佐证不是结论 */
-.live-at {
-  color: var(--color-text-secondary);
-  font-weight: 400;
-}
-
-/* 「仅失败」切换：原生 button（不是 a-button）—— 它是切换器不是命令按钮，
-   要的是 pill + aria-pressed 的形态；antd 的 checked 态（a-check-tag）
-   配色不走主题令牌。
-   颜色策略：文字恒用正文色（#303030 / 暗 #e8e6e3，两套主题下都远超 4.5:1），
-   开关态由**边框 + 圆点**承载 —— 亮色主题的 --color-red (#ea4343) 在白底
-   只有约 3.9:1，当正文不达 AA，但当非文本图形（3:1 即可）是达标的；
-   把态交给边框与圆点，文字就永远不用为对比度操心。 */
-.fail-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 26px;
-  padding: 0 12px;
-  border-radius: 13px;
-  border: 1px solid var(--color-border);
-  background: transparent;
-  color: var(--color-text);
-  font-size: 12px;
-  line-height: 1;
-  cursor: pointer;
-  transition:
-    border-color 0.15s ease,
-    background-color 0.15s ease;
-}
-.fail-toggle:hover {
-  border-color: color-mix(in oklab, var(--color-red) 45%, var(--color-border));
-  background: color-mix(in oklab, var(--color-red) 6%, transparent);
-}
-.fail-toggle:active {
-  transform: scale(0.96);
-}
-/* 激活：红边 + 淡红底 + 实心红点。红点从空心变实心是第二个视觉线索
-   （色觉之外），aria-pressed 是第三个（读屏） */
-.fail-toggle.on {
-  border-color: color-mix(in oklab, var(--color-red) 55%, var(--color-border));
-  background: color-mix(in oklab, var(--color-red) 10%, transparent);
-  font-weight: 500;
-}
-/* 焦点环不在这里写：theme.css 有一条全站 :focus-visible（P1-7） */
-
-/* 圆点：未激活空心（只描边），激活实心。空心时边框色 3:1 于白底达标
-   （#ea4343 约 3.9:1）；暗色主题的 --color-red 是提亮版 #f08a7a（5.42:1） */
-.fail-dot {
-  width: 8px;
-  height: 8px;
-  flex: none;
-  border-radius: 50%;
-  border: 1.5px solid var(--color-red);
-  background: transparent;
-  transition: background-color 0.15s ease;
-}
-.fail-toggle.on .fail-dot {
-  background: var(--color-red);
-}
 </style>
