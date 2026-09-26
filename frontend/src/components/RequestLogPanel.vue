@@ -212,10 +212,12 @@ const CONTENT_MEASURE: Partial<Record<ColKey, { sel: string; pad: number }>> = {
  *  非预期的横向滚动，而且看不出是哪一列错。 */
 const columnsTotal = computed(() => COL_KEYS.reduce((sum, k) => sum + colW.value[k], 0))
 
-/** 弹性列（模板里那列不绑 width 的空列）的单元格属性：挂上 log-elastic 类，
- *  配合下面的样式把内边距清零 —— antd 的 th/td 自带 8px 左右内边距，
- *  不清零的话，横向滚动时收到 0 宽的它仍会占 16px、留一道空缝。 */
-const elasticCell = () => ({ class: 'log-elastic' })
+/** 弹性列（模板里那列不绑 width 的空列）的单元格属性：内联清零内边距 ——
+ *  antd 的 th/td 自带 8px 左右内边距，不清零的话，横向滚动时收到 0 宽的
+ *  它仍会占 16px、留一道空缝。走内联 style 而不是 class + 样式规则：
+ *  内联不参与选择器级联，天然压过 antd 运行时注入的 CSS-in-JS padding，
+ *  无需 !important（antd 表格样式里 padding 均无 !important，已核）。 */
+const elasticCell = () => ({ style: { padding: 0 } })
 
 /** 单元格左右内边距（antd 小表格 8+8）与右侧呼吸余量（给省略号与边框） */
 const CELL_PAD = 16
@@ -2009,17 +2011,6 @@ onMounted(() => {
 }
 .log-table :deep(.ant-table-body) {
   overflow-anchor: auto;
-}
-
-/* ---- 弹性列（见模板里那列的注释）：容器余量的去处 ----
-   内边距清零：antd 的 th/td 自带 8px 左右内边距，不清零的话，
-   横向滚动时收到 0 宽的它仍占 16px，在「操作」列左边留一道空缝。
-   !important 是必须的：antd 的单元格 padding 规则（CSS-in-JS，运行时注入）
-   在级联顺序里排在我们后面、有效特异性也更高，普通声明会被它压掉
-   （CDP getMatchedStyles 实测，2026-09-26）。 */
-.log-table :deep(th.log-elastic),
-.log-table :deep(td.log-elastic) {
-  padding: 0 !important;
 }
 
 /* ---- 把面板剩下的高度一路传到表体 ----
