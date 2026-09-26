@@ -134,11 +134,14 @@ func (s *Server) Register(r *gin.Engine) {
 // registerAdminRoutes 挂载管理后台 API。
 //
 // 三层防线，从外到内：
-//   1. sameOriginOnly —— 拒绝来自其它网页的跨站请求（表单 CSRF 的主防线，
-//      见其注释）。没有登录时它几乎是唯一的防线，有了登录后依然必要。
-//   2. requireConsoleAuth —— 无账号模型的密钥登录（console_auth.go）。
-//      未配置 RELAY_ADMIN_KEY 时放行一切，保持旧部署行为。
-//   3. limitAdminBody —— 管理接口请求体上限，输入全部来自网络。
+//  1. sameOriginOnly —— 拒绝来自其它网页的跨站请求（表单 CSRF 的主防线，
+//     见其注释）。没有登录时它几乎是唯一的防线，有了登录后依然必要。
+//  2. requireConsoleAuth —— 无账号模型的密钥登录（console_auth.go）。
+//     未配置 RELAY_ADMIN_KEY 时放行一切，保持旧部署行为。
+//  3. limitAdminBody —— 管理接口请求体上限，输入全部来自网络。
+//  4. gzipResponses —— 响应 gzip 压缩（性能层，不是防线）。放在最内层：
+//     limitAdminBody 的 MaxBytesReader 在它之前已捕获原始 writer 的引用
+//     用于超限时的连接关闭提示，晚于它包装就不会干扰那套引用。
 //
 // 登录/状态三个接口挂在独立的公开子组上：它们必须在鉴权之前可达，
 // 否则永远拿不到会话。公开子组同样受 1、3 两层约束 —— 登录接口的
@@ -151,7 +154,7 @@ func (s *Server) registerAdminRoutes(r *gin.Engine) {
 		adminPublic.POST("/auth/logout", s.consoleLogout)
 		adminPublic.GET("/auth/status", s.consoleAuthStatus)
 	}
-	admin := r.Group("/api/admin", sameOriginOnly(), s.requireConsoleAuth(), limitAdminBody)
+	admin := r.Group("/api/admin", sameOriginOnly(), s.requireConsoleAuth(), limitAdminBody, gzipResponses())
 	{
 		admin.GET("/system/info", s.systemInfo)
 		registerSystemRoutes(admin, s)
