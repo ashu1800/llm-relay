@@ -1028,7 +1028,10 @@ onBeforeUnmount(() => {
             @change="onGroupFilterChange"
           />
           <a-button type="primary" @click="openCreate"><PlusOutlined /> 新建渠道</a-button>
-          <a-button :loading="loading" @click="load"><ReloadOutlined /> 刷新</a-button>
+          <!-- 图标化与看板/分组/代理三页的工具栏统一：位置固定后图标即可辨认 -->
+          <a-button :loading="loading" title="刷新" aria-label="刷新" @click="load">
+            <ReloadOutlined />
+          </a-button>
         </div>
         <div class="toolbar-spacer" />
         <span class="toolbar-hint">

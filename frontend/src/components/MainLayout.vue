@@ -11,11 +11,8 @@ import {
   SettingOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
-  BulbOutlined,
-  BulbFilled,
   LogoutOutlined
 } from '@ant-design/icons-vue'
-import { useThemeStore } from '@/stores/theme'
 import { useAuthStore } from '@/stores/auth'
 import { message } from 'ant-design-vue'
 import { onLive } from '@/composables/useLive'
@@ -25,7 +22,6 @@ import VersionBadge from '@/components/VersionBadge.vue'
 
 const route = useRoute()
 const router = useRouter()
-const themeStore = useThemeStore()
 const authStore = useAuthStore()
 
 // 退出登录：服务端清掉会话 Cookie，本地状态随之置否，回登录页。
@@ -33,12 +29,6 @@ const authStore = useAuthStore()
 async function logout() {
   await authStore.logout()
   router.push('/login')
-}
-
-// 主题切换带上点击坐标：新主题从灯泡位置圆形扩散铺满全屏
-// （动画本身在 themeStore.toggleWithBurst，这里只负责把事件坐标递过去）
-function toggleTheme(e: MouseEvent) {
-  themeStore.toggleWithBurst(e.clientX, e.clientY)
 }
 
 // ---- 预算告警（全局）----
@@ -174,11 +164,12 @@ onUnmounted(() => {
 
 <template>
   <div class="main-layout">
-    <!-- 没有顶栏：品牌与主题切换都归到侧栏。
+    <!-- 没有顶栏：品牌归到侧栏。
          参考站有一条 64px 的顶栏，但它装的是公告条和「控制台/模型/文档/头像」，
          我们这边只剩品牌一个元素 —— 留着就是一行空白，还把每个页面的内容
-         整体压下 64px。品牌移到侧栏顶部、主题按钮移到侧栏底部之后，
-         右侧内容直接顶到最上面。 -->
+         整体压下 64px。品牌移到侧栏顶部之后，右侧内容直接顶到最上面。
+         主题切换 2026-09-26 起改到看板页工具栏右上角（刷新按钮左边），
+         侧栏不再承担它。 -->
     <div class="main-layout-body">
       <div class="console-layout">
         <!-- 侧边栏：实测宽 192px，内边距 8px -->
@@ -233,16 +224,6 @@ onUnmounted(() => {
             <button class="console-menu-item" aria-label="退出登录" @click="logout">
               <LogoutOutlined class="console-menu-icon" aria-hidden="true" />
               <span v-if="!collapsed" class="console-menu-label">退出登录</span>
-            </button>
-            <button
-              class="nav-icon-btn"
-              :title="themeStore.isDark ? '切换浅色' : '切换深色'"
-              :aria-label="themeStore.isDark ? '切换到浅色主题' : '切换到深色主题'"
-              :aria-pressed="themeStore.isDark"
-              @click="toggleTheme"
-            >
-              <BulbOutlined v-if="!themeStore.isDark" aria-hidden="true" />
-              <BulbFilled v-else aria-hidden="true" />
             </button>
           </div>
         </aside>
@@ -376,32 +357,11 @@ onUnmounted(() => {
   background: var(--color-border);
 }
 
-.nav-icon-btn {
-  width: 32px;
-  height: 32px;
-  flex: 0 0 32px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--color-border);
-  border-radius: 50%;
-  background: transparent;
-  color: var(--color-icon);
-  font-size: 15px;
-  cursor: var(--cursor-hand);
-  transition: background 0.2s var(--ease-expo);
-}
-
-.nav-icon-btn:hover {
-  background: var(--color-icon-hover-bg);
-}
-
-/* 触摸目标：WCAG 2.2 的 2.5.8 要求可点区域至少 24×24 CSS 像素
-   （按钮本身的可见尺寸 32px 已达标），这里只在**粗指针**设备上
-   把纵向命中区撑到 44px —— 手机上一排小圆钮很容易点偏，
+/* 触摸目标：WCAG 2.2 的 2.5.8 要求可点区域至少 24×24 CSS 像素。
+   这里只在**粗指针**设备上把收起态菜单项（纯图标、无文字）的
+   纵向命中区撑到 44px —— 手机上纯图标按钮很容易点偏，
    而撑开命中区不影响桌面端的视觉密度。 */
 @media (pointer: coarse) {
-  .nav-icon-btn,
   .console-sidebar.is-collapsed .console-menu-item {
     min-height: 44px;
   }
@@ -454,8 +414,8 @@ onUnmounted(() => {
 /* 收起态：这一列只剩图标，而 .console-menu-item 的左右 10px 内边距是给展开态的
    文字留的。56px 宽减去侧栏自己左右各 8px 只剩 40px，图标 15px 加上左内边距
    之后左留白 18px、右留白 23px —— 实测（.shots/measure-sidebar.mjs）整列图标比
-   侧栏中轴偏左 5px，与上面居中的 LR 圆标（12/12）、底部那枚主题按钮（20.5/20.5）
-   不在一条竖线上。收起态改成内容居中并去掉内边距，四处的中心线统一落到中轴上
+   侧栏中轴偏左 5px，与上面居中的 LR 圆标（12/12）不在一条竖线上。
+   收起态改成内容居中并去掉内边距，各处中心线统一落到中轴上
    （实测都是 28px，即 56/2）。 */
 .console-sidebar.is-collapsed .console-menu-item {
   justify-content: center;
@@ -511,9 +471,8 @@ onUnmounted(() => {
   text-overflow: ellipsis;
 }
 
-/* 底部三个动作：收起侧栏 / 退出登录 / 主题切换。
-   主题按钮原来在右上角顶栏里，顶栏去掉后放到这里 —— 换主题是「跟界面有关」
-   的操作，跟导航放一起比飘在内容区右上角更顺。
+/* 底部两个动作：收起侧栏 / 退出登录。
+   （主题切换 2026-09-26 起迁去看板页工具栏右上角，这里不再承担它。）
 
    竖排，不挤一行 —— 这是 2026-09-25 站主截图反馈「收…」「退…」文字被截断的修复。
    页脚可用宽 176px（192 侧栏 − 左右各 8 内边距），原来是一行三项：
@@ -521,12 +480,12 @@ onUnmounted(() => {
    而一枚「收起侧栏」的完整内容宽是 101px（左内边距 10 + 图标 15 + 间距 8 +
    文字 58 + 右内边距 10），文字被压到 25px，于是截断成「收…」
    （渲染态实测：label scrollWidth 58 > clientWidth 25，两枚按钮都是）。
-   两枚并排无论如何都放不下（101×2 + 32 + 8 = 242 > 176），所以改成竖排：
+   两枚并排仍放不下（101×2 + 4 = 206 > 176），所以改成竖排：
    两枚文字按钮各占满整栏（101px 内容 + 75px 余量），文字不再参与宽度争抢。
+   展开态两枚胶囊贴右缘，与菜单项同宽同形；
 
-   灯泡仍然贴右缘：与它在这一行里时的位置一致，右缘和两枚胶囊齐平。
-   收起态本来就是竖排三枚居中图标（ui-spec 第 18 条钉着那三处的中心线），
-   从此展开/收起是同一套排布，只是展开态文字可见。 */
+   收起态本来就是竖排图标居中（ui-spec 第 18 条钉着那几处的中心线），
+   展开/收起是同一套排布，只是展开态文字可见。 */
 .sidebar-footer {
   display: flex;
   flex-direction: column;
@@ -541,11 +500,7 @@ onUnmounted(() => {
   width: 100%;
 }
 
-.sidebar-footer .nav-icon-btn {
-  align-self: flex-end;
-}
-
-/* 收起态（56px 宽，内容区 40px）放不下文字，只留图标 —— 三枚图标居中，
+/* 收起态（56px 宽，内容区 40px）放不下文字，只留图标 —— 图标居中，
    中心线统一落到中轴 28px（=56/2），与上面的菜单图标、LR 圆标同一条线 */
 .console-sidebar.is-collapsed .sidebar-footer {
   align-items: center;
@@ -554,10 +509,6 @@ onUnmounted(() => {
 
 .console-sidebar.is-collapsed .sidebar-footer .console-menu-item {
   width: 32px;
-}
-
-.console-sidebar.is-collapsed .sidebar-footer .nav-icon-btn {
-  align-self: center;
 }
 
 /* ---------- 内容区 ---------- */

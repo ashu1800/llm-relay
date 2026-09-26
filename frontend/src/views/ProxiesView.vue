@@ -248,7 +248,10 @@ onMounted(load)
     <section class="panel manage-panel">
       <div class="manage-toolbar">
         <div class="toolbar-left">
-          <a-button :loading="loading" @click="load"><ReloadOutlined /> 刷新</a-button>
+          <!-- 图标化与看板/渠道/分组三页的工具栏统一：位置固定后图标即可辨认 -->
+          <a-button :loading="loading" title="刷新" aria-label="刷新" @click="load">
+            <ReloadOutlined />
+          </a-button>
           <a-button type="primary" @click="openCreate"><PlusOutlined /> 新建代理</a-button>
         </div>
         <div class="toolbar-spacer" />

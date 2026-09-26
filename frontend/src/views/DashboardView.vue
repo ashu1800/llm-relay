@@ -3,7 +3,7 @@
 // 上面是筛选栏与四张概览卡，下面是请求日志列表。
 //
 // 两者**不**共用筛选条件（2026-09-16 站主要求）：
-//   概览卡按工具栏的时间范围 / 分组 / 渠道 / 模型统计；
+//   概览卡按工具栏的时间范围 / 渠道 / 模型统计；
 //   日志列表恒定显示全部最新请求，只受 ?trace_id= / ?status_class= 两个深链约束。
 // 列表的用处是「盯着最新发生了什么」，筛过之后反而看不到刚进来的调用。
 //
@@ -20,10 +20,13 @@ import {
   ThunderboltOutlined,
   CheckCircleOutlined,
   ReloadOutlined,
-  SwapOutlined
+  SwapOutlined,
+  BulbOutlined,
+  BulbFilled
 } from '@ant-design/icons-vue'
 import { useRoute } from 'vue-router'
 import { api } from '@/api/client'
+import { useThemeStore } from '@/stores/theme'
 import PageToolbar from '@/components/PageToolbar.vue'
 import StatCard from '@/components/StatCard.vue'
 import AnimatedNumber from '@/components/AnimatedNumber.vue'
@@ -78,17 +81,16 @@ const ranges = [
   { key: '7d', label: '近7天' },
   { key: '30d', label: '近30天' }
 ]
-// ---- 筛选条件（时间范围 / 分组 / 渠道 / 模型）全部持久化 ----
+// ---- 筛选条件（时间范围 / 渠道 / 模型）全部持久化 ----
 //
-// 为什么要持久化：「只看某个分组」是常态视角，每次打开页面、或从别的页面
+// 为什么要持久化：「只看某个渠道」是常态视角，每次打开页面、或从别的页面
 // 切回来都要重选一遍，是纯粹的重复劳动。与渠道列表页的筛选同一套做法
 // （见 utils/persistedChoice.ts）。
 //
-// 这四个条件是**整页**的：上面的卡片与下面的列表都按它们取数。
+// 这三个条件是**整页**的：上面的卡片与下面的列表都按它们取数。
 // 合并之前列表页自己记了一套 logs-* 键、看板记了一套 dashboard-*：
 // 同一页面上出现两套视角，是这次合并要消灭的东西之一。
 const RANGE_KEY = 'dashboard-range'
-const GROUP_KEY = 'dashboard-group'
 const CHANNEL_KEY = 'dashboard-channel'
 const MODEL_KEY = 'dashboard-model'
 // 词元卡片的数字格式：完整千分位 / 紧凑缩写（一律带 M/B 单位）。
@@ -96,7 +98,7 @@ const MODEL_KEY = 'dashboard-model'
 const TOKEN_FMT_KEY = 'dashboard-token-fmt'
 
 // 哨兵值用 'all' 而不是 0：后端的约定是「不传参数＝不筛选」，
-// 而界面上的「全部分组」与「分组 id=0」是两件事，混用迟早出错
+// 而界面上的「全部渠道」与「渠道 id=0」是两件事，混用迟早出错
 const ALL = 'all'
 
 // 紧凑格式的持久化取值是字符串（persistedChoice 只存字符串），
@@ -108,7 +110,6 @@ function toggleTokenFmt() {
 }
 
 const range = ref('today')
-const groupFilter = ref<string>(ALL)
 const channelFilter = ref<string>(ALL)
 const modelFilter = ref<string>(ALL)
 // 排障深链带来的两个临时条件（?trace_id=… / ?status_class=error）。
@@ -120,29 +121,29 @@ const statusClass = ref('')
 // 免得用户以为地址栏能当书签用、却越用越乱
 const route = useRoute()
 
+// 主题切换（工具栏右上角那枚灯泡，2026-09-26 从侧栏底部迁来）：
+// 状态、持久化与圆形扩散动画都在 stores/theme.ts，这里只递坐标
+const themeStore = useThemeStore()
+
+function toggleTheme(e: MouseEvent) {
+  themeStore.toggleWithBurst(e.clientX, e.clientY)
+}
+
 // 列表面板的句柄：工具栏的「刷新」要连它一起刷（一页一个刷新按钮）
 const logPanel = ref<{ reload: () => void } | null>(null)
 // 筛选下拉的候选：来自管理接口，不是统计接口 —— 统计接口只回有流量的渠道，
-// 而「筛一条今天还没被用过的渠道」是合理需求（结果就是 0）
+// 而「筛一条今天还没被用过的渠道」是合理需求（结果就是 0）。
+// filterGroups 不喂任何筛选（分组筛选 2026-09-26 移除），但渠道选项的
+// 「· 分组名」后缀与请求日志面板的分组标签渲染还靠它
 const filterGroups = ref<ChannelGroup[]>([])
 const filterChannels = ref<Channel[]>([])
 
-const groupOptions = computed(() => [
-  { value: ALL, label: '全部分组' },
-  ...filterGroups.value.map((g) => ({ value: String(g.id), label: g.name }))
-])
-
-// 渠道选项：图标 + 名字，分组名只在「全部分组」时才补上
+// 渠道选项：图标 + 名字，分组名一律补上 —— 候选横跨全部分组，而渠道名
+// 没有唯一约束，跨分组的两个「D1」只有靠分组名才分得清
 // （见 utils/channelOption.ts，请求日志面板用的是同一个组件）
-const visibleChannels = computed(() =>
-  groupFilter.value === ALL
-    ? filterChannels.value
-    : filterChannels.value.filter((c) => String(c.group_id) === groupFilter.value)
-)
-
 const channelOptions = computed(() => [
   { value: ALL, label: '全部渠道' },
-  ...visibleChannels.value.map((c) => channelOption(c, filterGroups.value, groupFilter.value === ALL))
+  ...filterChannels.value.map((c) => channelOption(c, filterGroups.value, true))
 ])
 
 // 模型候选取渠道白名单（/channels 的 models）：它是系统当前认识的模型全集。
@@ -154,8 +155,8 @@ const channelOptions = computed(() => [
 const visibleModels = computed(() => {
   const src =
     channelFilter.value === ALL
-      ? visibleChannels.value
-      : visibleChannels.value.filter((c) => String(c.id) === channelFilter.value)
+      ? filterChannels.value
+      : filterChannels.value.filter((c) => String(c.id) === channelFilter.value)
   return [...new Set(src.flatMap((c) => c.models || []))].sort()
 })
 
@@ -164,17 +165,10 @@ const modelOptions = computed(() => [
   ...visibleModels.value.map((m) => ({ value: m, label: m }))
 ])
 
-// syncFilters 把下级筛选夹回合法值：换了分组，原来选的渠道可能已不属于它；
-// 换了分组或渠道，原来选的模型可能已不在候选里。
+// syncFilters 把下级筛选夹回合法值：换了渠道，原来选的模型可能已不在候选里。
 // 不夹的话查询条件会停在一个空集合上（列表恒为 0 条、卡片全是 0），
-// 而界面上看不出原因。顺序固定：先渠道后模型，因为后者的候选由前者收窄。
+// 而界面上看不出原因。
 function syncFilters() {
-  if (
-    channelFilter.value !== ALL &&
-    !visibleChannels.value.some((c) => String(c.id) === channelFilter.value)
-  ) {
-    channelFilter.value = ALL
-  }
   if (modelFilter.value !== ALL && !visibleModels.value.includes(modelFilter.value)) {
     modelFilter.value = ALL
   }
@@ -182,15 +176,17 @@ function syncFilters() {
 
 function persistFilters() {
   writeStoredChoice(RANGE_KEY, range.value)
-  writeStoredChoice(GROUP_KEY, groupFilter.value)
   writeStoredChoice(CHANNEL_KEY, channelFilter.value)
   writeStoredChoice(MODEL_KEY, modelFilter.value)
 }
 
-// 存下来的筛选值可能指向已经删掉的分组 / 渠道 / 模型。那种状态的表现是
+// 存下来的筛选值可能指向已经删掉的渠道 / 模型。那种状态的表现是
 // 「所有数字都是 0」或「列表恒为 0 条」，从界面上完全看不出原因 ——
 // 所以列表到手后校验一次，不合法就退回「全部」（与渠道列表页的
 // applyStoredGroupFilter 同一套做法）。
+//
+// 历史遗留：dashboard-group 这个键是分组筛选（2026-09-26 移除）留下的，
+// 不会被读取也不会被清理 —— 孤儿键无害，不值得写迁移代码。
 //
 // 从 URL 带着 trace_id / status_class 进来的那一次**不恢复**本地筛选：
 // 那种链接是要发给别人、或以后自己再打开的，同一个链接应该在哪台机器上、
@@ -200,16 +196,9 @@ function persistFilters() {
 function applyStoredFilters() {
   if (traceId.value || statusClass.value) return
   range.value = readStoredChoice(RANGE_KEY, ranges.map((r) => r.key), 'today')
-  groupFilter.value = readStoredChoice(
-    GROUP_KEY,
-    [ALL, ...filterGroups.value.map((g) => String(g.id))],
-    ALL
-  )
-  // 渠道的允许集合按「当前分组下可见的渠道」算，否则会恢复出
-  // 「分组 A + 属于 B 的渠道」这种共存状态
   channelFilter.value = readStoredChoice(
     CHANNEL_KEY,
-    [ALL, ...visibleChannels.value.map((c) => String(c.id))],
+    [ALL, ...filterChannels.value.map((c) => String(c.id))],
     ALL
   )
   modelFilter.value = readStoredChoice(MODEL_KEY, [ALL, ...visibleModels.value], ALL)
@@ -225,7 +214,7 @@ async function loadFilters() {
     filterGroups.value = g.items || []
     filterChannels.value = c.items || []
   } catch {
-    // 拉不到就只剩「全部」两个选项，看板本身照常取数 ——
+    // 拉不到就只剩「全部」一个选项，看板本身照常取数 ——
     // 一个筛选框不该让整页打不开
   }
   applyStoredFilters()
@@ -248,7 +237,7 @@ function applyUrlFilters() {
 // 查询串成了 ?range=[object Object]，后端认不出、退回「今天」，
 // 存储里也写进 "[object Object]" —— 界面上筛选项看着是选中的，数据却是今天的。
 //
-// 这四个处理函数只重取**统计**（卡片）。列表不吃这四个条件，所以这里不该顺手调
+// 这三个处理函数只重取**统计**（卡片）。列表不吃这三个条件，所以这里不该顺手调
 // logPanel.reload()：那会让一次「只看 glm」的筛选白刷一遍列表，而它的内容按定义
 // 不会变。
 // （历史上这里还踩过一个坑：那时列表跟着 props 重取，而父组件的事件处理函数是同步
@@ -265,13 +254,6 @@ function onRangeChange() {
   reloadStats()
 }
 
-function onGroupChange(v: string) {
-  groupFilter.value = v
-  syncFilters()
-  persistFilters()
-  reloadStats()
-}
-
 function onChannelChange(v: string) {
   channelFilter.value = v
   syncFilters()
@@ -279,7 +261,7 @@ function onChannelChange(v: string) {
   reloadStats()
 }
 
-// 三个下拉都用 @change + v-model：a-select 的 change 传的是**值**
+// 两个下拉都用 @change + v-model：a-select 的 change 传的是**值**
 // （a-radio-group 传的是事件对象，上面踩过），这里仍显式赋值一次 ——
 // 不依赖 v-model 与 change 的先后顺序。
 function onModelChange(v: string) {
@@ -306,10 +288,9 @@ function reloadAll() {
   logPanel.value?.reload()
 }
 
-// 分组 / 渠道 / 模型不选时不带参数（后端把「不传」当作不筛选）
+// 渠道 / 模型不选时不带参数（后端把「不传」当作不筛选）
 function statsQuery() {
   let s = '?range=' + range.value
-  if (groupFilter.value !== ALL) s += '&group_id=' + groupFilter.value
   if (channelFilter.value !== ALL) s += '&channel_id=' + channelFilter.value
   if (modelFilter.value !== ALL) s += '&model=' + encodeURIComponent(modelFilter.value)
   return s
@@ -370,16 +351,6 @@ const scopeCurrency = computed(() => {
     const c = filterChannels.value.find((x) => String(x.id) === channelFilter.value)
     return (c?.currency ?? '').toUpperCase()
   }
-  if (groupFilter.value !== ALL) {
-    const set = new Set(
-      filterChannels.value
-        .filter((c) => String(c.group_id) === groupFilter.value)
-        .map((c) => (c.currency ?? '').toUpperCase())
-    )
-    // 分组里混着两种币就不猜：交给 primaryCurrency，硬挑一个会让另一半金额
-    // 看起来像不存在
-    if (set.size === 1) return [...set][0]
-  }
   return ''
 })
 const costCur = computed(() => scopeCurrency.value || primaryCurrency(summary.value?.costs))
@@ -400,9 +371,9 @@ const rateValue = computed(() => (summary.value ? summary.value.success_rate * 1
 // 推送来的永远是「今天 + 全站」那一份（见 live.go），所以：
 // - 当前正好是「今天 + 全站」→ 直接合并（它不带 range 等本地查询字段，
 //   整个替换会把页面依赖的其它字段抹掉，这里只做字段合并）；
-// - 当前是别的视角（近 7 天 / 筛了分组或渠道）→ 合并不了，但**收到推送本身
+// - 当前是别的视角（近 7 天 / 筛了渠道或模型）→ 合并不了，但**收到推送本身
 //   就说明有新流量**（服务端只在数据真的变了才推），于是立刻静默重取一次
-//   当前视角。以前这里是直接 return，选着「近 7 天」或某个分组时卡片就
+//   当前视角。以前这里是直接 return，选着「近 7 天」或筛了渠道时卡片就
 //   再也不动了，只能靠手点「刷新」；后来改成 setTimeout(1500) 之后卡片会动了，
 //   但那 1.5 秒人为延迟恰好把数字的变动推到入场动画（sweep 2s / glow 1.6s）
 //   结束之后 —— 站主二次反馈「动画播完了数值才变动」指的就是它。
@@ -459,14 +430,9 @@ onLive('stats', (data: Record<string, unknown>) => {
   // 提前合并会得到一个缺字段的 summary
   if (!summary.value) return
   // 推送来的那份是「今天 + 全站」，只有当前正好是这个视角才能直接合并。
-  // 模型筛选也算别的视角：不判它的话，筛着某个模型时收到的全站数字
-  // 会把卡片顶掉（比不刷新更糟 —— 它看起来像是刷新了）
-  if (
-    range.value !== 'today' ||
-    groupFilter.value !== ALL ||
-    channelFilter.value !== ALL ||
-    modelFilter.value !== ALL
-  ) {
+  // 渠道 / 模型筛选也算别的视角：不判它们的话，筛着某个渠道或模型时收到的
+  // 全站数字会把卡片顶掉（比不刷新更糟 —— 它看起来像是刷新了）
+  if (range.value !== 'today' || channelFilter.value !== ALL || modelFilter.value !== ALL) {
     statsReloader.request()
     return
   }
@@ -491,8 +457,10 @@ onMounted(async () => {
 
 <template>
   <div class="dashboard">
-    <!-- 工具栏：只服务上面的概览卡 —— 时间范围 + 分组 / 渠道 / 模型 + 刷新。
-         下面的日志列表不吃这四个条件（它恒定全量最新，理由见下）。
+    <!-- 工具栏：只服务上面的概览卡 —— 时间范围 + 渠道 / 模型 + 刷新。
+         下面的日志列表不吃这三个条件（它恒定全量最新，理由见下）。
+         （分组筛选 2026-09-26 应站主要求移除，看板只留渠道 / 模型两个
+         「往下钻」的维度。）
 
          这里曾经放过一句说明筛选作用范围的提示，2026-09-17 应站主要求**移除**
          （提交 c56354b）。所以别再往这里加提示 ——
@@ -512,14 +480,8 @@ onMounted(async () => {
       <a-radio-group v-model:value="range" button-style="solid" @change="onRangeChange">
         <a-radio-button v-for="r in ranges" :key="r.key" :value="r.key">{{ r.label }}</a-radio-button>
       </a-radio-group>
-      <!-- 分组 / 渠道 / 模型紧跟在时间范围右边：它们回答的是同一类问题
+      <!-- 渠道 / 模型紧跟在时间范围右边：它们回答的是同一类问题
            （「下面这些数字算的是哪一部分」），放在一起才读得成一句话 -->
-      <a-select
-        v-model:value="groupFilter"
-        :options="groupOptions"
-        style="width: 150px"
-        @change="onGroupChange"
-      />
       <!-- 240px = 最长的一条「图标 + 渠道名 · 分组名」量出来的，
            与请求日志列表同一个宽度；给窄了会把分组名截掉 -->
       <a-select
@@ -548,7 +510,27 @@ onMounted(async () => {
         {{ statusClass === 'error' ? '仅失败' : '仅成功' }}
       </a-tag>
       <template #right>
-        <a-button :loading="loading" @click="reloadAll()"><ReloadOutlined /> 刷新</a-button>
+        <!-- 主题切换：灯泡形态沿用原侧栏底部那枚（32px 圆形描边，见 .theme-btn）。
+             点击坐标递给 store，新主题从按钮位置圆形扩散铺满全屏。
+             2026-09-26 从侧栏底部迁来 —— 换主题服务的是「这块数字怎么看着舒服」，
+             放在看板自己的工具栏右上角比藏在侧栏页脚更顺手。 -->
+        <button
+          type="button"
+          class="theme-btn"
+          :title="themeStore.isDark ? '切换浅色' : '切换深色'"
+          :aria-label="themeStore.isDark ? '切换到浅色主题' : '切换到深色主题'"
+          :aria-pressed="themeStore.isDark"
+          @click="toggleTheme"
+        >
+          <BulbOutlined v-if="!themeStore.isDark" aria-hidden="true" />
+          <BulbFilled v-else aria-hidden="true" />
+        </button>
+        <!-- 一页一个「刷新」：卡片与列表一起刷（见 reloadAll）。
+             图标化与另外三页的工具栏统一 —— 刷新是高频动作，位置固定后
+             图标即可辨认；title 与 aria-label 兜住悬停提示与读屏 -->
+        <a-button :loading="loading" title="刷新" aria-label="刷新" @click="reloadAll()">
+          <ReloadOutlined />
+        </a-button>
       </template>
     </PageToolbar>
 
@@ -705,6 +687,29 @@ onMounted(async () => {
    它是仪器读数不是内容块，不该与卡片抢视觉重量 */
 .dash-pulse {
   margin: calc(var(--gap) / 2) 0;
+}
+
+/* 工具栏右上角的主题切换按钮：32px 圆形描边，形态沿用原侧栏底部那枚
+   （2026-09-26 迁来）。a-button 的标准高同为 32px，并排基线一致；
+   描边、图标色与悬停底色全走全站令牌，明暗主题各自成立。 */
+.theme-btn {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--color-icon);
+  font-size: 15px;
+  cursor: var(--cursor-hand);
+  transition: background 0.2s var(--ease-expo);
+}
+
+.theme-btn:hover {
+  background: var(--color-icon-hover-bg);
 }
 
 /* 词元卡右上角的格式切换按钮。
