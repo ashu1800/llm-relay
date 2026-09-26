@@ -8,7 +8,7 @@
 //
 //   1. 有错误        → 显示错误与重试（**必须排在「有更新」之前**）
 //   2. 任务进行中    → 进度条与阶段说明
-//   3. 任务刚结束    → 成功 + 重启按钮，或失败 + 原因
+//   3. 任务刚结束    → 成功 + 重启按钮，或失败 + 重试更新/重新检测
 //   4. 有更新且能更新 → 一键更新按钮（附更新日志入口）
 //   5. 有更新但不能   → 说明原因（源码构建 / 无法定位自身）
 //   6. 已是最新       → 发布链接 + 回滚入口
@@ -16,6 +16,11 @@
 // 第 1 条排在最前是有原因的：更新失败时如果被第 4 条「有新版本可用」盖住，
 // 用户看到的是「还能再点一次」，而错误原因（磁盘满、校验不通过）
 // 就再也没机会被看到 —— 他会一直点，一直失败。
+//
+// 第 3 条失败分支必须给「重试更新」而不是只有「重新检测」：服务端的
+// 失败任务记录不会自己消失，面板会一直停在这个分支 —— 检测跑多少遍
+// 都回不到第 4 条的「立即更新」，下载失败就成了一次性的死局
+// （实测踩过：直连 GitHub 超时后，面板里没有任何办法重发下载）。
 //
 // 面板本体用 a-popover：侧栏 192px 且 overflow-y: auto，任何 overflow
 // 不是 visible 的祖先都会裁掉绝对定位的后代（实测把 300px 的面板裁成
@@ -417,7 +422,22 @@ const phaseText = computed(() => {
                 <span v-if="restarting">正在重启…（{{ restartCountdown }}s）</span>
                 <span v-else>立即重启以生效</span>
               </button>
-              <button v-else class="vb-btn is-ghost" @click="refresh(true)">重新检测</button>
+              <!-- 失败后最要紧的是「再试一次」：只给「重新检测」的话，
+                   面板永远停在失败分支，用户没有重发下载的入口。
+                   能一键更新时给重试主按钮，否则退回只有重新检测。 -->
+              <template v-else>
+                <button
+                  v-if="canApply"
+                  class="vb-btn is-primary"
+                  :disabled="applying"
+                  @click="doUpdate"
+                >
+                  <SyncOutlined v-if="applying" spin />
+                  <DownloadOutlined v-else />
+                  {{ applying ? '正在启动…' : '重试更新' }}
+                </button>
+                <button class="vb-btn is-ghost" @click="refresh(true)">重新检测</button>
+              </template>
             </div>
 
             <!-- ④ 有更新且可以更新 -->
