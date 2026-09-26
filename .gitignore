@@ -11,12 +11,6 @@ deploy/data/
 # ===== Go =====
 /backend/llm-relay
 /backend/server
-# 宿主侧更新器的构建产物。install.sh 把它装到 $INSTALL_DIR，
-# 而本地直接 go build ./cmd/updater 会落在包目录里 —— 9MB 的二进制
-# 不该跟着源码走。
-/backend/updater
-/backend/updater.exe
-/backend/llm-relay-updater
 /out/
 *.test
 *.out
@@ -46,6 +40,9 @@ backend/internal/web/dist/*
 *.log
 tmp/
 .cache/
+# 临时工作产物：部署/诊断脚本、一次性验证输出（.tmp-deploy、.tmp-rlog.txt 这类）。
+# 用通配盖住整族，避免每造一个临时文件就得来加一行。
+.tmp-*
 
 # ===== 编辑器与系统 =====
 .DS_Store
@@ -54,6 +51,10 @@ Thumbs.db
 .vscode/
 *.swp
 .shots/
+
+# ===== ZCode 工作区配置（本机工具状态，不入库）=====
+.zcode/
+.zcodeignore
 
 # ===== 内部审查文档（刻意不入库）=====
 # 代码审查报告逐条记录了未修复项、攻击面、以及安全加固的具体边界
