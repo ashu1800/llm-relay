@@ -26,7 +26,13 @@ const vars = computed(() => groupVars(style.value))
 
 <template>
   <span class="group-tag" :class="{ 'is-custom': !style.auto }" :style="vars" :title="style.label">
-    {{ style.label }}
+    <!-- 内层 inline 包一层：inline 盒不会被任何容器压缩（放不下就溢出），
+         它的 rect 宽度恒等于文字真实宽度。请求日志的列宽测量靠这一层
+         「看穿」外层的 max-width: 100% —— 外层是被列宽压扁的（压扁后
+         rect = 可用宽，量它等于量当前列宽，长名字永远撑不开列）。
+         对渲染零影响：inline 盒继承外层的字体与 nowrap，省略号仍由
+         外层的 overflow + text-overflow 画在它自己的边缘。 -->
+    <span class="gt-text">{{ style.label }}</span>
   </span>
 </template>
 

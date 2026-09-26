@@ -795,10 +795,20 @@ console.log('=== 请求日志列宽：测量锚点与模板必须对得上 ===')
     // 测量是全局查询，于是模型列那枚更宽的胶囊被算进了密钥列（密钥列常年宽 58px）。
     // 静态检查看不出跨列命中，那一条在 scripts/check-log-columns.mjs 里运行时把关；
     // 这里守住的是另一半：锚点的类名得真的挂在元素上。
-    const external = { '.key-tag': /<GroupTag\b[^>]*\bkey-tag\b/ }
+    //
+    // 复合选择器 '.key-tag .gt-text'（2026-09-26）：测量锚点挪到了 GroupTag
+    // 渲染的内层 inline 盒上 —— 外层带 max-width: 100% 会被列宽压扁，
+    // 量它等于量「当前列宽」，长密钥名永远撑不开列。gt-text 的元素在
+    // GroupTag.vue 的模板里，断言换成读那个组件的源码。
+    const groupTagSrc = readFileSync(join(SRC, 'components/GroupTag.vue'), 'utf8')
+    const external = {
+      '.key-tag': { src: tpl, re: /<GroupTag\b[^>]*\bkey-tag\b/ },
+      '.key-tag .gt-text': { src: groupTagSrc, re: /class="gt-text"/ }
+    }
     for (const sel of sels) {
-      const ok = external[sel]
-        ? external[sel].test(tpl)
+      const ext = external[sel]
+      const ok = ext
+        ? ext.re.test(ext.src)
         : new RegExp(`class="[^"]*\\b${sel.replace(/^\./, '')}\\b`).test(tpl)
       check(`锚点 ${sel} 能对应到真实元素`, ok, '选择器与模板对不上时测量会静默跳过，那一列永远停在下限')
     }
@@ -825,10 +835,12 @@ console.log('=== 请求日志列宽：测量锚点与模板必须对得上 ===')
 
     // 弹性列（2026-09-26）：容器比声明合计宽时，Chrome 的 fixed 表格布局会把
     // 余量按比例摊给所有绑了宽度的列（1920 实测 ×1.59，渠道列 128 声明被拉到
-    // 204 而内容只有 37），量得再准也会被拉伸毁掉。合适的解法是一列**不绑宽度**
-    // 的弹性列独吞余量，其余列按声明宽度 1:1 渲染。删掉它不报错、列表照常
-    // 出数据，只是每列凭空多一截空白 —— 正是站主反馈回去的那个现象，
-    // 所以这里钉住它必须存在：列数 = 绑 width 的列数 + 1（且仅此一列）。
+    // 204 而内容只有 37），量得再准也会被拉伸毁掉。解法是留一列**不绑宽度**：
+    // 当日上午它独吞全部余量、其余列 1:1 渲染；同日下午余量改由 distribute
+    // 等额摊进各列，这列退到只剩「浮点零头 + 窄窗口收 0」的职责 ——
+    // 但「恰好一列不绑 width」的形态没有变。删掉它不报错、列表照常出数据，
+    // 只是窄窗口横向滚动时会留一道 16px 的空缝，所以这里钉住它必须存在：
+    // 列数 = 绑 width 的列数 + 1（且仅此一列）。
     // 刻意不再 grep「弹性列」等注释字样做第二锚：它抓的回归（删列/多列）
     // 计数已全覆盖，只会因改写注释而误报。
     const colCount = (panelSrc.match(/<a-table-column[\s>]/g) || []).length

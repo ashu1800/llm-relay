@@ -96,9 +96,9 @@ const current = ref<RequestLog | null>(null)
 // 多出大半空白，换一批更长的渠道名/密钥名又重新出现截断。所以改成**量了再定**。
 //
 // 为什么「声明宽度 ≥ 内容所需宽度」就能保证内容完整：表格是
-// table-layout: fixed，声明宽就是列宽的下界；而声明总宽小于容器宽时 antd 还会
-// 把余量**按比例分给各列**（ui-spec 第 10 条有实测：声明 155/155/130…
-// 渲染成 200/200/167…）。所以只要声明宽够，内容就不会被 ellipsis 截断 ——
+// table-layout: fixed，各列实际宽 = 声明宽 + 余量均摊份额（见 distribute），
+// 只增不减；而容器比声明合计宽时余量按等额摊给各列、scroll.x 取摊后的合计
+// （恰好等于容器宽）—— 各列渲染宽永远 ≥ 声明宽，内容就不会被 ellipsis 截断。
 // 这正是本机制要保证的那条不变量。
 //
 // 量的对象有硬性要求：必须是**不被列宽压缩**的元素，scrollWidth 才等于
@@ -158,9 +158,12 @@ const COL_BOUNDS: Record<ColKey, [number, number]> = {
   action: [64, 64] // 一个 28px 图标按钮，宽度固定
 }
 
-/** 运行时列宽。初值取原来那组定宽常量（模型列的 190 是它的常规值），
- *  首屏先按它们渲染、测量结果随后覆盖 —— 避免「先窄后宽」闪一下。 */
-const colW = ref<Record<ColKey, number>>({
+/** 各列的「内容紧宽」：下限与当前页内容所需宽度取较大者，**不含**余量均摊。
+ *  remeasureColumns 写入、distribute 读取。与 colW 分开存的原因：窗口 resize
+ *  只需要按新容器宽重新均摊（内容紧宽不变），不必重新量内容 —— 两件事要能
+ *  独立发生，均摊不能反过来要求一次测量。初值同 colW（首屏在测量落地前先
+ *  按它们渲染）。 */
+const baseW: Record<ColKey, number> = {
   time: 96,
   model: 190,
   channel: 88,
@@ -171,7 +174,12 @@ const colW = ref<Record<ColKey, number>>({
   status: 64,
   key: 100,
   action: 64
-})
+}
+
+/** 运行时列宽（模板绑定值）= 内容紧宽 + 余量均摊份额，见 distribute。
+ *  初值取原来那组定宽常量（模型列的 190 是它的常规值），
+ *  首屏先按它们渲染、测量与均摊随后覆盖 —— 避免「先窄后宽」闪一下。 */
+const colW = ref<Record<ColKey, number>>({ ...baseW })
 
 /**
  * 每列的内容锚点与固定前缀宽（px）。
@@ -190,11 +198,29 @@ const colW = ref<Record<ColKey, number>>({
  * 第 1 条是 2026-09-23 的实测教训：密钥列原来写的是 '.group-tag'，而模型名与
  * 密钥名都用 GroupTag 渲染 —— 模型列那枚更宽的胶囊（deepseek-v4.1-flash ≈ 123px）
  * 也被算了进来，密钥列因此常年 145px，而那一页的内容只需要 71px（多出 58px 空白）。
- * 现在密钥列用只属于它的 .key-tag。
+ * 现在密钥列用只属于它的 .key-tag（配 .gt-text 内层锚点）。
+ *
+ * 第 2 条的坑比字面更深（2026-09-26 长内容实测补）：「不被压缩」不只是
+ * display 类别的事 —— 看着安全的盒子也可能被列宽压扁：
+ *   · flex 子项（min-width: 0 + overflow: hidden，如 .chan-name）；
+ *   · 带 max-width: 100% 的 inline-block（如 GroupTag 的 .key-tag）。
+ * 压扁后 rect = 当前可用宽，测量变成「量列宽自己」：长内容时每轮只比
+ * 上一轮多 6px（(col−40)+46 = col+6），而测量只在行变化时跑 ——
+ * 静态加载下永远爬不到真实宽度，长名字一直挂着省略号。
+ * 解法是把锚点挪到**内层 inline 盒**（.chan-text / .gt-text）：
+ * inline 盒放不下就溢出、任何容器都压不扁它，rect 恒等于文字真实宽度；
+ * 省略号仍由外层的 overflow + text-overflow 负责画，视觉不变。
  */
 const CONTENT_MEASURE: Partial<Record<ColKey, { sel: string; pad: number }>> = {
-  model: { sel: '.model-cell', pad: 0 }, // inline-flex + nowrap
-  channel: { sel: '.chan-name', pad: 24 }, // 18 图标 + 6 间距
+  model: { sel: '.model-cell', pad: 0 }, // inline-flex + nowrap，放不下就溢出、不被压缩
+  // 渠道：量的是**内层 .chan-text**（inline 盒，放不下就溢出），不是 .chan-name。
+  // .chan-name 是 flex 子项（min-width: 0）会被列宽压扁：压扁后 rect = 可用宽，
+  // 量它等于量「当前列宽装了多少」—— 长名字时每次测量只比上一次多 6px
+  // （(col−40)+46 = col+6），静态加载下永远爬不到内容真实需要的宽度，
+  // 表现就是长渠道名一直挂着省略号（2026-09-26 长内容实测抓到）。
+  // inline 盒不会被压缩（放不下就溢出），rect 恒等于文字真实宽度。
+  // pad 24 = 18 图标 + 6 间距，与 .chan-cell 的一套加法一致
+  channel: { sel: '.chan-text', pad: 24 },
   // 词元的锚点是整格（两排共用一个网格，量它就是量最宽的那一排）。
   // 2026-09-24 之前锚点是 .tk-line，那时它是 display:flex 的定宽轨道 ——
   // 量到的是轨道（恒 128px）而不是内容，列宽因此锁死在初值；
@@ -204,12 +230,20 @@ const CONTENT_MEASURE: Partial<Record<ColKey, { sel: string; pad: number }>> = {
   elapsed: { sel: '.dur-line', pad: 9 }, // 3 竖条 + 6 间距
   cost: { sel: '.txt-cell', pad: 0 },
   speed: { sel: '.spd-cell', pad: 0 }, // inline-flex + nowrap
-  key: { sel: '.key-tag', pad: 0 } // inline-block + ellipsis，溢出量真实
+  // 密钥：量 .key-tag 里由 GroupTag 渲染的内层 .gt-text（inline 盒）。
+  // .key-tag 自己是 inline-block 但带 max-width: 100% —— 会被单元格内容宽
+  // 压扁（与 .chan-name 同一个坑：量到的是「当前列宽」，长密钥名撑不开列）。
+  // pad 18 = 胶囊自己的左右内边距 16 + 边框 2（以前量整个胶囊、pad 记 0，
+  // 那份加法随锚点一起搬进来）
+  key: { sel: '.key-tag .gt-text', pad: 18 }
 }
 
 /** 各列宽之和。模板里每列的 :width 与表格 scroll.x 都取这里 ——
  *  宽度只有这一份定义。此前模板写一遍、求和再抄一遍，漏改的表现是表格出现
- *  非预期的横向滚动，而且看不出是哪一列错。 */
+ *  非预期的横向滚动，而且看不出是哪一列错。
+ *  列宽含余量均摊份额（见 distribute）：宽窗口下合计恰好等于容器可用宽，
+ *  scroll.x 作为 min-width 不再与容器打架；窄窗口下合计即声明宽，
+ *  横向滚动的边界与声明一致。 */
 const columnsTotal = computed(() => COL_KEYS.reduce((sum, k) => sum + colW.value[k], 0))
 
 /** 弹性列（模板里那列不绑 width 的空列）的单元格属性：内联清零内边距 ——
@@ -222,6 +256,58 @@ const elasticCell = () => ({ style: { padding: 0 } })
 /** 单元格左右内边距（antd 小表格 8+8）与右侧呼吸余量（给省略号与边框） */
 const CELL_PAD = 16
 const CELL_BREATH = 6
+
+/**
+ * 把容器比「内容紧宽合计」宽出来的余量**均摊**进每一列。
+ *
+ * 之前的做法（2026-09-26 上午）是让「密钥」与「操作」之间那列不绑宽度的
+ * 弹性列独吞余量：其余十列确实按声明宽 1:1 渲染了，但 1920 视口下 582px
+ * 全堆在一处 —— 密钥与操作之间空出一整条，密密麻麻的数据列后面跟着一片
+ * 空白，比余量分散到各列时更刺眼（站主当日截图反馈的正是这条）。
+ * 参考站的同款日志表是整表均匀留白、没有集中空洞（.shots/light-logs.png），
+ * 均摊正是它的形态。
+ *
+ * 所以现在每列分到 leftover/10：内容仍居中，多出来的部分读起来是
+ * 「更宽的呼吸」而不是一处断裂。分摊是**等额**的而不是按列宽比例的 ——
+ * 按比例就是 Chrome 原生行为（上午实测 ×1.59），宽列多占、窄列少占，
+ * 空白量随列宽拉开差距，站主 2026-09-24 反馈的「渠道列富余很多」
+ * 正是那个比例差。等额分摊让每列的绝对空白一致。
+ *
+ * 分摊后各列实际宽 = 声明宽 + 份额，仍满足「声明 ≥ 内容所需」的不变量
+ * （只增不减），内容不会被截断；scroll.x 取新的合计，恰好等于容器宽，
+ * 表格不再有横向滚动，弹性列只剩浮点零头（亚像素）可吸收 —— 它仍留着，
+ * 窄窗口（内容比容器宽）时它收 0、不留缝的职责不变。
+ *
+ * 为什么不设上限（比如每列最多 +40）：设了上限，超宽视口下多出来的部分
+ * 又会回流到弹性列、重新出现一条空洞 —— 与不摊等价。均摊到每一列之后
+ * 再宽的窗口也只是「整体更松」，不会出现集中空白。
+ *
+ * 返回是否有列宽被写掉：调用方据此决定要不要在重渲染后重新量位置
+ * （亮带、滚动提示）。均摊的写入要经 Vue 重渲染才落到 DOM —— 同一帧里
+ * 再去读表格的滚动状态，读到的还是旧列宽。
+ */
+function distribute(): boolean {
+  const body = tableWrap.value?.querySelector<HTMLElement>('.ant-table-body')
+  if (!body) return false
+  // clientWidth 已扣除纵向滚动条：表体有滚动条时容器 1694、可用 1686，
+  // 余量必须按 1686 摊，否则合计超宽、表格出现 1~8px 的假横向滚动
+  const avail = body.clientWidth
+  if (!avail) return false
+  const declared = COL_KEYS.reduce((sum, k) => sum + baseW[k], 0)
+  const leftover = avail - declared
+  const share = leftover > 0 ? leftover / COL_KEYS.length : 0
+  let changed = false
+  for (const key of COL_KEYS) {
+    const want = baseW[key] + share
+    // 同值不写：resize 事件连发时每帧都进来，写同样的值不该触发整表重渲染
+    // （浮点份额同一容器宽下算出的值逐位相同，比较是安全的）
+    if (colW.value[key] !== want) {
+      colW.value[key] = want
+      changed = true
+    }
+  }
+  return changed
+}
 
 /**
  * 按当前页内容重算各列宽度。
@@ -269,13 +355,19 @@ function remeasureColumns() {
     if (want === undefined) continue
     // 只在 ≥2px 时写：1px 的抖动不值得让整张表重排一次
     // （列宽一抖，所有行的扫光位置都要跟着重算）
-    if (Math.abs(want - colW.value[key]) >= 2) {
-      colW.value[key] = want
+    if (Math.abs(want - baseW[key]) >= 2) {
+      baseW[key] = want
       changed = true
     }
   }
+  // 首次测量可能没越过 2px 阈值（内容与初值几乎一致），但余量还没摊过 ——
+  // 均摊必须无条件跑，不能只在 changed 时跑。它自己也可能写列宽
+  // （如行数增减让纵向滚动条出现/消失、容器可用宽变了），所以返回值
+  // 要与 changed 合起来看：任何一个动了列宽，亮带与滚动提示都得重量
+  const spread = distribute()
   // 列宽变了 → 行宽也变了 → 正在飞的扫光亮带要重新定位
-  if (changed) {
+  // （nextTick：均摊经 Vue 重渲染才落到 DOM，提前量到的是旧列宽）
+  if (changed || spread) {
     nextTick(repositionBeams)
     // 列宽一变，「右边还有没有内容」也跟着变（列变窄可能就不再需要滚动）
     nextTick(syncScrollHints)
@@ -1001,9 +1093,10 @@ onUnmounted(() => {
   freshTimers.clear()
   fxTargets.value = []
   detachBeamWatch()
-  // 横向滚动边界提示的两个监听（滚动走捕获、改窗口）
+  // 横向滚动边界提示（滚动走捕获）与余量重摊（改窗口）的两个监听，
+  // 摘的就是挂上去的那两个引用
   window.removeEventListener('scroll', syncScrollHints, true)
-  window.removeEventListener('resize', syncScrollHints)
+  window.removeEventListener('resize', onResize)
 })
 
 onLive('logs', (items: RequestLog[]) => {
@@ -1126,8 +1219,18 @@ function restoreAnchor(body: HTMLElement, anchor: RowAnchor, attempt = 0) {
   })
 }
 
-function onScrollOrResize() {
-  syncScrollHints()
+// 滚动只影响「左右还能不能滚」的提示；窗口宽窄变化还要把余量重新均摊 ——
+// 内容紧宽（baseW）不随窗口变，重摊是纯算术，不必重新量内容。
+// 两个监听分开挂，卸载时也按同一个引用摘（此前注册 onScrollOrResize、
+// 摘 syncScrollHints，引用对不上等于从没摘干净 —— 面板常驻所以没暴露过）。
+//
+// 均摊若写了列宽，要经 Vue 重渲染才落到 DOM：同步去量滚动状态与亮带，
+// 读到的都是旧列宽（resize 一事件一帧地连发，每帧都差一拍）。所以
+// 两个读取都排到 nextTick —— 没写列宽时 nextTick 里量到的也是新布局，
+// 代价只是一次微任务。
+function onResize() {
+  if (distribute()) nextTick(repositionBeams)
+  nextTick(syncScrollHints)
 }
 
 onMounted(() => {
@@ -1152,8 +1255,8 @@ onMounted(() => {
   // 但 window 捕获监听不依赖拿到它。而轮询版有个真实风险：表体若在 2 秒后才
   // 出现（后端慢、首屏加载失败重试），监听就永远挂不上，阴影从此不再更新。
   // 删掉。
-  window.addEventListener('scroll', onScrollOrResize, true)
-  window.addEventListener('resize', onScrollOrResize)
+  window.addEventListener('scroll', syncScrollHints, true)
+  window.addEventListener('resize', onResize)
   nextTick(syncScrollHints)
 })
 </script>
@@ -1196,11 +1299,16 @@ onMounted(() => {
            后面，「用什么模型、什么强度思考」一行读完。
            2026-09-20 模型列先改成按内容自适应；2026-09-23 推广到每一列
            （站主要求「每列至少把内容显示完整」），scroll.x 改为各列宽之和。
-           2026-09-26 补了最后一刀：容器余量原先按比例摊给每一列
-           （1920 视口实测 ×1.59），量得再准也被拉伸毁掉 —— 现在由
-           「密钥」与「操作」之间那列**不绑宽度**的弹性列独吞余量
-           （见那列上的注释），各列按声明宽度 1:1 渲染；渠道下限同日
-           128 → 88（不再按库里最长渠道名拍下限，见 COL_BOUNDS 的注释）。
+           2026-09-26 第一刀：容器余量原先按比例摊给每一列
+           （1920 视口实测 ×1.59），量得再准也被拉伸毁掉 —— 当日改为由
+           「密钥」与「操作」之间那列**不绑宽度**的弹性列独吞余量，
+           各列按声明宽度 1:1 渲染；渠道下限同日 128 → 88
+           （不再按库里最长渠道名拍下限，见 COL_BOUNDS 的注释）。
+           2026-09-26 第二刀（当日截图反馈）：1:1 之后 582px 余量全堆在
+           密钥与操作之间，一条集中空洞比分散的余量更刺眼 —— 现在改为
+           distribute 把余量**等额**摊进每一列（每列 +leftover/10，
+           参考站同款日志表就是整表均匀留白），弹性列只剩浮点零头与
+           窄窗口时的 0 宽职责（见那列上的注释）。
            横向滚动仍可能发生（内容比容器宽时），固定列的遮挡情况由
            scripts/check-log-columns.mjs 盯着。 -->
       <!-- 外面这层只为扫光存在：亮带是这一层里的绝对定位元素，表格内部
@@ -1284,8 +1392,14 @@ onMounted(() => {
             <span v-if="record.channel_name" class="chan-cell">
               <ChannelIcon :name="record.channel_name" :icon="channelIconOf(record.channel_id)" :size="18" />
               <!-- 名字带 title：多了图标之后这一格更挤，长渠道名会被省略号
-                   截掉，截掉的部分要能悬停看到 -->
-              <span class="chan-name" :title="record.channel_name">{{ record.channel_name }}</span>
+                   截掉，截掉的部分要能悬停看到。
+                   内层 .chan-text 是列宽的测量锚点（见 CONTENT_MEASURE）：
+                   inline 盒不会被列宽压扁，rect 恒等于文字真实宽度 ——
+                   量外层 .chan-name（flex 子项，min-width: 0）量到的是
+                   被压缩后的可用宽，长名字永远撑不开列。 -->
+              <span class="chan-name" :title="record.channel_name">
+                <span class="chan-text">{{ record.channel_name }}</span>
+              </span>
             </span>
             <span v-else class="muted">—</span>
           </template>
@@ -1441,14 +1555,17 @@ onMounted(() => {
             <span v-else class="muted">—</span>
           </template>
         </a-table-column>
-        <!-- 弹性列（2026-09-26 加，**有意**不绑 width）：容器比十列的声明合计宽时，
-             Chrome 的 fixed 表格布局会把余量按比例摊给所有绑了宽度的列 ——
-             1920 视口实测比例 ×1.59：渠道列声明 128px 被拉到 204px，而内容
-             只有 37px，每一列都凭空多出一截空白（站主截图反馈的根因之一）。
-             这列不绑宽度，余量就**全部**落进它这里，其余十列按声明宽度
-             1:1 渲染，内容贴边。名字里没有"列"的语义，它就是一行行进来的
-             空白；customHeaderCell/customCell 把内边距清零，横向滚动时
-             （声明合计比容器宽）它自己收到 0px，不留痕迹。 -->
+        <!-- 弹性列（2026-09-26 加，**有意**不绑 width）。它经历两轮分工：
+             上午：容器比十列的声明合计宽时，Chrome 的 fixed 表格布局会把余量
+             按比例摊给所有绑了宽度的列（1920 实测 ×1.59），这列不绑宽度就能
+             独吞全部余量，其余十列按声明宽 1:1 渲染 —— 修掉了「每列凭空
+             多一截空白」。
+             下午（当日截图反馈）：582px 余量独吞成一整条，密钥与操作之间
+             空出一道刺眼的洞。余量改由 distribute 等额摊进每一列（见脚本），
+             这列退到只剩两份职责：吸收均摊后的浮点零头（亚像素，0.0xpx），
+             以及窄窗口（声明合计比容器宽、表格横向滚动）时自己收到 0px ——
+             customHeaderCell/customCell 把内边距清零，保证这道缝不留痕迹。
+             名字里没有"列"的语义，它就是一行行进来的空白。 -->
         <a-table-column
           title=""
           :custom-header-cell="elasticCell"
