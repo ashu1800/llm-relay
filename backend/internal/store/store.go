@@ -231,6 +231,19 @@ func (s *Store) migrateLegacySchema() error {
 		}
 	}
 
+	// proxies.for_update（勾选「用于自动更新」）与 multiplier 是同一类坑：
+	// 实体上 not null 且没有 default，AutoMigrate 给**已有数据**的表加这种列
+	// 会生成 ADD COLUMN ... NOT NULL，Postgres 直接报
+	// "column contains null values"，AutoMigrate 返回错误、应用起不来。
+	// 先手工补列，DEFAULT false 就是这个字段的正确语义（默认不用于更新），保留。
+	if s.hasTable("proxies") && !s.hasColumn("proxies", "for_update") {
+		if err := s.db.Exec(
+			"ALTER TABLE proxies ADD COLUMN for_update boolean NOT NULL DEFAULT false").Error; err != nil {
+			return fmt.Errorf("迁移 proxies.for_update 失败: %w", err)
+		}
+		slog.Info("代理表已补充「用于自动更新」列（既有代理默认不用于更新）")
+	}
+
 	if s.hasTable("model_pricings") && s.hasTable("channel_models") {
 		// 只填「还没配价」的白名单行：用户在渠道里已经配好的价格不能被
 		// 一张要被删掉的旧表覆盖

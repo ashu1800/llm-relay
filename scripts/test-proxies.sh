@@ -111,6 +111,19 @@ curl -s -o /dev/null -X PUT "$API/proxies/$PID" -H 'Content-Type: application/js
 chk "传新密码 -> 换成新密文" "t" "$($PG "SELECT password_enc <> '' AND password_enc <> 'new-secret' FROM proxies WHERE id=$PID")"
 
 echo
+echo "=== 7b. 用于自动更新：单选互斥 ==="
+curl -s -o /dev/null -X PUT "$API/proxies/$PID" -H 'Content-Type: application/json' -d '{"for_update":true}'
+chk "勾选后落库" "t" "$($PG "SELECT for_update FROM proxies WHERE id=$PID")"
+chk "另一个代理未被波及" "f" "$($PG "SELECT for_update FROM proxies WHERE id=$BAD")"
+
+curl -s -o /dev/null -X PUT "$API/proxies/$BAD" -H 'Content-Type: application/json' -d '{"for_update":true}'
+chk "改勾另一个也落库" "t" "$($PG "SELECT for_update FROM proxies WHERE id=$BAD")"
+chk "旧的勾选被自动取消（同一时间只有一个更新代理）" "f" "$($PG "SELECT for_update FROM proxies WHERE id=$PID")"
+
+curl -s -o /dev/null -X PUT "$API/proxies/$BAD" -H 'Content-Type: application/json' -d '{"for_update":false}'
+chk "取消勾选落库" "f" "$($PG "SELECT for_update FROM proxies WHERE id=$BAD")"
+
+echo
 echo "=== 8. 渠道在用时不能删 ==="
 CH=$($PG "SELECT id FROM channels ORDER BY id LIMIT 1")
 OLD=$($PG "SELECT proxy_id FROM channels WHERE id=$CH")

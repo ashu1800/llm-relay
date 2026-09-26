@@ -207,6 +207,13 @@ type Proxy struct {
 	HasPassword bool `gorm:"-" json:"has_password"`
 	// 与渠道同一类坑：带 gorm default 标签的布尔字段存不进 false
 	Enabled bool `gorm:"not null" json:"enabled"`
+	// ForUpdate 勾选「用于自动更新」：版本检测与更新下载走这个代理，
+	// 给服务器连不上 GitHub 的部署用。同一时间至多一个代理勾选
+	// （互斥由 API 层保证，见 admin_proxies.go），生效还要求代理处于
+	// 启用状态 —— 停用即自动回退到设置页手填的代理或直连。
+	// 之所以是软引用（不存外键）：更新模块每次重建客户端时现查现用，
+	// 删掉勾选的代理不需要任何清理，行为自然回退。
+	ForUpdate bool `gorm:"not null" json:"for_update"`
 	// 最近一次连通性测试的结果。缓存下来，打开页面就能看到上次的结果，
 	// 不必每次进页面都去拨一遍（拨号要花时间，代理不通时更慢）
 	LastStatus    string     `gorm:"size:16;not null;default:unknown" json:"last_status"`

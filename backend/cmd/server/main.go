@@ -141,7 +141,8 @@ func run() error {
 	//
 	// binary 形态（install.sh 安装的官方产物）由进程原子替换自身可执行文件，
 	// systemd 的 Restart=always 负责拉起新版本；source 形态只提示、不能自更新。
-	updateSvc := update.NewService(st.DB(), logger)
+	// cipher 传给更新服务：代理管理里勾选「用于自动更新」的代理，密码由它解开。
+	updateSvc := update.NewService(st.DB(), logger, cipher)
 	logger.Info("版本更新功能已就绪",
 		"version", version.Version,
 		"build_type", version.BuildType,

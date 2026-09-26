@@ -107,6 +107,8 @@ export interface Proxy {
   username: string
   has_password: boolean
   enabled: boolean
+  /** 勾选「用于自动更新」：版本检测与更新下载走这个代理（单选互斥，后端保证） */
+  for_update: boolean
   /** unknown / ok / fail —— 最近一次连通性测试的结论 */
   last_status: string
   last_latency_ms: number

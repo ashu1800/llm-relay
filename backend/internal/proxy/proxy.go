@@ -78,6 +78,20 @@ func (c Config) Redacted() string {
 	return fmt.Sprintf("%s://%s", c.Protocol, c.Address())
 }
 
+// URL 返回可交给 http.ProxyURL 的代理地址（如 socks5://user:pass@host:1080）。
+//
+// 给不经过本包 Transport、却要走同一个代理的调用方用（更新模块自己
+// 构造 transport）。socks5 的认证写在 userinfo 里：net/http 处理
+// socks5 代理时按 userinfo 回传用户名密码，与本包 DialContext 的
+// xproxy.Auth 等价；密码里的特殊字符由 url 编码保证不破坏结构。
+func (c Config) URL() string {
+	u := &url.URL{Scheme: c.Protocol, Host: c.Address()}
+	if c.Username != "" {
+		u.User = url.UserPassword(c.Username, c.Password)
+	}
+	return u.String()
+}
+
 // DialContext 返回一个「经由该代理」建立 TCP 连接的函数。
 //
 // http 代理在这里用 CONNECT 隧道（HTTPS 目标必须用隧道，

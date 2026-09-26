@@ -30,7 +30,10 @@ const form = reactive({
   username: '',
   // 编辑时留空表示「沿用原密码」—— 界面上拿不到明文，也不该拿
   password: '',
-  enabled: true
+  enabled: true,
+  // 勾选「用于自动更新」：版本检测与更新下载走这个代理。
+  // 单选互斥由后端保证（勾新的自动清旧的），这里只是转发勾选值
+  forUpdate: false
 })
 
 // ---- 表单校验（2026-09-24 UI 审评补）----
@@ -101,6 +104,7 @@ function openCreate() {
   form.username = ''
   form.password = ''
   form.enabled = true
+  form.forUpdate = false
   modalOpen.value = true
 }
 
@@ -113,6 +117,7 @@ function openEdit(row: Proxy) {
   form.username = row.username
   form.password = ''
   form.enabled = row.enabled
+  form.forUpdate = row.for_update
   modalOpen.value = true
 }
 
@@ -126,7 +131,8 @@ async function save() {
       host: form.host.trim(),
       port: Number(form.port) || 0,
       username: form.username.trim(),
-      enabled: form.enabled
+      enabled: form.enabled,
+      for_update: form.forUpdate
     }
     // 密码三态：编辑时留空 = 不改（不传这个字段），非空 = 设为新密码。
     // 这里刻意不传空串 —— 那会被后端理解成「清空密码」
@@ -297,6 +303,9 @@ onMounted(load)
             <template #default="{ record }">
               <span class="proxy-addr">{{ addressOf(record) }}</span>
               <div v-if="record.username" class="sub-text">用户：{{ record.username }}</div>
+              <!-- 更新代理的身份要一眼可辨：它决定的是「版本更新走不走得通」，
+                   与转发无关，所以放地址列而不是启用列 -->
+              <div v-if="record.for_update" class="sub-text update-mark">用于自动更新</div>
             </template>
           </a-table-column>
           <a-table-column title="状态" :width="200">
@@ -414,6 +423,16 @@ onMounted(load)
           <a-switch v-model:checked="form.enabled" />
           <span class="field-hint inline">停用后，指向它的渠道会直接连不上（不会自动改成直连）</span>
         </a-form-item>
+        <a-form-item label="用于自动更新">
+          <a-switch v-model:checked="form.forUpdate" />
+          <span class="field-hint inline">
+            勾选后，版本检测与更新下载走这个代理（服务器连不上 GitHub 时用）
+          </span>
+          <div v-if="form.forUpdate" class="field-hint">
+            同时只会有一个更新代理：保存后其它代理的勾选会被自动取消；
+            代理还需要处于启用状态，停用即回退到直连或设置里的备用代理。
+          </div>
+        </a-form-item>
       </a-form>
       <template #footer>
         <div class="modal-footer">
@@ -462,6 +481,7 @@ onMounted(load)
 .disabled { color: var(--color-text-secondary); cursor: not-allowed; }
 .field-hint { color: var(--color-text-secondary); font-size: 12px; margin-top: 4px; }
 .field-hint.inline { margin-left: 8px; }
+.update-mark { color: var(--text-red); }
 .two-col { display: grid; grid-template-columns: 1fr 140px; gap: 12px; }
 .modal-footer { display: flex; align-items: center; justify-content: space-between; }
 .footer-right { display: flex; gap: 8px; }

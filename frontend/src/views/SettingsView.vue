@@ -444,8 +444,8 @@ onMounted(() => {
           <a-form-item label="出站代理（可选）">
             <a-input v-model:value="updateForm.proxy" placeholder="socks5://127.0.0.1:1080 或 http://…" class="mono" />
             <span class="dim upd-hint">
-              留空即直连。国内网络访问 GitHub 不稳定时填它，
-              更新时的下载也走同一个代理
+              留空即直连。国内网络访问 GitHub 不稳定时填它，更新时的下载也走同一个代理。
+              若「代理管理」里已有勾选「用于自动更新」的启用代理，则优先用它，这里的地址退为备用
             </span>
           </a-form-item>
 

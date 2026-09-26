@@ -116,6 +116,44 @@ func TestNormalizeChannelWeightsRepairsDuplicates(t *testing.T) {
 	}
 }
 
+// TestMigrateAddsProxyForUpdateColumn 存量库补 proxies.for_update 列。
+//
+// 「not null 且没有 default」的列交给 AutoMigrate 去给非空表加，Postgres
+// 会报 "column contains null values"、应用起不来（见 migrateLegacySchema
+// 里 multiplier 那段注释）。这条测试模拟升级前的老库（有数据、无该列），
+// 钉住「补列成功 + 既有行回填 false」的升级路径。
+func TestMigrateAddsProxyForUpdateColumn(t *testing.T) {
+	s := testStore(t)
+	if err := s.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	// 还原成升级前的样子：没有这一列，且表里至少有一行数据
+	s.db.Exec("ALTER TABLE proxies DROP COLUMN IF EXISTS for_update")
+	if err := s.db.Exec(`INSERT INTO proxies (name, protocol, host, port, enabled, last_status)
+		VALUES ('__mig_probe__', 'socks5', '10.0.0.1', 1080, true, 'unknown')
+		ON CONFLICT (name) DO NOTHING`).Error; err != nil {
+		t.Skipf("造数据失败，跳过: %v", err)
+	}
+	t.Cleanup(func() { s.db.Exec("DELETE FROM proxies WHERE name = '__mig_probe__'") })
+
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("老库补列迁移失败: %v", err)
+	}
+	if !s.hasColumn("proxies", "for_update") {
+		t.Fatal("迁移后应存在 for_update 列")
+	}
+	var nulls int64
+	s.db.Raw("SELECT count(*) FROM proxies WHERE for_update IS NULL").Scan(&nulls)
+	if nulls != 0 {
+		t.Fatalf("NOT NULL 列补齐后不应有 NULL 行，实际 %d", nulls)
+	}
+	var checked int64
+	s.db.Raw("SELECT count(*) FROM proxies WHERE name = '__mig_probe__' AND for_update = true").Scan(&checked)
+	if checked != 0 {
+		t.Fatal("既有代理补列后默认应为 false（不用于自动更新）")
+	}
+}
+
 // TestHasColumnScopedToCurrentSchema 列探测限定当前 schema。
 // （只验证正向：本 schema 的列能查到。跨 schema 的隔离依赖库的部署形态，
 // 有条件的测试库可以用 search_path 制造第二个 schema 验证反向。）

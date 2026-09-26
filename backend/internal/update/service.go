@@ -16,6 +16,8 @@ import (
 	"gorm.io/gorm"
 
 	"llm-relay/internal/model"
+	"llm-relay/internal/proxy"
+	"llm-relay/internal/secure"
 	"llm-relay/internal/version"
 )
 
@@ -136,6 +138,10 @@ type Service struct {
 	db     *gorm.DB
 	logger *slog.Logger
 
+	// cipher 用于解开勾选代理（代理管理里勾选「用于自动更新」的）的密码。
+	// nil 时解不开密码的代理会回退到设置里的手填代理并记 Warn。
+	cipher *secure.Cipher
+
 	// client 由配置（代理/token/仓库）构造，配置变更时重建。
 	// 用 mu 保护：配置可以在运行时改，而检测更新可能正好在跑。
 	mu     sync.RWMutex
@@ -205,11 +211,13 @@ func (t *Task) Snapshot() *Task {
 }
 
 // NewService 构造更新服务。
-func NewService(db *gorm.DB, logger *slog.Logger) *Service {
+//
+// cipher 用来解开勾选代理的密码（见 resolveUpdateProxyURL）。
+func NewService(db *gorm.DB, logger *slog.Logger, cipher *secure.Cipher) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	s := &Service{db: db, logger: logger}
+	s := &Service{db: db, logger: logger, cipher: cipher}
 	cfg, err := s.loadConfig()
 	if err != nil {
 		// 读配置失败不该让服务起不来：用默认值继续，界面上会显示
@@ -259,7 +267,7 @@ func (s *Service) SaveConfig(cfg Config) error {
 // applyConfig 重建客户端。构造失败时保留旧客户端并把原因记下来，
 // 由检测接口通过 Warning 暴露 —— 比让整个更新功能直接不可用要好。
 func (s *Service) applyConfig(cfg Config) {
-	client, err := NewClient(ClientOptions{Repo: cfg.Repo, Token: cfg.Token, ProxyURL: cfg.Proxy})
+	client, err := NewClient(ClientOptions{Repo: cfg.Repo, Token: cfg.Token, ProxyURL: s.resolveUpdateProxyURL(cfg.Proxy)})
 	if err != nil {
 		s.logger.Warn("更新客户端构造失败，沿用上一次的配置", "err", err)
 		s.mu.Lock()
@@ -271,6 +279,53 @@ func (s *Service) applyConfig(cfg Config) {
 	s.cfg = cfg
 	s.client = client
 	s.mu.Unlock()
+}
+
+// OnProxyChanged 代理管理里的代理发生增删改后调用。
+//
+// 勾选「用于自动更新」的代理变了（换勾选对象、改地址、停用、删除），
+// 客户端就要按新的代理重建 —— 与 SaveConfig 走同一条 applyConfig 路径，
+// 重建失败同样只记 Warn、沿用旧客户端。
+func (s *Service) OnProxyChanged() {
+	s.applyConfig(s.GetConfig())
+}
+
+// resolveUpdateProxyURL 决定重建客户端时用哪个代理。
+//
+// 优先级：代理管理里勾选「用于自动更新」且启用中的代理（单选互斥，
+// 至多一个）> 设置页手填的代理地址（fallback）> 直连（空串）。
+// 勾选代理必须处于启用状态：停用即视为不用于更新，行为自然回退。
+//
+// 查询或解密出任何问题都只记 Warn 然后走 fallback，不返回错误：
+// 更新是低频操作，勾选的代理坏了应当表现为「检测失败带 Warning」
+// （现有链路本来就会把这种失败显示给用户），而不是让重建路径 panic。
+func (s *Service) resolveUpdateProxyURL(fallback string) string {
+	if s.db == nil {
+		// 与 loadConfig 同款防护：测试或特殊装配可能没有库
+		return fallback
+	}
+	var row model.Proxy
+	err := s.db.Where("for_update = ? AND enabled = ?", true, true).Order("id").First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return fallback
+	}
+	if err != nil {
+		s.logger.Warn("查询用于自动更新的代理失败，回退到设置里的代理", "err", err)
+		return fallback
+	}
+	cfg, err := proxy.FromEntity(row, s.cipher)
+	if err != nil {
+		s.logger.Warn("用于自动更新的代理密码解不开，回退到设置里的代理", "proxy_id", row.ID, "err", err)
+		return fallback
+	}
+	// FromEntity 刻意不校验（见它的注释），这里必须补上：库里若有协议非法的
+	// 行（手工改库、老数据），不拦的话无效 URL 会让 NewClient 整个失败、
+	// 客户端停留在旧配置 —— 回退手填比卡死在旧状态有用得多
+	if err := cfg.Validate(); err != nil {
+		s.logger.Warn("用于自动更新的代理配置无效，回退到设置里的代理", "proxy_id", row.ID, "err", err)
+		return fallback
+	}
+	return cfg.URL()
 }
 
 // loadConfig 从 settings 表读配置。

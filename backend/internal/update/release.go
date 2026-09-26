@@ -210,11 +210,21 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	}, nil
 }
 
-// guardedTransport 构造带 SSRF 防护的 transport，可选走代理。
+// guardedTransport 构造 transport，可选走代理。
+//
+// 走代理时**不**套 netguard 的建连校验，这是刻意的：netguard 校验的是
+// 即将建连的地址，走代理时那个地址就是代理服务器本身 —— 而大量部署的
+// 代理恰恰跑在本机或内网（127.0.0.1:7890、内网网关上的 Clash）。
+// 代理是管理员在管理台显式配置的可信出口，与渠道出站代理同一信任级别，
+// 能配它的人本来就有出网自由，把它当 SSRF 目标拦下是自我矛盾
+// （设置页的示例一直写着 socks5://127.0.0.1:1080，而实际会被拦）。
+//
+// 目标侧的防护一点没少：API 目标写死 api.github.com，下载每一跳都要过
+// checkDownloadTarget（HTTPS 强制 + 主机白名单），真正落到公网目标上。
 func guardedTransport(proxyURL string) (*http.Transport, error) {
-	var t *http.Transport
-	if strings.TrimSpace(proxyURL) != "" {
-		u, err := url.Parse(strings.TrimSpace(proxyURL))
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL != "" {
+		u, err := url.Parse(proxyURL)
 		if err != nil {
 			return nil, fmt.Errorf("update.proxy 不是合法 URL: %w", err)
 		}
@@ -223,7 +233,7 @@ func guardedTransport(proxyURL string) (*http.Transport, error) {
 		default:
 			return nil, fmt.Errorf("update.proxy 只支持 http/https/socks5/socks5h，当前: %q", u.Scheme)
 		}
-		t = &http.Transport{
+		return &http.Transport{
 			Proxy: http.ProxyURL(u),
 			// 复用 Go 默认 transport 的连接参数（超时、keep-alive、HTTP/2）
 			ForceAttemptHTTP2:     true,
@@ -231,9 +241,10 @@ func guardedTransport(proxyURL string) (*http.Transport, error) {
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
-		}
+		}, nil
 	}
-	return netguard.GuardedTransport(t), nil
+	// 直连：没有可信出口可豁免，目标必须是公网地址。
+	return netguard.GuardedTransport(nil), nil
 }
 
 // FetchLatestRelease 取最新的正式版本（不含 draft 与 prerelease）。

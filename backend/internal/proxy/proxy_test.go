@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -246,6 +248,48 @@ func TestConfigValidate(t *testing.T) {
 		}
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: 期望包含 %q，实际 %v", c.name, c.want, err)
+		}
+	}
+}
+
+// URL() 的契约：产出的字符串必须能被 url.Parse 无损还原 ——
+// 更新模块（internal/update）拿到的是字符串，要用 url.Parse 交给 http.ProxyURL，
+// 还原不回去的 URL 到了那边才报错，就太晚了。
+func TestConfigURL(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			"socks5 无认证",
+			Config{Protocol: model.ProxyProtocolSOCKS5, Host: "127.0.0.1", Port: 1080},
+			"socks5://127.0.0.1:1080",
+		},
+		{
+			"http 带认证",
+			Config{Protocol: model.ProxyProtocolHTTP, Host: "proxy.example.com", Port: 8080, Username: "u", Password: "p"},
+			"http://u:p@proxy.example.com:8080",
+		},
+		{
+			"https 特殊字符密码转义",
+			Config{Protocol: model.ProxyProtocolHTTPS, Host: "proxy.example.com", Port: 8443, Username: "user", Password: "p@ss:word"},
+			"https://user:p%40ss%3Aword@proxy.example.com:8443",
+		},
+	}
+	for _, c := range cases {
+		got := c.cfg.URL()
+		if got != c.want {
+			t.Errorf("%s: 期望 %q，实际 %q", c.name, c.want, got)
+			continue
+		}
+		u, err := url.Parse(got)
+		if err != nil {
+			t.Errorf("%s: 产出的 URL 无法被 url.Parse 还原: %v", c.name, err)
+			continue
+		}
+		if u.Scheme != c.cfg.Protocol || u.Hostname() != c.cfg.Host || u.Port() != strconv.Itoa(c.cfg.Port) {
+			t.Errorf("%s: 还原结果不符: scheme=%q host=%q port=%q", c.name, u.Scheme, u.Hostname(), u.Port())
 		}
 	}
 }

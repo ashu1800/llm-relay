@@ -44,6 +44,9 @@ type proxyPayload struct {
 	//   其它        -> 设为新密码
 	Password *string `json:"password"`
 	Enabled  *bool   `json:"enabled"`
+	// ForUpdate 勾选「用于自动更新」：版本检测与更新下载走这个代理。
+	// 单选互斥由这里保证：设为 true 时清掉其它代理的勾选（见 create/update）
+	ForUpdate *bool `json:"for_update"`
 }
 
 // proxyView 是给界面看的形状：不含密文，但告诉界面「有没有配密码」。
@@ -53,6 +56,7 @@ func proxyView(p model.Proxy) gin.H {
 		"host": p.Host, "port": p.Port, "username": p.Username,
 		"has_password": p.PasswordEnc != "",
 		"enabled":      p.Enabled,
+		"for_update":   p.ForUpdate,
 		"last_status":  p.LastStatus, "last_latency_ms": p.LastLatencyMs,
 		"last_error": p.LastError, "last_tested_at": p.LastTestedAt,
 		"created_at": p.CreatedAt, "updated_at": p.UpdatedAt,
@@ -70,6 +74,16 @@ func (s *Server) listProxies(c *gin.Context) {
 		out = append(out, proxyView(p))
 	}
 	c.JSON(http.StatusOK, gin.H{"items": out, "total": len(out)})
+}
+
+// clearOtherUpdateFlags 收敛「用于自动更新」的单选互斥：把除 keepID 之外
+// 已勾选的代理全部取消勾选。create/update 与备份导入三条路径共用这一条
+// UPDATE，保证「至多一个更新代理」只有一种写法。keepID 传 0 表示事务里
+// 还没有要保留的行（导入路径的新行尚未插入），即清掉库里全部勾选。
+func clearOtherUpdateFlags(tx *gorm.DB, keepID uint) error {
+	return tx.Model(&model.Proxy{}).
+		Where("for_update = ? AND id <> ?", true, keepID).
+		Update("for_update", false).Error
 }
 
 func (s *Server) createProxy(c *gin.Context) {
@@ -103,9 +117,10 @@ func (s *Server) createProxy(c *gin.Context) {
 	if p.Enabled != nil {
 		enabled = *p.Enabled
 	}
+	forUpdate := p.ForUpdate != nil && *p.ForUpdate
 	row := model.Proxy{
 		Name: name, Protocol: cfg.Protocol, Host: cfg.Host, Port: cfg.Port,
-		Username: cfg.Username, Enabled: enabled,
+		Username: cfg.Username, Enabled: enabled, ForUpdate: forUpdate,
 		// 新建时状态未知：界面显示「未测试」而不是假的「正常」
 		LastStatus: "unknown",
 	}
@@ -117,9 +132,24 @@ func (s *Server) createProxy(c *gin.Context) {
 		}
 		row.PasswordEnc = enc
 	}
-	if err := s.deps.Store.DB().Create(&row).Error; err != nil {
+	err := s.deps.Store.DB().Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&row).Error; err != nil {
+			return err
+		}
+		// 单选互斥：勾选「用于自动更新」的代理同一时间只有一个。
+		// 与主写放同一事务，避免出现「两个都勾着」的中间状态
+		if row.ForUpdate {
+			return clearOtherUpdateFlags(tx, row.ID)
+		}
+		return nil
+	})
+	if err != nil {
 		writeConflictOrInternal(c, err, "代理名已存在: "+name)
 		return
+	}
+	// 只有勾选了才需要通知更新模块重建客户端；普通新建不影响它
+	if row.ForUpdate {
+		s.invalidateProxyCaches(row.ID)
 	}
 	c.JSON(http.StatusOK, proxyView(row))
 }
@@ -183,6 +213,9 @@ func (s *Server) updateProxy(c *gin.Context) {
 	if p.Enabled != nil {
 		updates["enabled"] = *p.Enabled
 	}
+	if p.ForUpdate != nil {
+		updates["for_update"] = *p.ForUpdate
+	}
 	if p.Password != nil {
 		if *p.Password == "" {
 			updates["password_enc"] = ""
@@ -213,7 +246,18 @@ func (s *Server) updateProxy(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
 		return
 	}
-	if err := db.Model(&model.Proxy{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+	// 主更新与「单选互斥清理」放同一事务：半路上断掉时不能留下
+	// 两个代理都勾着「用于自动更新」的状态
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&model.Proxy{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			return err
+		}
+		if p.ForUpdate != nil && *p.ForUpdate {
+			return clearOtherUpdateFlags(tx, id)
+		}
+		return nil
+	})
+	if err != nil {
 		writeConflictOrInternal(c, err, "代理名已存在")
 		return
 	}
@@ -252,7 +296,15 @@ func (s *Server) deleteProxy(c *gin.Context) {
 		return
 	}
 	s.invalidateProxyCaches(id)
-	deleteByID(c, db, &model.Proxy{}, id, "代理不存在")
+	if deleteByID(c, db, &model.Proxy{}, id, "代理不存在") {
+		// 上面的 invalidateProxyCaches 是在删除**之前**触发的：更新模块那时
+		// 查库还能查到这行，重建出的客户端仍指着刚删掉的代理，且之后没有
+		// 别的事件再来纠正。删除成功后补一次通知，让它按「勾选代理已消失」
+		// 重新解析（回退手填地址或直连）。
+		if s.deps.Update != nil {
+			s.deps.Update.OnProxyChanged()
+		}
+	}
 }
 
 // testProxySaved 测试已保存的代理，并把结果写回该行。
@@ -395,9 +447,16 @@ func (s *Server) proxyConfigOf(p model.Proxy) (proxy.Config, error) {
 // invalidateProxyCaches 让转发器丢掉这个代理缓存的客户端。
 // 地址、端口、密码、启用状态一变就要调 —— 否则旧连接会继续按老配置拨下去，
 // 表现为「配置改了却不生效」。
+//
+// 更新模块也在这里被通知：勾选「用于自动更新」的代理变了（换勾选对象、
+// 改地址、停用、删除）时，它的客户端要按新代理重建 —— 与转发侧同理，
+// 不通知的话旧代理会一直用到重启。
 func (s *Server) invalidateProxyCaches(id uint) {
 	if s.deps.Service != nil {
 		s.deps.Service.InvalidateProxy(id)
+	}
+	if s.deps.Update != nil {
+		s.deps.Update.OnProxyChanged()
 	}
 }
 

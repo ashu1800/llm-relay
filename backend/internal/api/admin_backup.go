@@ -267,6 +267,14 @@ func (s *Server) importConfig(c *gin.Context) {
 		px.LastError = ""
 		px.LastLatencyMs = 0
 		px.LastTestedAt = nil
+		// 单选互斥与代理管理接口同一规则：备份里勾选「用于自动更新」的代理
+		// 进场时清掉库里已勾选的。导入不走那个接口，不做这一步会留下
+		// 两个勾选，破坏「至多一个更新代理」的不变量
+		if px.ForUpdate {
+			if err := clearOtherUpdateFlags(db, 0); err != nil {
+				report.Warnings = append(report.Warnings, "收敛「用于自动更新」勾选失败: "+err.Error())
+			}
+		}
 		if err := db.Create(&px).Error; err != nil {
 			report.Warnings = append(report.Warnings, "代理 "+px.Name+" 导入失败: "+err.Error())
 			continue
@@ -508,6 +516,13 @@ func (s *Server) importConfig(c *gin.Context) {
 
 	if s.deps.Pricing != nil {
 		s.deps.Pricing.Invalidate()
+	}
+
+	// 代理的「用于自动更新」勾选可能随导入变化：备份里勾选的进场、库里
+	// 原有的被收敛掉。让更新模块按新的勾选重建客户端，否则它会继续用
+	// 导入前那套代理配置，直到下一次代理变更或重启
+	if s.deps.Update != nil {
+		s.deps.Update.OnProxyChanged()
 	}
 
 	c.JSON(http.StatusOK, gin.H{
