@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"strings"
 
 	"llm-relay/internal/model"
@@ -49,6 +50,16 @@ func errUnsupportedContent(reason string) error {
 func UpstreamRequest(protocol, path string, body []byte, upstreamModel string) (string, []byte, error) {
 	if !isChatPath(path) {
 		return path, body, nil
+	}
+	// 工具 / 结构化输出的 JSON Schema 引用归一化（详见 schema_refs.go）：
+	// OpenAI 兼容网关代转 Google 模型时只认「根级 $defs 直接子节点」的 $ref，
+	// 嵌套定义与深层引用会让整条请求 400。趁还是通用语形状在这里统一整理，
+	// 一处覆盖全部出站协议；没有引用问题的请求字节级原样返回。
+	var normalized int
+	body, normalized = normalizeSchemaRefs(body)
+	if normalized > 0 {
+		slog.Info("出站 schema 含不合规 $ref，已归一化",
+			"protocol", protocol, "model", upstreamModel, "schemas", normalized)
 	}
 	switch protocol {
 	case model.ProtocolAnthropic:
