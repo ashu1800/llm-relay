@@ -95,6 +95,13 @@ build-embed:
 test:
 	@cd $(BACKEND_DIR) && go test ./...
 
+# 从 backend/internal/model 重新生成前端 TS 类型（frontend/src/api/generated/model.ts）。
+# Go 实体增删字段后跑一次并提交产物；前端 CI 不依赖 Go 工具链。
+# 需要先装一次生成器：go install github.com/gzuidhof/tygo@latest
+gen-types:
+	@cd $(BACKEND_DIR) && tygo generate
+	@echo ">>> 已生成 $(FRONTEND_DIR)/src/api/generated/model.ts（记得提交）"
+
 # 发布新版本。只做转发，逻辑在 scripts/release.sh（单一实现，避免两处漂移）。
 # 用法：make release VERSION_ARG=patch | minor | major | v0.1.5
 #        （也可附加 DRY_RUN=1 看将要做的事）
