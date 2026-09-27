@@ -2,13 +2,14 @@ package api
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"golang.org/x/net/websocket"
+	"github.com/gorilla/websocket"
 
 	"llm-relay/internal/config"
 )
@@ -49,25 +50,33 @@ func TestLiveSocketHeartbeat(t *testing.T) {
 	// httptest 的地址是 http://，换成 ws://
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/admin/live"
 	// Origin 必须与 Host 同源：sameOriginOnly 中间件会拒掉不符的
-	origin := srv.URL
-	ws, err := websocket.Dial(wsURL, "", origin)
+	header := http.Header{}
+	header.Set("Origin", srv.URL)
+	// 用带压缩能力的拨号端（与浏览器同款协商路径），顺带断言
+	// permessage-deflate 真的被服务端接住 —— 这是迁移到 gorilla 的
+	// 主要收益之一，静默失效时没有任何报错，只有体积悄悄变大
+	dialer := &websocket.Dialer{EnableCompression: true}
+	ws, resp, err := dialer.Dial(wsURL, header)
 	if err != nil {
 		t.Fatalf("WebSocket 连接失败：%v", err)
 	}
 	defer ws.Close()
+	if resp == nil || !strings.Contains(resp.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate") {
+		t.Fatal("服务端未协商 permessage-deflate（客户端声明支持而服务端拒绝）")
+	}
 
 	// 收帧直到拿到心跳。给足余量：节拍 60ms，3 秒足够收几十帧
 	_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
 	got := false
 	for !got {
-		var raw string
-		if err := websocket.Message.Receive(ws, &raw); err != nil {
+		_, payload, err := ws.ReadMessage()
+		if err != nil {
 			t.Fatalf("收帧失败（未收到心跳）：%v", err)
 		}
 		var msg struct {
 			Type string `json:"type"`
 		}
-		if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+		if err := json.Unmarshal(payload, &msg); err != nil {
 			continue
 		}
 		if msg.Type == "heartbeat" {
@@ -79,17 +88,17 @@ func TestLiveSocketHeartbeat(t *testing.T) {
 	}
 
 	// 心跳帧必须是合法 JSON 且不带业务数据（否则前端会把它当成数据帧处理）
-	var raw string
 	_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
-	if err := websocket.Message.Receive(ws, &raw); err != nil {
+	_, rawBytes, err := ws.ReadMessage()
+	if err != nil {
 		t.Fatalf("收第二帧失败：%v", err)
 	}
 	var msg struct {
 		Type string          `json:"type"`
 		Data json.RawMessage `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
-		t.Fatalf("心跳帧不是合法 JSON：%v（原文 %.80s）", err, raw)
+	if err := json.Unmarshal(rawBytes, &msg); err != nil {
+		t.Fatalf("心跳帧不是合法 JSON：%v（原文 %.80s）", err, rawBytes)
 	}
 	if msg.Type != "heartbeat" {
 		t.Fatalf("第二帧类型是 %q，期望 heartbeat（节拍应稳定）", msg.Type)

@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"golang.org/x/net/websocket"
+	"github.com/gorilla/websocket"
 
 	"llm-relay/internal/model"
 )
@@ -329,6 +330,27 @@ func mustJSON(v any) []byte {
 	return b
 }
 
+// liveUpgrader 把 HTTP 连接升级成 WebSocket。
+//
+// 2026-09-27 从 golang.org/x/net/websocket 迁到 gorilla/websocket：
+// 前者已冻结维护（golang.org/x/net 仓库明说 websocket 包处于维护者缺失状态），
+// 后者自 2022 年起恢复积极维护，还带来 permessage-deflate 压缩 ——
+// logs 帧忙时每秒最多 50 行 × 35 字段的 JSON，压缩后线上体积降一个量级，
+// 浏览器与 useLive 都不需要任何改动（握手时透明协商）。
+var liveUpgrader = websocket.Upgrader{
+	ReadBufferSize: 1024,
+	// 写缓冲故意取小值而不是默认 4096：gorilla 的已知问题是压缩开启时
+	// 每条连接的 flate 上下文占用的内存随写缓冲增长（gorilla#621），
+	// 而本端点单帧要么是几十字节的心跳、要么是整帧一次性 WriteMessage ——
+	// 大于缓冲的载荷会绕过缓冲直写网络，小缓冲不产生额外系统调用。
+	WriteBufferSize:   128,
+	EnableCompression: true,
+	// Origin 校验交给链路里已有的 sameOriginOnly 中间件（握手请求与普通
+	// 请求走同一条链）；gorilla 默认的 CheckOrigin 拒绝一切带跨站 Origin 的
+	// 升级，与「无 Origin 的命令行客户端放行」的既有口径冲突，这里放行。
+	CheckOrigin: func(*http.Request) bool { return true },
+}
+
 // liveSocket 是实时推送的 WebSocket 端点。
 //
 // 只推不接：这个通道上没有需要客户端上报的东西，
@@ -338,78 +360,84 @@ func (s *Server) liveSocket(c *gin.Context) {
 		writeUpstreamError(c, 501, "实时推送未启用", "not_implemented")
 		return
 	}
-	websocket.Handler(func(ws *websocket.Conn) {
-		id, ch := s.deps.Live.subscribe()
-		defer s.deps.Live.unsubscribe(id)
+	ws, err := liveUpgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		// 失败时 Upgrade 已自己写掉错误响应（握手不合法回 400 等），
+		// 这里只留痕：排查「连不上 /live」时唯一的服务端线索
+		s.logger().Debug("实时推送连接升级失败", "err", err)
+		return
+	}
+	defer ws.Close()
 
-		// 必须有人读：x/net/websocket 只在 Read/Receive 路径里处理
-		// 控制帧（Ping → Pong、Close），只写不读的话客户端的关闭帧
-		// 永远不被处理，订阅会一直留着 —— 而广播是「有变化才推」，
-		// 空闲时可能几小时不推一次，靠 Send 失败来发现断线是不可靠的。
-		//
-		// 这个通道上没有需要客户端上报的东西，读到的内容一律丢弃。
-		closed := make(chan struct{})
-		go func() {
-			defer close(closed)
-			var discard string
-			for {
-				if err := websocket.Message.Receive(ws, &discard); err != nil {
-					return
-				}
-			}
-		}()
+	id, ch := s.deps.Live.subscribe()
+	defer s.deps.Live.unsubscribe(id)
 
-		// 连上先补一份当前快照：不然要等到下一次变化才有东西显示，
-		// 而「打开页面后数字是空的」看起来就像坏了。
-		// 与 liveStatsLoop 同一口径：今天 + 全站（零值筛选）
-		//
-		// Store 为 nil 时整段跳过（与下面 health 的 Logs != nil 同一个防御）：
-		// 没有数据库就取不出汇总，而这条连接仍然该能建立、能收心跳 ——
-		// 心跳的测试正是这样跑的（不起数据库）。
-		if s.deps.Store != nil {
-			start, end, _ := resolveRange("today")
-			if data, err := s.summarySnapshot(start, end, statsFilter{}); err == nil {
-				_ = websocket.Message.Send(ws, string(mustJSON(liveMessage{Type: "stats", Data: data})))
-			}
-		}
-		// 队列水位同样补一份：否则要等到它变化才显示（大多数时候队列是
-		// 平稳的，那一等可能就是永远）
-		if s.deps.Logs != nil {
-			_ = websocket.Message.Send(ws, string(mustJSON(liveMessage{Type: "health", Data: s.deps.Logs.QueueStats()})))
-		}
-
-		// WebSocket 连接不允许并发写，所以写只在这个 goroutine 里做。
-		//
-		// 心跳也走这里而不是另起一个 goroutine：并发写会被 x/net/websocket
-		// 直接判为错误，心跳必须和普通帧排在同一条写队列上。
-		// 心跳带 `{"type":"heartbeat"}` 而不是空帧 —— 前端 dispatch 只认已知
-		// type，未知的直接忽略；写成心跳类型让它可被日志与探针识别。
-		heartbeat := time.NewTicker(heartbeatInterval)
-		defer heartbeat.Stop()
+	// 必须有人读：gorilla 与 x/net 一样只在读路径处理控制帧
+	// （Ping → Pong、Close），只写不读的话客户端的关闭帧永远不被处理，
+	// 订阅会一直留着 —— 而广播是「有变化才推」，空闲时可能几小时不推一次，
+	// 靠写失败来发现断线是不可靠的。
+	//
+	// 这个通道上没有需要客户端上报的东西，读到的内容一律丢弃。
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
 		for {
-			select {
-			case <-closed:
+			if _, _, err := ws.ReadMessage(); err != nil {
 				return
-			case <-heartbeat.C:
-				// 与普通帧同一条写超时：客户端 TCP 缓冲区满时（标签页被挂起）
-				// 没有 deadline 的 Send 会把这条 goroutine 永久堵住
-				_ = ws.SetWriteDeadline(time.Now().Add(liveWriteTimeout))
-				if err := websocket.Message.Send(ws, string(mustJSON(liveMessage{Type: "heartbeat"}))); err != nil {
-					s.logger().Warn("实时心跳发送失败，断开该订阅", "err", err)
-					return
-				}
-			case payload, ok := <-ch:
-				if !ok {
-					return
-				}
-				// 写超时：客户端 TCP 缓冲区满时（比如标签页被挂起）
-				// 没有 deadline 的 Send 会把这条 goroutine 永久堵住
-				_ = ws.SetWriteDeadline(time.Now().Add(liveWriteTimeout))
-				if err := websocket.Message.Send(ws, string(payload)); err != nil {
-					s.logger().Warn("实时推送发送失败，断开该订阅", "err", err)
-					return
-				}
 			}
 		}
-	}).ServeHTTP(c.Writer, c.Request)
+	}()
+
+	// 连上先补一份当前快照：不然要等到下一次变化才有东西显示，
+	// 而「打开页面后数字是空的」看起来就像坏了。
+	// 与 liveStatsLoop 同一口径：今天 + 全站（零值筛选）
+	//
+	// Store 为 nil 时整段跳过（与下面 health 的 Logs != nil 同一个防御）：
+	// 没有数据库就取不出汇总，而这条连接仍然该能建立、能收心跳 ——
+	// 心跳的测试正是这样跑的（不起数据库）。
+	if s.deps.Store != nil {
+		start, end, _ := resolveRange("today")
+		if data, err := s.summarySnapshot(start, end, statsFilter{}); err == nil {
+			_ = ws.WriteMessage(websocket.TextMessage, mustJSON(liveMessage{Type: "stats", Data: data}))
+		}
+	}
+	// 队列水位同样补一份：否则要等到它变化才显示（大多数时候队列是
+	// 平稳的，那一等可能就是永远）
+	if s.deps.Logs != nil {
+		_ = ws.WriteMessage(websocket.TextMessage, mustJSON(liveMessage{Type: "health", Data: s.deps.Logs.QueueStats()}))
+	}
+
+	// WebSocket 连接不允许并发写，所以写只在这个 goroutine 里做。
+	//
+	// 心跳也走这里而不是另起一个 goroutine：并发写会被 gorilla 判为错误
+	// （与 x/net 同样的约束），心跳必须和普通帧排在同一条写队列上。
+	// 心跳带 `{"type":"heartbeat"}` 而不是空帧 —— 前端 dispatch 只认已知
+	// type，未知的直接忽略；写成心跳类型让它可被日志与探针识别。
+	heartbeat := time.NewTicker(heartbeatInterval)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-closed:
+			return
+		case <-heartbeat.C:
+			// 与普通帧同一条写超时：客户端 TCP 缓冲区满时（标签页被挂起）
+			// 没有 deadline 的写会把这条 goroutine 永久堵住
+			_ = ws.SetWriteDeadline(time.Now().Add(liveWriteTimeout))
+			if err := ws.WriteMessage(websocket.TextMessage, mustJSON(liveMessage{Type: "heartbeat"})); err != nil {
+				s.logger().Warn("实时心跳发送失败，断开该订阅", "err", err)
+				return
+			}
+		case payload, ok := <-ch:
+			if !ok {
+				return
+			}
+			// 写超时：客户端 TCP 缓冲区满时（比如标签页被挂起）
+			// 没有 deadline 的写会把这条 goroutine 永久堵住
+			_ = ws.SetWriteDeadline(time.Now().Add(liveWriteTimeout))
+			if err := ws.WriteMessage(websocket.TextMessage, payload); err != nil {
+				s.logger().Warn("实时推送发送失败，断开该订阅", "err", err)
+				return
+			}
+		}
+	}
 }

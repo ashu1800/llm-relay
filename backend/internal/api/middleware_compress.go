@@ -49,8 +49,8 @@ func gzipResponses() gin.HandlerFunc {
 // 在中间件返回之后才写响应，中间件阶段看不到 Content-Type。
 //
 // 通过内嵌 gin.ResponseWriter 接口，Hijack / CloseNotify / Status / Size
-// 等方法全部自动委托底层——WebSocket（/live）升级时 x/net/websocket
-// 对 writer 调 Hijack，发生在任何字节写入之前，压缩从未启用，
+// 等方法全部自动委托底层——WebSocket（/live）升级时 gorilla 的 Upgrader
+// 对底层连接调 Hijack，发生在任何字节写入之前，压缩从未启用，
 // 升级路径与加中间件之前逐字节一致。
 type gzipResponseWriter struct {
 	gin.ResponseWriter
