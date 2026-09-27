@@ -39,7 +39,7 @@ import { onLive, createThrottledLiveReloader } from '@/composables/useLive'
 import { currencyKeys, moneyText, primaryCurrency, symbolOf } from '@/utils/money'
 import type { Channel, ChannelGroup } from '@/api/types'
 import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
-import { channelOption } from '@/utils/channelOption'
+import { groupedChannelOptions } from '@/utils/channelOption'
 import ChannelOption from '@/components/ChannelOption.vue'
 
 type Summary = {
@@ -134,16 +134,17 @@ const logPanel = ref<{ reload: () => void } | null>(null)
 // 筛选下拉的候选：来自管理接口，不是统计接口 —— 统计接口只回有流量的渠道，
 // 而「筛一条今天还没被用过的渠道」是合理需求（结果就是 0）。
 // filterGroups 不喂任何筛选（分组筛选 2026-09-26 移除），但渠道选项的
-// 「· 分组名」后缀与请求日志面板的分组标签渲染还靠它
+// 分组头与请求日志面板的分组标签渲染还靠它
 const filterGroups = ref<ChannelGroup[]>([])
 const filterChannels = ref<Channel[]>([])
 
-// 渠道选项：图标 + 名字，分组名一律补上 —— 候选横跨全部分组，而渠道名
-// 没有唯一约束，跨分组的两个「D1」只有靠分组名才分得清
+// 渠道选项：图标 + 名字，按分组归堆（分组名做组头，渠道不带「· 分组名」
+// 后缀）。分组信息不能完全不显示 —— 渠道名没有唯一约束，跨分组的两个
+// 「D1」只有靠分组才分得清 —— 但平铺时它摊在每一行上，挤掉的正是渠道名
 // （见 utils/channelOption.ts，请求日志面板用的是同一个组件）
 const channelOptions = computed(() => [
   { value: ALL, label: '全部渠道' },
-  ...filterChannels.value.map((c) => channelOption(c, filterGroups.value, true))
+  ...groupedChannelOptions(filterChannels.value, filterGroups.value)
 ])
 
 // 模型候选取渠道白名单（/channels 的 models）：它是系统当前认识的模型全集。
@@ -488,8 +489,9 @@ onMounted(async () => {
       </a-radio-group>
       <!-- 渠道 / 模型紧跟在时间范围右边：它们回答的是同一类问题
            （「下面这些数字算的是哪一部分」），放在一起才读得成一句话 -->
-      <!-- 240px = 最长的一条「图标 + 渠道名 · 分组名」量出来的，
-           与请求日志列表同一个宽度；给窄了会把分组名截掉 -->
+      <!-- 240px 是按「图标 + 渠道名 · 分组名」的旧选项量出的：选项改成按分组
+           归堆后最长项短了一截，这个宽度只多不少；再长也有省略号兜底
+           （ChannelOption 的 .chan-opt-text），与请求日志列表同一个宽度 -->
       <a-select
         v-model:value="channelFilter"
         :options="channelOptions"
