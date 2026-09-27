@@ -98,6 +98,15 @@ jobs:
           # （vite build 只转译、不做类型检查），必须单独跑这一条才能拦住。
           npm run type-check
 
+      - name: 单元测试
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          # vitest：列宽分摊不变量、耗时档位边界、复制反馈时序、主题读取校验。
+          # 契约检查盯「源码里写着的形状」，这里盯「写着的逻辑对不对」——
+          # 两层互补，单测没过不许构建。
+          npm run test
+
       - name: 构建
         working-directory: frontend
         run: |

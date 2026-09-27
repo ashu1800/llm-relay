@@ -37,6 +37,16 @@ import { costText, symbolOf } from '@/utils/money'
 import { writeClipboard } from '@/utils/clipboard'
 import { fmtTime, fmtTimeCompact, pad2 } from '@/utils/fmtTime'
 import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
+import { rafThrottle } from '@/utils/rafThrottle'
+// 耗时家族（fmtMs / 档位 / 瀑布）与列宽纯逻辑（键 / 权重 / 摊法）已抽成独立模块：
+// 三条分摊不变量与档位边界在 spec 里钉着，契约检查的阈值锚点也移了过去
+import { fmtMs, latencyClass, latencyTitle, latencyWaterfall } from '@/components/latency'
+import {
+  COL_KEYS,
+  allocateWidths,
+  clampColumnWidth,
+  type ColKey
+} from '@/components/logColumns'
 import type { Channel, ChannelGroup, Paged, RequestLog } from '@/api/types'
 
 const props = defineProps<{
@@ -107,11 +117,6 @@ const current = ref<RequestLog | null>(null)
 // 又因为不能把内容块改成 inline-block / inline-flex —— ui-spec 第 10 条实测过，
 // inline 级原子盒会把单元格行高从 41px 顶到 49px —— 块级 flex/grid 的列一律量
 // **内部已 nowrap 的子元素**，再把固定前缀（图标、竖条、gap）加回去。
-const COL_KEYS = [
-  'time', 'model', 'channel', 'tokens', 'elapsed', 'cost', 'speed', 'status', 'key', 'action'
-] as const
-type ColKey = (typeof COL_KEYS)[number]
-
 /**
  * 每列的 [下限, 上限]。
  *
@@ -254,40 +259,6 @@ const columnsTotal = computed(() => COL_KEYS.reduce((sum, k) => sum + colW.value
  *  无需 !important（antd 表格样式里 padding 均无 !important，已核）。 */
 const elasticCell = () => ({ style: { padding: 0 } })
 
-/** 单元格左右内边距（antd 小表格 8+8）与右侧呼吸余量（给省略号与边框） */
-const CELL_PAD = 16
-const CELL_BREATH = 6
-
-/**
- * 宽屏余量分摊的**权重**（2026-09-27 感官升级）。
- *
- * 等额分摊（每列 +leftover/10）对短列是浪费：status / action 两列是
- * COL_BOUNDS 里写死的固定宽（[64,64]），内容是一枚胶囊、一个图标按钮，
- * 拉宽它们只会让一枚小胶囊周围空出一圈，而最需要宽度的模型/渠道/密钥
- * 三列（唯一会 ellipsis 截断的三列）只多拿到同样的一份。于是改为加权：
- *   · 固定窄列（status / action）份额为 0 —— 永远按声明宽渲染；
- *   · 三个会截断的长文本列（model / channel / key）权重 ×2；
- *   · 其余数值列权重 1。
- * 各列份额 = leftover × wᵢ / Σw，Σ份额 仍恰好等于 leftover，
- * 「合计 = 容器可用宽、不出现假横向滚动」的不变量不变；
- * 「实际宽 = 声明宽 + 份额 ≥ 声明宽（只增不减）」也不变。
- */
-const DISTRIBUTE_WEIGHT: Record<ColKey, number> = {
-  time: 1,
-  model: 2,
-  channel: 2,
-  tokens: 1,
-  elapsed: 1,
-  cost: 1,
-  speed: 1,
-  status: 0,
-  key: 2,
-  action: 0
-}
-
-/** Σw（权重合计，13）：distribute 的单位份额 = leftover / Σw，先算好存起来 */
-const WEIGHT_SUM = COL_KEYS.reduce((s, k) => s + DISTRIBUTE_WEIGHT[k], 0)
-
 /**
  * 把容器比「内容紧宽合计」宽出来的余量**摊**进列里。
  *
@@ -297,16 +268,18 @@ const WEIGHT_SUM = COL_KEYS.reduce((s, k) => s + DISTRIBUTE_WEIGHT[k], 0)
  *   下午：改为**等额**摊给每一列（leftover/10），空白均匀、无集中空洞 ——
  *   参考站的同款日志表正是整表均匀留白的形态（.shots/light-logs.png）。
  *
- * 2026-09-27 起再改为**加权**等价形态（DISTRIBUTE_WEIGHT）：等额解决了
+ * 2026-09-27 起再改为**加权**等价形态（权重表见 logColumns.ts）：等额解决了
  * 「集中空洞」，但对固定窄列是浪费 —— status/action 的内容是一枚胶囊、
  * 一个图标按钮，拉宽只产生空白；真正会 ellipsis 截断的 model/channel/key
  * 才是余量的去向。加权后空白仍然分散在各列（不会回到集中空洞），
  * 只是长文本列多拿、固定列不拿。
  *
- * 分摊后各列实际宽 = 声明宽 + 份额，仍满足「声明 ≥ 内容所需」的不变量
- * （只增不减），内容不会被截断；Σ份额 = leftover，scroll.x 取新的合计
- * 恰好等于容器宽，表格不再有横向滚动，弹性列只剩浮点零头（亚像素）可吸收
- * —— 它仍留着，窄窗口（内容比容器宽）时它收 0、不留缝的职责不变。
+ * 摊法本体是 logColumns.allocateWidths（纯函数，三条不变量在 spec 里钉着）；
+ * 这一层只做 DOM 读数（容器可用宽）与响应式写入。分摊后各列实际宽 =
+ * 声明宽 + 份额，仍满足「声明 ≥ 内容所需」的不变量（只增不减），内容不会被
+ * 截断；Σ份额 = leftover，scroll.x 取新的合计恰好等于容器宽，表格不再有
+ * 横向滚动，弹性列只剩浮点零头（亚像素）可吸收 —— 它仍留着，窄窗口
+ * （内容比容器宽）时它收 0、不留缝的职责不变。
  *
  * 返回是否有列宽被写掉：调用方据此决定要不要在重渲染后重新量位置
  * （亮带、滚动提示）。均摊的写入要经 Vue 重渲染才落到 DOM —— 同一帧里
@@ -319,19 +292,13 @@ function distribute(): boolean {
   // 余量必须按 1686 摊，否则合计超宽、表格出现 1~8px 的假横向滚动
   const avail = body.clientWidth
   if (!avail) return false
-  const declared = COL_KEYS.reduce((sum, k) => sum + baseW[k], 0)
-  const leftover = avail - declared
-  // 加权分摊（权重表见 DISTRIBUTE_WEIGHT 的说明）：单位份额 = leftover / Σw，
-  // 各列拿「单位份额 × 自己的权重」，权重 0 的列完全不拉伸。
-  // Σ(份额) = leftover × Σw / Σw = leftover，合计仍恰好等于容器可用宽。
-  const unit = leftover > 0 ? leftover / WEIGHT_SUM : 0
+  const want = allocateWidths(avail, baseW)
   let changed = false
   for (const key of COL_KEYS) {
-    const want = baseW[key] + unit * DISTRIBUTE_WEIGHT[key]
     // 同值不写：resize 事件连发时每帧都进来，写同样的值不该触发整表重渲染
     // （同一容器宽下算出的值逐位相同，比较是安全的）
-    if (colW.value[key] !== want) {
-      colW.value[key] = want
+    if (colW.value[key] !== want[key]) {
+      colW.value[key] = want[key]
       changed = true
     }
   }
@@ -375,7 +342,7 @@ function remeasureColumns() {
     })
     if (max === 0) continue // 本页该列没有锚点（如全是空值），保持原宽
     const [lo, hi] = COL_BOUNDS[key]
-    next[key] = Math.min(hi, Math.max(lo, max + spec.pad + CELL_PAD + CELL_BREATH))
+    next[key] = clampColumnWidth(max, spec.pad, lo, hi)
   }
 
   let changed = false
@@ -401,28 +368,6 @@ function remeasureColumns() {
     // 列宽一变，「右边还有没有内容」也跟着变（列变窄可能就不再需要滚动）
     nextTick(syncScrollHints)
   }
-}
-
-/**
- * rAF 节流器（2026-09-27 性能收口）：scroll / resize 事件的触发频率高于
- * 帧率（Windows 上鼠标滚轮一格能连发十几个 scroll），而经它节流的处理
- * 全是「读几何」—— 逐事件跑等于每次强制布局，滚动一快就掉帧。
- * 合并到每帧最多一次，且 rAF 回调跑在本帧 paint 之前：亮带位置仍然
- * 与滚动同步呈现，只是不再为中间态白算。cancel 供卸载时摘除挂起的帧。
- */
-function rafThrottle(fn: () => void): (() => void) & { cancel: () => void } {
-  let raf = 0
-  const schedule = () => {
-    if (!raf) raf = requestAnimationFrame(() => {
-      raf = 0
-      fn()
-    })
-  }
-  schedule.cancel = () => {
-    if (raf) cancelAnimationFrame(raf)
-    raf = 0
-  }
-  return schedule
 }
 
 // 列宽在 rows 变化后重算：翻页 / 换筛选 / 首屏的整批替换，以及实时推送插行
@@ -833,29 +778,6 @@ async function copyError() {
   else message.warning('复制失败，请手动选择复制')
 }
 
-/**
- * 详情抽屉的耗时瀑布（2026-09-27）：三个阶段各一条水平条，长度按占总耗时的比例。
- * 一眼看出「这次到底慢在哪一段」—— 首字条占满而握手条极短，慢的就是模型生成；
- * 反过来握手条占一半，问题在网络/代理。条色沿用列表里的耗时分级（同色同义）。
- */
-function latencyWaterfall(row: RequestLog) {
-  const total = row.total_ms || 0
-  const rows: { label: string; pct: number; cls: string; text: string }[] = []
-  const push = (label: string, ms: number | null | undefined, kind: 'first' | 'total') => {
-    if (!ms || ms <= 0) return
-    rows.push({
-      label,
-      pct: total > 0 ? Math.min(100, (ms / total) * 100) : 0,
-      cls: latencyClass(ms, kind),
-      text: fmtMs(ms)
-    })
-  }
-  push('上游握手', row.upstream_ms, 'first')
-  push('首字', row.first_byte_ms, 'first')
-  push('总共', row.total_ms, 'total')
-  return rows
-}
-
 /** 抽屉当前那条日志的瀑布行：computed 缓存，模板的 v-if（画不画）与
  *  v-for（画什么）共用同一份结果，不再每次渲染都重新算两遍 */
 const waterfallRows = computed(() => (current.value ? latencyWaterfall(current.value) : []))
@@ -948,36 +870,7 @@ function openDetail(row: RequestLog) {
   detailOpen.value = true
 }
 
-// 耗时分级（2026-09-16 站主重定阈值，两行各用一套）：
-//   首字：≤10s 绿、10-30s 橙、>30s 红
-//   耗时：≤20s 绿、20-60s 橙、>60s 红
-// 首字更严，因为它才是「用户感觉卡不卡」的那一下；总耗时把上游生成的时间也算进去，
-// 长回答本来就要几十秒，用同一把尺子会把正常请求染红。
-//
-// 边界取 <=10000 / <=30000 这种「闭区间、下一档从 10001 起」的写法，
-// 不在两档之间留缝：中间的毫秒必须落进某一档，否则会出现「不着色」的空档。
-//
-// fmtMs 对 0 与空值都返回 '-'，那种情况不着色，避免把「没有数据」显示成「很快」。
-function latencyClass(ms: number | null | undefined, kind: 'first' | 'total' = 'total') {
-  if (!ms) return 'lat-none'
-  const [fast, mid] = kind === 'first' ? [10000, 30000] : [20000, 60000]
-  if (ms <= fast) return 'lat-fast'
-  if (ms <= mid) return 'lat-mid'
-  return 'lat-slow'
-}
-
-/** 悬停说明这一档的判据：颜色本身不该是唯一的信息来源 */
-function latencyTitle(ms: number | null | undefined, kind: 'first' | 'total' = 'total') {
-  if (!ms) return '没有记录到耗时'
-  if (kind === 'first') {
-    if (ms <= 10000) return '10 秒内'
-    if (ms <= 30000) return '10-30 秒'
-    return '超过 30 秒'
-  }
-  if (ms <= 20000) return '20 秒内'
-  if (ms <= 60000) return '20-60 秒'
-  return '超过 60 秒'
-}
+// 耗时分级与悬停说明在 components/latency.ts（档位阈值被契约检查锚定）。
 
 /** 「任务耗时」列里两行数值的悬停说明：先说这行是哪个数，再说这一档的判据 */
 function durTitle(name: string, ms: number | null | undefined, kind: 'first' | 'total' = 'total') {
@@ -1071,15 +964,7 @@ function fmtTimeAt(t: string) {
   return wall + ' (UTC' + (offMin < 0 ? '-' : '+') + pad2(Math.floor(abs / 60)) + ':' + pad2(abs % 60) + ')'
 }
 
-/* 耗时文本。秒**一律补齐两位小数**（8.70s / 14.00s，而不是 8.7s / 14.0s）：
-   列表是竖着扫的，位数一致时小数点在同一列上，扫一列数字不用重新找基准。
-   不足 1 秒仍按毫秒显示（170ms）—— 抖成「0.17s」不如毫秒直观，
-   而且库里最小的耗时是 2ms，两位小数会把它抹成「0.00s」，
-   等于把「很快」显示成「没有耗时」。 */
-function fmtMs(v: number) {
-  if (!v) return '-'
-  return v >= 1000 ? (v / 1000).toFixed(2) + 's' : v + 'ms'
-}
+// fmtMs 在 components/latency.ts（秒值补齐两位小数被契约检查锚定）。
 
 // 词元超过 1K 后改用 K 显示：列宽有限，4457 这种原始数字扫一眼读不出量级。
 // 与 fmtMs 同一档阈值（>=1000），但这里按两位小数截断而不是四舍五入 ——

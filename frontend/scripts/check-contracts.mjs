@@ -499,14 +499,17 @@ console.log('=== 多排数值的列左缘对齐契约 ===')
     (panel.match(/latencyClass\(record\.total_ms,\s*'total'\)/g) || []).length === 2,
   )
 
-  // 阈值是站主定的，写在函数里而不是散在模板各处的三元表达式里
-  const lat = panel.slice(panel.indexOf('function latencyClass'), panel.indexOf('function statusColor'))
+  // 阈值是站主定的，写在函数里而不是散在模板各处的三元表达式里。
+  // 2026-09-27：latencyClass / fmtMs 随耗时家族抽去 components/latency.ts
+  //（单元测试 latency.spec.ts 也锚在那里），这条契约跟着搬 —— 阈值锚的是
+  // 函数体，函数住哪儿锚哪儿。上面几条模板断言仍盯面板（调用点没动）。
+  const lat = readFileSync(join(SRC, 'components/latency.ts'), 'utf8')
   check('首字档位是 10s / 30s', /first'\s*\?\s*\[10000,\s*30000\]/.test(lat))
   check('耗时档位是 20s / 60s', /\[20000,\s*60000\]/.test(lat))
   // 两位小数：秒一律 toFixed(2)，站主明确要求「保留两位并且补齐两位」
   check(
     '耗时秒值补齐两位小数',
-    /\(v \/ 1000\)\.toFixed\(2\)/.test(panel),
+    /\(v \/ 1000\)\.toFixed\(2\)/.test(lat),
     '位数不齐时小数点不在同一列上，扫一列数字要重新找基准',
   )
 }

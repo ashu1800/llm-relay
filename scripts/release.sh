@@ -133,11 +133,13 @@ else
   ( cd backend && GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" GOSUMDB=off go test ./... ) \
     || die "go test 未通过"
 
-  log "前端 type-check + 契约检查…"
+  log "前端 type-check + 契约检查 + 单元测试…"
   ( cd frontend && npm run type-check >/tmp/release-typecheck.log 2>&1 ) \
     || { tail -25 /tmp/release-typecheck.log; die "前端类型检查未通过"; }
   ( cd frontend && npm run check >/tmp/release-contracts.log 2>&1 ) \
     || { grep -E 'FAIL|未通过' /tmp/release-contracts.log | head -25; die "前端契约检查未通过"; }
+  ( cd frontend && npm run test >/tmp/release-unittest.log 2>&1 ) \
+    || { tail -25 /tmp/release-unittest.log; die "前端单元测试未通过"; }
 
   ok "本地预检通过"
 fi

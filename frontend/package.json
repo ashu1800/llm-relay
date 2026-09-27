@@ -10,7 +10,9 @@
     "precompress": "node scripts/precompress.mjs dist",
     "type-check": "vue-tsc --noEmit",
     "check": "node scripts/check-contracts.mjs",
-    "verify": "npm run type-check && npm run check && npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify": "npm run type-check && npm run check && npm run test && npm run build",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -26,8 +28,10 @@
     "@types/node": "^24.13.4",
     "@types/sortablejs": "^1.15.9",
     "@vitejs/plugin-vue": "^5.2.1",
+    "happy-dom": "^20.14.5",
     "typescript": "^5.7.2",
     "vite": "^6.0.3",
+    "vitest": "^5.0.2",
     "vue-tsc": "^2.1.10"
   }
 }
