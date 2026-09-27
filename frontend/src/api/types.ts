@@ -1,27 +1,42 @@
-export interface Channel {
-  id: number
-  name: string
-  group_id: number
-  /** 上游协议：客户端无论用哪种协议，都会按它转成上游格式 */
-  protocol: string
-  base_url: string
-  /** 记账币种（CNY / USD）：价格按它录入，日志与看板也按它统计 */
-  currency: string
-  api_key_hint: string
-  weight: number
-  /** 走哪个出站代理转发；0 = 直连 */
-  proxy_id: number
-  /** 渠道图标：data URI / 图片地址 / 一两个字符；空表示用默认图标 */
-  icon: string
-  enabled: boolean
-  monitor_type: string
+// 前端 API 类型。单一事实源在 Go：backend/internal/model 的结构体经 tygo
+// 生成 generated/model.ts（重生成：cd backend && tygo generate，或 make gen-types），
+// 本文件把生成实体收口成「接口响应形状」——只在两类地方覆盖生成结果：
+//   1. 可空性：Go 指针字段（*time.Time）生成 `field?: string`，但线上 JSON
+//      里 nil 指针序列化成 null，前端一律写 `field: string | null`；
+//   2. jsonb 窄化：Go 侧存 jsonb 的松散 JSON（JSONMap/JSONList → any），
+//      内部结构的知识只存在于前端（SlotRule / RateRule / RetryTrailStep），
+//      在这里叠加。Go 新增字段会自动流进这些类型，不再手工双写。
+//
+// 响应里「实体之外」的聚合字段（today_spent / runtime / models 一类，
+// 由列表接口现场计算）也在这里声明 —— 它们不属于任何 Go 实体。
+//
+// 历史教训（这段别删）：env 变量清单手写 13 条错 6 条、分组策略 label 两处
+// 不一致 —— 手工双写漂移在这个项目里发生过不止一次。
+import type {
+  APIKey as APIKeyEntity,
+  Channel as ChannelEntity,
+  ChannelGroup as ChannelGroupEntity,
+  ChannelModel as ChannelBindingEntity,
+  Proxy as ProxyEntity,
+  RequestLog as RequestLogEntity
+} from './generated/model'
+import {
+  ProtocolAnthropic,
+  ProtocolCustom,
+  ProtocolEmbeddings,
+  ProtocolGemini,
+  ProtocolOpenAIChat,
+  ProtocolOpenAIResponses
+} from './generated/model'
+
+export interface Channel extends Omit<
+  ChannelEntity,
+  'available_slots' | 'extra_config' | 'custom_mapping' | 'last_checked_at'
+> {
   available_slots: SlotRule[] | null
   extra_config: Record<string, unknown> | null
   custom_mapping: Record<string, unknown> | null
-  health_status: string
-  last_error: string
   last_checked_at: string | null
-  created_at: string
   /** 模型白名单的对外名（列表接口带出，画面上「模型」列用） */
   models?: string[]
   model_count?: number
@@ -67,19 +82,7 @@ export interface RateRule {
   label: string
 }
 
-export interface ChannelGroup {
-  id: number
-  name: string
-  remark: string
-  strategy: string
-  is_default: boolean
-  enabled: boolean
-  /** 胶囊颜色（#rrggbb）；空表示按分组名自动配色 */
-  color: string
-  /** 每分钟请求数上限，0 = 不限制 */
-  rpm: number
-  /** 每分钟 token 数上限，0 = 不限制 */
-  tpm: number
+export interface ChannelGroup extends Omit<ChannelGroupEntity, 'daily_budget'> {
   /**
    * 按币种的日预算（{"CNY": 50}）。逐币种独立判定，不做任何折算
    * （与看板金额同一铁律）。null / 缺币种 = 该币种不限。
@@ -97,24 +100,8 @@ export interface ChannelGroup {
  * Proxy 出站代理。密码只进不出：接口返回的是 has_password，
  * 编辑时留空即表示沿用原密码。
  */
-export interface Proxy {
-  id: number
-  name: string
-  /** socks5 / http / https；https 表示用 TLS 连到代理本身 */
-  protocol: string
-  host: string
-  port: number
-  username: string
-  has_password: boolean
-  enabled: boolean
-  /** 勾选「用于自动更新」：版本检测与更新下载走这个代理（单选互斥，后端保证） */
-  for_update: boolean
-  /** unknown / ok / fail —— 最近一次连通性测试的结论 */
-  last_status: string
-  last_latency_ms: number
-  last_error: string
+export interface Proxy extends Omit<ProxyEntity, 'last_tested_at'> {
   last_tested_at: string | null
-  created_at: string
 }
 
 /** 代理连通性测试结果 */
@@ -127,37 +114,18 @@ export interface ProxyTestResult {
 }
 
 /** 渠道的模型白名单条目：对外名 → 上游名（留空则同名） */
-export interface ChannelBinding {
-  id: number
-  channel_id: number
-  public_name: string
-  upstream_name: string
-  enabled: boolean
-  /** 这一个模型走哪个代理；0 = 跟随渠道 */
-  proxy_id: number
+export interface ChannelBinding extends Omit<ChannelBindingEntity, 'peak_rules'> {
   // 价格挂在这一行上：同一个模型名在不同渠道成本不同，
   // 全局一份价只能取其一（原来的做法），账就对不上了
-  input_per_1m: string
-  output_per_1m: string
-  cache_read_per_1m: string
-  cache_write_per_1m: string
-  /** 固定倍率，1 = 原价；没有时段命中时用它 */
-  multiplier: number
   /** 倍率时段：命中时用该时段的倍率（优先于固定倍率） */
   peak_rules: RateRule[] | null
 }
 
-export interface APIKey {
-  // 0 表示沿用全局默认；负数表示这把密钥完全不限流
-  rate_limit_rpm: number
-  id: number
-  name: string
-  key_prefix: string
-  enabled: boolean
+export interface APIKey
+  extends Omit<APIKeyEntity, 'allowed_models' | 'allowed_groups' | 'last_used_at'> {
   allowed_models: string[] | null
   allowed_groups: string[] | null
   last_used_at: string | null
-  created_at: string
 }
 
 /** 故障转移链路里的一次失败尝试（后端 relay.AttemptTrail 的落库形态） */
@@ -177,52 +145,16 @@ export interface RetryTrailStep {
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
 }
 
-export interface RequestLog {
-  id: number
-  trace_id: string
-  api_key_name: string
-  channel_id: number
-  channel_name: string
-  group_id: number
-  inbound_protocol: string
-  upstream_protocol: string
-  model_requested: string
-  model_upstream: string
-  /**
-   * 这次调用是否被渠道的「默认模型映射」接下的：model_requested 是客户端
-   * 请求的名字（没命中任何白名单），model_upstream 才是真正发给上游的默认模型。
-   * 开了兜底之后客户端把模型名写错也不再报错，这个标记是唯一的发现途径。
-   */
-  fallback_mapped?: boolean
-  /** 入站思考参数的归一档位（off/minimal/low/medium/high/on/auto）；空 = 请求没带思考参数 */
-  thinking_level?: string
-  stream: boolean
-  status_code: number
-  error: string
-  retry_count: number
+export interface RequestLog
+  extends Omit<RequestLogEntity, 'retry_trail' | 'pricing_snapshot'> {
   /**
    * 故障转移链路的逐次失败尝试（渠道/状态码/错误/用量），随日志快照。
    * 失败尝试的 token 上游可能照收（context-length-exceeded 的 400 就是典型），
    * 详情里看得见它，账面对不上上游账单时才有线索。没有失败尝试时为空。
    */
   retry_trail?: { steps?: RetryTrailStep[] } | null
-  prompt_tokens: number
-  completion_tokens: number
-  total_tokens: number
-  cached_tokens: number
-  cache_creation_tokens: number
-  reasoning_tokens: number
-  usage_estimated: boolean
-  estimated_cost: string
-  /** 这笔账的币种，随日志一起快照（渠道改币种不会改写历史） */
-  cost_currency: string
   /** 计价快照：命中时刻的单价与倍率，日后改价不会影响历史账目 */
   pricing_snapshot?: Record<string, any> | null
-  first_byte_ms: number
-  total_ms: number
-  upstream_ms: number
-  client_ip: string
-  created_at: string
 }
 
 export interface Paged<T> {
@@ -236,14 +168,15 @@ export interface Paged<T> {
 // 原来那张「模型名 → 单价」的独立表已经下线，全局一份价没法表达
 // 「同一个模型名在不同渠道成本不同」。
 
-// 渠道协议选项，与后端 model.Protocol* 常量保持一致
-export const PROTOCOLS = [
-  { value: 'openai-chat', label: 'OpenAI Chat Completions' },
-  { value: 'openai-responses', label: 'OpenAI Responses' },
-  { value: 'anthropic-messages', label: 'Anthropic Messages' },
-  { value: 'gemini-generateContent', label: 'Gemini generateContent' },
-  { value: 'openai-embeddings', label: 'OpenAI Embeddings' },
-  { value: 'custom', label: '自定义（可配置适配器）' }
+// 渠道协议选项。value 不再手写字符串 —— 直接取生成文件里的后端常量，
+// 加协议时改 Go 侧（model.Protocol*），这里补 label 即可，值永远对得上。
+export const PROTOCOLS: { value: string; label: string }[] = [
+  { value: ProtocolOpenAIChat, label: 'OpenAI Chat Completions' },
+  { value: ProtocolOpenAIResponses, label: 'OpenAI Responses' },
+  { value: ProtocolAnthropic, label: 'Anthropic Messages' },
+  { value: ProtocolGemini, label: 'Gemini generateContent' },
+  { value: ProtocolEmbeddings, label: 'OpenAI Embeddings' },
+  { value: ProtocolCustom, label: '自定义（可配置适配器）' }
 ]
 
 // 分组路由策略。全站只有这一份定义：GroupsView 以前自己抄了一份，

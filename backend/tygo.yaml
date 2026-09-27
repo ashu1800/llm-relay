@@ -1,0 +1,19 @@
+# tygo：从 internal/model 的 Go 结构体生成 TypeScript 类型（前端单一事实源）。
+# 重新生成：cd backend && tygo generate（或 make gen-types）
+# 产物 ../frontend/src/api/generated/model.ts 提交入库，前端 CI 不需要 Go 工具链。
+#
+# 映射口径：
+#   time.Time      → string（JSON 里就是 RFC3339 字符串）
+#   decimal.Decimal → string（shopspring 序列化为带引号的数字字符串，前端按 string 消费）
+#   *T             → T | null（可空列）；tygo 对指针字段另加 ? 可选标记，
+#                    与「字段必在、值可为 null」的实际语义不一致，见 types.ts 的收口说明。
+type_mappings:
+  time.Time: "string"
+  github.com/shopspring/decimal.Decimal: "string"
+
+packages:
+  - path: "llm-relay/internal/model"
+    output_path: "../frontend/src/api/generated/model.ts"
+    indent: "  "
+    type_mappings:
+      decimal.Decimal: "string"
