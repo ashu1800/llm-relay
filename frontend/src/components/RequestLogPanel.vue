@@ -41,6 +41,9 @@ import { rafThrottle } from '@/utils/rafThrottle'
 // 耗时家族（fmtMs / 档位 / 瀑布）与列宽纯逻辑（键 / 权重 / 摊法）已抽成独立模块：
 // 三条分摊不变量与档位边界在 spec 里钉着，契约检查的阈值锚点也移了过去
 import { fmtMs, latencyClass, latencyTitle, latencyWaterfall } from '@/components/latency'
+// 速度的分母口径也抽成独立模块（2026-09-29）：它出过「几千 tok/s」的假值事故，
+// 三种分母的判据在 speed.spec.ts 里逐条钉着
+import { speedOf, speedText } from '@/components/speed'
 import {
   COL_KEYS,
   allocateWidths,
@@ -914,30 +917,30 @@ function tokenTitle(row: RequestLog) {
   )
 }
 
-// 输出速度（词元/秒）。分母按输出方式分两套口径：
-//   - 流式：首字之后才是生成时段，用「总耗时 − 首字」；
-//   - 非流式：响应头与完整正文一起到达（后端非流式的 first_byte_ms 记的
-//     是响应头到达时刻，那时生成已经完成），生成时长只能用总耗时近似。
-// 口径不同的分叉必须让用户看得见 —— 列表里流式行带「流」胶囊就是这里
-// 的可视标记，悬停说明写明用的是哪个分母。
-// 返回空串表示算不出（没有输出词元、没量到耗时、流式缺首字），单元格显示 —，
-// 不猜数 —— 估出来的速度比没有速度更误导。
+// 输出速度（词元/秒）：分母的判据在 components/speed.ts —— 三种口径
+// （首字后生成 / 总耗时 / 上游整段返回时的总耗时）连「首字窗口塌缩」的阈值
+// 都有单元测试钉着，这里只剩显示层。
+// 返回空串表示算不出（没有输出词元、没量到耗时），单元格显示 —，不猜数 ——
+// 估出来的速度比没有速度更误导。
 function tokPerSec(row: RequestLog): string {
-  const out = row.completion_tokens
-  if (!out || out <= 0 || !row.total_ms) return ''
-  const ms = row.stream ? row.total_ms - (row.first_byte_ms || 0) : row.total_ms
-  if (ms <= 0) return ''
-  const v = out / (ms / 1000)
-  // 一律取整（站主 2026-09-21 要求）：速度只是个量级参考，小数位是假精度，
-  // 取整后同列位数也天然一致
-  return v.toFixed(0)
+  return speedText(row)
 }
 
-// 速度的悬停说明：把分子分母摊开，速成的数怎么来的一眼可查。
-// 分母带「（流式）/（非流式）」后缀 —— 两种口径的差别就藏在这个词里。
+// 速度的悬停说明：把分子分母摊开，速度怎么来的一眼可查。
+// 三种分母分三种写法 —— 口径不同的分叉必须让用户看得见：
+//   · 首字后生成 X —— 流式，上游逐帧返回；
+//   · 整段耗时 X（上游未逐帧返回正文）—— 首字之后没有可用的生成时段，
+//     窗口里量到的只是尾包传输，退回总耗时（见 speed.ts 的阈值）；
+//   · 总耗时 X —— 非流式，响应头与整段正文一起到达。
 function speedTitle(row: RequestLog) {
-  const ms = row.stream ? row.total_ms - (row.first_byte_ms || 0) : row.total_ms
-  const denom = row.stream ? '首字后生成 ' + fmtMs(ms) : '总耗时 ' + fmtMs(ms)
+  const r = speedOf(row)
+  if (!r) return ''
+  const denom =
+    r.kind === 'firstByte'
+      ? '首字后生成 ' + fmtMs(r.denomMs)
+      : r.kind === 'burst'
+        ? '整段耗时 ' + fmtMs(r.denomMs) + '（上游未逐帧返回正文）'
+        : '总耗时 ' + fmtMs(r.denomMs)
   return '输出 ' + fmtTokens(row.completion_tokens) + ' 词元 ÷ ' + denom
 }
 
@@ -1520,9 +1523,10 @@ onMounted(() => {
           </template>
         </a-table-column>
         <!-- 速度列：每秒词元输出速度。流式请求在数值前带「流」胶囊（同一行）——
-             输出速度必须结合输出方式才读得懂：流式的分母是首字之后的生成时段，
-             非流式只能用总耗时近似（口径见 tokPerSec 注释），胶囊就是那个分叉的
-             可视标记。失败请求通常没有输出词元，显示 — -->
+             输出速度必须结合输出方式才读得懂：流式的分母通常是首字之后的生成时段，
+             上游整段返回时退回总耗时，非流式也只能用总耗时近似（口径判据见
+             components/speed.ts），胶囊就是那个分叉的可视标记。失败请求通常
+             没有输出词元，显示 — -->
         <a-table-column title="速度" :width="colW.speed">
           <template #default="{ record }">
             <span v-if="tokPerSec(record)" class="spd-cell" :title="speedTitle(record)">
