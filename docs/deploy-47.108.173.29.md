@@ -1,15 +1,19 @@
 # 部署记录：47.108.173.29（阿里云 2C1.6G）
 
 > 部署日期：2026-09-25 · 版本 `v0.1.0-55-g862c888` · 形态 `binary`（systemd，无 Docker）
+> 后续变更：2026-09-29 接入域名 `llm.ashu180.cn` 并启用 HTTPS（见「八、域名与 HTTPS」）
 
 ## 一、访问方式
 
 | 项 | 值 |
 |---|---|
-| 管理后台 | http://47.108.173.29:8888 |
+| **管理后台（推荐）** | **https://llm.ashu180.cn** |
+| **API 基地址（推荐）** | **https://llm.ashu180.cn/v1** |
+| 管理后台（直连，明文） | http://47.108.173.29:8888 |
 | 管理密钥 | `<见服务器 /opt/llm-relay/deploy/.env，不入库>` |
 | 配置文件 | `/opt/llm-relay/deploy/.env`（权限 600） |
 | 服务名 | `llm-relay.service`（已设开机自启） |
+| 反代 / 证书 | nginx 1.24 + Let's Encrypt（`llm.ashu180.cn`，到期 2026-12-28） |
 
 管理密钥首次登录时输入，浏览器换取 7 天会话。**泄露后**改 `.env` 里的
 `RELAY_ADMIN_KEY` 再 `systemctl restart llm-relay`，所有已登录会话立即失效。
@@ -117,7 +121,11 @@ http://47.108.173.29:8888/console/channels → 200（SPA 深链回退）✓
 
 ## 五、已知问题与后续优化建议
 
-### 1. 静态资源未压缩（带宽浪费 68%）
+> **状态（2026-09-29 更新）**：本节 1、2 两条均已落地。
+> 1 由**后端构建期预压缩**解决（比反代 gzip 更省 CPU，见「八」）；
+> 2 由 **nginx + Let's Encrypt** 解决。下面保留原始分析，便于回看当时的判断依据。
+
+### 1. 静态资源未压缩（带宽浪费 68%）——已解决，走的是后端预压缩
 
 当前服务器**不对静态资源做 gzip**，也没发 `Cache-Control`/`ETag`：
 
@@ -147,10 +155,14 @@ http://47.108.173.29:8888/console/channels → 200（SPA 深链回退）✓
 考虑到资源是**构建期就固定**的，更好的做法是在构建时预压缩成 `.gz` 一并
 embed，运行时只做选择 —— 但那需要改 embed 逻辑。
 
-### 2. 无 HTTPS
+### 2. 无 HTTPS ——已解决（nginx 反代 + Let's Encrypt）
 
 当前是明文 HTTP。管理密钥与所有 API 密钥都会以明文过公网。
 如果只是自用、且经代理访问，风险可接受；否则建议配 nginx + Let's Encrypt。
+
+**落地情况**：2026-09-29 已按此建议接入 `https://llm.ashu180.cn`，
+详见「八、域名与 HTTPS」。原来的明文入口 `http://47.108.173.29:8888`
+保持可用（未动），是否关掉由安全组决定 —— 关之前先确认没有客户端还在用它。
 
 ### 3. 与既有服务共存的边界
 
@@ -184,6 +196,14 @@ su - postgres -c "psql -d llm_relay"
 
 # 备份（备份文件含渠道密钥密文，请妥善保存）
 su - postgres -c "pg_dump -d llm_relay" > /root/llm-relay-$(date +%F).sql
+
+# 证书（nginx + Let's Encrypt）
+nginx -t && systemctl reload nginx                # 改完反代配置
+certbot certificates                              # 看证书与到期日
+certbot renew --dry-run                           # 演练续期（staging，不耗额度）
+systemctl list-timers certbot.timer               # 确认续期调度存在
+journalctl -u certbot.service --since "7 days ago"  # 看续期历史
+curl -sI https://llm.ashu180.cn/ | head -1        # 线上冒烟
 ```
 
 ### 重新部署（改了代码之后）
@@ -215,3 +235,94 @@ bash /opt/llm-relay/deploy/swap-binary.sh
 4. **压测的 load 会滞后**：压完看到 load 29 不要慌，那是 1 分钟均值还没衰减；
    看 `/proc/loadavg` 的第四段（运行队列 `1/291` = 只有 1 个可运行进程）才准。
 5. **`pkill -9 -f` 会被安全策略拦截**（含删除语义），改用 `pkill -f`。
+6. **`pkill -f "http.server 80"` 会杀掉自己**：探针脚本的命令行里也含这个字符串，
+   匹配到了发起它的那个 shell。要加方括号写成 `pkill -f 'http[.]server (80|443)'`。
+7. **nginx 1.24 不认 `http2 on;`**：那是 1.25.1 才引入的写法，1.24 上必须写
+   `listen 443 ssl http2;`，否则 `nginx -t` 直接报 unknown directive。
+8. **`--standalone` 签发，续期就得改 webroot**：签发时 80 端口空着，standalone
+   能自己起临时监听；nginx 一接管 80，standalone 续期会因端口被占而**静默失败**，
+   直到证书过期那天全站握手失败才暴露。改法见 `deploy/nginx/README.md`。
+9. **`certbot.timer` 默认可能是 disabled**：Ubuntu 同时装了 `/etc/cron.d/certbot`，
+   但那份 cron 带 `\! -d /run/systemd/system` 守卫，**systemd 主机上根本不执行**。
+   `certbot renew --dry-run` 通过 ≠ 续期会自动发生，要
+   `systemctl is-enabled certbot.timer` 确认。
+10. **`ssh_exec` 不带 `connection_id` 用的是「当前连接」**：中途切过 `ssh_connect_profile`
+    后，后续命令会跑在另一台机器上。本次排查 443 端口时因此把两台机器的结果混在
+    一起，一度误判「443 被安全组拦死」——实际早就放行了。**多条服务器并行操作时，
+    每条命令都显式传 connection_id。**
+
+## 八、域名与 HTTPS（2026-09-29）
+
+### 目标与形态
+
+把 `llm.ashu180.cn`（A 记录已指向 47.108.173.29）接到这台机器上的 llm-relay
+并申请 HTTPS 证书。域名与证书只服务本网关，**不动同机其它服务**。
+
+```
+客户端 ──HTTPS(443)──> nginx 1.24 ──HTTP(127.0.0.1:8888)──> llm-relay
+                          └─ 80：/.well-known/acme-challenge/ 供续期，其余 301 跳 HTTPS
+```
+
+nginx 只做三件事：**TLS 终止、转发、真实客户端 IP 透传**。配置归档在
+[`deploy/nginx/`](../deploy/nginx/)（站点配置 + WebSocket map + 安装续期说明）。
+
+### 关键决策与理由
+
+| 决策 | 理由 |
+|---|---|
+| 反代**不启用 gzip、不做静态缓存** | 后端 `static.go` 已在构建期把前端产物预压缩成 `.gz` 并自带 `Cache-Control`/`ETag`；再压一遍在 2 核机器上是白烧 CPU，还会与上游 `Content-Encoding` 打架 |
+| `proxy_buffering off` | 缓冲会把整段回答攒到最后一次性吐出，首包时间直接退化成一个完整的上游耗时 |
+| `proxy_read_timeout 600s` | 后端 `RELAY_UPSTREAM_TIMEOUT=300s`，反代必须比它长，否则先断的是 nginx |
+| `Connection` 用 map，不写死 `upgrade` | 写死会让没有 Upgrade 头的普通请求也被声明成升级 |
+| `proxy_set_header Host $host` | 后端 `sameOriginOnly` 拿 `Origin` 的 host 与 `Request.Host` 比对，Host 传错会让管理台所有写操作 403 |
+| `X-Forwarded-Proto $scheme` | 后端据此判断是否给会话 Cookie 加 `Secure`（`console_auth.go:162`） |
+| `client_max_body_size 40m` | 比 `RELAY_MAX_REQUEST_BODY_MB=32` 留余量，超限时回后端自己的 JSON 错误体 |
+| HSTS 不加 `includeSubDomains`/`preload` | 这台机器上还有别的服务，不替整站立规矩 |
+| 保留明文 `:8888` 入口 | 现有客户端可能还在用它；是否关闭属于安全组操作，另议 |
+
+### 证书与续期
+
+```
+签发    certbot certonly --standalone -d llm.ashu180.cn（2026-09-29，ECDSA）
+路径    /etc/letsencrypt/live/llm.ashu180.cn/{fullchain,privkey}.pem
+到期    2026-12-28（Let's Encrypt 90 天）
+续期    authenticator = webroot，目录 /var/www/certbot（**已从 standalone 改过来**）
+调度    certbot.timer（每日 00:00、12:00 检查；原为 disabled，已 enable）
+钩子    /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh（续期成功后 reload nginx）
+```
+
+`certbot renew --dry-run` 已用 staging 真跑过一遍 HTTP-01 挑战，结果
+`all simulated renewals succeeded`。
+
+### 验证结果
+
+外部视角（大陆腾讯云 106.12.28.144、海外 Vultr 66.42.99.110 各一遍）：
+
+| 检查项 | 结果 |
+|---|---|
+| `http://llm.ashu180.cn/` | 301 → HTTPS ✓ |
+| `https://llm.ashu180.cn/` | 200，`ssl_verify_result=0`（证书链完整）✓ |
+| TLS 握手耗时 | 大陆 0.094s / 海外 0.635s，HTTP/2 协商成功 ✓ |
+| TLS 1.0 / 1.1 | 拒绝（`no protocols available`）✓ |
+| 证书主体 | `CN=llm.ashu180.cn`，issuer Let's Encrypt，到期 2026-12-28 ✓ |
+
+应用层（走公网域名，逐项实测）：
+
+| 检查项 | 结果 |
+|---|---|
+| 会话 Cookie | `console_session=…; Path=/; Max-Age=604800; HttpOnly; **Secure**; SameSite=Lax` —— `Secure` 生效即证明 `X-Forwarded-Proto: https` 传对了 ✓ |
+| 登录 / 管理接口 | 登录 200；`system/info`、`keys`、`logs` 全 200 ✓ |
+| 跨站 Origin | `Origin: https://evil.example` → **403**，`sameOriginOnly` 经反代仍生效 ✓ |
+| WebSocket `/api/admin/live` | `HTTP/1.1 101 Switching Protocols` + `Connection: upgrade` ✓ |
+| `/v1/models` | 200，正常返回上游模型列表 ✓ |
+| 流式 SSE | `first_byte=3.18s` vs `total=4.80s`，83 个事件分块到达 → **未被缓冲** ✓ |
+| 静态资源预压缩 | `Accept-Encoding: gzip` 时 index.html 1711 字节（不压缩 2958 字节）✓ |
+| 未匹配路径 | 返回后端 JSON 404 而非 nginx HTML 404 → 确证请求到了后端 ✓ |
+
+验证用的临时 API 密钥（`__https-verify-tmp__`、`__sse-buffering-check__`）已删除，
+会话 Cookie 与本地凭据文件已清空。
+
+### 开销
+
+nginx master + 2 worker 合计 RSS 约 23.6 MB，`systemctl` 口径 Memory 4.1 MB
+（峰值 6.7 MB）—— 对 1.6G 的机器可忽略。llm-relay 本体的内存与重启次数不受影响。
