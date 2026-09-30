@@ -919,22 +919,25 @@ function tokenTitle(row: RequestLog) {
 
 // 输出速度（词元/秒）：判据在 components/speed.ts —— 只有一个含义
 // 「输出词元 ÷ 首字后生成时段」，量不到生成时段时返回空串、单元格显示 —，
-// 悬停说明讲清是哪种量不到（四种原因见下面的 speedMissTitle）。
+// 悬停说明讲清是哪种量不到（五种原因见下面的 speedMissTitle）。
 // 返回空串不猜数：换分母（总耗时）凑出来的数含排队与首字等待，比没有数更误导。
 function tokPerSec(row: RequestLog): string {
   return speedText(row)
 }
 
 // 「—」的悬停说明：说清为什么量不到，而不是让人以为是没数据。
-// 塌缩那一种把窗口摆出来（「只剩 0.53s（占 6%）」）—— 判据是「窗口相对整次请求
-// 塌缩了」，把两个数给出来，站主可以自己判断这一行值不值得再查。
+// 窗口类的两种把实测的窗口摆出来 —— 站主可以自己判断这一行值不值得再查。
 function speedMissTitle(row: RequestLog) {
   switch (speedMissReason(row)) {
+    case 'oneShot':
+      // 有交付观测且只读到一次：上游把整段正文一次发出（不是「猜」，是读循环记的事实）
+      return '算不出速度：上游把整段正文一次发出（正文只读到 1 个分块），量不到生成时段'
     case 'burst': {
-      const win = (row.total_ms || 0) - (row.first_byte_ms || 0)
+      // 窗口 = 有观测时用实测的送达跨度，没有观测时退回「总耗时 − 首字」
+      const span = row.body_reads > 0 ? (row.last_byte_ms || 0) - (row.first_byte_ms || 0) : 0
+      const win = span > 0 ? span : (row.total_ms || 0) - (row.first_byte_ms || 0)
       if (win <= 0) return '算不出速度：首字与收尾落在同一毫秒，量不到生成时段'
-      const share = row.total_ms ? ((win / row.total_ms) * 100).toFixed(1) : '0'
-      return '算不出速度：首字之后只剩 ' + fmtMs(win) + '（占整次请求 ' + share + '%，疑似上游整段返回）'
+      return '算不出速度：可用的窗口只有 ' + fmtMs(win) + '（不足 200ms），量到的是尾包传输'
     }
     case 'noStream':
       return '算不出速度：非流式请求，响应头与整段正文一起到达'
@@ -948,11 +951,16 @@ function speedMissTitle(row: RequestLog) {
 }
 
 // 速度的悬停说明：把分子分母摊开，速度怎么来的一眼可查。
-// 两种写法（有数 / 量不到）与 tokPerSec 同进同退 —— 有数就一定说得出分母。
+// 两种写法（有数 / 量不到）与 tokPerSec 同进同退 —— 有数就一定说得出分母；
+// 有数的两种来源（实测送达跨度 / 历史行的近似）也分开写，别把近似说成实测。
 function speedTitle(row: RequestLog) {
   const r = speedOf(row)
   if (r) {
-    return '输出 ' + fmtTokens(row.completion_tokens) + ' 词元 ÷ 首字后生成 ' + fmtMs(r.denomMs)
+    const denom =
+      row.body_reads > 0
+        ? '首字后生成 ' + fmtMs(r.denomMs)
+        : '首字后窗口 ' + fmtMs(r.denomMs) + '（此行没有交付观测，按总耗时 − 首字近似）'
+    return '输出 ' + fmtTokens(row.completion_tokens) + ' 词元 ÷ ' + denom
   }
   return speedMissTitle(row)
 }
@@ -1536,9 +1544,10 @@ onMounted(() => {
           </template>
         </a-table-column>
         <!-- 速度列：每秒词元输出速度。只有一个含义 —— 输出词元 ÷ 首字后生成时段
-             （口径与四种「量不到」的判据见 components/speed.ts）。量不到的行显示 —，
-             悬停说明讲清是哪种量不到（非流式 / 上游整段返回 / 没有输出词元 / 没量到
-             耗时）—— 不换分母凑数：总耗时口径含排队与首字等待，与生成速度不是一回事。
+             （口径与五种「量不到」的判据见 components/speed.ts）。量不到的行显示 —，
+             悬停说明讲清是哪种量不到（上游一次发出 / 窗口不足 200ms / 非流式 /
+             没有输出词元 / 没量到耗时）—— 不换分母凑数：总耗时口径含排队与首字等待，
+             与生成速度不是一回事。
              流式且量得到的行在数值前带「流」胶囊（同一行）—— 输出速度要结合输出
              方式才读得懂。失败请求通常没有输出词元，显示 — -->
         <a-table-column title="速度" :width="colW.speed">

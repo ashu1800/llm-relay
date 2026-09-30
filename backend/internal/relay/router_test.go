@@ -322,7 +322,7 @@ func TestBuildLogMarksFallback(t *testing.T) {
 		},
 		Attempt: &Attempt{StatusCode: 200},
 	}
-	entry := BuildLog(req, res, Usage{}, 200, "", 1, 2)
+	entry := BuildLog(req, res, Usage{}, 200, "", Timing{FirstByteMs: 1, TotalMs: 2})
 
 	if entry.ModelRequested != "claude-opus-4-7" {
 		t.Errorf("请求模型应记客户端原名，实际 %q", entry.ModelRequested)
@@ -349,7 +349,7 @@ func TestBuildLogDoesNotMarkExactMatchAsFallback(t *testing.T) {
 		},
 		Attempt: &Attempt{StatusCode: 200},
 	}
-	entry := BuildLog(req, res, Usage{}, 200, "", 1, 2)
+	entry := BuildLog(req, res, Usage{}, 200, "", Timing{FirstByteMs: 1, TotalMs: 2})
 
 	if entry.FallbackMapped {
 		t.Error("精确命中的请求不该标成兜底")

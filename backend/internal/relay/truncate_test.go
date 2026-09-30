@@ -46,7 +46,7 @@ func TestBuildLogTruncatesErrorColumn(t *testing.T) {
 	req := &RelayRequest{TraceID: "t1", PublicModel: "m"}
 	res := &RelayResult{TraceID: "t1"}
 	long := strings.Repeat("网关错误页", 400) // 2000 字符，超 varchar(1024)
-	entry := BuildLog(req, res, Usage{}, 502, long, 1, 2)
+	entry := BuildLog(req, res, Usage{}, 502, long, Timing{FirstByteMs: 1, TotalMs: 2})
 	if n := len([]rune(entry.Error)); n > 1024 {
 		t.Fatalf("BuildLog Error 未截断：%d 字符（>1024 会撑爆日志列）", n)
 	}

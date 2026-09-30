@@ -304,11 +304,25 @@ type RequestLog struct {
 	CostCurrency    string  `gorm:"size:8;not null;default:USD" json:"cost_currency"`
 	PricingSnapshot JSONMap `gorm:"type:jsonb" json:"pricing_snapshot"`
 
-	FirstByteMs int       `json:"first_byte_ms"`
-	TotalMs     int       `json:"total_ms"`
-	UpstreamMs  int       `json:"upstream_ms"`
-	ClientIP    string    `gorm:"size:64" json:"client_ip"`
-	CreatedAt   time.Time `gorm:"index:idx_log_created,priority:1" json:"created_at"`
+	FirstByteMs int `json:"first_byte_ms"`
+	TotalMs     int `json:"total_ms"`
+	// BodyReads / LastByteMs 是流式读循环里的交付观测（2026-09-30 立），
+	// 用来回答「首字之后那段窗口到底是不是生成时段」：
+	//
+	//   BodyReads = 1  → 上游把整段正文一次发出（响应头与正文同时到），
+	//                    首字之后量到的只是尾包传输，速度算不出来；
+	//   BodyReads >= 2 → 正文确实是分多次交付的，LastByteMs − FirstByteMs
+	//                    就是正文真正用了多久送达，可以当生成时段用。
+	//
+	// 基准与 FirstByteMs 相同（本次上游尝试的 StartedAt），三者相减才有意义；
+	// 拿 TotalMs 去减会把排队与重试退避算进生成时段（TotalMs 从处理器入口起算）。
+	// 加列之前的历史行两列都是 0（前端按「没有观测」退回旧口径，见 speed.ts）。
+	BodyReads  int `json:"body_reads"`
+	LastByteMs int `json:"last_byte_ms"`
+
+	UpstreamMs int       `json:"upstream_ms"`
+	ClientIP   string    `gorm:"size:64" json:"client_ip"`
+	CreatedAt  time.Time `gorm:"index:idx_log_created,priority:1" json:"created_at"`
 	// RetryTrail 是故障转移链路的逐次尝试摘要（渠道/状态码/错误/用量），
 	// 与 PricingSnapshot 同理存快照。失败尝试的 token 上游可能照收
 	// （context-length-exceeded 的 400 就是典型），详情里看得见，

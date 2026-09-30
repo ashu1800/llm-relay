@@ -12,10 +12,10 @@ import (
 // 定价快照会随日志一起落库，保证日后同步价格时历史账目不会漂移。
 // respBody/respHeader 为空表示本次没有可留存的响应（例如上游未返回就失败）。
 func (s *Server) finalizeLog(req *relay.RelayRequest, res *relay.RelayResult, usage relay.Usage,
-	status int, errMsg string, firstByteMs, totalMs int,
+	status int, errMsg string, tm relay.Timing,
 	respBody []byte, respHeader http.Header,
 ) {
-	entry := relay.BuildLog(req, res, usage, status, errMsg, firstByteMs, totalMs)
+	entry := relay.BuildLog(req, res, usage, status, errMsg, tm)
 	// 分组 TPM 记账：只认上游回报的实际用量（usage.Estimated 为真时是按报文长度
 	// 估的，也一并计入 —— 估出来的值同样代表消耗，不计反而会让限制失效）
 	if s.deps.GroupLimit != nil && entry.GroupID > 0 {

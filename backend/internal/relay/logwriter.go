@@ -250,9 +250,67 @@ func BillingModel(req *RelayRequest, res *RelayResult) string {
 	return ""
 }
 
+// Timing 是一次请求的时序观测值（毫秒），全部由处理器打点。
+//
+// 基准有两套，混用会算错：TotalMs 从处理器入口起算（含排队、重试退避），
+// 其余三个从**本次上游尝试**的 StartedAt 起算（见 relay.Attempt.StartedAt）。
+// 所以「首字之后的生成时段」只能用 FirstByteMs / LastByteMs 这一对同基准的值相减 ——
+// 拿 TotalMs 去减会把排队与退避算进生成时段，重试过的请求被系统性算低
+// （docs/superpowers/specs/2026-09-29-speed-metric-robustness-design.md 第八节第 2 条）。
+type Timing struct {
+	// FirstByteMs 是首个正文字节到达时刻
+	FirstByteMs int
+	// LastByteMs 是最后一个正文分块到达时刻；BodyReads == 1 时与 FirstByteMs 相等
+	LastByteMs int
+	// BodyReads 是读到正文的次数（分块数）。1 = 上游把整段正文一次发出，
+	// 0 = 没观测（加列之前的历史行，或非流式分支）
+	BodyReads int
+	// TotalMs 是整次请求耗时（处理器入口起算）
+	TotalMs int
+}
+
+// BodyTiming 累计「正文交付」的观测值：正文分几次到达、最后一次是什么时候。
+//
+// 它是 Timing 里 BodyReads / LastByteMs 的来源，单独抽出来是为了让「怎么数」
+// 这件事能被测到 —— 读循环里手写四行计数器时，漏掉 lastByteMs 的更新不会有任何
+// 症状（前端只是少一个更准的分母），而抽出来之后语义由用例钉着。
+//
+// 所有时刻都必须与 FirstMs 同基准（本次上游尝试起算），否则相减没有意义。
+type BodyTiming struct {
+	// FirstMs 是首个正文分块到达时刻；没读到过正文时为 0
+	FirstMs int
+	// LastMs 是最后一个正文分块到达时刻
+	LastMs int
+	// Reads 是读到正文的次数
+	Reads int
+}
+
+// Observe 记录一次读：n 是本次读到的字节数（<= 0 表示没读到，不记）。
+func (b *BodyTiming) Observe(n, atMs int) {
+	if n <= 0 {
+		return
+	}
+	if b.FirstMs == 0 {
+		b.FirstMs = atMs
+	}
+	b.LastMs = atMs
+	b.Reads++
+}
+
+// SpanMs 是正文送达跨度（首块到末块）；Reads < 2 时为 0。
+//
+// 它比「总耗时 − 首字」更接近真实的生成时段：两端都以本次上游尝试为基准，
+// 不含排队与重试退避，也不含末块之后的收尾开销。
+func (b *BodyTiming) SpanMs() int {
+	if b.Reads < 2 {
+		return 0
+	}
+	return b.LastMs - b.FirstMs
+}
+
 // BuildLog 由转发结果组装一条日志记录。
 func BuildLog(req *RelayRequest, res *RelayResult, usage Usage, status int, errMsg string,
-	firstByteMs, totalMs int,
+	tm Timing,
 ) model.RequestLog {
 	entry := model.RequestLog{
 		TraceID:        req.TraceID,
@@ -273,8 +331,10 @@ func BuildLog(req *RelayRequest, res *RelayResult, usage Usage, status int, errM
 		CacheCreationTokens: usage.CacheCreationTokens,
 		ReasoningTokens:     usage.ReasoningTokens,
 		UsageEstimated:      usage.Estimated,
-		FirstByteMs:         firstByteMs,
-		TotalMs:             totalMs,
+		FirstByteMs:         tm.FirstByteMs,
+		TotalMs:             tm.TotalMs,
+		BodyReads:           tm.BodyReads,
+		LastByteMs:          tm.LastByteMs,
 		ClientIP:            req.ClientIP,
 		CreatedAt:           time.Now().UTC(),
 	}

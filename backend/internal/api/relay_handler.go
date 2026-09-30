@@ -223,7 +223,7 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 			upMsg := relay.TruncateRunes(convert.UpstreamErrorMessage(res.Candidate.Channel.Protocol, att.Body), 800)
 			p.writeError(c, att.StatusCode, upMsg, "upstream_error")
 			s.finalizeLog(req, res, attemptUsage(res), att.StatusCode, upMsg,
-				att.HeaderMs, totalMs, att.Body, att.Headers)
+				relay.Timing{FirstByteMs: att.HeaderMs, TotalMs: totalMs}, att.Body, att.Headers)
 			return
 		}
 		// 分组超限要回 429 而不是 502：502 会让客户端以为上游坏了而重试，
@@ -243,7 +243,9 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 			status, errType = http.StatusBadRequest, "invalid_request_error"
 		}
 		p.writeError(c, status, relayErr.Error(), errType)
-		s.finalizeLog(req, res, relay.Usage{}, status, relayErr.Error(), 0, totalMs, nil, nil)
+		// 没走到上游（或没有应答）：时序全为 0，只有总耗时是真的
+		s.finalizeLog(req, res, relay.Usage{}, status, relayErr.Error(),
+			relay.Timing{TotalMs: totalMs}, nil, nil)
 		return
 	}
 
@@ -261,7 +263,12 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 		upMsg := relay.TruncateRunes(convert.UpstreamErrorMessage(res.Candidate.Channel.Protocol, att.Body), 800)
 		p.writeError(c, att.StatusCode, upMsg, "upstream_error")
 		s.finalizeLog(req, res, attemptUsage(res), att.StatusCode,
-			upMsg, att.HeaderMs, int(time.Since(started).Milliseconds()), att.Body, att.Headers)
+			upMsg, relay.Timing{
+				// 非流式分支只量得到响应头时刻（那时整段正文与响应头一起到了），
+				// BodyReads/LastByteMs 留 0 = 没观测，前端据此不显示速度
+				FirstByteMs: att.HeaderMs,
+				TotalMs:     int(time.Since(started).Milliseconds()),
+			}, att.Body, att.Headers)
 		return
 	}
 
@@ -287,7 +294,11 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 		usage = relay.EstimateUsage(len(rawBody), len(att.Body))
 	}
 	s.finalizeLog(req, res, usage, att.StatusCode, "",
-		att.HeaderMs, int(time.Since(started).Milliseconds()), att.Body, att.Headers)
+		relay.Timing{
+			// 同上游错误分支：非流式只量得到响应头时刻
+			FirstByteMs: att.HeaderMs,
+			TotalMs:     int(time.Since(started).Milliseconds()),
+		}, att.Body, att.Headers)
 }
 
 // attemptUsage 取最后一次上游尝试回报的用量，供失败路径落账。
@@ -321,7 +332,12 @@ func (s *Server) streamToClient(c *gin.Context, p *inboundProfile, req *relay.Re
 
 	tee := relay.NewUsageTee(nil)
 	buf := make([]byte, 32*1024)
-	firstByteMs := 0
+	// 交付观测（2026-09-30 立）：正文分几次到达、最后一次是什么时候。
+	// 只记这两个数就能回答「首字之后那段窗口是不是生成时段」——
+	// 上游整段一次发出时 Reads = 1、窗口里只有尾包传输；
+	// 逐帧返回时 Reads 是几十上百，LastMs − FirstMs 就是真实生成时段。
+	// 判据与消费见 frontend/src/components/speed.ts。
+	var body relay.BodyTiming
 
 	// 上游中断、以及客户端主动断开，是两种不同的收尾，不能混为一谈
 	var streamErr error
@@ -337,9 +353,9 @@ func (s *Server) streamToClient(c *gin.Context, p *inboundProfile, req *relay.Re
 	for {
 		n, readErr := att.Stream.Read(buf)
 		if n > 0 {
-			if firstByteMs == 0 {
-				firstByteMs = int(time.Since(att.StartedAt).Milliseconds())
-			}
+			// 打点基准是本次上游尝试的 StartedAt（与首字同一套基准），
+			// 一次 time.Since 覆盖首块与末块两个观测值，不为每字节付代价
+			body.Observe(n, int(time.Since(att.StartedAt).Milliseconds()))
 			_, _ = tee.Write(buf[:n])
 			// 留存模式下才捕获，none 模式不做任何额外拷贝
 			if relay.ShouldStorePayload(s.deps.Config.Relay.PayloadStorageMode, att.StatusCode) &&
@@ -419,5 +435,10 @@ func (s *Server) streamToClient(c *gin.Context, p *inboundProfile, req *relay.Re
 		logErr = "上游流中断: " + streamErr.Error()
 	}
 	s.finalizeLog(req, res, usage, logStatus, logErr,
-		firstByteMs, int(time.Since(started).Milliseconds()), streamCapture, att.Headers)
+		relay.Timing{
+			FirstByteMs: body.FirstMs,
+			LastByteMs:  body.LastMs,
+			BodyReads:   body.Reads,
+			TotalMs:     int(time.Since(started).Milliseconds()),
+		}, streamCapture, att.Headers)
 }

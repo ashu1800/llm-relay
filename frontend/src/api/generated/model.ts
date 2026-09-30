@@ -443,6 +443,19 @@ export interface RequestLog {
   pricing_snapshot: JSONMap;
   first_byte_ms: number /* int */;
   total_ms: number /* int */;
+  /**
+   * BodyReads / LastByteMs 是流式读循环里的交付观测（2026-09-30 立），
+   * 用来回答「首字之后那段窗口到底是不是生成时段」：
+   *   BodyReads = 1  → 上游把整段正文一次发出（响应头与正文同时到），
+   *                    首字之后量到的只是尾包传输，速度算不出来；
+   *   BodyReads >= 2 → 正文确实是分多次交付的，LastByteMs − FirstByteMs
+   *                    就是正文真正用了多久送达，可以当生成时段用。
+   * 基准与 FirstByteMs 相同（本次上游尝试的 StartedAt），三者相减才有意义；
+   * 拿 TotalMs 去减会把排队与重试退避算进生成时段（TotalMs 从处理器入口起算）。
+   * 加列之前的历史行两列都是 0（前端按「没有观测」退回旧口径，见 speed.ts）。
+   */
+  body_reads: number /* int */;
+  last_byte_ms: number /* int */;
   upstream_ms: number /* int */;
   client_ip: string;
   created_at: string;

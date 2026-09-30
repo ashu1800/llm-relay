@@ -14,33 +14,28 @@
 // （2026-09-29 那版是「窗口塌缩的行退回总耗时」），站主看到的是同一个渠道
 // 同一分钟里 10 / 274 / 4 / 7 tok/s 这样一组没法互相比较的数。
 //
-// 三种「量不到」，判据依次是：
-//   · 没有输出词元（失败请求、或上游没给 usage）→ 分子都没有，谈不上速度；
-//   · 没量到总耗时（total_ms = 0，落库异常）→ 分母也没有；
-//   · 非流式请求 —— 响应头与整段正文一起到达，first_byte_ms 记的是响应头时刻，
-//     那时生成已经完成，窗口里只有正文传输；
-//   · 流式但首字窗口塌缩 —— 上游把整段正文压到最后一刻才发（响应头与首个正文
-//     字节几乎同一时刻到达），窗口量到的是尾包传输而不是生成时段。
+// 分母怎么取，按「有没有交付观测」分两条路（两条路的阈值是同一个绝对下限）：
 //
-// 后两种都是「上游没有逐帧返回」，差别只在客户端要的是不是流式；中继控制不了
-// 上游的交付方式，能做的是不给一个分母含等待时间的数 —— 那正是站主 2026-09-30
-// 反馈「这列看着别扭」的原因（旧版对塌缩行显示的是「词元 ÷ 整次请求耗时」，
-// 14 秒里有 13.5 秒在等首字，读数自然只有 10 tok/s）。
+//   1. 有观测（2026-09-30 起后端在流式读循环里记 body_reads / last_byte_ms）：
+//      正文分多次到达（body_reads ≥ 2）时，last_byte_ms − first_byte_ms 就是正文
+//      真正用了多久送达 —— 两端都以本次上游尝试为基准，不含排队与重试退避，
+//      比「总耗时 − 首字」更接近生成时段。只读到一次（body_reads = 1）说明上游
+//      把整段正文一次发出，窗口里只有尾包传输，直接判为量不到。
+//   2. 没有观测（加列之前的历史行）：退回「总耗时 − 首字」。这个口径偏大
+//      （含排队与首字等待），但配上绝对下限之后不会给出假值。
+//
+// 为什么阈值是绝对毫秒（200ms）而不是原来的「总耗时 5%」：比例判据会把
+// 「首字等待占九成、但确实逐帧返回」的请求判成塌缩 —— 站主 2026-09-30 截图里
+// 那四行就是（窗口 530~790ms，占各自总耗时 3.3%~6.0%，同一列两种分母）。
+// 绝对下限在 2026-09-29 的数据上也验证过：「窗口 < 200ms」与「窗口 < 总耗时 5%」
+// 两种规则给出的 p99 / 最大值完全相同（370 / 1069 tok/s），而前者多认下 102 行
+// （窗口 200ms~5% 那些），它们算出来的速度都落在正常区间里。
+// 反向也成立：上游整段返回时，几 KB 的正文传输只要几十毫秒（那批塌缩行的窗口
+// 中位数 16ms、最小 4ms），不可能撑到 200ms。
 import type { RequestLog } from '@/api/types'
 
-/**
- * 首字窗口塌缩的判据：首字之后剩下的时间不足总耗时的 1/20。
- *
- * 这不是「上游慢」，是「上游没有逐帧返回」：正文（连同响应头）在请求末尾整块
- * 到达时，`total_ms − first_byte_ms` 退化成几毫秒的尾包传输时间，而分子仍是
- * 整段输出的词元数 —— 366 词元 ÷ 7ms = 52286 tok/s 就是这么来的。
- *
- * 阈值取比例而不是某个绝对毫秒数，是因为这个形态的特征就是「窗口相对整次请求
- * 塌缩了」；生产数据上「窗口 < 总耗时 5%」（命中 323 行）与「窗口 < 200ms」
- * （命中 221 行）两种规则给出的 p99 / 最大值完全相同（370 / 1069 tok/s），
- * 结论不依赖阈值取在哪一刀。
- */
-const MIN_WINDOW_SHARE = 1 / 20
+/** 可用的生成时段下限（毫秒）：比这更短的窗口量到的是尾包传输，不是生成时段。 */
+const MIN_WINDOW_MS = 200
 
 export interface SpeedReading {
   /** 词元/秒。未取整 —— 显示层一律取整（站主 2026-09-21 要求） */
@@ -50,7 +45,7 @@ export interface SpeedReading {
 }
 
 /** 速度算不出的原因，用来给「—」配一句解释（文案在组件里）。 */
-export type SpeedMissReason = 'noOutput' | 'noTime' | 'noStream' | 'burst'
+export type SpeedMissReason = 'noOutput' | 'noTime' | 'noStream' | 'oneShot' | 'burst'
 
 interface SpeedEval {
   reading: SpeedReading | null
@@ -66,12 +61,26 @@ function evaluate(row: RequestLog): SpeedEval {
   if (!out || out <= 0) return { reading: null, miss: 'noOutput' }
   const total = row.total_ms || 0
   if (total <= 0) return { reading: null, miss: 'noTime' }
+  // 非流式：响应头与整段正文一起到达，first_byte_ms 记的是响应头时刻，
+  // 那时生成已经完成，窗口里只有正文传输
   if (!row.stream) return { reading: null, miss: 'noStream' }
 
-  const win = total - (row.first_byte_ms || 0)
-  // 窗口非正（首字与收尾记在同一毫秒；重试链路里首字甚至可能晚于落库的总耗时）
-  // 也按塌缩处理：那时窗口里没有任何可用的生成时段
-  if (win > 0 && win >= total * MIN_WINDOW_SHARE) {
+  const first = row.first_byte_ms || 0
+  const reads = row.body_reads || 0
+  if (reads > 0) {
+    // 有交付观测：按事实判
+    if (reads < 2) return { reading: null, miss: 'oneShot' }
+    const span = (row.last_byte_ms || 0) - first
+    if (span >= MIN_WINDOW_MS) {
+      return { reading: { tokPerSec: out / (span / 1000), denomMs: span }, miss: null }
+    }
+    return { reading: null, miss: 'burst' }
+  }
+
+  // 没有观测（历史行）：退回「总耗时 − 首字」，同样要过绝对下限。
+  // 窗口非正（首字与收尾记在同一毫秒）也落到这里判为量不到。
+  const win = total - first
+  if (win >= MIN_WINDOW_MS) {
     return { reading: { tokPerSec: out / (win / 1000), denomMs: win }, miss: null }
   }
   return { reading: null, miss: 'burst' }
