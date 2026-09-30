@@ -64,10 +64,10 @@ const (
 	// 所以只放行 github.com 会让下载永远停在第一跳。这里把整条链上的
 	// 主机都列出来，并且**每一跳都重新校验一次**（见 download 的实现）——
 	// 不是只在开头校验一次就闭眼跟随。
-	allowedAPPHost   = "api.github.com"
-	allowedHTMLHost  = "github.com"
-	allowedAssetHost = "objects.githubusercontent.com"
-	// 备用资源域。GitHub 会按区域/负载切换，实测两种都出现过
+	allowedAPPHost      = "api.github.com"
+	allowedHTMLHost     = "github.com"
+	allowedSourceHost   = "codeload.github.com"
+	allowedAssetHost    = "objects.githubusercontent.com"
 	allowedAltAssetHost = "release-assets.githubusercontent.com"
 
 	// apiUserAgent 是 GitHub API 要求必须带的（不带会被拒）。
@@ -500,14 +500,12 @@ func validateDownloadURL(rawURL string) error {
 	if host == "" {
 		return fmt.Errorf("下载地址缺少主机名")
 	}
-	switch {
-	case host == allowedHTMLHost, strings.HasSuffix(host, "."+allowedHTMLHost):
-	case host == allowedAssetHost, strings.HasSuffix(host, "."+allowedAssetHost):
-	case host == allowedAltAssetHost, strings.HasSuffix(host, "."+allowedAltAssetHost):
+	switch host {
+	case allowedHTMLHost, allowedSourceHost, allowedAssetHost, allowedAltAssetHost:
+		return nil
 	default:
 		return fmt.Errorf("下载地址指向不受信任的主机: %s", host)
 	}
-	return nil
 }
 
 // Download 把 rawURL 指向的文件下载到 dest，并限制大小。

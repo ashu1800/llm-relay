@@ -40,7 +40,7 @@ jobs:
       - name: 设置 Go 环境
         uses: actions/setup-go@v5
         with:
-          # 读 backend/go.mod 的 go 指令（当前 1.25.0）。
+          # 读 backend/go.mod 的 go 指令（当前 1.25.13）。
           # 不在 workflow 里另写一个版本号：两处写死的结果必然是漂移，
           # 而「CI 用的 Go 版本与项目声明的不一致」会造成只有 CI 才复现的编译错误。
           go-version-file: backend/go.mod
@@ -56,11 +56,17 @@ jobs:
           # 注意：vet 会真的做类型检查，编译不过的代码在这里就会失败。
           go vet ./...
 
+      - name: govulncheck
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          # 版本固定：v1.7.0 支持项目的 Go 1.25 工具链；避免 @latest 自动要求更高 Go 版本。
+          go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
       - name: go test
         working-directory: backend
         run: |
           set -euo pipefail
-          # -race 打开竞态检测：这个项目是并发中转服务，锁用错、
           # 共享 map 并发读写这类问题平时不显形，只在压力下偶发，
           # 而 CI 是最适合把它们逼出来的地方。
           # CGO_ENABLED=1 是 -race 的硬性要求（race detector 依赖 cgo）。

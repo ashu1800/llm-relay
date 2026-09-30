@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -158,8 +159,44 @@ func (s *Server) verifySessionToken(token string) bool {
 // 服务本身以明文 HTTP 跑，HTTPS 由前面的反代终结，只能靠
 // X-Forwarded-Proto 还原；Secure 标志因此只在确认是 HTTPS 时才加，
 // 否则本机 HTTP 调试时浏览器会直接拒收 Cookie。
-func requestIsHTTPS(c *gin.Context) bool {
-	return c.Request.TLS != nil || strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https")
+func (s *Server) requestIsHTTPS(c *gin.Context) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+	if c.Request.TLS != nil {
+		return true
+	}
+	if !s.isTrustedProxy(c) {
+		return false
+	}
+	return strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https")
+}
+
+func (s *Server) isTrustedProxy(c *gin.Context) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
+	if err != nil {
+		host = c.Request.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || s.deps == nil || s.deps.Config == nil {
+		return false
+	}
+	for _, raw := range s.deps.Config.Server.TrustedProxies {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if proxyIP := net.ParseIP(raw); proxyIP != nil && proxyIP.Equal(ip) {
+			return true
+		}
+		if _, network, err := net.ParseCIDR(raw); err == nil && network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- 登录 / 登出 / 状态 ----
@@ -219,7 +256,7 @@ func (s *Server) consoleLogin(c *gin.Context) {
 	// 携带，与 sameOriginOnly 一起构成 CSRF 的两道防线。
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(consoleCookieName, s.signSessionToken(exp),
-		int(s.sessionTTL.Seconds()), "/", "", requestIsHTTPS(c), true)
+		int(s.sessionTTL.Seconds()), "/", "", s.requestIsHTTPS(c), true)
 	c.JSON(http.StatusOK, gin.H{
 		"expires_at":        exp.UTC().Format(time.RFC3339),
 		"session_ttl_hours": int(s.sessionTTL.Hours()),
@@ -231,7 +268,7 @@ func (s *Server) consoleLogout(c *gin.Context) {
 	// Max-Age<0 会被编码成 Max-Age=0，浏览器随即删除 Cookie。
 	// 无状态令牌本身无法服务端吊销：复制下来的令牌在自然过期前仍有效，
 	// 需要强制全体下线时轮换 RELAY_ADMIN_KEY 并重启（版本不符即失效）。
-	c.SetCookie(consoleCookieName, "", -1, "/", "", requestIsHTTPS(c), true)
+	c.SetCookie(consoleCookieName, "", -1, "/", "", s.requestIsHTTPS(c), true)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

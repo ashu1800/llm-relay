@@ -52,6 +52,21 @@ func TestValidateAdminKey(t *testing.T) {
 	})
 }
 
+func TestValidatePublicDeployment(t *testing.T) {
+	base := Default()
+	base.Server.Host = "0.0.0.0"
+	if err := base.validate(); err == nil || !strings.Contains(err.Error(), "admin_key") {
+		t.Fatalf("公网监听缺少管理密钥应拒绝，实际 %v", err)
+	}
+	base.Security.AdminKey = "0123456789abcdef-random-value"
+	if err := base.validate(); err == nil || !strings.Contains(err.Error(), "public_origin") {
+		t.Fatalf("公网监听缺少固定来源应拒绝，实际 %v", err)
+	}
+	base.Server.PublicOrigin = "https://relay.example.com"
+	if err := base.validate(); err != nil {
+		t.Fatalf("完整公网配置应通过：%v", err)
+	}
+}
 func TestValidateSessionTTL(t *testing.T) {
 	t.Run("非法时长拒绝", func(t *testing.T) {
 		c := Default()

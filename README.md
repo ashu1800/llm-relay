@@ -98,12 +98,13 @@ curl -sSL https://raw.githubusercontent.com/ashu1800/llm-relay/main/deploy/insta
 | `INSTALL_DIR` | `/opt/llm-relay` | 安装目录 |
 | `PORT` | `8888` | 监听端口（写入 `.env` 的 `SERVER_PORT`） |
 | `BIND_ADDR` | `127.0.0.1` | 监听地址（写入 `.env` 的 `SERVER_HOST`） |
+| `SERVER_PUBLIC_ORIGIN` | — | 公网/反代部署时的固定管理台来源，例如 `https://relay.example.com` |
 | `DB_NAME` / `DB_USER` | `llm_relay` / `llmrelay` | 数据库 |
 | `VERSION` | 最新 Release | 要安装的版本号（不带 v 前缀） |
 | `RELAY_GH_PROXY` | — | GitHub 下载加速前缀（形如 `https://gh-proxy.com`） |
 
-> - 默认只绑 `127.0.0.1`。放到公网时加 `BIND_ADDR=0.0.0.0`，并先设好
->   `RELAY_ADMIN_KEY`（见[密钥与安全](#密钥与安全)），建议再加反向代理 + HTTPS。
+> - 默认只绑 `127.0.0.1`。放到公网时加 `BIND_ADDR=0.0.0.0`，并同时设置
+>   `SERVER_PUBLIC_ORIGIN=https://你的管理台域名` 与 `RELAY_ADMIN_KEY`，建议再加反向代理 + HTTPS。
 > - **重复运行就是升级**：已有密钥原样沿用，升级前自动备份数据库到
 >   `$INSTALL_DIR/backups/`（恢复用 `deploy/restore.sh`）。
 > - 小内存服务器（2 核 1.6G）也能装：不编译任何东西，下载归档约 8 MB。
@@ -215,7 +216,7 @@ curl -s http://127.0.0.1:8888/system/info | python3 -m json.tool
   bash scripts/rotate-secret.sh          # 内部会先 dry-run 再正式迁移
   ```
 
-**公网部署**：先设好 `RELAY_ADMIN_KEY` 再把 `SERVER_HOST` 改成 `0.0.0.0`，
+**公网部署**：先设好 `RELAY_ADMIN_KEY` 与 `SERVER_PUBLIC_ORIGIN`，再把 `SERVER_HOST` 改成 `0.0.0.0`，
 建议加反向代理 + HTTPS（Caddy / Nginx 均可）。经反代时按 `SERVER_TRUSTED_PROXIES`
 （默认只信回环）采信 `X-Forwarded-For`，登录限流才能拿到真实客户端 IP。
 

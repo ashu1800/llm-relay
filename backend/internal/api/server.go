@@ -148,13 +148,13 @@ func (s *Server) Register(r *gin.Engine) {
 // 输入同样来自网络。抽成独立方法而非留在 Register 里，是让测试能
 // 挂载与管理环境完全相同的路由接线（含中间件顺序）。
 func (s *Server) registerAdminRoutes(r *gin.Engine) {
-	adminPublic := r.Group("/api/admin", sameOriginOnly(), limitAdminBody)
+	adminPublic := r.Group("/api/admin", s.sameOriginOnly(), limitAdminBody)
 	{
 		adminPublic.POST("/auth/login", s.consoleLogin)
 		adminPublic.POST("/auth/logout", s.consoleLogout)
 		adminPublic.GET("/auth/status", s.consoleAuthStatus)
 	}
-	admin := r.Group("/api/admin", sameOriginOnly(), s.requireConsoleAuth(), limitAdminBody, gzipResponses())
+	admin := r.Group("/api/admin", s.sameOriginOnly(), s.requireConsoleAuth(), limitAdminBody, gzipResponses())
 	{
 		admin.GET("/system/info", s.systemInfo)
 		registerSystemRoutes(admin, s)
@@ -207,7 +207,8 @@ func (s *Server) healthz(c *gin.Context) {
 func (s *Server) readyz(c *gin.Context) {
 	if s.deps != nil && s.deps.Store != nil {
 		if err := s.deps.Store.Ready(); err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready", "error": err.Error()})
+			slog.Default().Warn("数据库未就绪", "err", err)
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready", "error": "database unavailable"})
 			return
 		}
 	}

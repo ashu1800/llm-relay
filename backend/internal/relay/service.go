@@ -509,6 +509,7 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 		// 也正因为如此，被剔掉的候选不写进 tried —— 下一个重试轮次还要能重新考虑它
 		// （限额是按分钟算的，跨过窗口边界就该恢复）。
 		limitedReason := ""
+		// 先筛掉当前额度已满的候选；真正选中后再原子预留 RPM 名额。
 		for len(cands) > 0 {
 			ok, reason := s.groupLimit.Check(cands[0].Channel.GroupID, cands[0].GroupRPM, cands[0].GroupTPM, time.Now())
 			if ok {
@@ -574,9 +575,16 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 			}
 		}
 
+		reserved, reserveReason := s.groupLimit.AllowAndRecord(cand.Channel.GroupID, cand.GroupRPM, cand.GroupTPM, time.Now())
+		if !reserved {
+			if attemptNo == 0 {
+				return res, fmt.Errorf("%w: %s", ErrGroupLimited, reserveReason)
+			}
+			lastErr = fmt.Errorf("%w: %s", ErrGroupLimited, reserveReason)
+			break
+		}
 		tried = append(tried, cand.Channel.ID)
-		// 计数放在「确定要发」这一刻：RPM 统计的是发往上游的请求数，重试也计入
-		s.groupLimit.Record(cand.Channel.GroupID, time.Now())
+		// AllowAndRecord 已在真正发出前原子预留了 RPM 名额。
 
 		acquired := s.state.AcquireWait(ctx, cand.Channel.ID,
 			ChannelMaxConcurrency(cand.Channel.ExtraConfig), channelSlotWait)

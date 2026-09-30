@@ -89,7 +89,26 @@ func (l *GroupLimiter) Check(id uint, rpm, tpm int, now time.Time) (bool, string
 	return true, ""
 }
 
-// Record 记一次即将发往上游的请求。
+// AllowAndRecord 原子判断并预留一个发往上游的请求名额。
+// RPM 检查与记账必须在同一把锁内完成，否则并发请求会同时通过 Check。
+func (l *GroupLimiter) AllowAndRecord(id uint, rpm, tpm int, now time.Time) (bool, string) {
+	if l == nil || id == 0 || (rpm <= 0 && tpm <= 0) {
+		return true, ""
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	w := l.window(id, now)
+	if rpm > 0 && w.requests >= rpm {
+		return false, fmt.Sprintf("分组每分钟请求数已达上限 %d", rpm)
+	}
+	if tpm > 0 && w.tokens >= tpm {
+		return false, fmt.Sprintf("分组每分钟 token 数已达上限 %d", tpm)
+	}
+	w.requests++
+	return true, ""
+}
+
+// Record 记一次即将发往上游的请求。保留给诊断与兼容调用方。
 func (l *GroupLimiter) Record(id uint, now time.Time) {
 	if l == nil || id == 0 {
 		return

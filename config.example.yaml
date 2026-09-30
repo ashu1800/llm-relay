@@ -1,10 +1,12 @@
 # LLM Relay 配置示例
 # Docker 部署下多数项由 .env 环境变量覆盖，此文件供裸机/自定义部署使用。
 server:
-  host: 0.0.0.0
+  host: 127.0.0.1
   port: 8888
   mode: release
-  # 可信反向代理地址列表（也可用 SERVER_TRUSTED_PROXIES 环境变量，逗号分隔）。
+  # 公网/反代部署时设置为浏览器访问管理台的固定来源，例如 https://relay.example.com。
+  # public_origin: https://relay.example.com
+  # trusted_proxies: ["127.0.0.1", "::1"]
   # 经 nginx/caddy 反代时按它采信 X-Forwarded-For 解析真实客户端 IP
   # （管理台登录限流按 IP 计数）。默认只信回环；直连部署不用改。
   # trusted_proxies: ["127.0.0.1", "::1"]

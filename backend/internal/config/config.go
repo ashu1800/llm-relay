@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -37,6 +39,9 @@ type ServerConfig struct {
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"`
 	Mode string `yaml:"mode"` // debug | release
+	// PublicOrigin 是管理台允许的固定浏览器来源，例如 https://relay.example.com。
+	// 留空时仅允许与请求 Host 完全一致的来源；公网部署建议显式配置。
+	PublicOrigin string `yaml:"public_origin"`
 	// TrustedProxies 是可信反向代理的地址列表，交给 gin.SetTrustedProxies。
 	// 登录限流按客户端 IP 计数，而经反代部署时请求的远端地址是代理本身，
 	// 真实 IP 在 X-Forwarded-For 里 —— 只有来自可信代理的该头部才会被采信，
@@ -100,7 +105,7 @@ type LogConfig struct {
 // Default 返回内置默认值。
 func Default() *Config {
 	cfg := &Config{
-		Server: ServerConfig{Host: "0.0.0.0", Port: 8888, Mode: "release"},
+		Server: ServerConfig{Host: "127.0.0.1", Port: 8888, Mode: "release"},
 		Database: DatabaseConfig{
 			Host: "127.0.0.1", Port: 5432, User: "llmrelay",
 			Password: "", DBName: "llm_relay", SSLMode: "disable", TimeZone: "UTC",
@@ -163,6 +168,7 @@ func applyEnv(c *Config) {
 	setStr(&c.Server.Host, "SERVER_HOST")
 	setInt(&c.Server.Port, "SERVER_PORT")
 	setStr(&c.Server.Mode, "GIN_MODE")
+	setStr(&c.Server.PublicOrigin, "SERVER_PUBLIC_ORIGIN")
 	setCsv(&c.Server.TrustedProxies, "SERVER_TRUSTED_PROXIES")
 
 	setStr(&c.Database.Host, "DB_HOST")
@@ -206,6 +212,7 @@ func envKeys() map[string]string {
 		"host":                         "SERVER_HOST",
 		"port":                         "SERVER_PORT",
 		"mode":                         "GIN_MODE",
+		"public_origin":                "SERVER_PUBLIC_ORIGIN",
 		"trusted_proxies":              "SERVER_TRUSTED_PROXIES",
 		"log_level":                    "LOG_LEVEL",
 		"log_format":                   "LOG_FORMAT",
@@ -232,6 +239,23 @@ func EnvKeys() map[string]string { return envKeys() }
 func (c *Config) validate() error {
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port 非法: %d", c.Server.Port)
+	}
+	if origin := strings.TrimSpace(c.Server.PublicOrigin); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("server.public_origin 必须是完整的 scheme://host（不能带路径、查询、片段或凭据）")
+		}
+		if !strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https") {
+			return fmt.Errorf("server.public_origin 只支持 http 或 https")
+		}
+	}
+	if !isLoopbackHost(c.Server.Host) {
+		if strings.TrimSpace(c.Security.AdminKey) == "" {
+			return fmt.Errorf("server.host=%s 不是回环地址时必须设置 security.admin_key（RELAY_ADMIN_KEY）", c.Server.Host)
+		}
+		if strings.TrimSpace(c.Server.PublicOrigin) == "" {
+			return fmt.Errorf("server.host=%s 不是回环地址时必须设置 server.public_origin（SERVER_PUBLIC_ORIGIN）", c.Server.Host)
+		}
 	}
 	// 管理密钥的强度在启动时就地卡死，而不是等到被暴力破解才后悔：
 	// 公网上的登录接口面对的是无限次的自动化尝试，太短的密钥（哪怕有
@@ -267,6 +291,17 @@ func (c *Config) validate() error {
 		return fmt.Errorf("relay.retry_same_upstream_delay 不应超过 30s: %s", c.Relay.RetrySameUpstreamDelay)
 	}
 	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	h := strings.TrimSpace(host)
+	if h == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func setStr(dst *string, key string) {

@@ -339,8 +339,9 @@ func TestValidateDownloadURL(t *testing.T) {
 		{"https://github.com/ashu1800/llm-relay/releases/download/v1.0.0/x.tar.gz", false},
 		{"https://objects.githubusercontent.com/abc/x.tar.gz", false},
 		{"https://release-assets.githubusercontent.com/abc/x.tar.gz", false},
-		// 子域也放行（GitHub 会用到 codeload 等）
 		{"https://codeload.github.com/x", false},
+		{"https://evil.github.com/x", true},
+		{"https://evil.objects.githubusercontent.com/x", true},
 		// 必须是 https
 		{"http://github.com/x", true},
 		// 不能带凭据

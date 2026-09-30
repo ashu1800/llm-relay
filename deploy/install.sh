@@ -45,22 +45,40 @@ DB_NAME="${DB_NAME:-llm_relay}"
 DB_USER="${DB_USER:-llmrelay}"
 VERSION="${VERSION:-}"
 RELAY_GH_PROXY="${RELAY_GH_PROXY:-}"
+SERVER_PUBLIC_ORIGIN="${SERVER_PUBLIC_ORIGIN:-}"
 
 for a in "$@"; do
   case "$a" in
     *=*)
       key="${a%%=*}" val="${a#*=}"
       case "$key" in
-        INSTALL_DIR|PORT|BIND_ADDR|DB_NAME|DB_USER|VERSION|RELAY_GH_PROXY) printf -v "$key" '%s' "$val" ;;
-        *) warn "未知参数 $a（可用：INSTALL_DIR PORT BIND_ADDR DB_NAME DB_USER VERSION RELAY_GH_PROXY）" ;;
+        INSTALL_DIR|PORT|BIND_ADDR|DB_NAME|DB_USER|VERSION|RELAY_GH_PROXY|SERVER_PUBLIC_ORIGIN) printf -v "$key" '%s' "$val" ;;
+        *) warn "未知参数 $a（可用：INSTALL_DIR PORT BIND_ADDR DB_NAME DB_USER VERSION RELAY_GH_PROXY SERVER_PUBLIC_ORIGIN）" ;;
       esac
       ;;
     *) warn "忽略参数 $a（参数需写成 KEY=VALUE）" ;;
   esac
 done
 
-# ---------------- 前置检查 -----------------------------------------------
-[ "$(id -u)" = "0" ] || die "请用 root 运行：curl -sSL ... | sudo bash"
+# ---------------- 输入校验 -------------------------------------------------
+# DB 名称会进入 PostgreSQL 标识符位置，必须限制为安全标识符；否则通过
+# su - postgres -c 拼接命令可能改变执行的 SQL 或 shell 语义。
+case "$DB_USER" in
+  ''|[!a-zA-Z_]*|*[!a-zA-Z0-9_]* ) die "DB_USER 只能包含字母、数字、下划线，且必须以字母或下划线开头" ;;
+esac
+case "$DB_NAME" in
+  ''|[!a-zA-Z_]*|*[!a-zA-Z0-9_]* ) die "DB_NAME 只能包含字母、数字、下划线，且必须以字母或下划线开头" ;;
+esac
+case "$PORT" in
+  ''|*[!0-9]*) die "PORT 必须是数字" ;;
+esac
+[ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "PORT 必须在 1-65535 之间"
+case "$SERVER_PUBLIC_ORIGIN" in *[[:space:]\"\'\`\$\\]*|*$'\n'*|*$'\r'*) die "SERVER_PUBLIC_ORIGIN 只能是无空白、无 shell 特殊字符的 URL" ;; esac
+case "$BIND_ADDR" in *[[:space:]\"\'\`\$\\]*|*$'\n'*|*$'\r'*) die "BIND_ADDR 不能包含空白或 shell 特殊字符" ;; esac
+case "$BIND_ADDR" in
+  127.0.0.1|localhost|::1) ;;
+  *) [ -n "$SERVER_PUBLIC_ORIGIN" ] || die "BIND_ADDR=$BIND_ADDR 时必须设置 SERVER_PUBLIC_ORIGIN（例如 https://relay.example.com）" ;;
+esac
 
 command -v apt-get >/dev/null || die "本脚本只支持 Debian/Ubuntu（需要 apt-get）"
 command -v systemctl >/dev/null || die "未检测到 systemctl，本脚本以 systemd 托管服务"
@@ -153,6 +171,7 @@ else
   DB_PASS="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   log "已生成新的数据库密码"
 fi
+case "$DB_PASS" in *"'"*|*'"'*|*$'\n'*|*$'\r'*) die "数据库密码不能包含单引号或换行，请使用其他密码" ;; esac
 
 # 主密钥同理：重装必须沿用原值，否则已存库的渠道密钥再也解不开
 if [ -f "$ENV_FILE" ] && grep -q "^RELAY_SECRET=.\+" "$ENV_FILE"; then
@@ -219,6 +238,7 @@ cat > "$ENV_FILE" <<EOF
 # 由 install.sh 生成于 $(date -Iseconds)
 SERVER_PORT=${PORT}
 SERVER_HOST=${BIND_ADDR}
+SERVER_PUBLIC_ORIGIN=${SERVER_PUBLIC_ORIGIN}
 
 # 渠道密钥的加密主密钥。缺失会退回程序内置的公开默认值，等于没有加密
 RELAY_SECRET=${RELAY_SECRET}

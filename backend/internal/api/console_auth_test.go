@@ -26,7 +26,7 @@ func newAuthTestServer(t *testing.T, adminKey string) (*Server, *gin.Engine) {
 	t.Helper()
 	s := &Server{
 		deps: &Deps{Config: &config.Config{
-			Server:   config.ServerConfig{Port: 8888},
+			Server:   config.ServerConfig{Port: 8888, TrustedProxies: []string{"192.0.2.1"}},
 			Security: config.SecurityConfig{Secret: "test-relay-secret", AdminKey: adminKey, SessionTTL: time.Hour},
 		}},
 		startedAt: time.Now(),
@@ -44,6 +44,7 @@ func loginRequest(r *gin.Engine, key string, headers map[string]string) *httptes
 	body := `{"key":"` + key + `"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/auth/login", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "192.0.2.1:1234"
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -162,10 +163,10 @@ func TestRequireConsoleAuth(t *testing.T) {
 	t.Run("垃圾与会话过期的 Cookie 一律 401", func(t *testing.T) {
 		s, r := newAuthTestServer(t, testAdminKey)
 		for name, token := range map[string]string{
-			"垃圾值":   "garbage.token.value",
-			"过期令牌":   s.signSessionToken(time.Now().Add(-time.Second)),
-			"伪造签名":   s.signSessionToken(time.Now().Add(time.Hour)) + "x",
-			"空字符串":   "",
+			"垃圾值":  "garbage.token.value",
+			"过期令牌": s.signSessionToken(time.Now().Add(-time.Second)),
+			"伪造签名": s.signSessionToken(time.Now().Add(time.Hour)) + "x",
+			"空字符串": "",
 		} {
 			req := httptest.NewRequest(http.MethodGet, "/api/admin/system/info", nil)
 			req.AddCookie(&http.Cookie{Name: consoleCookieName, Value: token})

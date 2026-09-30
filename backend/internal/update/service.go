@@ -227,6 +227,8 @@ type Task struct {
 	// 落到 undefined 上，而那个分支本该走「没有日志」。
 	Logs []string `json:"logs"`
 
+	// mu 保护任务字段与内部日志；服务级 taskMu 只保护当前任务指针。
+	mu sync.RWMutex
 	// 内部字段不序列化
 	cancel context.CancelFunc
 	logs   []string
@@ -241,13 +243,15 @@ func (t *Task) Snapshot() *Task {
 	if t == nil {
 		return (&Task{}).Normalized()
 	}
-	cp := *t
-	cp.cancel = nil
-	// logs 是内部累积的原始行，暴露成 Logs 供界面在失败时显示。
-	// nil → 空切片的归一交给 Normalized 统一处理，这里只复制内容。
-	cp.Logs = append([]string{}, t.logs...)
-	cp.logs = nil
-	return &cp
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	cp := &Task{
+		ID: t.ID, Kind: t.Kind, Target: t.Target, Phase: t.Phase,
+		Percent: t.Percent, Message: t.Message, Started: t.Started,
+		Ended: t.Ended, Failed: t.Failed, Done: t.Done,
+		Logs: append([]string{}, t.logs...),
+	}
+	return cp
 }
 
 // NewService 构造更新服务。
@@ -737,6 +741,7 @@ func (s *Service) applyBinary(parent context.Context) (*Task, error) {
 		Message: "准备中",
 		Started: time.Now().UTC(),
 		cancel:  cancel,
+		mu:      sync.RWMutex{},
 	}
 	if err := s.claimTask(task); err != nil {
 		cancel()
@@ -757,8 +762,9 @@ func (s *Service) applyBinary(parent context.Context) (*Task, error) {
 func (s *Service) claimTask(t *Task) error {
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
-	if s.task != nil && !s.task.Done {
-		return fmt.Errorf("%w（%s，%s）", ErrTaskRunning, s.task.Phase, s.task.Message)
+	if s.task != nil && !s.task.Snapshot().Done {
+		snap := s.task.Snapshot()
+		return fmt.Errorf("%w（%s，%s）", ErrTaskRunning, snap.Phase, snap.Message)
 	}
 	s.task = t
 	return nil
@@ -769,9 +775,9 @@ func (s *Service) claimTask(t *Task) error {
 // 失败原因必须落日志：任务面板会被关掉，而排障的人手里只有日志。
 func (s *Service) failTask(t *Task, format string, args ...any) {
 	s.setTask(t, "failed", 100, fmt.Sprintf(format, args...))
-	s.taskMu.Lock()
+	t.mu.Lock()
 	t.Failed = true
-	s.taskMu.Unlock()
+	t.mu.Unlock()
 	s.logger.Warn("更新任务失败", "task", t.ID, "kind", t.Kind, "reason", fmt.Sprintf(format, args...))
 }
 
@@ -817,9 +823,9 @@ func (s *Service) runBinaryUpdate(ctx context.Context, t *Task) {
 		return
 	}
 
-	s.taskMu.Lock()
+	t.mu.Lock()
 	t.Target = target
-	s.taskMu.Unlock()
+	t.mu.Unlock()
 
 	// ---- 3. 下载、校验并替换 ----
 	if !s.installRelease(ctx, client, rel, target, exePath, t, 20) {
@@ -904,13 +910,12 @@ func (s *Service) installRelease(ctx context.Context, client *Client, rel *Relea
 
 // setTask 更新任务进度（线程安全）。
 func (s *Service) setTask(t *Task, phase string, percent int, message string) {
-	s.taskMu.Lock()
-	defer s.taskMu.Unlock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.Phase = phase
 	t.Percent = percent
 	t.Message = message
 	t.logs = append(t.logs, fmt.Sprintf("[%s] %s", phase, message))
-	// 只留最近 100 行：给界面看的日志不该无限增长
 	if len(t.logs) > 100 {
 		t.logs = t.logs[len(t.logs)-100:]
 	}
@@ -918,8 +923,8 @@ func (s *Service) setTask(t *Task, phase string, percent int, message string) {
 
 // finishTask 标记任务结束。
 func (s *Service) finishTask(t *Task) {
-	s.taskMu.Lock()
-	defer s.taskMu.Unlock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	now := time.Now().UTC()
 	t.Ended = &now
 	t.Done = true
@@ -937,7 +942,7 @@ func (s *Service) Progress(id string) (*Task, error) {
 	task := s.task
 	s.taskMu.Unlock()
 
-	if task != nil && (id == "" || task.ID == id) {
+	if task != nil && (id == "" || task.Snapshot().ID == id) {
 		return task.Snapshot().Normalized(), nil
 	}
 
@@ -1079,6 +1084,7 @@ func (s *Service) startDownloadRollback(ctx context.Context, exePath, targetVers
 		Message: fmt.Sprintf("正在准备回滚到 v%s", targetVersion),
 		Started: time.Now().UTC(),
 		cancel:  cancel,
+		mu:      sync.RWMutex{},
 	}
 	if err := s.claimTask(t); err != nil {
 		cancel()
@@ -1152,12 +1158,16 @@ func (s *Service) runDownloadRollback(ctx context.Context, t *Task, exePath, tar
 // Cancel 取消当前任务（目前只在 binary 形态有意义）。
 func (s *Service) Cancel() error {
 	s.taskMu.Lock()
-	defer s.taskMu.Unlock()
-	if s.task == nil || s.task.Done {
+	task := s.task
+	s.taskMu.Unlock()
+	if task == nil || task.Snapshot().Done {
 		return errors.New("没有正在进行的任务")
 	}
-	if s.task.cancel != nil {
-		s.task.cancel()
+	task.mu.RLock()
+	cancel := task.cancel
+	task.mu.RUnlock()
+	if cancel != nil {
+		cancel()
 	}
 	return nil
 }

@@ -42,12 +42,23 @@ else
   fi
 fi
 
-# 数据库连接与运行参数交给工具自己读（config.Load 的优先级是环境变量最高），
-# 与 systemd 跑主服务时用的是同一套键名、同一个 .env
-set -a
-# shellcheck disable=SC1090
-source <(grep -E '^(DB_HOST|DB_PORT|DB_USER|DB_PASSWORD|DB_NAME|DB_SSLMODE)=' "$ENV_FILE")
-set +a
+# 仅提取简单 KEY=VALUE 行，不执行文件内容；密码与值允许常见字符但拒绝换行。
+env_value() {
+  local key="$1" line value
+  line="$(grep -E "^${key}=" "$ENV_FILE" | head -1 || true)"
+  value="${line#*=}"
+  value="${value%$'\r'}"
+  value="${value#\"}"; value="${value%\"}"
+  value="${value#\'}"; value="${value%\'}"
+  case "$value" in *$'\n'*|*$'\r'*) echo "配置项 $key 不能包含换行" >&2; exit 1 ;; esac
+  printf '%s' "$value"
+}
+export DB_HOST="$(env_value DB_HOST)"
+export DB_PORT="$(env_value DB_PORT)"
+export DB_USER="$(env_value DB_USER)"
+export DB_PASSWORD="$(env_value DB_PASSWORD)"
+export DB_NAME="$(env_value DB_NAME)"
+export DB_SSLMODE="$(env_value DB_SSLMODE)"
 
 # 两个密钥都走标准输入（-stdin 的第一行旧、第二行新），不进命令行参数。
 # 命令行参数对同机其他用户是 /proc/<pid>/cmdline 可读的 —— 对一个

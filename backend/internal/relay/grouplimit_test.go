@@ -2,6 +2,7 @@ package relay
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -38,7 +39,33 @@ func TestGroupLimiterRPM(t *testing.T) {
 	}
 }
 
-// 分组 TPM：按上游回报的 token 累计，累计到的窗口里拦住后续请求。
+func TestGroupLimiterAllowAndRecordConcurrent(t *testing.T) {
+	l := NewGroupLimiter()
+	now := time.Now()
+	const workers = 100
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	allowed := 0
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if ok, _ := l.AllowAndRecord(9, 7, 0, now); ok {
+				mu.Lock()
+				allowed++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if allowed != 7 {
+		t.Fatalf("并发原子限流应恰好放行 7 次，实际 %d", allowed)
+	}
+	if got, _ := l.Usage(9, now); got != 7 {
+		t.Fatalf("并发原子限流记账应为 7，实际 %d", got)
+	}
+}
+
 func TestGroupLimiterTPM(t *testing.T) {
 	l := NewGroupLimiter()
 	now := time.Now()

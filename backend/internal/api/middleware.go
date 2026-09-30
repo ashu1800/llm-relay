@@ -37,25 +37,42 @@ import (
 //
 // 覆盖不到的情况：不带 Origin 的请求无法区分（例如 DNS rebinding）。
 // 但把「随便打开一个网页就能打管理接口」这条最现实的路径堵上了。
-func sameOriginOnly() gin.HandlerFunc {
+func (s *Server) sameOriginOnly() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		origin := c.GetHeader("Origin")
+		origin := strings.TrimSpace(c.GetHeader("Origin"))
 		if origin == "" {
+			// 无 Origin 的命令行客户端继续放行；浏览器 Cookie 请求仍受 SameSite 与会话鉴权保护。
 			c.Next()
 			return
 		}
-		u, err := url.Parse(origin)
-		// Origin: null（沙箱 iframe、file:// 页面）解析出来 Host 为空，会走拒绝分支
-		if err != nil || !strings.EqualFold(u.Host, c.Request.Host) {
+		allowed := strings.TrimSpace(s.deps.Config.Server.PublicOrigin)
+		if allowed == "" {
+			// 配置校验会拒绝非回环监听缺少 PublicOrigin；回环开发环境允许当前 Host，
+			// 便于 httptest 和随机本地端口工作。
+			allowed = "http://" + c.Request.Host
+			if c.Request.TLS != nil {
+				allowed = "https://" + c.Request.Host
+			}
+		}
+		if !sameOriginValue(origin, allowed) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": gin.H{
 				"code":    http.StatusForbidden,
-				"message": "拒绝跨站请求：管理接口只接受来自本服务页面的调用",
+				"message": "拒绝跨站请求：管理接口只接受来自配置来源的调用",
 				"type":    "forbidden_error",
 			}})
 			return
 		}
 		c.Next()
 	}
+}
+
+func sameOriginValue(a, b string) bool {
+	x, errA := url.Parse(strings.TrimSpace(a))
+	y, errB := url.Parse(strings.TrimSpace(b))
+	if errA != nil || errB != nil || x.User != nil || y.User != nil {
+		return false
+	}
+	return strings.EqualFold(x.Scheme, y.Scheme) && strings.EqualFold(x.Host, y.Host) && x.Path == "" && y.Path == ""
 }
 
 const ctxAPIKey = "llm_relay_api_key"
