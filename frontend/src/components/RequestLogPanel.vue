@@ -926,18 +926,37 @@ function tokPerSec(row: RequestLog): string {
 }
 
 // 「—」的悬停说明：说清为什么量不到，而不是让人以为是没数据。
-// 窗口类的两种把实测的窗口摆出来 —— 站主可以自己判断这一行值不值得再查。
+// 窗口类的几种把实测的窗口摆出来 —— 站主可以自己判断这一行值不值得再查。
 function speedMissTitle(row: RequestLog) {
   switch (speedMissReason(row)) {
     case 'oneShot':
       // 有交付观测且只读到一次：上游把整段正文一次发出（不是「猜」，是读循环记的事实）
       return '算不出速度：上游把整段正文一次发出（正文只读到 1 个分块），量不到生成时段'
+    case 'implausible': {
+      // 窗口够长，但按词元数算出来的速度超过物理上限：多半是词元数与窗口对不上
+      const span = (row.last_byte_ms || 0) - (row.first_byte_ms || 0)
+      const rate = span > 0 ? Math.round(row.completion_tokens / (span / 1000)) : 0
+      return (
+        '算不出速度：按 ' +
+        fmtMs(span) +
+        ' 的窗口算是 ' +
+        fmtTokens(rate) +
+        ' tok/s，超过物理上限（1000 tok/s），窗口或词元数不可信'
+      )
+    }
     case 'burst': {
-      // 窗口 = 有观测时用实测的送达跨度，没有观测时退回「总耗时 − 首字」
-      const span = row.body_reads > 0 ? (row.last_byte_ms || 0) - (row.first_byte_ms || 0) : 0
-      const win = span > 0 ? span : (row.total_ms || 0) - (row.first_byte_ms || 0)
+      if (row.body_reads > 0) {
+        // 有观测：窗口就是实测的送达跨度
+        const span = (row.last_byte_ms || 0) - (row.first_byte_ms || 0)
+        if (span <= 0) {
+          return '算不出速度：首字与末块落在同一毫秒（只读到 ' + fmtTokens(row.body_reads) + ' 个分块），量不到生成时段'
+        }
+        return '算不出速度：可用的窗口只有 ' + fmtMs(span) + '（不足 200ms），量到的是尾包传输'
+      }
+      // 没有观测的历史行：窗口是「总耗时 − 首字」这个近似
+      const win = (row.total_ms || 0) - (row.first_byte_ms || 0)
       if (win <= 0) return '算不出速度：首字与收尾落在同一毫秒，量不到生成时段'
-      return '算不出速度：可用的窗口只有 ' + fmtMs(win) + '（不足 200ms），量到的是尾包传输'
+      return '算不出速度：可用的窗口只有 ' + fmtMs(win) + '（此行没有交付观测，按总耗时 − 首字近似，不足 200ms）'
     }
     case 'noStream':
       return '算不出速度：非流式请求，响应头与整段正文一起到达'
@@ -1544,10 +1563,10 @@ onMounted(() => {
           </template>
         </a-table-column>
         <!-- 速度列：每秒词元输出速度。只有一个含义 —— 输出词元 ÷ 首字后生成时段
-             （口径与五种「量不到」的判据见 components/speed.ts）。量不到的行显示 —，
-             悬停说明讲清是哪种量不到（上游一次发出 / 窗口不足 200ms / 非流式 /
-             没有输出词元 / 没量到耗时）—— 不换分母凑数：总耗时口径含排队与首字等待，
-             与生成速度不是一回事。
+             （口径与六种「量不到」的判据见 components/speed.ts）。量不到的行显示 —，
+             悬停说明讲清是哪种量不到（上游一次发出 / 窗口只有几毫秒 / 算出来超过
+             物理上限 / 非流式 / 没有输出词元 / 没量到耗时）—— 不换分母凑数：
+             总耗时口径含排队与首字等待，与生成速度不是一回事。
              流式且量得到的行在数值前带「流」胶囊（同一行）—— 输出速度要结合输出
              方式才读得懂。失败请求通常没有输出词元，显示 — -->
         <a-table-column title="速度" :width="colW.speed">

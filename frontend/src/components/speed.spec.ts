@@ -1,13 +1,15 @@
-// 速度口径的回归（2026-09-29 立，2026-09-30 改成「一列一个口径」+ 按观测判）。
+// 速度口径的回归（2026-09-29 立，2026-09-30 两次收紧+放宽）。
 //
 // 抽 speed.ts 的直接原因就是「首字窗口塌缩」把速度算成几千 tok/s —— 所以用例
-// 不造干净数字，一组组直接抄生产库真实行（2026-09-25~29，id 见 docs/superpowers/
+// 不造干净数字，一组组直接抄生产库真实行（2026-09-25~30，id 见 docs/superpowers/
 // specs/2026-09-29-speed-metric-robustness-design.md 的表）。
 //
-// 2026-09-30 的两处改动，都在这里逐条钉住：
+// 2026-09-30 的三处改动，都在这里逐条钉住：
 //   1. 塌缩行不再退回总耗时，而是显示 —（一列一个口径）；
 //   2. 判据从「窗口 < 总耗时 5%」改成绝对下限 200ms，并且优先用后端新落库的
-//      交付观测（body_reads / last_byte_ms）算分母。
+//      交付观测（body_reads / last_byte_ms）算分母；
+//   3. 有观测时不再用固定毫秒门槛，改成「算出来的速度是否物理上可能」（≤1000 tok/s）
+//      —— 固定门槛把「短而快」的回答一并砍掉了（站主 2026-09-30 追问的那批）。
 import { describe, expect, it } from 'vitest'
 import { speedMissReason, speedOf, speedText } from './speed'
 import type { RequestLog } from '@/api/types'
@@ -35,6 +37,31 @@ describe('有交付观测：按正文分块数与送达跨度判（2026-09-30 �
     expect(speedMissReason(row)).toBeNull()
   })
 
+  it('窗口短但逐帧返回、算出来速度正常 → 算得出（2026-09-30 放宽的那一类）', () => {
+    // 生产库 id 6785：97 词元 / 跨度 190ms / 40 个分块 → 510 tok/s。
+    // 旧判据（跨度 ≥ 200ms）把这一类一并砍掉，等于把「短而快」的回答判成量不到。
+    const row = makeLog({ completion_tokens: 97, total_ms: 1726, first_byte_ms: 1531, last_byte_ms: 1721, body_reads: 40 })
+    expect(speedOf(row)!.denomMs).toBe(190)
+    expect(speedText(row)).toBe('511')
+    expect(speedMissReason(row)).toBeNull()
+  })
+
+  it('同一天里被 200ms 门槛误伤的那批（143~199ms、10~40 个分块）全部算得出', () => {
+    // 抄自生产库 2026-09-30 15:11~15:40 的 6 行，按跨度算分别是 510/296/440/457/446/397
+    const rows = [
+      { out: 97, first: 1531, last: 1721, reads: 40, total: 1726 },
+      { out: 58, first: 4063, last: 4259, reads: 10, total: 4309 },
+      { out: 63, first: 7105, last: 7248, reads: 23, total: 7409 },
+      { out: 74, first: 8512, last: 8674, reads: 21, total: 8806 },
+      { out: 87, first: 10828, last: 11023, reads: 24, total: 11135 },
+      { out: 79, first: 12040, last: 12239, reads: 15, total: 12538 }
+    ]
+    const texts = rows.map((r) =>
+      speedText(makeLog({ completion_tokens: r.out, total_ms: r.total, first_byte_ms: r.first, last_byte_ms: r.last, body_reads: r.reads }))
+    )
+    expect(texts).toEqual(['511', '296', '441', '457', '446', '397'])
+  })
+
   it('上游把整段正文一次发出（只读到 1 个分块）：量不到，显示 —', () => {
     // 这正是站主 2026-09-30 截图里那类行的形态：首字 ≈ 总耗时
     const row = makeLog({ completion_tokens: 142, total_ms: 14180, first_byte_ms: 13520, last_byte_ms: 13520, body_reads: 1 })
@@ -43,20 +70,34 @@ describe('有交付观测：按正文分块数与送达跨度判（2026-09-30 �
     expect(speedMissReason(row)).toBe('oneShot')
   })
 
-  it('分块多次但跨度不足 200ms：量到的是尾包传输，显示 —', () => {
-    const row = makeLog({ completion_tokens: 366, total_ms: 7395, first_byte_ms: 7388, last_byte_ms: 7392, body_reads: 3 })
+  it('只读到 3 个分块、正文 18ms 内到齐（站主问的 id 6913）：量不到，理由是窗口', () => {
+    // 23 词元 ÷ 18ms = 1278 tok/s —— 物理上不可能；上游把响应头与正文一起压在最后发
+    const row = makeLog({ completion_tokens: 23, total_ms: 4095, first_byte_ms: 4062, last_byte_ms: 4080, body_reads: 3 })
     expect(speedOf(row)).toBeNull()
+    expect(speedText(row)).toBe('')
     expect(speedMissReason(row)).toBe('burst')
   })
 
-  it('跨度恰好 200ms：算得出（边界留在可用一侧）', () => {
-    const row = makeLog({ completion_tokens: 100, total_ms: 9000, first_byte_ms: 8000, last_byte_ms: 8200, body_reads: 5 })
-    expect(speedOf(row)!.denomMs).toBe(200)
-    expect(speedText(row)).toBe('500')
+  it('窗口够长但算出来超过物理上限（词元数与窗口对不上）：量不到，理由是上限', () => {
+    // 生产库 id 6683：58761 词元 / 跨度 12.738s → 4613 tok/s。分块数 1541 说明窗口是真的，
+    // 对不上的是词元数 —— 两种都不可信，但理由文案要说在点上（说上限，不说窗口）。
+    const row = makeLog({ completion_tokens: 58761, total_ms: 13000, first_byte_ms: 200, last_byte_ms: 12938, body_reads: 1541 })
+    expect(speedOf(row)).toBeNull()
+    expect(speedMissReason(row)).toBe('implausible')
   })
 
-  it('跨度 199ms：算不出', () => {
-    const row = makeLog({ completion_tokens: 100, total_ms: 9000, first_byte_ms: 8000, last_byte_ms: 8199, body_reads: 5 })
+  it('物理上限对「短而快」留了余量：1ms/词元（1000 tok/s）仍算得出', () => {
+    const atLimit = makeLog({ completion_tokens: 100, total_ms: 9000, first_byte_ms: 8100, last_byte_ms: 8200, body_reads: 12 })
+    expect(speedOf(atLimit)!.denomMs).toBe(100)
+    expect(speedText(atLimit)).toBe('1000')
+
+    const over = makeLog({ completion_tokens: 101, total_ms: 9000, first_byte_ms: 8100, last_byte_ms: 8200, body_reads: 12 })
+    expect(speedOf(over)).toBeNull()
+    expect(speedMissReason(over)).toBe('burst') // 窗口只有 100ms，理由说窗口
+  })
+
+  it('首字与末块落在同一毫秒（跨度 = 0）：量不到', () => {
+    const row = makeLog({ completion_tokens: 23, total_ms: 7364, first_byte_ms: 7253, last_byte_ms: 7253, body_reads: 2 })
     expect(speedOf(row)).toBeNull()
     expect(speedMissReason(row)).toBe('burst')
   })
@@ -70,8 +111,7 @@ describe('有交付观测：按正文分块数与送达跨度判（2026-09-30 �
   })
 })
 
-describe('没有交付观测的历史行：退回「总耗时 − 首字」+ 绝对下限 200ms', () => {
-  it('站主 2026-09-30 截图那四行：窗口都够宽，四行都算得出（口径一致）', () => {
+describe('没有交付观测的历史行：退回「总耗时 − 首字」+ 绝对下限 200ms', () => {  it('站主 2026-09-30 截图那四行：窗口都够宽，四行都算得出（口径一致）', () => {
     // WorkBuddy海外 / deepseek-v4.1-flash，抄自站主截图（时间取整到 10ms）。
     // 旧版判据（窗口 < 总耗时 5%）会把其中三行判成塌缩、退回总耗时，
     // 于是同一列出现 10 / 274 / 4 / 7 这样没法互相比较的一组数。
@@ -165,6 +205,10 @@ describe('非流式与算不出的情形', () => {
     // 前端只有时间戳，分不出「分块缓冲」与「真的这么快」。有观测之后这类行的
     // 分母换成实测跨度（比「总耗时 − 首字」小），值只会更高 —— 要彻底解决得让
     // 上游探针看它到底怎么发的（设计文档第八节第 1 条）。
+    //
+    // 注意这一行是**没有观测的历史行**，所以走的是「总耗时 − 首字 + 200ms 下限」，
+    // 不带物理上限（1069 tok/s 才显示得出来）。有观测的行会过 1000 tok/s 上限 ——
+    // 两条路的差别是有意的：上限要拿分块数当证据，历史行没有。
     const row = makeLog({ completion_tokens: 7344, total_ms: 10715, first_byte_ms: 3845 })
     expect(speedText(row)).toBe('1069')
     expect(speedMissReason(row)).toBeNull()
