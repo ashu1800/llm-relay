@@ -39,6 +39,7 @@ import {
 } from '@ant-design/icons-vue'
 import { useVersionStore } from '@/stores/version'
 import { versionApi, type RollbackCandidate } from '@/api/version'
+import { RESTART_COUNTDOWN_MS, canReloadAfterRestart } from '@/components/restartGate'
 
 const store = useVersionStore()
 
@@ -214,50 +215,73 @@ async function doUpdate() {
 //
 // 后端在回响应之后才退出进程，所以这里通常能拿到响应；
 // 拿不到也是正常的（重启成功了，只是连接断了）。
-// 倒计时只是「最长还要等多久」的展示；探活立刻开始 ——
-// systemd 通常 1-2 秒就把服务拉起来，回来即刷新，
-// 不必白等满 8 秒。
+//
+// 刷新时机是这里唯一容易做错的地方（站主 2026-09-30 反馈「点完立即刷新，页面 502」）：
+// 进程是在回完 /system/restart **之后**才退出的，所以紧接着的那次探活探到的还是
+// 旧进程（healthz 照样 200）。判据因此是两条，缺一不可：
+//   1. 8 秒倒计时走完 —— systemd 是 RestartSec=3，旧进程退出 + 新进程拉起都在里面；
+//   2. 探到的 uptime 比重启前小 —— 只认「新进程」，不认「还活着」。
+// 两条都由 restartGate.ts 的 canReloadAfterRestart 与下面的循环把守。
 let restartTimer: ReturnType<typeof setInterval> | null = null
+
+// 探活读一次当前进程的 uptime（毫秒）。读不到返回 null ——
+// 重启前读不到就只能靠倒计时兜底，重启后读不到就是「还没起来」。
+async function currentUptimeMs(): Promise<number | null> {
+  try {
+    const res = await fetch('/healthz', { cache: 'no-store' })
+    if (!res.ok) return null
+    const body = await res.json()
+    return typeof body?.uptime_ms === 'number' ? body.uptime_ms : null
+  } catch {
+    return null
+  }
+}
 
 async function doRestart() {
   if (restarting.value) return
   restarting.value = true
-  restartCountdown.value = 8
+  restartCountdown.value = Math.round(RESTART_COUNTDOWN_MS / 1000)
+
+  // 必须在发重启请求**之前**读：请求一发出去进程就开始退出了
+  const beforeMs = await currentUptimeMs()
 
   await store.restart()
 
   restartTimer = setInterval(() => {
-    restartCountdown.value -= 1
+    if (restartCountdown.value > 0) restartCountdown.value -= 1
     if (restartCountdown.value <= 0 && restartTimer) {
       clearInterval(restartTimer)
       restartTimer = null
     }
   }, 1000)
-  void waitAndReload()
+  void waitAndReload(beforeMs)
 }
 
-// 轮询健康检查直到服务回来，然后刷新页面。
+// 轮询健康检查直到**新进程**起来，然后刷新页面。
+//
+// 倒计时结束之前一次都不探、更不刷新：那段时间里旧进程可能还在退出，
+// 探到 200 也不能说明新进程起来了（这正是 502 的成因）。
 // 最多等 30 秒：超过这个时间说明不是「还在启动」而是「起不来了」，
-// 那时候继续转圈只会让人以为在等一个即将出现的结果。
-async function waitAndReload() {
-  for (let i = 0; i < 15; i++) {
-    try {
-      const res = await fetch('/healthz', { cache: 'no-store' })
-      if (res.ok) {
+// 或者重启根本没生效（那时 uptime 只会一直变大），继续转圈只会让人以为在等结果。
+async function waitAndReload(beforeMs: number | null) {
+  const notBefore = Date.now() + RESTART_COUNTDOWN_MS
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
+    if (Date.now() >= notBefore) {
+      const uptimeMs = await currentUptimeMs()
+      if (canReloadAfterRestart(beforeMs, uptimeMs)) {
         window.location.reload()
         return
       }
-    } catch {
-      // 服务还没起来
     }
-    await new Promise((r) => setTimeout(r, 2000))
+    await new Promise((r) => setTimeout(r, 1000))
   }
   if (restartTimer) {
     clearInterval(restartTimer)
     restartTimer = null
   }
   restarting.value = false
-  message.warning('服务在 30 秒内没有恢复响应，请检查服务状态（journalctl -u llm-relay）')
+  message.warning('没有等到服务重启完成（可能重启没有生效），请检查服务状态（journalctl -u llm-relay）')
 }
 
 // ---- 回滚 ----
@@ -452,7 +476,7 @@ const phaseText = computed(() => {
               >
                 <SyncOutlined v-if="restarting" spin />
                 <ReloadOutlined v-else />
-                <span v-if="restarting">正在重启…（{{ restartCountdown }}s）</span>
+                <span v-if="restarting">正在重启…{{ restartCountdown > 0 ? `（${restartCountdown}s）` : '' }}</span>
                 <span v-else>立即重启以生效</span>
               </button>
               <!-- 失败后最要紧的是「再试一次」：只给「重新检测」的话，

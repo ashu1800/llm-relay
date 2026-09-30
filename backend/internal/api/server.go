@@ -189,10 +189,17 @@ func (s *Server) registerStatic(r *gin.Engine) {
 }
 
 // healthz 只表示进程存活，不依赖任何外部组件。
+//
+// uptime 是给人看的字符串，uptime_ms 是给程序用的：管理台的「立即重启」要等
+// **新进程**起来才刷新页面，判据就是「探到的 uptime 比重启前小」
+// （见 frontend/src/components/restartGate.ts）—— 让前端去解析 "1h2m3s"
+// 这种格式既啰嗦又容易错，直接给毫秒数。
 func (s *Server) healthz(c *gin.Context) {
+	up := time.Since(s.startedAt)
 	c.JSON(http.StatusOK, gin.H{
-		"status": "ok",
-		"uptime": time.Since(s.startedAt).Round(time.Second).String(),
+		"status":    "ok",
+		"uptime":    up.Round(time.Second).String(),
+		"uptime_ms": up.Milliseconds(),
 	})
 }
 

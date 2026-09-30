@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -48,6 +49,39 @@ func doJSON(r *gin.Engine, method, path, body string) *httptest.ResponseRecorder
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	return w
+}
+
+// TestHealthzExposesUptimeMs 钉住 healthz 的 uptime_ms。
+//
+// 它是管理台「点立即重启之后，什么时候可以刷新页面」的判据
+// （frontend/src/components/restartGate.ts：只认 uptime 变小的那个新进程）。
+// 少了这个字段，前端只能退回「倒计时一到就刷新」—— 而那正是站主
+// 2026-09-30 反馈的 502：旧进程还没退出时刷新，页面撞进重启窗口。
+func TestHealthzExposesUptimeMs(t *testing.T) {
+	s := &Server{deps: &Deps{}, startedAt: time.Now().Add(-3 * time.Second)}
+	r := gin.New()
+	r.GET("/healthz", s.healthz)
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("healthz 应当回 200，实际 %d", w.Code)
+	}
+	var body struct {
+		Status   string `json:"status"`
+		Uptime   string `json:"uptime"`
+		UptimeMs int64  `json:"uptime_ms"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v（%s）", err, w.Body.String())
+	}
+	if body.Status != "ok" || body.Uptime == "" {
+		t.Errorf("status/uptime 应保持原样，实际 %+v", body)
+	}
+	// 3 秒前启动 → 3000ms 上下；给足余量，只要求「是同量级的毫秒数」
+	if body.UptimeMs < 2900 || body.UptimeMs > 5000 {
+		t.Errorf("uptime_ms 应约为 3000，实际 %d", body.UptimeMs)
+	}
 }
 
 // TestVersionEndpointAlwaysAnswers 钉住「版本接口不依赖更新功能」这条契约。
