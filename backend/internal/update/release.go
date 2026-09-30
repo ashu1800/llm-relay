@@ -41,6 +41,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -212,12 +213,18 @@ func NewClient(opts ClientOptions) (*Client, error) {
 
 // guardedTransport 构造 transport，可选走代理。
 //
-// 走代理时**不**套 netguard 的建连校验，这是刻意的：netguard 校验的是
-// 即将建连的地址，走代理时那个地址就是代理服务器本身 —— 而大量部署的
-// 代理恰恰跑在本机或内网（127.0.0.1:7890、内网网关上的 Clash）。
-// 代理是管理员在管理台显式配置的可信出口，与渠道出站代理同一信任级别，
-// 能配它的人本来就有出网自由，把它当 SSRF 目标拦下是自我矛盾
-// （设置页的示例一直写着 socks5://127.0.0.1:1080，而实际会被拦）。
+// 走**显式配置**的代理时**不**套 netguard 的建连校验，这是刻意的：netguard 校验的是
+// 即将建连的地址，走代理时那个地址就是代理服务器本身 —— 而大量部署的代理恰恰跑在
+// 本机或内网（127.0.0.1:7890、内网网关上的 Clash）。代理是管理员在管理台显式配置的
+// 可信出口，与渠道出站代理同一信任级别，能配它的人本来就有出网自由，把它当 SSRF 目标
+// 拦下是自我矛盾（设置页的示例一直写着 socks5://127.0.0.1:1080，而实际会被拦）。
+//
+// **环境变量里的代理同理**（HTTP_PROXY / HTTPS_PROXY / ALL_PROXY，Go 的默认 transport
+// 本来就会读它们）：那同样是运维自己配的可信出口，而且是最常见的一种 ——
+// 系统级 Clash/v2ray 就写在环境变量里。所以这里按地址把它们交给
+// netguard.GuardedTransportExcept 豁免，而不是整条不校验：NO_PROXY 会让一部分请求
+// 仍然直连，那些请求必须照旧校验（2026-09-30 修：修复前这种部署会以
+// 「目标地址指向内网或本机，已拒绝: 127.0.0.1」失败，而面板里手填同一个代理却能用）。
 //
 // 目标侧的防护一点没少：API 目标写死 api.github.com，下载每一跳都要过
 // checkDownloadTarget（HTTPS 强制 + 主机白名单），真正落到公网目标上。
@@ -243,8 +250,52 @@ func guardedTransport(proxyURL string) (*http.Transport, error) {
 			ExpectContinueTimeout: 1 * time.Second,
 		}, nil
 	}
-	// 直连：没有可信出口可豁免，目标必须是公网地址。
-	return netguard.GuardedTransport(nil), nil
+	// 直连（可能仍由环境变量指定了代理）：目标是公网地址，代理是可信出口
+	return netguard.GuardedTransportExcept(nil, envProxyAddrs()), nil
+}
+
+// envProxyAddrs 取出环境变量里配置的代理地址（host:port），交给 netguard 豁免。
+//
+// 读的是 http.ProxyFromEnvironment 同一组变量（大小写都认）。地址按 Transport
+// 实际拨号时的形式归一化：URL 里没写端口时补上该 scheme 的默认端口 ——
+// Go 的 canonicalAddr 就是这么做的，不补的话 "127.0.0.1:80" 与 "127.0.0.1" 对不上，
+// 豁免就会静默失效。没写 scheme 的写法（127.0.0.1:7890）Go 按 http:// 处理，
+// 这里跟它保持一致。
+func envProxyAddrs() []string {
+	var out []string
+	seen := make(map[string]struct{})
+	for _, key := range []string{
+		"HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+		"https_proxy", "http_proxy", "all_proxy",
+	} {
+		raw := strings.TrimSpace(os.Getenv(key))
+		if raw == "" {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			// 没写 scheme 的简写：Go 自己按 http:// 处理（见 httpproxy.parseProxy）
+			u, err = url.Parse("http://" + raw)
+		}
+		if err != nil || u.Host == "" {
+			continue
+		}
+		addr := u.Host
+		if u.Port() == "" {
+			switch u.Scheme {
+			case "http":
+				addr = net.JoinHostPort(u.Hostname(), "80")
+			case "https":
+				addr = net.JoinHostPort(u.Hostname(), "443")
+			}
+		}
+		if _, ok := seen[addr]; ok {
+			continue
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+	}
+	return out
 }
 
 // FetchLatestRelease 取最新的正式版本（不含 draft 与 prerelease）。

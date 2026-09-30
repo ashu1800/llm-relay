@@ -1,8 +1,10 @@
 package netguard
 
 import (
+	"context"
 	"errors"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -141,5 +143,46 @@ func TestGuardedTransportAllowsPublicIPLiteral(t *testing.T) {
 	var ip net.IP = net.ParseIP("8.8.8.8")
 	if blocked, _ := ipBlocked(ip); blocked {
 		t.Fatal("8.8.8.8 不该被判为禁止")
+	}
+}
+
+// 豁免名单只放行列出的那个地址，其余照旧拦 —— 这条是「按地址豁免」的核心语义，
+// 也是 update 包用来放行环境变量代理（127.0.0.1:7890）的依据。
+func TestGuardedTransportExceptSkipsOnlyListedAddr(t *testing.T) {
+	var dialed []string
+	// 自带 DialContext：既避免真连网络，也验证「豁免时确实交给了底层拨号器」
+	base := &http.Transport{DialContext: func(_ context.Context, _, addr string) (net.Conn, error) {
+		dialed = append(dialed, addr)
+		c1, c2 := net.Pipe()
+		_ = c2.Close()
+		return c1, nil
+	}}
+	tr := GuardedTransportExcept(base, []string{"127.0.0.1:7890", "  "})
+
+	if _, err := tr.DialContext(t.Context(), "tcp", "127.0.0.1:7890"); err != nil {
+		t.Fatalf("名单里的地址（可信代理）应当放行，实际 %v", err)
+	}
+	if len(dialed) != 1 || dialed[0] != "127.0.0.1:7890" {
+		t.Fatalf("豁免的地址应当交给底层拨号器，实际拨号记录 %v", dialed)
+	}
+
+	// 同一个主机、不同端口：不在名单里，照旧拦
+	if _, err := tr.DialContext(t.Context(), "tcp", "127.0.0.1:7891"); !errors.Is(err, ErrBlocked) {
+		t.Fatalf("未列入名单的回环地址应被拦，实际 %v", err)
+	}
+	// 内网网关同理
+	if _, err := tr.DialContext(t.Context(), "tcp", "10.0.0.1:7890"); !errors.Is(err, ErrBlocked) {
+		t.Fatalf("未列入名单的内网地址应被拦，实际 %v", err)
+	}
+	if len(dialed) != 1 {
+		t.Fatalf("被拦的地址不该真的拨号，实际拨号记录 %v", dialed)
+	}
+}
+
+// 名单为空（= GuardedTransport）时一个地址都不放行。
+func TestGuardedTransportExceptEmptyListBlocksAll(t *testing.T) {
+	tr := GuardedTransportExcept(&http.Transport{}, nil)
+	if _, err := tr.DialContext(t.Context(), "tcp", "127.0.0.1:7890"); !errors.Is(err, ErrBlocked) {
+		t.Fatalf("空名单不该放行任何地址，实际 %v", err)
 	}
 }

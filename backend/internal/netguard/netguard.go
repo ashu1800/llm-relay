@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // ErrBlocked 表示目标地址落在禁止访问的范围内。
@@ -127,30 +128,75 @@ func Control(_, address string, _ syscall.RawConn) error {
 
 // GuardedTransport 在给定 transport 的基础上补上建连校验与禁跳转。
 //
-// 传 nil 时以 http.DefaultTransport 为基底。原有的 DialContext 会被保留
-// （走代理的场景必须保留），但会在其外层再套一次 Control 校验 ——
-// 走代理时被校验的是代理服务器地址，这正是我们要的：
-// 代理是运维自己配的可信出口，而真实目标由代理解析，本进程管不到，
-// 也不该管（能配代理的人本来就有出网自由）。
+// 传 nil 时以 http.DefaultTransport 为基底，但**换掉它自带的拨号器** ——
+// 只有这样 Control 才真的装上（套在自带拨号器外面是装不上的，那等于只剩
+// CheckHost 那一次校验，DNS rebinding 就能绕过）。参数按 DefaultTransport 的
+// 原值来（30s 拨号超时 / 30s keep-alive），免得顺手把默认超时改掉。
+//
+// 调用方自带 DialContext 时（渠道出站代理那类自定义拨号器）保留它，
+// 只在外层加一次显式校验 —— 那种情况下 Control 插不进去，是既有取舍。
 func GuardedTransport(base *http.Transport) *http.Transport {
+	return GuardedTransportExcept(base, nil)
+}
+
+// GuardedTransportExcept 与 GuardedTransport 相同，但 except 里的地址（形如 host:port）
+// **不做内网校验**：它们是运维自己配置的可信出口（代理服务器）。
+//
+// 为什么需要「按地址豁免」而不是「配了代理就整条豁免」：transport 用
+// http.ProxyFromEnvironment 时，NO_PROXY 会让一部分请求仍然直连，那些请求必须照旧校验；
+// 只有走代理的那部分，建连目标才是代理自己 —— 而代理常常就跑在本机或内网
+// （Clash/v2ray 默认 127.0.0.1:7890），把它当 SSRF 目标拦下是自我矛盾：
+// 能配代理的人本来就有出网自由（与 update.guardedTransport 对显式代理的处理同一个道理）。
+//
+// 比对的 addr 是 Transport 交给 DialContext 的**未解析** host:port（Go 对代理连接
+// 用的正是代理 URL 里的 host:port），所以按字符串比即可，不需要 DNS。
+func GuardedTransportExcept(base *http.Transport, except []string) *http.Transport {
 	var t *http.Transport
 	if base != nil {
 		t = base.Clone()
 	} else {
 		t = http.DefaultTransport.(*http.Transport).Clone()
 	}
-	inner := t.DialContext
-	d := &net.Dialer{Control: Control}
+
+	exempt := make(map[string]struct{}, len(except))
+	for _, a := range except {
+		if a = strings.TrimSpace(a); a != "" {
+			exempt[a] = struct{}{}
+		}
+	}
+	isExempt := func(addr string) bool {
+		_, ok := exempt[addr]
+		return ok
+	}
+
+	// 与 http.DefaultTransport 同款参数：Control 是额外一道校验，
+	// 不能因为它把默认的拨号超时丢掉（没有 Timeout 的 Dialer 会一直挂着）。
+	guarded := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: Control}
+	plain := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+
+	var inner func(ctx context.Context, network, addr string) (net.Conn, error)
+	if base != nil {
+		// 调用方自己的拨号器要保留（它可能带着自定义解析/绑定/代理设置）
+		inner = t.DialContext
+	}
 	if inner == nil {
-		t.DialContext = d.DialContext
+		t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if isExempt(addr) {
+				// 可信出口：代理自己解析目标，本进程管不到（见函数注释）
+				return plain.DialContext(ctx, network, addr)
+			}
+			return guarded.DialContext(ctx, network, addr)
+		}
 		return t
 	}
 	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		// 先做一次显式校验，让错误信息可读；真正的兜底在 Control
-		host, _, err := net.SplitHostPort(addr)
-		if err == nil {
-			if _, err := CheckHost(host); err != nil {
-				return nil, err
+		if !isExempt(addr) {
+			// 先做一次显式校验，让错误信息可读；真正的兜底在 Control
+			host, _, err := net.SplitHostPort(addr)
+			if err == nil {
+				if _, err := CheckHost(host); err != nil {
+					return nil, err
+				}
 			}
 		}
 		return inner(ctx, network, addr)

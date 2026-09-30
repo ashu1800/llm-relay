@@ -19,7 +19,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -321,36 +320,8 @@ func TestStartCheckLoopFallsBackToDefaultInterval(t *testing.T) {
 	}
 }
 
-// TestRealGitHubCheckAgainstDefaultRepo 是真访问 api.github.com 的冒烟测试。
-//
-// 默认跳过：日常 go test 与 CI 不该依赖外网（未配 token 时限额只有 60 次/小时，
-// 国内机器更是常年连不上，要靠代理）。需要确认「代理 / token 配好之后真能通」
-// 时手动跑：
-//
-//	LLMRELAY_TEST_NET=1 go test ./internal/update -run TestRealGitHubCheck -v
-//
-// 它走的是 stub 用例覆盖不到的那半条链路：netguard 的建连校验、
-// api.github.com 的响应解析、版本号比较。
-func TestRealGitHubCheckAgainstDefaultRepo(t *testing.T) {
-	if os.Getenv("LLMRELAY_TEST_NET") != "1" {
-		t.Skip("未设置 LLMRELAY_TEST_NET=1，跳过真实 GitHub 冒烟测试")
-	}
-	s := &Service{logger: slog.Default(), cfg: DefaultConfig()}
-	client, err := NewClient(ClientOptions{Repo: s.cfg.Repo, ProxyURL: os.Getenv("LLMRELAY_TEST_PROXY")})
-	if err != nil {
-		t.Fatalf("构造客户端失败: %v", err)
-	}
-	s.client = client
-
-	info := s.Check(context.Background(), true)
-	if info.Warning != "" {
-		t.Fatalf("真实检测失败: %s", info.Warning)
-	}
-	if info.Latest == "" {
-		t.Fatal("应当拿到一个最新版本号")
-	}
-	t.Logf("仓库 %s：当前 %s，最新 %s，有新版本=%v", s.cfg.Repo, info.Current, info.Latest, info.HasUpdate)
-}
+// TestRealGitHubCheckAgainstDefaultRepo 等真访问 GitHub 的用例在 realnet_test.go
+// （默认跳过，需要 LLMRELAY_TEST_NET=1）。
 
 // 首次检测延后：这一条防的是「进程一启动就打 GitHub」——
 // 崩溃重启循环里那会持续烧共享限额。
