@@ -5,10 +5,22 @@
 // 而那条警告在构建产物里被剥掉，测试也不看控制台，于是
 // ProxiesView 传的 :empty / empty-text 错了很久都没人发现（空态文案从来没显示过）。
 //
-// 这里直接读 .vue 源码做静态比对，不依赖浏览器环境。
+// 这里直接读源码做静态比对，不依赖浏览器环境。
+// 2026-09-30 起还有一节「主题契约」：注册表、theme.css、预涂清单、光标资源、
+// antd 令牌映射五处的一致性都在这里比对（多主题之后靠人眼盯不住）。
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+// 主题相关：解析器与光标生成器都只有一个实现，脚本之间共用
+import {
+  PUBLIC_DIR,
+  REQUIRED_TOKENS,
+  parseInlineList,
+  parseRegistry,
+  parseSwatches,
+  parseThemes
+} from './lib/theme-css.mjs'
+import { renderAll } from './gen-theme-cursors.mjs'
 
 // 用 fileURLToPath 而不是 url.pathname：后者会保留百分号编码，
 // 而本仓库路径里含中文（「不忘初心」），拼出来的路径必然是 ENOENT
@@ -132,6 +144,13 @@ for (const file of walk(SRC)) {
   // 也支持函数返回样式对象的写法（见 utils/modelStyle.ts）
   for (const m of src.matchAll(/['"](--[\w-]+)['"]\s*:/g)) defined.add(m[1])
   for (const m of src.matchAll(/var\((--[\w-]+)/g)) referenced.add(m[1])
+  // utils/antdTheme.ts 是「以字符串形式引用 CSS 令牌」的地方：它把 antd 的
+  // token 名映射到 CSS 变量名，读取发生在运行时（getComputedStyle），
+  // 源码里一个 var(...) 都没有。不数进来的话，那几个令牌会被下面的
+  // 「已定义但未被引用」误报成死代码。
+  if (/antdTheme\.ts$/.test(file)) {
+    for (const m of src.matchAll(/'(--[\w-]+)'/g)) referenced.add(m[1])
+  }
 }
 for (const m of theme.matchAll(/var\((--[\w-]+)/g)) referenced.add(m[1])
 // utils/*Style.ts 里 key 有时由变量拼接，注释与实现里会同时出现名字。
@@ -151,135 +170,255 @@ check('所有 var(--token) 都有定义', missing.length === 0, missing.length ?
 const unused = [...defined].filter((d) => !referenced.has(d) && !d.startsWith('--tone-'))
 if (unused.length) console.log(`  INFO  已定义但未被引用（可能是预留或死代码）: ${unused.join(', ')}`)
 
-// 深色块必须覆盖语义色：漏掉的话深色模式下会用到浅色底上挑的值
-const darkStart = theme.indexOf(":root[data-theme='dark']")
-const darkBlock = darkStart >= 0 ? theme.slice(darkStart, theme.indexOf('\n}', darkStart)) : ''
-for (const tok of ['--color-red', '--color-orange', '--color-green', '--color-blue', '--color-purple', '--color-gray', '--color-icon', '--text-primary-ink']) {
-  check(`深色主题覆盖了 ${tok}`, darkBlock.includes(tok + ':'))
-}
-
-// 光标 SVG 里的颜色是主题变量的第二份定义。
+// ---- 主题契约（2026-09-30 立）----
 //
-// 光标是当作图片加载的，没有 CSS 级联，SVG 里写不了 var(...)，只能把色值抄一遍。
-// 这与 theme.ts 里记的「双份定义会漂移」是同一类坑：改主题色时漏掉光标，
-// 界面不会报错、也不会失败，只是光标停在旧颜色上，肉眼在相近的两色之间很难发现。
-//
-// 取色来源是「主色实心块」那一对（填充 = 实心块底色、描边 = 压在上面的文字色），
-// 不是 --color-primary：主色 #c87864 压在米白页底上只有 3.05:1，
-// 而实心块那对本就是按「要看得清」挑的。
-//
-// 2026-09-18 起改为每个主题各一套光标（轮廓也不同，不只是换色），
-// 所以下面按主题分块取值、按文件逐个比对。
+// 12 套主题 × 40 多个令牌，靠人眼盯不住，而这里盯的都是「漏了就静默出错」的东西：
+//   · 注册表 / CSS / 预涂清单三处 id 集合不一致 —— 某个主题选了没样式，
+//     或者刷新时先闪一下别的配色（预涂脚本带的是旧清单）
+//   · 某个主题块漏写令牌 —— 它会静默继承 :root（浅色）的值：不报错、不失败
+//   · 色样预览与主题块颜色不一致 —— 卡片上看到的样子与点下去得到的样子不是一回事
+//   · 光标与实心块配色不同步 —— 光标停在上一套主题的颜色上（相近两色很难发现）
+//   · 组件里又冒出按主题名分支的选择器 —— 加一套主题就要改 N 处，漏一处没人发现
 console.log('')
-console.log('=== 光标资源 ===')
+console.log('=== 主题契约 ===')
+{
+  const themes = parseThemes(theme)
+  const registry = parseRegistry()
+  const swatches = parseSwatches(theme)
+  const inlineTones = parseInlineList()
 
-// 从 theme.css 里切出 :root 与深色块两段，后面的断言都在各自的块里做。
-// 不切成块而是全文 grep 的话，「深色没覆盖光标变量」这种漏配会被浅色的定义
-// 蒙过去 —— 全文里当然能找到那个变量名，但它不在深色块里。
-const rootStart = theme.indexOf(':root {')
-const rootBlock = rootStart >= 0 ? theme.slice(rootStart, theme.indexOf('\n}', rootStart)) : ''
-check('theme.css 里能切出 :root 块', !!rootBlock)
-check('theme.css 里能切出深色块', !!darkBlock)
+  // 1. 三处 id 集合一致
+  const cssIds = [...themes.keys()]
+  const regIds = registry.map((r) => r.id)
+  const missingInCss = regIds.filter((id) => !cssIds.includes(id))
+  const extraInCss = cssIds.filter((id) => !regIds.includes(id))
+  check(
+    'theme.css 的主题块与注册表一一对应',
+    missingInCss.length === 0 && extraInCss.length === 0,
+    [
+      missingInCss.length ? `CSS 缺: ${missingInCss.join(', ')}` : '',
+      extraInCss.length ? `CSS 多: ${extraInCss.join(', ')}` : ''
+    ]
+      .filter(Boolean)
+      .join('；')
+  )
+  // 0. 绝对下限。上面这些比较都是「两个集合互为子集」，两边同时失手（解析器
+  //    结构变了、都返回空）时会全部零迭代、零失败 —— 看起来全绿，其实一套主题
+  //    都没查过。所以先钉一个绝对数量。
+  check(
+    '解析到的主题块不少于 12 套，且与注册表数量一致',
+    cssIds.length >= 12 && cssIds.length === regIds.length,
+    `CSS ${cssIds.length} 套 / 注册表 ${regIds.length} 套`
+  )
+  check("浅色主题由 :root 承载，不存在 :root[data-theme='light'] 块", !theme.includes(":root[data-theme='light']"))
 
-// 从某个块里读一个颜色变量
-const readColor = (block, tok) => {
-  const m = block.match(new RegExp(tok.replace(/[-]/g, '\\-') + ':\\s*(#[0-9a-fA-F]{3,8})'))
-  return m ? m[1].toLowerCase() : null
-}
-// 从某个块里读一个光标令牌：返回 { url, hotspot: 'x y', fallback }
-const readCursor = (block, tok) => {
-  const m = block.match(new RegExp(tok.replace(/[-]/g, '\\-') + ":\\s*url\\('([^']+)'\\)\\s+(\\d+)\\s+(\\d+)\\s*,\\s*([a-z-]+)"))
-  return m ? { url: m[1], hotspot: `${m[2]} ${m[3]}`, fallback: m[4] } : null
-}
+  // 2. 每个主题块写全必需令牌（清单在 lib/theme-css.mjs，与对比度脚本共用）
+  for (const [id, t] of themes) {
+    const miss = REQUIRED_TOKENS.filter((tok) => !t.vars.has(tok))
+    check(
+      `${id} 块写全了必需令牌（${REQUIRED_TOKENS.length} 项）`,
+      miss.length === 0,
+      miss.length ? `缺 ${miss.length} 项: ${miss.join(', ')}` : ''
+    )
+    // 反向断言：**其余主题块**里也不许出现清单之外的令牌。
+    // 出现了说明「这个令牌随主题变，但没人保证另外 11 套主题也写了它」——
+    // 漏写的那些块会静默继承 :root（浅色）的值，正是上面那条要防的同一个坑，
+    // 只是从「清单漏登记」这一侧进来的。新令牌该做的是加进 REQUIRED_TOKENS。
+    //
+    // 只管非 :root 的块：:root 是基准，尺寸/字体/由其他令牌派生的别名
+    // （--focus-ring、--latency-*、--color-primary-a20 等）都写在那里，
+    // 它们本来就不随主题变，也不需要在 12 个块里各写一遍。
+    if (id === 'light') continue
+    const extra = [...t.vars.keys()].filter((tok) => !REQUIRED_TOKENS.includes(tok))
+    check(`${id} 块没有清单之外的令牌`, extra.length === 0, extra.length ? `多 ${extra.join(', ')}（加进 REQUIRED_TOKENS，或改成不随主题变）` : '')
+    // 块内重复定义：解析器用 Map 存令牌，后写的会静默覆盖先写的（值以最后一行为准），
+    // 所以「同一块里写了两遍」这种多半是改主题时留下的残迹，必须报出来 ——
+    // 按 key 比对的那些断言（缺了/多了）都看不见重复。
+    const names = [...t.body.matchAll(/^\s*(--[\w-]+)\s*:/gm)].map((m) => m[1])
+    const dups = [...new Set(names.filter((n, i) => names.indexOf(n) !== i))]
+    check(`${id} 块内没有重复定义`, dups.length === 0, dups.length ? `重复: ${dups.join(', ')}` : '')
+  }
 
-const THEMES = [
-  { name: '浅色', block: rootBlock, arrow: 'cursor-arrow-light.svg', hand: 'cursor-hand-light.svg' },
-  { name: '深色', block: darkBlock, arrow: 'cursor-arrow-dark.svg', hand: 'cursor-hand-dark.svg' },
-]
+  // 3. color-scheme 与外壳色：两处都由注册表说，但值必须真的来自 CSS
+  for (const r of registry) {
+    const t = themes.get(r.id)
+    if (!t) continue
+    check(
+      `${r.id} 的 color-scheme 与注册表 tone 一致`,
+      t.colorScheme === r.tone,
+      `CSS ${t.colorScheme ?? '缺'} / 注册表 ${r.tone}`
+    )
+    const tok = r.tone === 'light' ? '--color-primary' : '--color-bg'
+    const cssColor = (t.vars.get(tok) || '').toLowerCase()
+    check(
+      `${r.id} 注册表 shell 等于 ${tok}（浅色取主色、深色取页面底）`,
+      (r.shell || '').toLowerCase() === cssColor,
+      `注册表 ${r.shell} / CSS ${cssColor}`
+    )
+  }
 
-// 实心块那对颜色在两个主题里各自定义了一次，光标必须跟着各自的走
-const palette = {}
-for (const t of THEMES) {
-  palette[t.name] = { fill: readColor(t.block, '--solid-primary-bg'), stroke: readColor(t.block, '--solid-primary-fg') }
-  check(`${t.name}块里能读到 --solid-primary-bg（光标填充来源）`, !!palette[t.name].fill)
-  check(`${t.name}块里能读到 --solid-primary-fg（光标描边来源）`, !!palette[t.name].stroke)
-}
+  // 4. index.html 的预涂清单：它跑在打包产物之前，import 不了注册表，只能抄一份
+  {
+    const missing = regIds.filter((id) => !inlineTones.has(id))
+    const extra = [...inlineTones].filter((id) => !regIds.includes(id))
+    check(
+      'index.html 预涂清单的 id 集合与注册表一致',
+      missing.length === 0 && extra.length === 0,
+      [
+        missing.length ? `预涂缺: ${missing.join(', ')}` : '',
+        extra.length ? `预涂多: ${extra.join(', ')}` : ''
+      ]
+        .filter(Boolean)
+        .join('；')
+    )
+  }
 
-const publicDir = join(SRC, '..', 'public')
-const attr = (svg, name) => {
-  const m = svg.match(new RegExp(`\\b${name}="(#[0-9a-fA-F]{3,8})"`))
-  return m ? m[1].toLowerCase() : null
-}
+  // 5. 主题卡的预览色样：写死是有意的（预览不随当前主题变），所以要盯着它与主题块一致
+  for (const r of registry) {
+    const t = themes.get(r.id)
+    const sw = swatches.get(r.id)
+    if (!t || !sw) {
+      check(`${r.id} 有 [data-swatch] 预览色样`, false, t ? '缺色样' : '缺主题块')
+      continue
+    }
+    for (const [swTok, themeTok] of [
+      ['--sw-page', '--color-bg'],
+      ['--sw-card', '--color-fg'],
+      ['--sw-border', '--color-border'],
+      ['--sw-accent', '--solid-primary-bg']
+    ]) {
+      const a = (sw.get(swTok) || '').toLowerCase()
+      const b = (t.vars.get(themeTok) || '').toLowerCase()
+      check(`${r.id} 色样 ${swTok} == 主题块的 ${themeTok}`, a === b, `色样 ${a || '缺'} / 主题块 ${b || '缺'}`)
+    }
+  }
 
-for (const t of THEMES) {
-  for (const [kind, file] of [['箭头', t.arrow], ['手型', t.hand]]) {
-    let svg
-    try { svg = readFileSync(join(publicDir, file), 'utf8') } catch { check(`${t.name}${kind}光标 ${file} 存在`, false, '读不到文件'); continue }
-    const tag = `${t.name}${kind} ${file}`
+  // 6. 光标：每套主题的文件名、热区、配色都要与自己的实心块对得上
+  const readCursorToken = (value) => {
+    const m = (value || '').match(/^url\('([^']+)'\)\s+(\d+)\s+(\d+)\s*,\s*([a-z-]+)$/)
+    return m ? { url: m[1], hotspot: `${m[2]} ${m[3]}`, fallback: m[4] } : null
+  }
+  const KINDS = [
+    { label: '箭头', tok: '--cursor-arrow', suffix: 'arrow', hotspot: '2 2', fallback: 'auto' },
+    { label: '手型', tok: '--cursor-hand', suffix: 'hand', hotspot: '9 2', fallback: 'pointer' }
+  ]
+  for (const r of registry) {
+    const t = themes.get(r.id)
+    if (!t) continue
+    // cursorSource 是显式共用（oled 与 dark 的实心块那一对相同），否则必须是自己那一份
+    const source = r.cursorSource || r.id
+    const fill = (t.vars.get('--solid-primary-bg') || '').toLowerCase()
+    const stroke = (t.vars.get('--solid-primary-fg') || '').toLowerCase()
+    for (const k of KINDS) {
+      const tag = `${r.id} ${k.label}光标`
+      const c = readCursorToken(t.vars.get(k.tok))
+      if (!c) {
+        check(`${tag} 的 ${k.tok} 可解析（url + 热区 + 兜底）`, false, t.vars.get(k.tok) || '缺')
+        continue
+      }
+      check(`${tag} 指向 cursor-${k.suffix}-${source}.svg`, c.url === `/cursor-${k.suffix}-${source}.svg`, c.url)
+      check(`${tag} 用根绝对路径`, c.url.startsWith('/'), c.url)
+      check(`${tag} 热区是 ${k.hotspot}`, c.hotspot === k.hotspot, c.hotspot)
+      check(`${tag} 兜底是 ${k.fallback}`, c.fallback === k.fallback, c.fallback)
 
-    // 按属性逐项比对，而不是「整份文件里出现过这个色值就算过」：
-    // 后者在 fill/stroke 写反时照样通过 —— 两个色值都在文件里。
-    const fill = attr(svg, 'fill')
-    const stroke = attr(svg, 'stroke')
-    check(`${tag} 的 fill 等于本主题实心块底色 ${palette[t.name].fill}`, fill === palette[t.name].fill, `实测 ${fill}`)
-    check(`${tag} 的 stroke 等于本主题实心块文字色 ${palette[t.name].stroke}`, stroke === palette[t.name].stroke, `实测 ${stroke}`)
-    check(`${tag} 的 fill 与 stroke 不是同一个色`, fill !== stroke)
+      const file = `cursor-${k.suffix}-${source}.svg`
+      let svg = null
+      try {
+        svg = readFileSync(join(PUBLIC_DIR, file), 'utf8')
+      } catch {
+        check(`${tag} 文件 ${file} 存在`, false, '读不到文件')
+        continue
+      }
+      const attrOf = (name) => {
+        const m = svg.match(new RegExp(`\\b${name}="(#[0-9a-fA-F]{3,8})"`))
+        return m ? m[1].toLowerCase() : null
+      }
+      check(`${file} 的 fill 等于本主题实心块底色 ${fill}`, attrOf('fill') === fill, `实测 ${attrOf('fill')}`)
+      check(`${file} 的 stroke 等于本主题实心块文字色 ${stroke}`, attrOf('stroke') === stroke, `实测 ${attrOf('stroke')}`)
+      check(`${file} 的 fill 与 stroke 不是同一个色`, attrOf('fill') !== attrOf('stroke'))
+      check(`${file} 带固有尺寸`, /<svg[^>]*\bwidth="\d+"[^>]*\bheight="\d+"/.test(svg.replace(/\s+/g, ' ')))
+      const wh = svg.replace(/\s+/g, ' ').match(/<svg[^>]*\bwidth="(\d+)"[^>]*\bheight="(\d+)"/)
+      check(`${file} 不超过 32x32（Firefox 上限）`, !!wh && +wh[1] <= 32 && +wh[2] <= 32, wh ? `实测 ${wh[1]}x${wh[2]}` : '读不到尺寸')
+      const fills = [...svg.matchAll(/\bfill="(#[0-9a-fA-F]{3,8})"/g)]
+      check(`${file} 只有一处 fill`, fills.length === 1, `实测 ${fills.length} 处`)
+      const comments = svg.match(/<!--[\s\S]*?-->/g) || []
+      check(`${file} 注释里没有连续减号`, !comments.some((c) => c.slice(4, -3).includes('--')))
+    }
+  }
 
-    // 光标图必须自带固有尺寸：Chrome 拿不到 width/height 时不会渲染光标，
-    // 也不报错，表现只是「样式改了但没效果」
-    check(`${tag} 带固有尺寸`, /<svg[^>]*\bwidth="\d+"[^>]*\bheight="\d+"/.test(svg.replace(/\s+/g, ' ')))
-    // Firefox 67 起自定义光标上限 32x32，超了会被整个丢弃
-    const wh = svg.match(/<svg[^>]*\bwidth="(\d+)"[^>]*\bheight="(\d+)"/)
-    check(`${tag} 不超过 32x32（Firefox 上限）`, !!wh && +wh[1] <= 32 && +wh[2] <= 32, wh ? `实测 ${wh[1]}x${wh[2]}` : '读不到尺寸')
-    // XML 注释里出现连续两个减号会让整个 SVG 解析失败（favicon 踩过这个坑）
-    const comments = svg.match(/<!--[\s\S]*?-->/g) || []
-    check(`${tag} 注释里没有连续减号`, !comments.some((c) => c.slice(4, -3).includes('--')))
+  // 7. 脚本生成的光标必须与主题色同步（改主题色忘了重新生成时，这份内容会不一样）
+  const generated = renderAll(theme)
+  for (const [name, { content }] of generated) {
+    let disk = null
+    try {
+      disk = readFileSync(join(PUBLIC_DIR, name), 'utf8')
+    } catch {
+      /* 下面的断言会报出来 */
+    }
+    check(`public/${name} 与主题色同步（npm run gen:cursors）`, disk === content)
+  }
+  // 反向：主题已经删掉、文件还留着的旧光标（只提示，不影响正确性）
+  const expected = new Set(['cursor-arrow-light.svg', 'cursor-hand-light.svg', 'cursor-arrow-dark.svg', 'cursor-hand-dark.svg', ...generated.keys()])
+  const orphans = readdirSync(PUBLIC_DIR).filter((f) => /^cursor-(arrow|hand)-.+.svg$/.test(f) && !expected.has(f))
+  if (orphans.length) console.log(`  INFO  public/ 下有不再被任何主题使用的光标文件: ${orphans.join(', ')}`)
+
+  // 8. antd 令牌映射读的 CSS 变量必须真的存在（否则 antd 会静默退回自己的默认色）
+  const antdSrc = readFileSync(join(SRC, 'utils/antdTheme.ts'), 'utf8')
+  const antdVars = [...antdSrc.matchAll(/'(--[\w-]+)'/g)].map((m) => m[1])
+  check('antdTheme.ts 里映射了至少 10 个令牌', antdVars.length >= 10, `实测 ${antdVars.length} 个`)
+  const antdMissing = antdVars.filter((v) => !defined.has(v))
+  check('antdTheme.ts 映射的令牌都在 theme.css 里有定义', antdMissing.length === 0, antdMissing.length ? `未定义: ${antdMissing.join(', ')}` : '')
+
+  // 9. 漂移守卫：按主题名分支的写法只允许出现在这两个文件里
+  //
+  // theme.css 是主题块本身（那些选择器就该长这样），theme.ts 是唯一写这个属性的地方。
+  // 组件里再冒出 [data-theme=...] 就说明有人开了一条并行分支 —— 多主题下
+  // 那条分支要么漏了 10 套主题，要么每加一套都要回来改，两种都会静默出错。
+  const THEME_ATTR_ALLOWED = ['styles/theme.css', 'stores/theme.ts']
+  for (const file of walk(SRC)) {
+    const rel = file.slice(SRC.length + 1).replace(/\\/g, '/')
+    if (THEME_ATTR_ALLOWED.includes(rel)) continue
+    const src = stripComments(readFileSync(file, 'utf8'))
+    const hit = src.match(/\[data-theme\s*[\^$*~|]?=/)
+    check(`${rel} 里没有按主题名分支的选择器`, !hit, hit ? '改用主题令牌（见 theme.css 的组件档位令牌）' : '')
+  }
+
+  // 老键只该被「读一次做迁移」的地方提到：store 与它的用例（用例必须写这个字面量
+  // 才测得了迁移），以及 index.html 的预涂脚本（它也要认这个键，否则首帧闪一下）。
+  const legacyKeyUsers = [join(SRC, '..', 'index.html'), ...walk(SRC)].filter((f) =>
+    readFileSync(f, 'utf8').includes('llm-relay-darkstyle')
+  )
+  check(
+    '老键 llm-relay-darkstyle 只出现在迁移相关的位置（store / 它的用例 / 预涂脚本）',
+    legacyKeyUsers.every((f) => /stores[\\/]theme(\.spec)?\.ts$/.test(f) || /index\.html$/.test(f)),
+    legacyKeyUsers.map((f) => f.slice(SRC.length + 1)).join(', ')
+  )
+
+  // 10. 老档位迁移的**判据**必须两处一致（不只是「都提到了那个键」）。
+  //
+  // 预涂脚本（index.html）与 store 各写了一份这个判断，而它们必须表达同一件事：
+  // 只有「上次停在深色」才迁移成 oled。写歪一边的表现是首帧一套、打包产物起来后
+  // 另一套 —— 正是那一段注释声称要避免的跳变，而它只在刷新的一瞬间可见。
+  // 比对方式：取出各自那行判断，把变量名抹掉（saved / stored 叫什么无所谓），
+  // 只比「出现了哪些字面量」与「&&/||/=== 各几个」。
+  {
+    const ruleOf = (src) => {
+      const line = src.split('\n').find((l) => l.includes("'oled'") && l.includes('===') && l.includes('&&'))
+      if (!line) return null
+      const lits = [...line.matchAll(/'([^']+)'/g)].map((m) => m[1]).sort().join(',')
+      const count = (sub) => line.split(sub).length - 1
+      return `${lits}|&&${count('&&')}|${count('||')}|||${count('===')}`
+    }
+    const a = ruleOf(readFileSync(join(SRC, '..', 'index.html'), 'utf8'))
+    const b = ruleOf(readFileSync(join(SRC, 'stores/theme.ts'), 'utf8'))
+    check(
+      '预涂脚本与 store 的老档位迁移判据同形（变量名可不同）',
+      !!a && a === b,
+      `index.html ${a ?? '找不到'} / theme.ts ${b ?? '找不到'}`
+    )
   }
 }
 
-// CSS 里的热区必须与图形对得上：写错的表现是「点下去的位置和看到的尖差开」。
-// 两套的热区还必须**逐字相同** —— 同一位置在两个主题下点到不同的东西，
-// 用户只会觉得「点歪了」，不会想到是换了套光标。
-// 这里直接比对两个令牌的定义本身：绕道去比图形尺寸或路径长度都验证不到这件事。
-for (const tok of ['--cursor-arrow', '--cursor-hand']) {
-  const got = THEMES.map((t) => ({ name: t.name, v: readCursor(t.block, tok) }))
-  check(`theme.css 两个主题都定义了 ${tok} 且带热区`, got.every((g) => !!g.v), got.map((g) => `${g.name}:${g.v ? '有' : '缺'}`).join(' '))
-  if (got.every((g) => g.v)) {
-    check(`${tok} 两个主题的热区坐标逐字相同`, got[0].v.hotspot === got[1].v.hotspot, `${got[0].name} ${got[0].v.hotspot} vs ${got[1].name} ${got[1].v.hotspot}`)
-    check(`${tok} 两个主题的兜底光标相同`, got[0].v.fallback === got[1].v.fallback, `${got[0].v.fallback} vs ${got[1].v.fallback}`)
-  }
-}
-// 浅色令牌必须指向 -light 文件、深色指向 -dark：两处都写成同一个文件
-// （复制粘贴后忘了改）时，另一套图形就成了没人引用的死资源，而界面上
-// 两个主题看着都「有光标」，不会有人发现。
-for (const t of THEMES) {
-  const a = readCursor(t.block, '--cursor-arrow')
-  const h = readCursor(t.block, '--cursor-hand')
-  const suffix = t.name === '浅色' ? '-light.svg' : '-dark.svg'
-  check(`${t.name}块的 --cursor-arrow 指向 ${suffix}`, !!a && a.url.endsWith(suffix), a ? a.url : '读不到')
-  check(`${t.name}块的 --cursor-hand 指向 ${suffix}`, !!h && h.url.endsWith(suffix), h ? h.url : '读不到')
-}
-// 深色块必须**显式覆盖**这两个令牌：漏掉的话深色模式下会继承 :root 的值，
-// 把浅色那份亮底深描边的图形直接搬到深色底上（填充 #b15840 在面板上只有 2.73:1）
-for (const tok of ['--cursor-arrow', '--cursor-hand']) {
-  check(`深色块覆盖了 ${tok}`, darkBlock.includes(tok + ':'))
-}
-// 光标 URL 必须是根绝对路径：这份 CSS 打包后在 /assets/ 下，相对路径会解析不到
-for (const t of THEMES) {
-  for (const tok of ['--cursor-arrow', '--cursor-hand']) {
-    const c = readCursor(t.block, tok)
-    check(`${t.name}块的 ${tok} 用根绝对路径`, !!c && c.url.startsWith('/'), c ? c.url : '读不到')
-  }
-}
-// 四份图形都不该是五颜六色的非预期产物：只允许出现一对 fill/stroke
-for (const t of THEMES) {
-  for (const file of [t.arrow, t.hand]) {
-    let svg
-    try { svg = readFileSync(join(publicDir, file), 'utf8') } catch { continue }
-    const fills = [...svg.matchAll(/\bfill="(#[0-9a-fA-F]{3,8})"/g)].map((m) => m[1].toLowerCase())
-    check(`${file} 只有一处 fill`, fills.length === 1, `实测 ${fills.length} 处: ${fills.join(', ')}`)
-  }
-}
 
 console.log('')
 console.log('=== 新日志入场动效契约 ===')

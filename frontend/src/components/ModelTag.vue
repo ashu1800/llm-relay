@@ -19,9 +19,11 @@ const vars = computed(() => modelVars(style.value))
 <style scoped>
 .model-tag {
   /* 明度由主题决定，色相与彩度由模型名决定（见 utils/modelStyle.ts）。
-     L=0.47 是实测出来的：它让各色相都能满足正文 4.5:1 的对比度要求，
-     又不会在浅色主题下糊成一片。 */
-  --mt-l: 0.47;
+     浅色族 L=0.47、深色族 0.80，都是实测出来的：它让各色相都能满足正文
+     4.5:1 的对比度要求，又不会糊在背景里。值走主题令牌
+     （2026-09-30 之前深色是下面一条 data-theme='dark' 覆盖，
+     多主题之后那种写法要列 8 个深色 id）。 */
+  --mt-l: var(--tag-tint-l);
 
   display: inline-block;
   /* 列宽装不下的长模型名要出省略号，不能把列撑开、更不能折行
@@ -41,9 +43,6 @@ const vars = computed(() => modelVars(style.value))
   vertical-align: middle;
 }
 
-/* 深色主题下换成高明度文字：同一个色相在深底上必须提亮才够对比，
-   直接沿用浅色主题的值会糊在背景里。 */
-:root[data-theme='dark'] .model-tag {
-  --mt-l: 0.80;
-}
+/* 深色族提亮那一档现在写在 theme.css 的 --tag-tint-l 里（每个深色主题块各写一次）：
+   同一个色相在深底上必须提亮才够对比，直接沿用浅色主题的值会糊在背景里。 */
 </style>

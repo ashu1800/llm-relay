@@ -2,16 +2,37 @@
 //   1. 不同的模型真的不同色 —— 色相由模型名派生，撞色就等于没做
 //   2. 胶囊文字对底色的对比度 ≥ 4.5:1（WCAG AA 正文标准），浅色与深色主题各测一遍
 //
-// 用法: NODE_USE_ENV_PROXY=0 node scripts/check-model-colors.mjs
+// 用法: NODE_USE_ENV_PROXY=0 node scripts/check-model-colors.mjs [both|all|<主题 id>]
 // 依赖: Chrome 带 --remote-debugging-port=9222 在跑（与其它 capture-*.mjs 相同）
 //
 // 为什么必须在浏览器里量：oklch 的实际渲染值、半透明底色与面板底色的合成结果、
 // 深浅主题各自的明度，都只有浏览器算得准；拿 CSS 源码推是推不出结论的。
+//
+// 2026-09-30：主题清单改为从 frontend/src/styles/theme.css 解析（共用一个解析器），
+// 默认只跑两套默认主题 —— 模型胶囊的明度是**族档位**（--tag-tint-l：
+// 浅色族 0.47 / 深色族 0.80），同族内各主题取同一个值，所以两套就够代表两族；
+// 想逐套确认时用 all。族档位在族内是否一致由 check-theme-contrast.mjs 打 INFO 提示。
 import fs from 'node:fs'
+import { parseRegistry, parseThemes } from '../frontend/scripts/lib/theme-css.mjs'
 
 const URL_LOG = 'http://127.0.0.1:8888/console/dashboard'
 const OUT_DIR = '.shots'
-const THEMES = ['light', 'dark']
+const ALL_IDS = [...parseThemes().keys()]
+const THEME_ARG = (process.argv[2] || 'both').toLowerCase()
+const THEMES =
+  THEME_ARG === 'both'
+    ? ['light', 'dark']
+    : THEME_ARG === 'all'
+      ? ALL_IDS
+      : ALL_IDS.includes(THEME_ARG)
+        ? [THEME_ARG]
+        : null
+if (!THEMES) {
+  console.error(`参数只能是 both / all，或某个主题 id（${ALL_IDS.join(' / ')}），收到 ${THEME_ARG}`)
+  process.exit(2)
+}
+// 显示名从注册表取，免得报错时只看到 'solarized-dark' 这种 id
+const REGISTRY = new Map(parseRegistry().map((t) => [t.id, t]))
 
 const ver = await (await fetch('http://127.0.0.1:9222/json/version')).json()
 const ws = new WebSocket(ver.webSocketDebuggerUrl)
@@ -114,7 +135,10 @@ ws.close()
 
 // ---- 汇总 ----
 let failed = 0
-const NAME = { light: '浅色主题', dark: '深色主题' }
+const nameOf = (id) => {
+  const r = REGISTRY.get(id)
+  return r ? `${r.name}（${id}）` : id
+}
 for (const theme of THEMES) {
   const r = results[theme]
   const rows = r.明细
@@ -129,7 +153,7 @@ for (const theme of THEMES) {
   const bad = rows.filter((x) => x.对比度 < 4.5)
   const overflow = rows.filter((x) => x.溢出)
 
-  console.log(`\n=== ${NAME[theme]}（data-theme=${r.主题}）===`)
+  console.log(`\n=== ${nameOf(theme)}（data-theme=${r.主题}）===`)
   console.log(`  胶囊 ${rows.length} 个，模型 ${models.length} 种，色相 ${byHue.size} 种`)
   for (const x of rows.slice(0, 8)) {
     console.log(`    ${x.模型.padEnd(24)} 色相 ${String(x.色相).padStart(3)}  ${x.文字色.padEnd(28)} 底 ${x.合成底色.padEnd(18)} 对比度 ${x.对比度}`)
@@ -143,5 +167,7 @@ for (const theme of THEMES) {
   if (bad.length || clash.length) failed++
 }
 
-console.log(`\n结论：${failed ? '不通过（见上）' : '通过'}；截图已存到 ${OUT_DIR}/model-tags-light.png 与 ${OUT_DIR}/model-tags-dark.png`)
+console.log(
+  `\n结论：${failed ? '不通过（见上）' : '通过'}；截图已存到 ${OUT_DIR}/model-tags-${THEMES.join('-')}.png`
+)
 process.exit(failed ? 1 : 0)

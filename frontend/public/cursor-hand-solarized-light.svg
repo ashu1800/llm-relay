@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- 由 frontend/scripts/gen-theme-cursors.mjs 生成，不要手改。
+       形状取自形状模板 cursor-hand-light.svg（浅色族的锐角轮廓），
+       交互手型的配色取自 solarized-light 主题「主色实心块」那一对：fill 是块底色、stroke 是压在上面的文字色。
+       改完主题色跑 npm run gen:cursors 重新生成，check-contracts.mjs 会逐字节比对。 -->
+  <path
+    d="M7.4 11.4 V4.3 a1.7 1.7 0 0 1 3.4 0 V10.8 H15.4
+       a3.2 3.2 0 0 1 3.2 3.2 V18 a3.4 3.4 0 0 1 -3.4 3.4 H9.6
+       a3.4 3.4 0 0 1 -3.4 -3.4 V17.6
+       c-1.5 -.2 -2.7 -1.5 -2.7 -3.1 c0 -1.2 1 -2.2 2.2 -2.2
+       l1.7 -.9 Z"
+    fill="#186194"
+    stroke="#ffffff"
+    stroke-width="1.5"
+    stroke-linejoin="round" />
+</svg>

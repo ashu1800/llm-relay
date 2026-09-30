@@ -66,6 +66,13 @@ backend/internal/version/VERSION text eol=lf
 *.ps1 text eol=lf
 *.psm1 text eol=lf
 
+# SVG：是文本，而且 public/cursor-*.svg 会被逐字节比对（2026-09-30 起）。
+# 生成器（frontend/scripts/gen-theme-cursors.mjs）写的是 LF，契约脚本拿磁盘内容
+# 与生成结果直接比 —— 不声明的话 core.autocrlf=true 的机器检成 CRLF，
+# 生成出来的文件会变成「头部 LF、正文 CRLF」的混合行尾，diff 里还会混进看不见的换行改动。
+# 这一条与 .sh / Makefile 那几条是同一个理由：显式钉死，不依赖每个人的 autocrlf。
+*.svg text eol=lf
+
 # 二进制：明确标记，免得 git 去猜（也不会被 autocrlf 碰）
 *.png binary
 *.jpg binary

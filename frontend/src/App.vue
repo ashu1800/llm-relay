@@ -8,6 +8,8 @@ import zhCN from 'ant-design-vue/es/locale/zh_CN'
 import dayjs from 'dayjs'
 import 'dayjs/locale/zh-cn'
 import { useThemeStore } from '@/stores/theme'
+import { buildAntdTokens, isDarkTone, readCssVar } from '@/utils/antdTheme'
+import { themeById } from '@/utils/themes'
 
 // dayjs 的 locale 决定日期选择器、相对时间等文案，与上面的 locale 是两套，
 // 必须一起设置，否则日期面板仍是英文
@@ -15,59 +17,37 @@ dayjs.locale('zh-cn')
 
 const themeStore = useThemeStore()
 
-// Ant Design Vue 令牌与参考站 CSS 变量保持同源
+// Ant Design Vue 令牌与本站 CSS 变量同源（2026-09-30 改为运行时读 CSS）。
 //
-// colorPrimary 与 --color-primary(#c87864) **有意不同**。
+// 这里的 13 个色值全部来自 styles/theme.css 的令牌，映射关系在
+// utils/antdTheme.ts 里一处维护。以前它们是手抄的字面量 —— 那时只有两套主题
+// 还抄得动，12 套主题 × 13 个值就是 156 份会各自漂移的副本，
+// 而漂移的表现是「按钮颜色和卡片不是同一套主题」，不报错、不失败。
 //
-// antd 的 type="primary" 按钮是实心填充 + 白字（colorTextLightSolid），
-// 字号 14px，属于正文级文字，要按 WCAG AA 的 4.5:1 算。
-// #c87864 上压白字只有 3.32:1 —— 全站 8 个主按钮（新建渠道 / 新建密钥 /
-// 保存 / 重试…）的文字都不达标。这里换成同色相压暗一档的 #b15840（4.84:1），
-// 观感与品牌色一致而文字读得清。
+// 两个值得记住的取色讲究（细节见 antdTheme.ts 与 theme.css）：
 //
-// 深色主题则是「浅底 + 深字」：深底上放 #b15840 时，按钮相对卡片(#303030)
-// 只有 2.73:1 的轮廓对比，会糊进背景；#e8a48c 对卡片 6.36:1、对页面底
-// 7.85:1，配深字 6.98:1，两个方向都够。
-//
-// 因此深色主题必须同时改 colorTextLightSolid —— 不改的话，浅底上的白字
-// 只有 2.08:1，比原来的问题更严重。深色下 error/success/warning 三个语义色
-// 也都是浅色（#f08a7a / #45c79a / #e0a83c），配深字分别是 5.95 / 6.82 / 6.78，
-// 所以这一处覆盖对它们同样是修正而不是副作用。
-const themeConfig = computed(() => ({
-  algorithm: themeStore.isDark ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
-  token: {
-    colorPrimary: themeStore.isDark ? '#e8a48c' : '#b15840',
-    colorInfo: themeStore.isDark ? '#e8a48c' : '#b15840',
-    colorSuccess: themeStore.isDark ? '#45c79a' : '#10b37d',
-    colorWarning: themeStore.isDark ? '#e0a83c' : '#f59e0b',
-    colorError: themeStore.isDark ? '#f08a7a' : '#ea4343',
-    // 实心按钮上的文字：浅色主题是白字压深底，深色主题反过来
-    colorTextLightSolid: themeStore.isDark ? '#3a241d' : '#ffffff',
-    colorTextBase: themeStore.isDark ? '#c8c8c8' : '#303030',
-    colorBgBase: themeStore.isDark ? '#202020' : '#f8f5ee',
-    colorBgContainer: themeStore.isDark ? '#303030' : '#ffffff',
-    colorBorder: themeStore.isDark ? '#424242' : '#d9d9d9',
-    // ---- 文字灰阶必须显式映射（2026-09-24 UI 审评）----
-    //
-    // 不映射的话它们走 antd 默认的 rgba(0,0,0,.25) / rgba(0,0,0,.45)：
-    //   · 占位文字 rgba(0,0,0,.25) 压白底只有 **1.84:1**（暗色 2.23:1）——
-    //     输入框里「这个框该填什么」的唯一线索几乎看不见（表单没有别的示例文案）。
-    //   · 二级文字 rgba(0,0,0,.45) 只有 3.36:1，不达 AA 正文的 4.5:1。
-    //
-    // 下面两个值与 styles/theme.css 的 --color-text-secondary 同源（alpha 0.70）：
-    // 浅色白卡 5.10:1 / 暗色卡片 4.69:1。占位文字比二级文字再淡一点点，
-    // 但仍守在 4.5:1 之上：浅色 #767676（白卡 4.54:1）、暗色 #979797（卡片 4.52:1）。
-    // 它**必须**比真实值淡 —— 否则用户分不清「已经填了」和「还没填」。
-    colorTextSecondary: themeStore.isDark ? 'rgba(200, 200, 200, 0.7)' : 'rgba(48, 48, 48, 0.7)',
-    colorTextPlaceholder: themeStore.isDark ? '#979797' : '#767676',
-    // 三级文字（antd 用它画表单说明与空态补充）。比上面两档更淡是**有意的**：
-    // 这一档只承载「读不到也不影响操作」的补充信息。亮度与 antd 默认同档
-    // （白底 3.36:1），但色相跟着页面的暖灰走，不再是从别处飘来的纯黑透明。
-    colorTextTertiary: themeStore.isDark ? 'rgba(200, 200, 200, 0.55)' : 'rgba(48, 48, 48, 0.55)',
-    borderRadius: 6,
-    fontFamily: 'var(--font-family-base)'
+// 1. colorPrimary 取的是 --solid-primary-bg，**不是** --color-primary。
+//    antd 的 type="primary" 按钮是实心填充 + 白字（colorTextLightSolid），
+//    字号 14px，属于正文级文字，要按 WCAG AA 的 4.5:1 算。
+//    主色 #c87864 上压白字只有 3.32:1 —— 全站 8 个主按钮（新建渠道 / 新建密钥 /
+//    保存 / 重试…）的文字都不达标。--solid-primary-bg 是专为「主色铺底 + 上面写字」
+//    挑的那一档（浅色族深底白字、深色族浅底深字，两个值必须成对使用）。
+// 2. 文字灰阶（二级/占位/三级）必须显式映射：antd 默认的占位文字
+//    rgba(0,0,0,.25) 压白底只有 1.84:1 —— 输入框里「这个框该填什么」的
+//    唯一线索几乎看不见。
+const themeConfig = computed(() => {
+  // 依赖的是**主题 id**，不是 tone：同族换主题（Nord → Dracula）时 tone 不变，
+  // 若依赖 tone，这个 computed 不会重算，antd 的按钮/表格会停在上一个主题的配色上。
+  const def = themeById(themeStore.themeId)
+  return {
+    algorithm: isDarkTone(def.tone) ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
+    token: {
+      ...buildAntdTokens(readCssVar),
+      borderRadius: 6,
+      fontFamily: 'var(--font-family-base)'
+    }
   }
-}))
+})
 </script>
 
 <template>

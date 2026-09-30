@@ -188,17 +188,79 @@ CSS 在 `/assets/` 下，相对路径取不到图），以及 antd 会给 `.ant-
 **Harding 是商业授权字体**（参考站自托管的那份），本项目内部自用不受影响，
 但对外分发前需要自行确认授权范围。
 
+### 主题系统
+
+2026-09-30 起界面有 **12 套内置配色**（浅色 4 / 深色 8），入口是**数据看板工具栏
+右上角那枚按钮**（点开是一个主题网格弹层）与**系统设置页的「界面主题」面板**
+（同一个选择器组件，两种尺寸）。原来的「深色质感档位」（`data-darkstyle`）已取消，
+「深空纯黑」升格成一套普通主题；老键在 store 里做一次性迁移。
+
+一条轴：`<html data-theme="<主题 id>">` 就是全部状态。`styles/theme.css` 里
+`:root` 是 `light` 主题本尊，其余 11 套各是一个 `:root[data-theme='<id>']` 块，
+**每块把随底色而变的令牌写全**（清单见 `frontend/scripts/lib/theme-css.mjs` 的
+`REQUIRED_TOKENS`）—— 不许靠继承：漏一个令牌会静默继承浅色主题的值，
+不报错、不失败，只是某个字在某套主题下发虚。哪些 id 存在由
+`src/utils/themes.ts` 的注册表说了算。
+
+配色来源（都是 MIT 许可，偏差逐条记在各自主题块的注释里）：
+
+| 主题 id | 上游 | 主题 id | 上游 |
+|---|---|---|---|
+| `light` / `dark` | 参考站 llm.ohub.vip 实测 | `nord` | Nord |
+| `oled` | 本站扩展（深灰的表面换纯黑） | `dracula` | Dracula |
+| `latte` / `mocha` | Catppuccin Latte / Mocha | `tokyo-night` | Tokyo Night |
+| `solarized-light` / `solarized-dark` | Solarized | `gruvbox-light` / `gruvbox-dark` | Gruvbox |
+
+取色规则：表面三件套与主色逐字取上游官方色值；上游没有中间调边框色时允许
+在两端色之间做 sRGB 插值（注明比例）；**上游值达不到 WCAG AA 就改**，
+偏差必须记进注释 —— 这不是例外而是常态（Solarized Light 的官方正文只有 4.15:1、
+Solarized Dark 的 base0 只有 4.32:1、Dracula 的正红在深色卡片上只有 3.6:1）。
+
+三条守卫：
+
+- `frontend/scripts/check-theme-contrast.mjs`：逐套实算 WCAG 比值
+  （文字 ≥ 4.5:1、非文本 ≥ 3:1、边框 ≥ 1.15:1），并打 INFO 提示「族档位令牌
+  在族内取值不一致」（可能是某个主题有意微调，也可能是改了一套忘了另一套）；
+- `frontend/scripts/check-contracts.mjs` 的「主题契约」一节：注册表 / CSS 块 /
+  `index.html` 预涂清单 / 预览色样 / 光标资源 / antd 令牌映射六处一致性，
+  外加一条漂移守卫 —— **组件里不许出现 `[data-theme=…]` 选择器**
+  （多主题下那种分支要么漏 10 套主题，要么每加一套都要回来改）；
+- `scripts/verify-themes.mjs`：真浏览器逐套确认「声明有没有真的作用到页面上」
+  （属性、页面底色、浏览器外壳色、刷新保持、弹层点击、控制台无异常）。
+
+antd 的令牌（主色、语义色、背景、边框、文字灰阶）**不再在 `App.vue` 里手抄**：
+`src/utils/antdTheme.ts` 维护「antd token → CSS 变量」的映射，运行时从计算样式读取。
+12 套主题 × 13 个值手抄就是 156 份会各自漂移的副本，而漂移的表现是
+「按钮颜色和卡片不是同一套主题」，不报错、不失败。
+
+**新增一套主题的步骤**（缺一步 `npm run check` 就会报出来）：
+
+1. `styles/theme.css`：复制一个同族主题块，改值，注释写清上游色名与偏差
+   （比值先跑 `node scripts/check-theme-contrast.mjs --verbose` 看实测）；
+2. 同一文件末尾的 `[data-swatch='<id>']` 加四项预览色（页面底/卡片/边框/主色实心块）；
+3. `src/utils/themes.ts` 的 `THEMES` 加一项（id / 名字 / 上游 / 明暗 / 说明 / 外壳色）；
+4. `frontend/index.html` 预涂脚本的 `THEME_IDS` 数组加一项（漏了会「刷新闪一下」）；
+5. `cd frontend && npm run gen:cursors` 生成该主题的两个光标文件（提交入库）；
+6. `npm run check && npm run test && npm run type-check`，必要时跑
+   `node scripts/verify-themes.mjs <base> <新 id>` 单独确认这一套。
+
 ### 自定义光标
 
 鼠标光标是本项目自己的品牌元素（参考站没有）：默认箭头与交互手型**每个主题
-各有一套**，四份图形在 `frontend/public/cursor-arrow-light.svg`、
-`cursor-hand-light.svg`、`cursor-arrow-dark.svg`、`cursor-hand-dark.svg`。
-两套不是同一张图换个色 —— 浅色是长而窄的锐角轮廓（高宽比 1.47），深色是短而
-阔的圆角轮廓（1.19），并列时一眼能分出是两套。填充与描边取自各主题「主色实心
-块」的那一对变量（浅色 `#b15840` 填充 + 白描边，实测对页底 4.44:1；深色
-`#e8a48c` 填充 + `#3a241d` 描边，对面板 6.36:1）。两套的热区坐标（箭头
-`2 2`、手型 `9 2`）必须逐字相同，否则切主题时点击落点会跳。输入框 I 型、
-拖拽、禁用、帮助四类保留系统光标。
+各有一套**，22 份图形在 `frontend/public/cursor-{arrow,hand}-<主题 id>.svg`。
+两族的**形状**不同（浅色是长而窄的锐角轮廓、深色是短而阔的圆角轮廓），
+颜色取自各主题「主色实心块」的那一对变量（填充 = 块底色、描边 = 压在上面的文字色）。
+
+只有 `light` / `dark` 那四份是手写的（它们就是形状模板，正文里记着尺寸实测）；
+其余 18 份由 `frontend/scripts/gen-theme-cursors.mjs --write`（`npm run gen:cursors`）
+从对应族的模板重着色生成 —— 光标是当图片加载的、没有 CSS 级联，SVG 里写不了
+`var()`，颜色只能是字面量，11 套主题手抄一份必然漂，而且漂了没有任何报错。
+`--check` 模式与 `check-contracts.mjs` 会逐字节比对，所以「改了主题主色、
+忘了重新生成光标」会当场变红。`oled` 复用 `dark` 的两个文件
+（实心块那一对相同，注册表里用 `cursorSource` 显式声明）。
+
+所有主题的热区坐标（箭头 `2 2`、手型 `9 2`）必须逐字相同，否则切主题时点击
+落点会跳。输入框 I 型、拖拽、禁用、帮助四类保留系统光标。
 
 要改光标形状或补齐 antd 升级后新增的交互组件，看
 `frontend/src/styles/theme.css` 的「自定义光标」段 —— 那里记着清单的来源、
@@ -289,16 +351,39 @@ Invoke-WslScript -Path .\deploy\install.sh
 ```bash
 node scripts/audit-cursors.mjs http://127.0.0.1:5173   # 开发态
 node scripts/audit-cursors.mjs                          # 默认打 127.0.0.1:8888
-node scripts/audit-cursors.mjs http://127.0.0.1:8888 light   # 只审浅色（默认两个主题都跑）
+node scripts/audit-cursors.mjs http://127.0.0.1:8888 light        # 只审浅色
+node scripts/audit-cursors.mjs http://127.0.0.1:8888 all          # 全部 12 套（慢）
+node scripts/audit-cursors.mjs http://127.0.0.1:8888 solarized-dark   # 点名一套
 ```
 
-每个用例在两个主题下各跑一遍（靠预置 `localStorage` 里的 `llm-relay-theme`
-切主题，导航前注入，所以首屏那批元素也在审计范围内）。深色页面上出现**浅色
-那套**文件名判失败，单独归为「串主题」一类打印 —— 只检查「是不是自定义光标」
-的话，深色块漏配覆盖时会继承 `:root` 的值，两个主题的审计报告会一模一样全绿，
-而「绿得看不出区别」的检查等于没检查。这条判断本身有反向验证：
-`.shots/verify-cross-theme-detection.mjs` 会手动把深色页面的光标变量改写成浅色
-那套，确认审计真的报出 1062 个串主题箭头 + 205 个串主题手型。
+默认跑两套默认主题（浅色 / 深色），`all` 跑全部 12 套。每个用例靠预置
+`localStorage` 里的 `llm-relay-theme` 切主题，导航前注入，所以首屏那批元素也在
+审计范围内。**页面上出现任何「不是本主题那一套」的文件名都判失败**，单独归为
+「串主题」一类打印 —— 只检查「是不是自定义光标」的话，某个主题漏配光标令牌时
+会继承 `:root`（浅色）那套，审计报告会一模一样全绿，而「绿得看不出区别」的检查
+等于没检查。这条判断本身有反向验证：`.shots/verify-cross-theme-detection.mjs`
+会手动把深色页面的光标变量改写成浅色那套，确认审计真的报出串主题的元素。
+
+2026-09-30 起主题清单与期望文件名都从 `frontend/src/styles/theme.css` 解析
+（`frontend/scripts/lib/theme-css.mjs`，与前端几个脚本共用一份解析器）：
+硬编码 `['light','dark']` 的话，新增主题不会自动纳入审计，而「忘了加」
+在这类脚本里是完全静默的。
+
+### 主题端到端：`scripts/verify-themes.mjs`
+
+静态脚本能比对声明，但「声明有没有真的作用到页面上」只有渲染后才知道：
+选择器写错、属性拼错、打包没带上，表现都只是页面退回默认配色，不报错。
+
+```bash
+node scripts/verify-themes.mjs                    # 默认 127.0.0.1:8888，逐套跑 12 套
+node scripts/verify-themes.mjs http://127.0.0.1:5173 nord   # 只验一套（调试用）
+```
+
+逐套断言四件事：`data-theme` 属性与 `localStorage` 一致、页面底色（计算样式）
+等于主题块声明的值、`meta theme-color` 等于注册表里的外壳色、导航期间控制台无异常；
+然后用**真实鼠标事件**点开看板那枚按钮，确认弹层里有全部主题卡（且分成浅色/深色
+两组）、点一张卡真的换主题、弹层不自动关闭、刷新后仍是刚选的那套、快捷按钮
+能切回浅色族。截图落到 `.shots/theme-<id>.png`（不入库，用来肉眼确认配色观感）。
 
 ### 表格列宽守卫：`check-table-widths.mjs` 与 `check-log-columns.mjs`
 

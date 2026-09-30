@@ -38,8 +38,11 @@ const vars = computed(() => groupVars(style.value))
 
 <style scoped>
 .group-tag {
-  /* 自动配色的明度：与模型胶囊同源（L=0.47 让各色相都能满足正文 4.5:1） */
-  --gt-l: 0.47;
+  /* 自动配色的明度：与模型胶囊同源（浅色族 L=0.47、深色族 0.80，
+     各自都能满足正文 4.5:1）。值来自主题令牌而不是写在这里 ——
+     2026-09-30 多主题之前这段是「深色用一条 :root[data-theme='dark'] 覆盖」，
+     多主题下那种写法要列 8 个深色 id，每加一套主题都要再来改一次。 */
+  --gt-l: var(--tag-tint-l);
   /* 基色：自动模式用 oklch 拼出来，自定义模式在下面被覆盖成用户选的颜色 */
   --gt-base: oklch(var(--gt-l) var(--gt-c) var(--gt-h));
 
@@ -62,7 +65,7 @@ const vars = computed(() => groupVars(style.value))
 .group-tag.is-custom {
   /* 自定义色也要压到同一条明度线上。
      原来这里是 --gt-base: var(--gt-color) 直接沿用用户选的原色，
-     于是 L=0.47 这条约束只对自动配色生效，自定义色全部绕过 ——
+     于是明度约束只对自动配色生效，自定义色全部绕过 ——
      而自定义色恰恰是最不可控的一类：取色器给什么就是什么。
      实测（13% 自身做底，文字用原色）：
        #ffff00 1.05:1   #00ff00 1.27:1   #a0d911 1.57:1   #faad14 1.74:1
@@ -73,20 +76,12 @@ const vars = computed(() => groupVars(style.value))
 
      压暗用 oklab 混黑而不是改 HSL 的 L：oklab 的 L 是感知均匀的，
      混黑后各色相的观感深度一致，色相也不会像 HSL 那样偏掉。
-     取 50% 是量出来的：0.50 时十三个预设最差值 5.27:1，
-     0.45 时 4.37:1 仍有个别不达标，0.55 则过暗、分组之间失去区分度。 */
-  --gt-base: color-mix(in oklab, var(--gt-color) 50%, black);
-}
-
-/* 深色主题：同一个色相在深底上必须提亮才够对比 */
-:root[data-theme='dark'] .group-tag {
-  --gt-l: 0.80;
-}
-
-/* 自定义色在深底上同理：直接沿用原色的话，深蓝/深紫几乎看不见背景边界。
-   同样用 oklab 混白保持感知均匀：混白 45% 时十三个预设最差值 4.83:1。
-   注意方向与浅色主题相反 —— 浅色底要压暗，深色底要提亮。 */
-:root[data-theme='dark'] .group-tag.is-custom {
-  --gt-base: color-mix(in oklab, var(--gt-color) 45%, white);
+     混合比例与目标色由主题令牌给出（浅色族混黑 50%、深色族混白 45%）：
+     0.50 时十三个预设最差值 5.27:1，0.45 时 4.37:1 仍有个别不达标，
+     0.55 则过暗、分组之间失去区分度；深色族方向相反，混白 45% 最差 4.83:1。
+     2026-09-30 之前这里是两条按 data-theme='dark' 分支的规则，
+     与 GroupsView 里的预览各写一份比例 —— 现在已经合成同一个令牌，
+     两处的 50% / 45% 不可能再各改一次。 */
+  --gt-base: color-mix(in oklab, var(--gt-color) var(--tag-custom-mix-amount), var(--tag-custom-mix-color));
 }
 </style>

@@ -13,7 +13,7 @@
 // 热力图与四张图表（消耗趋势 / 消耗分布 / 模型调用分析 / 模型消耗占比）已移除：
 // 概览卡与日志列表已经覆盖了「多少 / 多少钱 / 多快 / 哪些失败」这几个问题，
 // 图表属于「再往下研究」的需求，等真有人用再看要不要以别的方式补回。
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   ApiOutlined,
   DollarOutlined,
@@ -21,12 +21,12 @@ import {
   CheckCircleOutlined,
   ReloadOutlined,
   SwapOutlined,
-  BulbOutlined,
-  BulbFilled
+  BgColorsOutlined
 } from '@ant-design/icons-vue'
 import { useRoute } from 'vue-router'
 import { api } from '@/api/client'
 import { useThemeStore } from '@/stores/theme'
+import ThemePicker from '@/components/ThemePicker.vue'
 import PageToolbar from '@/components/PageToolbar.vue'
 import StatCard from '@/components/StatCard.vue'
 import AnimatedNumber from '@/components/AnimatedNumber.vue'
@@ -121,13 +121,46 @@ const statusClass = ref('')
 // 免得用户以为地址栏能当书签用、却越用越乱
 const route = useRoute()
 
-// 主题切换（工具栏右上角那枚灯泡，2026-09-26 从侧栏底部迁来）：
-// 状态、持久化与圆形扩散动画都在 stores/theme.ts，这里只递坐标
+// 主题选择（工具栏右上角那枚按钮，2026-09-26 从侧栏底部迁来、
+// 2026-09-30 从「一键翻浅深」改成「弹层里自选 12 套」——12 套主题再靠
+// 一个按钮轮着切不现实）：状态、持久化与圆形扩散动画都在 stores/theme.ts，
+// 这里只管弹层开合与顶部那两枚快捷按钮。
 const themeStore = useThemeStore()
+const themePanelOpen = ref(false)
 
-function toggleTheme(e: MouseEvent) {
-  themeStore.toggleWithBurst(e.clientX, e.clientY)
+// 快捷切换：切到该族上一次用过的主题（没记录过就是该族的默认）。
+// 这是原来那枚灯泡的行为（一次点击翻浅深）——它被保留在弹层顶部：
+// 常驻某套深色配色的人，不该为了「临时看一眼浅色」而丢掉自己的主题。
+// 它刻意**不带**圆形扩散：这里没有「点击位置」的语义（键盘也能按），
+// 而且这一下本来就是「临时翻一下」，静默切换比铺满全屏的动画更合手。
+function quickSwitch(tone: 'light' | 'dark') {
+  themeStore.setTone(tone)
 }
+
+// 弹层打开后把焦点移进选择器。
+//
+// 不主动移焦的话弹层对纯键盘用户等于不可达：antd 把内容 teleport 到 body 外层，
+// 触发按钮的焦点不会跟着进去 —— 实测点开后按 Tab 落到的是弹层**外面**的「刷新」按钮。
+// 聚焦到当前选中那张卡的 radio（它在 radiogroup 里），于是方向键可以直接换主题、
+// Tab 也不会漏掉这 12 张卡。鼠标路径下浏览器认为这次聚焦不是键盘发起的，
+// 不会画出焦点环（:focus-visible 的判定），所以观感不受影响。
+//
+// 用 watch 而不是弹层的 @open-change：内容是被 teleport 出来的，打开这一拍
+// DOM 里还没有那 12 张卡（实测 openChange 后立刻查是 null），所以这里要轮询几拍；
+// 顺带也不必关心 antd 事件名的细节。
+watch(themePanelOpen, (open) => {
+  if (!open) return
+  let tries = 0
+  const focusPicker = () => {
+    const el = document.querySelector<HTMLInputElement>('.theme-popover .theme-radio:checked')
+    if (el) {
+      el.focus()
+      if (document.activeElement === el) return
+    }
+    if (++tries < 12) setTimeout(focusPicker, 50)
+  }
+  void nextTick(focusPicker)
+})
 
 // 列表面板的句柄：工具栏的「刷新」要连它一起刷（一页一个刷新按钮）
 const logPanel = ref<{ reload: () => void } | null>(null)
@@ -518,21 +551,56 @@ onMounted(async () => {
         {{ statusClass === 'error' ? '仅失败' : '仅成功' }}
       </a-tag>
       <template #right>
-        <!-- 主题切换：灯泡形态沿用原侧栏底部那枚（32px 圆形描边，见 .theme-btn）。
-             点击坐标递给 store，新主题从按钮位置圆形扩散铺满全屏。
-             2026-09-26 从侧栏底部迁来 —— 换主题服务的是「这块数字怎么看着舒服」，
-             放在看板自己的工具栏右上角比藏在侧栏页脚更顺手。 -->
-        <button
-          type="button"
-          class="theme-btn"
-          :title="themeStore.isDark ? '切换浅色' : '切换深色'"
-          :aria-label="themeStore.isDark ? '切换到浅色主题' : '切换到深色主题'"
-          :aria-pressed="themeStore.isDark"
-          @click="toggleTheme"
+        <!-- 主题选择：2026-09-26 从侧栏底部迁来，2026-09-30 从「一键翻浅深」
+             改成「点开弹层自选」。弹层里是 12 套主题的网格（浅色 4 / 深色 8），
+             点哪张卡就从哪个位置圆形扩散出去（坐标由 ThemePicker 递给 store）。
+             弹层刻意不自动关闭：换主题的用法就是「点一下看效果、不合适再换下一个」。 -->
+        <a-popover
+          v-model:open="themePanelOpen"
+          trigger="click"
+          placement="bottomRight"
+          overlay-class-name="theme-popover"
         >
-          <BulbOutlined v-if="!themeStore.isDark" aria-hidden="true" />
-          <BulbFilled v-else aria-hidden="true" />
-        </button>
+          <button
+            type="button"
+            class="theme-btn"
+            :title="`界面主题（当前：${themeStore.current.name}）`"
+            :aria-label="`选择界面主题，当前 ${themeStore.current.name}`"
+            aria-haspopup="dialog"
+            :aria-expanded="themePanelOpen"
+          >
+            <BgColorsOutlined aria-hidden="true" />
+          </button>
+          <template #content>
+            <div class="theme-panel" role="dialog" aria-label="界面主题">
+              <div class="theme-panel-head">
+                <span class="theme-panel-title">界面主题</span>
+                <!-- 快捷切换：回到该族上次用过的那一套（默认就是浅色/深色） -->
+                <span class="theme-quick" role="group" aria-label="浅色与深色快捷切换">
+                  <button
+                    type="button"
+                    class="theme-quick-btn"
+                    :disabled="themeStore.tone === 'light'"
+                    :title="`切到 ${themeStore.lastLight === 'light' ? '浅色' : '上次用过的浅色主题'}`"
+                    @click="quickSwitch('light')"
+                  >
+                    浅色
+                  </button>
+                  <button
+                    type="button"
+                    class="theme-quick-btn"
+                    :disabled="themeStore.tone === 'dark'"
+                    :title="`切到 ${themeStore.lastDark === 'dark' ? '深色' : '上次用过的深色主题'}`"
+                    @click="quickSwitch('dark')"
+                  >
+                    深色
+                  </button>
+                </span>
+              </div>
+              <ThemePicker dense />
+            </div>
+          </template>
+        </a-popover>
         <!-- 一页一个「刷新」：卡片与列表一起刷（见 reloadAll）。
              图标化与另外三页的工具栏统一 —— 刷新是高频动作，位置固定后
              图标即可辨认；title 与 aria-label 兜住悬停提示与读屏 -->
@@ -696,9 +764,10 @@ onMounted(async () => {
   margin: calc(var(--gap) / 2) 0;
 }
 
-/* 工具栏右上角的主题切换按钮：32px 圆形描边，形态沿用原侧栏底部那枚
-   （2026-09-26 迁来）。a-button 的标准高同为 32px，并排基线一致；
-   描边、图标色与悬停底色全走全站令牌，明暗主题各自成立。 */
+/* 工具栏右上角的主题按钮：32px 圆形描边，形态沿用原侧栏底部那枚
+   （2026-09-26 迁来；2026-09-30 从灯泡换成调色盘图标 —— 它现在开的是
+   主题选择弹层，不再是「翻一下浅深」）。a-button 的标准高同为 32px，
+   并排基线一致；描边、图标色与悬停底色全走全站令牌，12 套主题各自成立。 */
 .theme-btn {
   width: 32px;
   height: 32px;
@@ -717,6 +786,55 @@ onMounted(async () => {
 
 .theme-btn:hover {
   background: var(--color-icon-hover-bg);
+}
+
+/* ---- 主题选择弹层（2026-09-30）----
+   宽度取「12 套主题 × 两列」放得下的最小值：420px（窄屏退到 92vw，
+   由 ThemePicker 自己把网格退成一列）。
+   弹层内容整体由 ThemePicker 渲染，这里只管头部与两枚快捷按钮。 */
+.theme-panel {
+  width: min(420px, 92vw);
+}
+.theme-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.theme-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+/* 快捷切换按钮：回到该族上次用过的那一套。禁用当前所在的那一侧 ——
+   点了也不会变，不如直接说「你已经在这边了」。 */
+.theme-quick {
+  display: inline-flex;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+.theme-quick-btn {
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  padding: 2px 10px;
+  cursor: var(--cursor-hand);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.theme-quick-btn + .theme-quick-btn {
+  border-left: 1px solid var(--color-border);
+}
+.theme-quick-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+  color: var(--text-primary-ink);
+}
+.theme-quick-btn:disabled {
+  color: var(--text-primary-ink);
+  font-weight: 600;
+  cursor: default;
 }
 
 /* 词元卡右上角的格式切换按钮。
@@ -791,5 +909,14 @@ onMounted(async () => {
   .summary-grid {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+</style>
+
+<!-- 弹层本体的样式：overlay-class-name 挂在 antd teleport 到 body 的那层上，
+     不在本组件的模板里，scoped 样式碰不到它（与 VersionBadge 的 vb-popover
+     同一处理）。内容自带头部与滚动结构，antd 默认内边距只会添乱。 -->
+<style>
+.theme-popover .ant-popover-inner {
+  padding: 10px;
 }
 </style>

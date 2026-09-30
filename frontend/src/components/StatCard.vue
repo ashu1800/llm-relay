@@ -108,11 +108,12 @@ onUnmounted(() => {
   pointer-events: none;
 }
 
+/* hover 阴影走主题令牌（--card-hover-shadow）：浅色族是两段投影，
+   深色族换成「白描边 + 更重的投影」—— 深色下投影几乎看不见，
+   得靠那圈描边撑住卡片边界。2026-09-30 之前这里是两条按 data-theme
+   分支的规则，多主题之后表达不了「深色族」。 */
 .summary-card:hover {
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 8px 24px -4px rgba(0, 0, 0, 0.08);
-}
-:root[data-theme='dark'] .summary-card:hover {
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 8px 28px -4px rgba(0, 0, 0, 0.7);
+  box-shadow: var(--card-hover-shadow);
 }
 
 /* 每种色调只在这里定义一次，图标与数值共用。

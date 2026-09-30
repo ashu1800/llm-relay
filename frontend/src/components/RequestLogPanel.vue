@@ -2055,15 +2055,12 @@ onMounted(() => {
   border-radius: var(--radius-control);
   border: 1px solid color-mix(in oklab, var(--tp) 32%, transparent);
   background: color-mix(in oklab, var(--tp) 13%, transparent);
-  color: color-mix(in oklab, var(--tp) 60%, black);
+  color: color-mix(in oklab, var(--tp) var(--pill-ink-mix-amount), var(--pill-ink-mix-color));
   font-size: 12px;
   font-weight: 500;
   line-height: 20px;
   white-space: nowrap;
   vertical-align: middle;
-}
-:root[data-theme='dark'] .think-pill {
-  color: color-mix(in oklab, var(--tp) 55%, white);
 }
 
 /* ---- 状态徽标（2026-09-27 感官升级）----
@@ -2085,7 +2082,7 @@ onMounted(() => {
   border-radius: var(--radius-control);
   border: 1px solid color-mix(in oklab, var(--sp) 32%, transparent);
   background: color-mix(in oklab, var(--sp) 13%, transparent);
-  color: color-mix(in oklab, var(--sp) 60%, black);
+  color: color-mix(in oklab, var(--sp) var(--pill-ink-mix-amount), var(--pill-ink-mix-color));
   font-size: 12px;
   font-weight: 500;
   line-height: 20px;
@@ -2097,9 +2094,6 @@ onMounted(() => {
 .status-pill.is-green { --sp: var(--color-green); }
 .status-pill.is-orange { --sp: var(--color-orange); }
 .status-pill.is-red { --sp: var(--color-red); }
-:root[data-theme='dark'] .status-pill {
-  color: color-mix(in oklab, var(--sp) 55%, white);
-}
 .status-pill .dot {
   flex: 0 0 4px;
   width: 4px;
@@ -2141,14 +2135,11 @@ onMounted(() => {
   border-radius: var(--radius-control);
   border: 1px solid color-mix(in oklab, var(--tp) 32%, transparent);
   background: color-mix(in oklab, var(--tp) 13%, transparent);
-  color: color-mix(in oklab, var(--tp) 60%, black);
+  color: color-mix(in oklab, var(--tp) var(--pill-ink-mix-amount), var(--pill-ink-mix-color));
   font-size: 12px;
   font-weight: 500;
   line-height: 20px;
   white-space: nowrap;
-}
-:root[data-theme='dark'] .stream-pill {
-  color: color-mix(in oklab, var(--tp) 55%, white);
 }
 /* 数值轨道**定宽**（2026-09-23 修，站主反馈「速度数量不同时左边的『流』样式
    不在同一纵向水平线上」）：速度是「输出词元 ÷ 耗时」，位数随请求变

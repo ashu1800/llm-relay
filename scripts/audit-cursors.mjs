@@ -7,10 +7,12 @@
 // 表现都只是那一处悄悄变回系统箭头，没有任何报错。
 //
 // 用法:
-//   node scripts/audit-cursors.mjs [baseUrl] [light|dark|both]
+//   node scripts/audit-cursors.mjs [baseUrl] [light|dark|both|all|<主题 id>]
 //   baseUrl 默认 http://127.0.0.1:8888（容器里跑的那个实例）
 //   开发态用 http://127.0.0.1:5173（先 npm run dev）
-//   第三个参数默认 both —— 每个用例在浅色与深色下各跑一遍。
+//   第三个参数默认 both —— 两套默认主题（浅色 / 深色）各跑一遍；
+//   all 跑全部 12 套（7 个路由 × 12 套，很慢，改主题系统时跑一次就够）；
+//   也可以点名一套（例如 solarized-dark）。
 //
 // 前置：一个开着调试端口的 Chrome
 //   chrome --remote-debugging-port=9222 --user-data-dir=.chrome-profile
@@ -26,17 +28,38 @@
 // 必须在导航**之前**用 Page.addScriptToEvaluateOnNewDocument 注入：
 // store 在页面初始化时就把 data-theme 写上了，导航之后再改会漏掉首屏那批元素，
 // 而「首屏用了另一个主题的光标」恰恰是最该被发现的情况。
+//
+// 2026-09-30：主题清单与光标文件名改为从 frontend/src/styles/theme.css 解析
+// （解析器与前端那几个脚本共用一份）。硬编码 ['light','dark'] 的话，
+// 新增主题不会自动纳入审计，而「忘了加」在这类脚本里是完全静默的。
 import http from 'node:http'
 import { WebSocket } from 'ws'
+import { parseThemes } from '../frontend/scripts/lib/theme-css.mjs'
 
 const CDP_PORT = 9222
 const base = (process.argv[2] || 'http://127.0.0.1:8888').replace(/\/$/, '')
+
+const THEME_BLOCKS = parseThemes()
+const ALL_IDS = [...THEME_BLOCKS.keys()]
+/** 某主题在 CSS 里声明的光标文件（去掉前导斜杠，与页面里 fetch 的用法一致） */
+const cursorFilesOf = (id) => {
+  const vars = THEME_BLOCKS.get(id)?.vars
+  if (!vars) return []
+  return ['--cursor-arrow', '--cursor-hand']
+    .map((tok) => (vars.get(tok) || '').match(/url\('([^']+)'\)/)?.[1])
+    .filter(Boolean)
+    .map((u) => u.replace(/^\//, ''))
+}
+
 const themeArg = (process.argv[3] || 'both').toLowerCase()
-if (!['light', 'dark', 'both'].includes(themeArg)) {
-  console.error(`第三个参数只能是 light / dark / both，收到 ${themeArg}`)
+let THEMES
+if (themeArg === 'both') THEMES = ['light', 'dark']
+else if (themeArg === 'all') THEMES = ALL_IDS
+else if (ALL_IDS.includes(themeArg)) THEMES = [themeArg]
+else {
+  console.error(`第三个参数只能是 light / dark / both / all，或某个主题 id（${ALL_IDS.join(' / ')}），收到 ${themeArg}`)
   process.exit(2)
 }
-const THEMES = themeArg === 'both' ? ['light', 'dark'] : [themeArg]
 
 // 需要点的用例：弹窗、抽屉、下拉都是按需渲染的，不点开就完全不在 DOM 里，
 // 只测静态页面会漏掉它们（实测：渠道弹窗里 246 个可点元素一个都不在静态页面里）
@@ -67,21 +90,23 @@ const CHECK_THEME = `(() => JSON.stringify({
   stored: localStorage.getItem('llm-relay-theme'),
 }))()`
 
-// 每个主题各有自己的文件名，所以按当前主题生成 classify。
-// 关键一条：**另一个主题的文件名必须判失败** ——
-// 只检查「是不是自定义光标」的话，深色下用到浅色那套（例如深色块漏配了
-// 覆盖，从这里继承 :root 的值）会被当成通过，而那正是这次重构要防的问题。
-const auditExpr = (theme) => `(() => {
-  const mineArrow = 'cursor-arrow-${theme}.svg'
-  const mineHand = 'cursor-hand-${theme}.svg'
-  const otherArrow = 'cursor-arrow-${theme === 'light' ? 'dark' : 'light'}.svg'
-  const otherHand = 'cursor-hand-${theme === 'light' ? 'dark' : 'light'}.svg'
+// 每个主题各有自己的文件名（12 套主题 = 22 份文件），所以按当前主题生成 classify。
+// 关键一条：**其他主题的文件名必须判失败** ——
+// 只检查「是不是自定义光标」的话，某个主题漏配了光标令牌、从 :root 继承到
+// 浅色那一套时会被当成通过，而那正是这套审计要防的问题。
+const auditExpr = (theme) => {
+  const mine = cursorFilesOf(theme)
+  const others = ALL_IDS.filter((id) => id !== theme).flatMap(cursorFilesOf)
+  return `(() => {
+  const mine = ${JSON.stringify(mine)}
+  const others = ${JSON.stringify([...new Set(others)])}
+  const arrow = (f) => f.includes('arrow')
   const classify = (v) => {
-    if (v.includes(mineArrow)) return '自定义箭头'
-    if (v.includes(mineHand)) return '自定义手型'
+    const m = mine.find((f) => v.includes(f))
+    if (m) return arrow(m) ? '自定义箭头' : '自定义手型'
     // 串主题：本主题下拿到了另一套图形，单独归一类，不与系统光标混在一起报
-    if (v.includes(otherArrow)) return '串主题箭头(' + otherArrow + ')'
-    if (v.includes(otherHand)) return '串主题手型(' + otherHand + ')'
+    const o = others.find((f) => v.includes(f))
+    if (o) return (arrow(o) ? '串主题箭头(' : '串主题手型(') + o + ')'
     return v
   }
   const out = {}
@@ -101,16 +126,12 @@ const auditExpr = (theme) => `(() => {
   }
   return out
 })()`
+}
 
-// 四份资源都要探测：只测当前主题那两份的话，另一主题的图形 404 了也看不见 ——
-// 而那种情况直到用户切主题才会暴露。只查 200 会被 SPA 回退骗过：
+// 全部主题的光标资源都要探测：只测当前主题那几份的话，别的主题的图形 404 了也看不见 ——
+// 而那种情况直到用户切到那套主题才会暴露。只查 200 会被 SPA 回退骗过：
 // 后端对任何未知路径都回 index.html + 200，图片解码失败后光标静默退回系统光标。
-const CURSOR_FILES = [
-  'cursor-arrow-light.svg',
-  'cursor-hand-light.svg',
-  'cursor-arrow-dark.svg',
-  'cursor-hand-dark.svg',
-]
+const CURSOR_FILES = [...new Set(ALL_IDS.flatMap(cursorFilesOf))]
 
 const PROBE_ASSETS = `(async () => {
   const out = {}

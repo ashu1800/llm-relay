@@ -1,4 +1,23 @@
-/* LLM Relay 主题令牌 —— 全部数值实测自参考站 llm.ohub.vip */
+/* LLM Relay 主题令牌 —— 默认两套数值实测自参考站 llm.ohub.vip，
+   其余十套取自公开配色项目（2026-09-30 主题系统扩容）。
+
+   结构（一条轴，改主题只动这里）：
+
+     :root                      → light 主题本尊（浅色默认主题不另开块，
+                                  否则同一套浅色会有两份定义）
+     :root[data-theme='<id>']   → 其余 11 套主题
+
+   哪些 id 存在由 src/utils/themes.ts 的注册表说了算；每个主题块必须把
+   「随底色而变」的令牌**写全**（清单见 scripts/lib/theme-css.mjs 的
+   REQUIRED_TOKENS），不许靠继承 —— 漏一个就会静默继承浅色主题的值，
+   而那种错不报错、不失败，只是某个字在某个主题里发虚。
+   `npm run check` 会逐令牌比对，`node scripts/check-theme-contrast.mjs`
+   会算每套主题的对比度是否过 WCAG AA。
+
+   组件里**不许**再写 [data-theme='…'] 这类按主题名分支的选择器：
+   主题差异一律通过令牌传导（先例是 --ch-icon-bg-l/--ch-icon-ink-l，
+   2026-09-17 那次也是因为「内联样式里 [data-theme='dark'] 永远覆盖不到」）。
+   check-contracts.mjs 有一条守卫盯着这件事。 */
 
 /* 列表字体 Harding：参考站自己的正文西文字体，本项目按站主要求原样随包分发。
    文件取自参考站自托管的资源（/assets/Harding-*.ttf，sha256 3F005EFB…），
@@ -39,8 +58,20 @@
      「按照渠道币种计，不折算」这一类**副标**，恰恰是需要读清的正文。
      0.70 之后：白卡 5.10:1、米白底 4.89:1（暗色卡片 4.69:1，见下方 dark 块）。
      再淡一档（0.6）会掉到 4.0 以下；再深一档（0.75）就与正文 #303030 难分主次，
-     层次会塌掉 —— 0.70 是「够读」与「看得出是次要」之间那一档。 */
+     层次会塌掉 —— 0.70 是「够读」与「看得出是次要」之间那一档。
+
+     每套主题的这个 alpha 都要各自量：它取决于该主题正文色本身的明度
+     （越浅的正文色，压到同一底色上需要的 alpha 越大）。脚本会替每套主题算。 */
   --color-text-secondary: rgba(48, 48, 48, 0.7);
+  /* 输入框占位文字。2026-09-30 从 App.vue 搬进来：它原来只存在于
+     antd 的令牌映射里，是「CSS 里没有的第二份定义」仅有的两处之一。
+     antd 默认的 rgba(0,0,0,.25) 压白底只有 1.84:1 —— 占位文字是
+     「这个框该填什么」的唯一线索，必须过 AA；又必须比真实值淡，
+     否则用户分不清「已经填了」和「还没填」。 */
+  --color-text-placeholder: #767676; /* 白卡 4.54:1 */
+  /* 三级文字：antd 用它画表单说明与空态补充。比上面两档更淡是**有意的**：
+     这一档只承载「读不到也不影响操作」的补充信息，不进对比度红线。 */
+  --color-text-tertiary: rgba(48, 48, 48, 0.55);
   --color-border: #d9d9d9;
 
   --color-red: #ea4343;
@@ -69,7 +100,7 @@
      4.5:1。它当按钮底色、边框、图标都合适（那些不适用文字对比度要求），
      但用作正文/标题文字就不达标了。这里给同色相加深的一档，专供文字。
      深色主题在下方换成提亮版：深色底上要往亮的方向走。 */
-  --text-primary-ink: #94523f; /* 白底 5.94:1；菜单选中底(#f4e4e0) 4.81:1 */
+  --text-primary-ink: #8f4e3c; /* 白底 6.32:1；菜单选中底 4.76:1 */
 
   /* 品牌标记（侧栏左上角的圆角方块）。
      底色不能用 --color-primary：白字压在上面只有 3.32:1，不达 AA。
@@ -264,12 +295,56 @@
   --scrollbar-track: transparent;
   --scrollbar-width: 0.5rem;
 
-  /* ---- 自定义光标 ----
-     每个主题各有一套自己的光标（不是同一张图换个色）。四份图形在
-       public/cursor-arrow-light.svg  / cursor-hand-light.svg
-       public/cursor-arrow-dark.svg   / cursor-hand-dark.svg
+  /* ---- color-scheme（2026-09-30）----
+     让浏览器知道这套主题是明是暗：原生滚动条、下拉、日期面板、自动填充的
+     输入框都跟着换，不会在深色页面里冒出一条亮色原生滚动条。
+     每个主题块都写这一行，check-contracts.mjs 断言它与注册表的 tone 一致。 */
+  color-scheme: light;
 
-     文件名带主题后缀是刻意的，不是命名洁癖：这两个资源是 embed 进二进制的
+  /* ---- 组件档位令牌（2026-09-30 随多主题收口）----
+     这几项原来以「:root[data-theme='dark'] .某组件」的形式散在组件里。
+     多主题之后那种写法表达不了「深色族」——只能把 8 个深色 id 逐个列进
+     7 处选择器，每加一套主题要改 7 个地方，漏一处不报错、也不失败，
+     表现只是「某个组件在某套主题下颜色不对」。
+     现在改成令牌：值写在这里（浅色族）与各深色主题块里，组件只读令牌，
+     于是「加一套主题」只跟 CSS 主题块有关。
+
+     族内一致性由 check-theme-contrast.mjs 打 INFO 提示（同一族里这几个值
+     理应相同；不一致时点名，让人确认是有意为之还是改了一套忘了另一套）。 */
+  /* 分组标签 / 模型标签的 oklch 亮度档：色相由 JS 按名字散列传入，
+     亮度必须随主题换档（浅色底压深、深色底提亮）。 */
+  --tag-tint-l: 0.47;
+  /* 用户自定义分组色的 oklab 混色目标与比例。
+     用 oklab 混黑而不是改 HSL 的 L：oklab 的 L 是感知均匀的，混黑后
+     各色相的观感深度一致，色相也不会像 HSL 那样偏掉。50% 是量出来的：
+     0.50 时十三个预设的最差值 5.27:1，0.45 时 4.37:1 仍有个别不达标，
+     0.55 则过暗、分组之间失去区分度。 */
+  --tag-custom-mix-color: black;
+  --tag-custom-mix-amount: 50%;
+  /* think / status / stream 三种药丸的文字色混合参数：与上面同一手法，
+     浅色混黑、深色混白（比例各自量过，见 RequestLogPanel 的注释）。 */
+  --pill-ink-mix-color: black;
+  --pill-ink-mix-amount: 60%;
+  /* 卡片 hover 阴影。深色下投影几乎看不见，得靠一圈更亮的描边撑住卡片边界。 */
+  --card-hover-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 8px 24px -4px rgba(0, 0, 0, 0.08);
+  /* 固定列渐隐阴影的颜色（日志表左/右固定列底下那条渐变，见下方 .log-table 段）：
+     浅色族用黑 10% 就够；深色族的卡片本身已经比黑亮得多，需要更重的一档才看得见。 */
+  --scroll-hint-color: rgba(0, 0, 0, 0.1);
+
+  /* ---- 自定义光标 ----
+     每个主题各有一套自己的光标（不是同一张图换个色）。
+
+     2026-09-30 多主题之前只有两份模板：
+       public/cursor-arrow-light.svg  / cursor-hand-light.svg（长而窄的锐角轮廓）
+       public/cursor-arrow-dark.svg   / cursor-hand-dark.svg （短而阔的圆角轮廓）
+     现在这两份是**形状模板**，其余 9 套主题的文件由
+       node scripts/gen-theme-cursors.mjs --write
+     从对应族的模板重着色生成（fill/stroke 换成该主题实心块那一对）。
+     生成物要提交入库，`--check` 模式与 check-contracts.mjs 会逐字节比对，
+     所以「改了某套主题的主色、忘了重新生成光标」会当场变红，而不是
+     悄悄留着旧颜色的光标。oled 复用深灰那两个文件（实心块那一对相同）。
+
+     文件名带主题后缀是刻意的，不是命名洁癖：这些资源是 embed 进二进制的
      静态文件，实测响应里没有 ETag、没有 Last-Modified、也没有 Cache-Control
      （go:embed 的文件修改时间是零值），也就是说浏览器只能靠 URL 判断新旧。
      沿用旧文件名的话，改完图形用户那边可能一直吃缓存里的旧光标，
@@ -283,20 +358,20 @@
          资源管线，要接哈希得先把它挪进 src/assets 并改成 import，
          为一个缓存问题引入一套新机制不划算。
 
-     两套图形的颜色各自取自本主题「主色实心块」的那一对变量
+     每套图形的颜色取自本主题「主色实心块」的那一对变量
      （--solid-primary-bg 作填充、--solid-primary-fg 作描边），
      而不是 --color-primary：主色 #c87864 压在米白页底上只有 3.05:1，
      而实心块那对是为主色按钮挑的、对比度本就是按「要看得清」选的
-     （浅色 4.44:1 / 深色 6.36:1）。取色来源不写进 SVG，
+     （浅色 4.84:1 / 深色 6.98:1）。取色来源不写进 SVG，
      因为光标是当图片加载的、没有 CSS 级联，颜色只能是字面量；
-     两处的一致性由 frontend/scripts/check-contracts.mjs 盯着。
+     两处的一致性由 check-contracts.mjs 逐主题盯着。
 
-     URL 必须写成根绝对路径：这四个文件不带哈希、原样发布在站点根目录，
+     URL 必须写成根绝对路径：这些文件不带哈希、原样发布在站点根目录，
      而这份 CSS 打包后位于 /assets/index-*.css，相对路径会解析到
-     /assets/ 下面去，四个光标都取不到图（表现是静默退回系统光标）。
+     /assets/ 下面去，光标都取不到图（表现是静默退回系统光标）。
 
      url 后面那两个数是热区（相对图形左上角），刻意不在左上角：
-     箭头取图形的箭尖 2 2，手型取食指指尖 9 2。两套的热区必须逐字相同 ——
+     箭头取图形的箭尖 2 2，手型取食指指尖 9 2。所有主题的热区必须逐字相同 ——
      同一位置在不同主题下点到不同的东西，用户只会觉得「点歪了」，
      不会意识到是换了套光标。改 SVG 里的图形时这些数要一起改，
      否则点击落点会与看到的尖差开一截。 */
@@ -304,8 +379,14 @@
   --cursor-hand: url('/cursor-hand-light.svg') 9 2, pointer;
 }
 
-/* 深色主题：实测自参考站 theme.js 的 dark 配置 */
+/* 深色主题（dark）：实测自参考站 theme.js 的 dark 配置 */
 :root[data-theme='dark'] {
+  color-scheme: dark;
+  /* 主色与浅色主题同值。以前这一行是**故意不写**的（靠继承 :root 拿到
+     同一个 #c87864）；多主题之后所有主题块一律写全 —— 「靠继承拿到同一个值」
+     和「忘了写」在代码上长得一模一样，而后者会让某套主题静默用上别的主题的颜色。
+     check-contracts.mjs 因此按令牌清单逐项要求每个块自洽。 */
+  --color-primary: #c87864;
   --color-bg: #202020;
   --color-fg: #303030;
   --color-fg-shadow: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 4px 20px -2px rgba(0, 0, 0, 0.6);
@@ -313,6 +394,8 @@
   /* 与浅色主题同一个 alpha（0.70）：暗色卡片 #303030 上合成 rgb(154,154,154)
      → 4.69:1，过 AA。0.65 时是 4.30:1，不达标。 */
   --color-text-secondary: rgba(200, 200, 200, 0.7);
+  --color-text-placeholder: #979797; /* 暗色卡片 4.52:1 */
+  --color-text-tertiary: rgba(200, 200, 200, 0.55);
   --color-border: #424242;
   --scrollbar-thumb: rgba(100, 100, 100);
 
@@ -351,7 +434,7 @@
   --ch-icon-ink-l: 0.80;
 
   /* 主色当文字用：深色底上往亮的方向调 */
-  --text-primary-ink: #e8a48c; /* 面板 6.36:1；菜单选中底 4.88:1 */
+  --text-primary-ink: #e8a48c; /* 面板 6.36:1；菜单选中底 5.86:1 */
 
   /* 焦点环不在这里重新定义：--focus-ring-color 指向 --text-primary-ink，
      它在本块已经换成提亮版（面板 6.36:1）—— 焦点环跟着一起换档，
@@ -382,32 +465,715 @@
   --text-terracotta: #e59a80; /* 5.82:1 */
   --text-blue: #4dd0e1;       /* 7.18:1 */
   --text-gray: #9aa1ac;       /* 5.07:1 */
+
+  /* 深色族的组件档位（浅色族的值在 :root，理由见那里的说明）：
+     深底要提亮，于是标签亮度档升到 0.80、自定义色改成混白 45%、
+     药丸文字混白 55%；hover 阴影换成白描边撑边界；固定列的渐隐阴影
+     加重到黑 40%（浅色族那档 10% 在深底上几乎看不见）。 */
+  --tag-tint-l: 0.80;
+  --tag-custom-mix-color: white;
+  --tag-custom-mix-amount: 45%;
+  --pill-ink-mix-color: white;
+  --pill-ink-mix-amount: 55%;
+  --scroll-hint-color: rgba(0, 0, 0, 0.4);
+  --card-hover-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 8px 28px -4px rgba(0, 0, 0, 0.7);
 }
 
-/* ---- 深空纯黑（OLED）：深色主题的「表面叠加层」（2026-09-27）----
-   不是第三套主题：文字、语义色、焦点环、光标、实心主色对全部沿用
-   上面深色块的定义，这一层只把「表面四件套」换成 OLED 档 ——
-   页面底 #0a0a0a / 卡片 #141414 / 边框 / 阴影，为夜间长时间盯盘与
-   OLED 屏省电服务（纯黑像素不发光）。
+/* ---- 深空纯黑（OLED）----
+   2026-09-27 引入时它是「深色主题之上的一个质感档位」（data-darkstyle=oled），
+   2026-09-30 随多主题升格成一等主题（id=oled）：档位那条轴只对「经典深灰」
+   生效，多主题下会变成「一个只影响某一套主题的开关」，比主题本身更难解释。
+   老键 llm-relay-darkstyle 在 stores/theme.ts 里做一次性迁移。
 
-   对比度不降反升：深色块的文字色都是按 #303030 挑的，表面换到更深的
-   #141414 后每一档的比值都在放大（次要文字 4.69 → 5.88:1，
-   红 5.42 → 7.5:1），无需另配一套文字色。
-
-   选择器刻意写成 [data-darkstyle] 在前：check-contracts 用
-   ":root[data-theme='dark']" 这个子串锚定深色块，把它放在前半段
-   会让 indexOf 提前命中本块、把叠加层误当成深色块去比对光标令牌。
-   两个属性选择器顺序不影响特异性，只影响那个字符串锚。
-
-   data-darkstyle 属性由 theme store 常驻写在 <html> 上（浅色下
-   本块选择器不命中、零副作用），浅深切换因此不需要补写属性。 */
-:root[data-darkstyle='oled'][data-theme='dark'] {
+   文字、语义色、实心主色对全部与深灰同值（表面的底色更暗，每一档的
+   对比度只会放大：次要文字 4.69 → 5.88:1，红 5.42 → 7.5:1），
+   换的只是表面四件套 —— 为夜间长时间盯盘与 OLED 屏省电服务
+   （纯黑像素不发光）。光标也不另生成一套：实心块那一对与深灰完全相同，
+   再写一份字节一样的 SVG 没有意义（注册表里 cursorSource: 'dark'）。 */
+:root[data-theme='oled'] {
+  color-scheme: dark;
+  --color-primary: #c87864;
   --color-bg: #0a0a0a;
   --color-fg: #141414;
-  --color-border: #2e2e2e;
   /* 纯黑底上投影几乎不可见：轮廓换更亮一档的白描边承扛起「卡片边界」 */
   --color-fg-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 4px 20px -2px rgba(0, 0, 0, 0.85);
+  --color-text: #c8c8c8;
+  --color-text-secondary: rgba(200, 200, 200, 0.7);
+  --color-text-placeholder: #979797;
+  --color-text-tertiary: rgba(200, 200, 200, 0.55);
+  --color-border: #2e2e2e;
   --scrollbar-thumb: rgba(110, 110, 110);
+  --cursor-arrow: url('/cursor-arrow-dark.svg') 2 2, auto;
+  --cursor-hand: url('/cursor-hand-dark.svg') 9 2, pointer;
+
+  --color-red: #f08a7a;
+  --color-orange: #e0a83c;
+  --color-green: #45c79a;
+  --color-blue: #4dd0e1;
+  --color-purple: #ab8ef2;
+  --color-gray: #9aa1ac;
+  --color-icon: #4dd0e1;
+  --color-icon-hover-bg: rgba(77, 208, 225, 0.16);
+  --ch-icon-bg-l: 0.32;
+  --ch-icon-ink-l: 0.80;
+
+  --text-primary-ink: #e8a48c;
+  --focus-ring-halo: #3a241d;
+  --brand-mark-bg: #e8a48c;
+  --brand-mark-fg: #3a241d;
+  --solid-primary-bg: #e8a48c;
+  --solid-primary-fg: #3a241d;
+  --tooltip-bg: #e8cec2;
+  --tooltip-fg: #3a241d;
+
+  --text-green: #45c79a;
+  --text-amber: #e0a83c;
+  --text-red: #f08a7a;
+  --text-purple: #ab8ef2;
+  --text-terracotta: #e59a80;
+  --text-blue: #4dd0e1;
+  --text-gray: #9aa1ac;
+
+  --tag-tint-l: 0.80;
+  --tag-custom-mix-color: white;
+  --tag-custom-mix-amount: 45%;
+  --pill-ink-mix-color: white;
+  --pill-ink-mix-amount: 55%;
+  --scroll-hint-color: rgba(0, 0, 0, 0.4);
+  --card-hover-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 8px 28px -4px rgba(0, 0, 0, 0.7);
+}
+
+/* ============================================================================
+   外部配色主题（2026-09-30 主题系统扩容）
+   ----------------------------------------------------------------------------
+   九套取自公开配色项目，浅色三套 + 深色六套（加上前面的三套共 12 套）：
+
+     latte            Catppuccin Latte      https://catppuccin.com/palette/
+     solarized-light  Solarized Light       https://ethanschoonover.com/solarized/
+     gruvbox-light    Gruvbox Light         https://github.com/morhetz/gruvbox
+     mocha            Catppuccin Mocha      https://catppuccin.com/palette/
+     nord             Nord                 https://www.nordtheme.com/docs/colors-and-palettes
+     dracula          Dracula              https://github.com/dracula/dracula-theme
+     tokyo-night      Tokyo Night          https://github.com/enkia/tokyo-night-vscode-theme
+     solarized-dark   Solarized Dark       https://ethanschoonover.com/solarized/
+     gruvbox-dark     Gruvbox Dark         https://github.com/morhetz/gruvbox
+   六个上游项目都是 MIT 许可（出处与许可见 docs/ui-spec.md 第 20 条）。
+
+   取色规则（三套老主题之外的每一块都按这个来，注释里逐项记了偏差）：
+
+     · 表面三件套（页面底/卡片/正文）与主色**逐字取上游官方色值**，
+       注释里写明取的是上游哪个色名（如 nord8、base1、mauve）。
+     · 上游没有中间调边框色时，允许在两端色之间做 sRGB 插值，注明比例。
+     · **上游值达不到 WCAG AA 就改**，偏差必须记进注释。这是常态而不是例外：
+       Solarized 与 Tokyo Night 这类低对比取向的配色，官方正文色直接拿来用
+       会低于 4.5:1（Solarized Light 的 base00 只有 4.15:1、Solarized Dark 的
+       base0 只有 4.32:1、Dracula 的正红 #ff5555 在深色卡片上只有 3.6:1）。
+       改的是「当正文/当文字用」的那一档，表面色不动 —— 界面看起来仍是那套配色。
+     · 每个「当前值」的比值都由 `node scripts/check-theme-contrast.mjs` 实算
+       （加 --verbose 会把 12 套 × 24 项逐条打出来），注释里那些数字就是它跑出来的，
+       不是手抄的；口径是「文字 on 卡片底」为主，另有注明的按注明算
+       （如 `--text-primary-ink` 给卡片与菜单选中底两档、`--solid-primary-fg`
+       给实心块底、`--tooltip-fg` 给提示浮层底）。
+     · 提到「原色/上游 #xxxxxx 只有 N.NN:1」的地方，说的是**被替换掉的那个上游色**，
+       并且注明了对哪层底算 —— 不注明的年代留下的数字对不上，2026-09-30 已逐条复核改正。
+
+   还有一个刻意保留的差异：Solarized Light 的卡片比页面底**略深**
+   （页面 base3 #fdf6e3、卡片 base2 #eee8d5）。上游把 base2 定义为
+   「高亮背景」档，卡片用它正是 Solarized 自己的语义；本站其余主题
+   一律是「卡片比页面底亮」，这一套是例外，不要顺手改平。
+   ============================================================================ */
+
+/* Catppuccin Latte（拿铁浅棕）：低饱和 pastel 暖调。
+   表面取自 base #eff1f5；卡片用纯白 —— 上游没有比 base 更亮的表面档，
+   而本站卡片一律是「比页面底亮一档」。强调色取官方主推的 mauve #8839ef。
+   正文与语义色的「文字档」在上游偏亮（yellow #df8e1d 在白底只有 2.6:1），
+   按同色相压深到过 AA，逐项见下方注释。 */
+:root[data-theme='latte'] {
+  color-scheme: light;
+  --color-primary: #8839ef; /* mauve，白底 5.41:1（填充/边框/图标用） */
+  --color-bg: #eff1f5; /* base */
+  --color-fg: #ffffff;
+  --color-fg-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 4px 12px 0 rgba(0, 0, 0, 0.04);
+  --color-text: #4c4f69; /* text */
+  /* alpha 0.85：Latte 的正文色比本站浅色主题亮，0.70 压出来只有 4.2:1（页面底上 4.24） */
+  --color-text-secondary: rgba(76, 79, 105, 0.85);
+  --color-text-placeholder: #6c6f85; /* subtext0，白卡 4.94:1 */
+  --color-text-tertiary: rgba(76, 79, 105, 0.55);
+  --color-border: #ccd0da; /* surface0 */
+  --scrollbar-thumb: #c9cdd8;
+  --cursor-arrow: url('/cursor-arrow-latte.svg') 2 2, auto;
+  --cursor-hand: url('/cursor-hand-latte.svg') 9 2, pointer;
+
+  --color-red: #d20f39;
+  --color-orange: #fe640b;
+  --color-green: #40a02b;
+  --color-blue: #04a5e5;
+  --color-purple: #8839ef;
+  --color-gray: #8c8fa1; /* overlay1 */
+  --color-icon: #179299; /* teal，白卡 3.75:1 */
+  --color-icon-hover-bg: rgba(23, 146, 153, 0.12);
+  --ch-icon-bg-l: 0.93;
+  --ch-icon-ink-l: 0.45;
+
+  --text-primary-ink: #6f28cd; /* mauve 压深一档：白卡 7.31、菜单选中底 4.85 */
+  --focus-ring-halo: #ffffff;
+  --brand-mark-bg: #8839ef;
+  --brand-mark-fg: #ffffff;
+  --solid-primary-bg: #8839ef;
+  --solid-primary-fg: #ffffff; /* 5.41:1 */
+  --tooltip-bg: #4c4f69;
+  --tooltip-fg: #eff1f5; /* 7.04:1 */
+
+  --text-green: #2f7d20; /* 上游 green #40a02b 只有 3.38:1，压深 */
+  --text-amber: #8f5a06; /* 上游 yellow #df8e1d 只有 2.62:1，压深 */
+  --text-red: #d20f39; /* 5.42:1 */
+  --text-purple: #8839ef; /* 5.41:1 */
+  --text-terracotta: #b34708; /* 上游 peach #fe640b 压深，5.49:1 */
+  --text-blue: #1e66f5; /* 4.91:1 */
+  --text-gray: #6c6f85; /* subtext0，4.94:1 */
+
+  --tag-tint-l: 0.47;
+  --tag-custom-mix-color: black;
+  --tag-custom-mix-amount: 50%;
+  --pill-ink-mix-color: black;
+  --pill-ink-mix-amount: 60%;
+  --scroll-hint-color: rgba(0, 0, 0, 0.1);
+  --card-hover-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 8px 24px -4px rgba(0, 0, 0, 0.08);
+}
+
+/* Solarized Light（日光浅）：2011 年的经典低对比配色。
+   页面 base3 #fdf6e3、卡片 base2 #eee8d5（上游的「高亮背景」档，见段首说明）。
+   官方正文 base00 #657b83 在卡片上只有 4.07:1，改用 base01 #586e75 再压深一档；
+   这一套色阶很窄，次要文字用**实色**而不是半透明（半透明压出来只有 3.8:1）。 */
+:root[data-theme='solarized-light'] {
+  color-scheme: light;
+  --color-primary: #268bd2; /* blue，页面底 3.41:1、卡片 3.00:1（非文本下限 3:1 刚好压线，别再压深） */
+  --color-bg: #fdf6e3; /* base3 */
+  --color-fg: #eee8d5; /* base2 */
+  --color-fg-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 4px 12px 0 rgba(0, 0, 0, 0.04);
+  --color-text: #4e6369; /* base01 #586e75 压深一档：页面底 5.37、卡片 5.84 */
+  --color-text-secondary: #51666c; /* 实色：页面底 4.60、卡片 4.98 */
+  --color-text-placeholder: #556a71; /* base01 压深一档：卡片 4.67 */
+  --color-text-tertiary: rgba(78, 99, 105, 0.6);
+  --color-border: #c8c9bd; /* base2 → base01 的 25% 插值（上游无中间调边框色） */
+  --scrollbar-thumb: #c8c9bd;
+  --cursor-arrow: url('/cursor-arrow-solarized-light.svg') 2 2, auto;
+  --cursor-hand: url('/cursor-hand-solarized-light.svg') 9 2, pointer;
+
+  --color-red: #dc322f;
+  --color-orange: #cb4b16;
+  --color-green: #859900;
+  --color-blue: #268bd2;
+  --color-purple: #6c71c4;
+  --color-gray: #93a1a1;
+  --color-icon: #1f7a72; /* cyan #2aa198 压深：卡片 4.26:1（原色只有 2.62:1） */
+  --color-icon-hover-bg: rgba(42, 161, 152, 0.14);
+  --ch-icon-bg-l: 0.93;
+  --ch-icon-ink-l: 0.45;
+
+  --text-primary-ink: #14557f; /* blue 压深：卡片 6.53、菜单选中底 5.20 */
+  --focus-ring-halo: #fdf6e3;
+  --brand-mark-bg: #186194; /* blue 压深：白字 6.61:1（原色配白字只有 3.68） */
+  --brand-mark-fg: #ffffff;
+  --solid-primary-bg: #186194;
+  --solid-primary-fg: #ffffff; /* 6.62:1 */
+  --tooltip-bg: #073642; /* base02 */
+  --tooltip-fg: #fdf6e3; /* 12.05:1 */
+
+  --text-green: #5a6b00; /* green #859900 压深：4.84:1（原色 3.07） */
+  --text-amber: #8a5306; /* yellow #b58900 压深：5.19:1（原色 3.31） */
+  --text-red: #b02a22; /* red #dc322f 压深：5.40:1（原色 3.83） */
+  --text-purple: #5b60ad; /* violet #6c71c4 压深：4.67:1 */
+  --text-terracotta: #a34410; /* orange #cb4b16 压深：5.05:1 */
+  --text-blue: #186194; /* 5.40:1 */
+  --text-gray: #53676a; /* 4.93:1 */
+
+  --tag-tint-l: 0.47;
+  --tag-custom-mix-color: black;
+  --tag-custom-mix-amount: 50%;
+  --pill-ink-mix-color: black;
+  --pill-ink-mix-amount: 60%;
+  --scroll-hint-color: rgba(0, 0, 0, 0.1);
+  --card-hover-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 8px 24px -4px rgba(0, 0, 0, 0.08);
+}
+
+/* Gruvbox Light（复古浅）：暖黄旧纸质感。
+   页面 bg0_s #f2e5bc、卡片 bg0 #fbf1c7（上游最亮表面档）、边框 bg2 #d5c4a1。
+   正文 fg1 #3c3836 对比度 11:1 以上，余量充足；语义色取上游的「中性/暗」档。 */
+:root[data-theme='gruvbox-light'] {
+  color-scheme: light;
+  --color-primary: #af3a03; /* neutral orange，卡片 5.40:1 */
+  --color-bg: #f2e5bc; /* bg0_s */
+  --color-fg: #fbf1c7; /* bg0 */
+  --color-fg-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 4px 12px 0 rgba(0, 0, 0, 0.04);
+  --color-text: #3c3836; /* fg1 */
+  --color-text-secondary: rgba(60, 56, 54, 0.8); /* 卡片 5.76、页面底 5.37 */
+  --color-text-placeholder: #6b6257; /* 卡片 5.27 */
+  --color-text-tertiary: rgba(60, 56, 54, 0.6);
+  --color-border: #d5c4a1; /* bg2 */
+  --scrollbar-thumb: #d5c4a1;
+  --cursor-arrow: url('/cursor-arrow-gruvbox-light.svg') 2 2, auto;
+  --cursor-hand: url('/cursor-hand-gruvbox-light.svg') 9 2, pointer;
+
+  --color-red: #9d0006;
+  --color-orange: #af3a03;
+  --color-green: #79740e;
+  --color-blue: #076678;
+  --color-purple: #8f3f71;
+  --color-gray: #7c6f64;
+  --color-icon: #076678; /* 卡片 5.82:1 */
+  --color-icon-hover-bg: rgba(7, 102, 120, 0.12);
+  --ch-icon-bg-l: 0.93;
+  --ch-icon-ink-l: 0.45;
+
+  --text-primary-ink: #8f2f02; /* 卡片 7.19、菜单选中底 5.21 */
+  --focus-ring-halo: #fbf1c7;
+  --brand-mark-bg: #af3a03;
+  --brand-mark-fg: #fbf1c7; /* 5.40:1 */
+  --solid-primary-bg: #af3a03;
+  --solid-primary-fg: #fbf1c7;
+  --tooltip-bg: #3c3836;
+  --tooltip-fg: #fbf1c7; /* 10.2:1 */
+
+  --text-green: #5f5c0b; /* neutral green #79740e 压深：6.09:1（原色 4.29） */
+  --text-amber: #8a5306; /* 上游无黄色文字档，取琥珀压深：5.57:1 */
+  --text-red: #9d0006; /* 7.59:1 */
+  --text-purple: #8f3f71; /* 5.94:1 */
+  --text-terracotta: #a34d14; /* 5.10:1 */
+  --text-blue: #076678; /* 5.82:1 */
+  --text-gray: #665c54; /* bg3，5.71:1 */
+
+  --tag-tint-l: 0.47;
+  --tag-custom-mix-color: black;
+  --tag-custom-mix-amount: 50%;
+  --pill-ink-mix-color: black;
+  --pill-ink-mix-amount: 60%;
+  --scroll-hint-color: rgba(0, 0, 0, 0.1);
+  --card-hover-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 8px 24px -4px rgba(0, 0, 0, 0.08);
+}
+
+/* Catppuccin Mocha（摩卡紫）：社区人气最高的 pastel 深色配色。
+   页面 base #1e1e2e、卡片 surface0 #313244、边框 surface1 #45475a，
+   强调色 mauve #cba6f7。深色族一律「浅底 + 深字」。 */
+:root[data-theme='mocha'] {
+  color-scheme: dark;
+  --color-primary: #cba6f7; /* mauve，卡片 6.15:1 */
+  --color-bg: #1e1e2e; /* base */
+  --color-fg: #313244; /* surface0 */
+  --color-fg-shadow: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 4px 20px -2px rgba(0, 0, 0, 0.6);
+  --color-text: #cdd6f4; /* text */
+  --color-text-secondary: rgba(205, 214, 244, 0.7); /* 卡片 4.90 */
+  --color-text-placeholder: #a6adc8; /* subtext0，卡片 5.62 */
+  --color-text-tertiary: rgba(205, 214, 244, 0.55);
+  --color-border: #45475a; /* surface1 */
+  --scrollbar-thumb: rgba(88, 91, 112);
+  --cursor-arrow: url('/cursor-arrow-mocha.svg') 2 2, auto;
+  --cursor-hand: url('/cursor-hand-mocha.svg') 9 2, pointer;
+
+  --color-red: #f38ba8;
+  --color-orange: #fab387;
+  --color-green: #a6e3a1;
+  --color-blue: #89dceb;
+  --color-purple: #cba6f7;
+  --color-gray: #a6adc8;
+  --color-icon: #89dceb; /* sky，卡片 8.03:1 */
+  --color-icon-hover-bg: rgba(137, 220, 235, 0.16);
+  --ch-icon-bg-l: 0.32;
+  --ch-icon-ink-l: 0.80;
+
+  --text-primary-ink: #cba6f7; /* 卡片 6.15、菜单选中底 5.02 */
+  --focus-ring-halo: #11111b; /* crust */
+  --brand-mark-bg: #cba6f7;
+  --brand-mark-fg: #1e1e2e; /* 8.07:1 */
+  --solid-primary-bg: #cba6f7;
+  --solid-primary-fg: #1e1e2e;
+  --tooltip-bg: #cdd6f4;
+  --tooltip-fg: #1e1e2e; /* 11.34:1 */
+
+  --text-green: #a6e3a1;
+  --text-amber: #f9e2af;
+  --text-red: #f38ba8;
+  --text-purple: #cba6f7;
+  --text-terracotta: #fab387;
+  --text-blue: #89b4fa;
+  --text-gray: #a6adc8;
+
+  --tag-tint-l: 0.80;
+  --tag-custom-mix-color: white;
+  --tag-custom-mix-amount: 45%;
+  --pill-ink-mix-color: white;
+  --pill-ink-mix-amount: 55%;
+  --scroll-hint-color: rgba(0, 0, 0, 0.4);
+  --card-hover-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 8px 28px -4px rgba(0, 0, 0, 0.7);
+}
+
+/* Nord（极地夜）：冷调蓝灰。表面用 Polar Night 四色
+   （页面 nord0 #2e3440、卡片 nord1 #3b4252、边框 nord3 #4c566a），
+   正文 nord4 #d8dee9，强调色 nord8 #88c0d0。
+   Nord 没有中间档灰，占位文字取 nord3 → nord4 的 70% 插值（注释见下）。 */
+:root[data-theme='nord'] {
+  color-scheme: dark;
+  --color-primary: #88c0d0; /* nord8，卡片 4.99:1 */
+  --color-bg: #2e3440; /* nord0 */
+  --color-fg: #3b4252; /* nord1 */
+  --color-fg-shadow: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 4px 20px -2px rgba(0, 0, 0, 0.6);
+  --color-text: #d8dee9; /* nord4 */
+  --color-text-secondary: rgba(216, 222, 233, 0.7); /* 卡片 4.58 */
+  --color-text-placeholder: #aeb5c3; /* nord3→nord4 的 70% 插值，卡片 4.9 */
+  --color-text-tertiary: rgba(216, 222, 233, 0.5);
+  --color-border: #4c566a; /* nord3 */
+  --scrollbar-thumb: rgba(76, 86, 106);
+  --cursor-arrow: url('/cursor-arrow-nord.svg') 2 2, auto;
+  --cursor-hand: url('/cursor-hand-nord.svg') 9 2, pointer;
+
+  --color-red: #bf616a; /* nord11 */
+  --color-orange: #d08770; /* nord12 */
+  --color-green: #a3be8c; /* nord14 */
+  --color-blue: #5e81ac; /* nord10 */
+  --color-purple: #b48ead; /* nord15 */
+  --color-gray: #7b88a1; /* nord3 → nord4 的 50% 插值（上游没有中性灰档） */
+  --color-icon: #88c0d0; /* nord8，卡片 4.99:1 */
+  --color-icon-hover-bg: rgba(136, 192, 208, 0.16);
+  --ch-icon-bg-l: 0.32;
+  --ch-icon-ink-l: 0.80;
+
+  /* nord8 提亮一档：菜单选中底（主色 20% 压页面底）上要 ≥4.5，
+     原色在那里只有 4.13:1 */
+  --text-primary-ink: #9ecbda;
+  --focus-ring-halo: #2e3440;
+  --brand-mark-bg: #88c0d0;
+  --brand-mark-fg: #2e3440; /* 6.21:1 */
+  --solid-primary-bg: #88c0d0;
+  --solid-primary-fg: #2e3440;
+  --tooltip-bg: #d8dee9;
+  --tooltip-fg: #2e3440; /* 9.25:1 */
+
+  --text-green: #a3be8c; /* nord14，卡片 4.94:1 */
+  --text-amber: #ebcb8b; /* nord13，卡片 6.44:1 */
+  --text-red: #e0a0a7; /* nord11 提亮两档：原色 4.1、提亮一档 4.4 */
+  --text-purple: #c9a7c4; /* nord15 提亮一档：原色 #b48ead 对卡片只有 3.54:1 */
+  --text-terracotta: #e8ae96; /* nord12 提亮两档：5.22 */
+  --text-blue: #94b3d6; /* nord9 提亮一档：原色 #81a1c1 对卡片只有 3.73:1 */
+  --text-gray: #b3bccd; /* nord4 压暗一档：5.26 */
+
+  --tag-tint-l: 0.80;
+  --tag-custom-mix-color: white;
+  --tag-custom-mix-amount: 45%;
+  --pill-ink-mix-color: white;
+  --pill-ink-mix-amount: 55%;
+  --scroll-hint-color: rgba(0, 0, 0, 0.4);
+  --card-hover-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 8px 28px -4px rgba(0, 0, 0, 0.7);
+}
+
+/* Dracula（暗夜紫）：深紫底 + 霓虹紫粉。
+   页面 background #282a36（官方）、卡片取 background → current line #44475a 的
+   50% 插值 #343746（官方把 current line 当行高亮用，直接当卡片太重）、
+   边框用 current line #44475a。正文 foreground #f8f8f2，强调 purple #bd93f9。
+   Dracula 的正红 #ff5555 在深色卡片上只有 3.6:1，文字档提亮到 #ff8080。 */
+:root[data-theme='dracula'] {
+  color-scheme: dark;
+  --color-primary: #bd93f9; /* purple，卡片 4.89:1 */
+  --color-bg: #282a36; /* background */
+  --color-fg: #343746; /* #282a36 → #44475a 的 50% 插值 */
+  --color-fg-shadow: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 4px 20px -2px rgba(0, 0, 0, 0.6);
+  --color-text: #f8f8f2; /* foreground */
+  --color-text-secondary: rgba(248, 248, 242, 0.78); /* 卡片 7.20 */
+  --color-text-placeholder: rgba(248, 248, 242, 0.62); /* 卡片 5.05 */
+  --color-text-tertiary: rgba(248, 248, 242, 0.5);
+  --color-border: #44475a; /* current line */
+  --scrollbar-thumb: rgba(68, 71, 90);
+  --cursor-arrow: url('/cursor-arrow-dracula.svg') 2 2, auto;
+  --cursor-hand: url('/cursor-hand-dracula.svg') 9 2, pointer;
+
+  --color-red: #ff5555;
+  --color-orange: #ffb86c;
+  --color-green: #50fa7b;
+  --color-blue: #8be9fd;
+  --color-purple: #bd93f9;
+  --color-gray: #6272a4; /* comment */
+  --color-icon: #8be9fd; /* cyan，卡片 8.52:1 */
+  --color-icon-hover-bg: rgba(139, 233, 253, 0.16);
+  --ch-icon-bg-l: 0.32;
+  --ch-icon-ink-l: 0.80;
+
+  /* purple 提亮一档：菜单选中底上要 ≥4.5，原色在那里只有 3.58:1 */
+  --text-primary-ink: #cfaafb;
+  --focus-ring-halo: #282a36;
+  --brand-mark-bg: #bd93f9;
+  --brand-mark-fg: #282a36; /* 5.90:1 */
+  --solid-primary-bg: #bd93f9;
+  --solid-primary-fg: #282a36;
+  --tooltip-bg: #f8f8f2;
+  --tooltip-fg: #282a36; /* 13.36:1 */
+
+  --text-green: #50fa7b; /* 8.59:1 */
+  --text-amber: #f1fa8c; /* 10.55:1 */
+  --text-red: #ff8080; /* 原色 #ff5555 对卡片只有 3.79:1，提亮 */
+  --text-purple: #bd93f9; /* 4.89:1 */
+  --text-terracotta: #ffb86c; /* 6.92:1 */
+  --text-blue: #8be9fd; /* 8.52:1 */
+  --text-gray: #9aa5cf; /* comment #6272a4 提亮：原色对卡片只有 2.49:1 */
+
+  --tag-tint-l: 0.80;
+  --tag-custom-mix-color: white;
+  --tag-custom-mix-amount: 45%;
+  --pill-ink-mix-color: white;
+  --pill-ink-mix-amount: 55%;
+  --scroll-hint-color: rgba(0, 0, 0, 0.4);
+  --card-hover-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 8px 28px -4px rgba(0, 0, 0, 0.7);
+}
+
+/* Tokyo Night（东京夜）：深蓝底夜色。
+   取官方 Night（不是 Storm/Light）：编辑器底 #1a1b26，
+   卡片用官方的 Storm 底 #24283b（比 Night 底亮一档，正好当抬升表面）、
+   边框用官方 terminal black #414868，正文 editor foreground #c0caf5，
+   强调蓝 #7aa2f7。上游明确写着「很多元素故意低对比」，本站不跟这条 ——
+   语义色一律提到过 AA（见下）。 */
+:root[data-theme='tokyo-night'] {
+  color-scheme: dark;
+  --color-primary: #7aa2f7; /* 卡片 5.74:1 */
+  --color-bg: #1a1b26; /* Night editor background */
+  --color-fg: #24283b; /* Storm editor background */
+  --color-fg-shadow: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 4px 20px -2px rgba(0, 0, 0, 0.6);
+  --color-text: #c0caf5; /* editor foreground */
+  --color-text-secondary: rgba(192, 202, 245, 0.72); /* 卡片 5.41 */
+  --color-text-placeholder: rgba(192, 202, 245, 0.66); /* 卡片 4.68 */
+  --color-text-tertiary: rgba(192, 202, 245, 0.5);
+  --color-border: #414868; /* terminal black */
+  --scrollbar-thumb: rgba(65, 72, 104);
+  --cursor-arrow: url('/cursor-arrow-tokyo-night.svg') 2 2, auto;
+  --cursor-hand: url('/cursor-hand-tokyo-night.svg') 9 2, pointer;
+
+  --color-red: #f7768e;
+  --color-orange: #ff9e64;
+  --color-green: #9ece6a;
+  --color-blue: #7dcfff;
+  --color-purple: #bb9af7;
+  --color-gray: #565f89; /* comment */
+  --color-icon: #7dcfff; /* 卡片 8.49:1 */
+  --color-icon-hover-bg: rgba(125, 207, 255, 0.16);
+  --ch-icon-bg-l: 0.32;
+  --ch-icon-ink-l: 0.80;
+
+  --text-primary-ink: #7aa2f7; /* 卡片 5.74、菜单选中底 4.73 */
+  --focus-ring-halo: #1a1b26;
+  --brand-mark-bg: #7aa2f7;
+  --brand-mark-fg: #1a1b26; /* 6.77:1 */
+  --solid-primary-bg: #7aa2f7;
+  --solid-primary-fg: #1a1b26;
+  --tooltip-bg: #c0caf5;
+  --tooltip-fg: #1a1b26; /* 10.6:1 */
+
+  --text-green: #9ece6a; /* 7.91:1 */
+  --text-amber: #e0af68; /* 7.24:1 */
+  --text-red: #f7768e; /* 5.46:1 */
+  --text-purple: #bb9af7; /* 6.28:1 */
+  --text-terracotta: #ff9e64; /* 7.13:1 */
+  --text-blue: #7dcfff; /* 8.49:1 */
+  --text-gray: #9aa5ce; /* comment #565f89 提亮：原色只有 2.34:1 */
+
+  --tag-tint-l: 0.80;
+  --tag-custom-mix-color: white;
+  --tag-custom-mix-amount: 45%;
+  --pill-ink-mix-color: white;
+  --pill-ink-mix-amount: 55%;
+  --scroll-hint-color: rgba(0, 0, 0, 0.4);
+  --card-hover-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 8px 28px -4px rgba(0, 0, 0, 0.7);
+}
+
+/* Solarized Dark（日光深）：深青底的低对比经典配色。
+   页面 base03 #002b36、卡片 base02 #073642、边框取 base02 → base01 的 40% 插值。
+   这一套的色阶比浅色那一套更窄：官方正文 base0 #839496 在卡片上只有 4.32:1，
+   所以正文用 base1 #93a1a1（5.11:1），次要文字只能取 base1 的 94% —— 
+   它与正文的层次差异是本配色固有的窄，不是漏调（改宽就只能牺牲 AA）。 */
+:root[data-theme='solarized-dark'] {
+  color-scheme: dark;
+  --color-primary: #268bd2; /* blue，卡片 3.53:1 */
+  --color-bg: #002b36; /* base03 */
+  --color-fg: #073642; /* base02 */
+  --color-fg-shadow: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 4px 20px -2px rgba(0, 0, 0, 0.6);
+  --color-text: #93a1a1; /* base1 */
+  --color-text-secondary: rgba(147, 161, 161, 0.95); /* 卡片 4.77 */
+  --color-text-placeholder: rgba(147, 161, 161, 0.96); /* 卡片 4.83 */
+  --color-text-tertiary: rgba(147, 161, 161, 0.6);
+  --color-border: #274c56; /* base02 → base01 的 40% 插值 */
+  --scrollbar-thumb: rgba(88, 110, 117);
+  --cursor-arrow: url('/cursor-arrow-solarized-dark.svg') 2 2, auto;
+  --cursor-hand: url('/cursor-hand-solarized-dark.svg') 9 2, pointer;
+
+  --color-red: #dc322f;
+  --color-orange: #cb4b16;
+  --color-green: #859900;
+  --color-blue: #268bd2;
+  --color-purple: #6c71c4;
+  --color-gray: #586e75; /* base01 */
+  --color-icon: #2aa198; /* cyan，卡片 4.12:1 */
+  --color-icon-hover-bg: rgba(42, 161, 152, 0.16);
+  --ch-icon-bg-l: 0.32;
+  --ch-icon-ink-l: 0.80;
+
+  /* blue 提亮版：卡片 7.16、菜单选中底 6.00（原色在菜单选中底上只有 2.97） */
+  --text-primary-ink: #7fc4ea;
+  --focus-ring-halo: #002b36;
+  --brand-mark-bg: #7fc4ea;
+  --brand-mark-fg: #002b36; /* 7.86:1 */
+  --solid-primary-bg: #7fc4ea;
+  --solid-primary-fg: #002b36;
+  --tooltip-bg: #93a1a1;
+  --tooltip-fg: #002b36; /* 5.62:1 */
+
+  --text-green: #a3bd00; /* #859900 提亮：卡片 6.41（原色 4.27） */
+  --text-amber: #d3a300; /* #b58900 提亮：5.87（原色 4.27） */
+  --text-red: #f57f7a; /* #dc322f 提亮：5.34（原色 2.96） */
+  --text-purple: #9a9ee6; /* #6c71c4 提亮：5.48（原色 3.12） */
+  --text-terracotta: #eb7f52; /* #cb4b16 提亮：5.01 */
+  --text-blue: #5fb0e0; /* 5.77 */
+  --text-gray: #93a1a1; /* base1，5.11 */
+
+  --tag-tint-l: 0.80;
+  --tag-custom-mix-color: white;
+  --tag-custom-mix-amount: 45%;
+  --pill-ink-mix-color: white;
+  --pill-ink-mix-amount: 55%;
+  --scroll-hint-color: rgba(0, 0, 0, 0.4);
+  --card-hover-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 8px 28px -4px rgba(0, 0, 0, 0.7);
+}
+
+/* Gruvbox Dark（复古深）：暖灰底 + 琥珀橘，像老式终端的琥珀屏。
+   页面 bg0 #282828、卡片 bg1 #3c3836、边框 bg2 #504945、正文 fg1 #ebdbb2。
+   强调色取 bright orange #fe8019（配深字 5.84:1）。 */
+:root[data-theme='gruvbox-dark'] {
+  color-scheme: dark;
+  --color-primary: #fe8019; /* 卡片 4.58:1 */
+  --color-bg: #282828; /* bg0 */
+  --color-fg: #3c3836; /* bg1 */
+  --color-fg-shadow: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 4px 20px -2px rgba(0, 0, 0, 0.6);
+  --color-text: #ebdbb2; /* fg1 */
+  --color-text-secondary: rgba(235, 219, 178, 0.72); /* 卡片 5.50 */
+  --color-text-placeholder: #bdae93; /* fg3，卡片 5.30 */
+  --color-text-tertiary: rgba(235, 219, 178, 0.5);
+  --color-border: #504945; /* bg2 */
+  --scrollbar-thumb: rgba(80, 73, 69);
+  --cursor-arrow: url('/cursor-arrow-gruvbox-dark.svg') 2 2, auto;
+  --cursor-hand: url('/cursor-hand-gruvbox-dark.svg') 9 2, pointer;
+
+  --color-red: #fb4934;
+  --color-orange: #fe8019;
+  --color-green: #b8bb26;
+  --color-blue: #83a598;
+  --color-purple: #d3869b;
+  --color-gray: #928374; /* gray */
+  --color-icon: #83a598; /* bright blue，卡片 4.29:1 */
+  --color-icon-hover-bg: rgba(131, 165, 152, 0.16);
+  --ch-icon-bg-l: 0.32;
+  --ch-icon-ink-l: 0.80;
+
+  /* bright yellow：卡片 6.81、菜单选中底 6.00 */
+  --text-primary-ink: #fabd2f;
+  --focus-ring-halo: #282828;
+  --brand-mark-bg: #fe8019;
+  --brand-mark-fg: #282828; /* 5.84:1 */
+  --solid-primary-bg: #fe8019;
+  --solid-primary-fg: #282828;
+  --tooltip-bg: #ebdbb2;
+  --tooltip-fg: #282828; /* 10.8:1 */
+
+  --text-green: #b8bb26; /* 5.60:1 */
+  --text-amber: #fabd2f; /* 6.81:1 */
+  --text-red: #ff8a7a; /* bright red #fb4934 提亮：原色只有 3.34:1 */
+  --text-purple: #e5a0b3; /* bright purple #d3869b 提亮：原色 4.22:1 */
+  --text-terracotta: #fe8019; /* 4.58:1 */
+  --text-blue: #a3c9bb; /* bright blue 提亮：原色 4.29:1 */
+  --text-gray: #c4b59f; /* fg4 #a89984 提亮：原色 4.16:1 */
+
+  --tag-tint-l: 0.80;
+  --tag-custom-mix-color: white;
+  --tag-custom-mix-amount: 45%;
+  --pill-ink-mix-color: white;
+  --pill-ink-mix-amount: 55%;
+  --scroll-hint-color: rgba(0, 0, 0, 0.4);
+  --card-hover-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 8px 28px -4px rgba(0, 0, 0, 0.7);
+}
+
+/* ---- 主题预览色样（2026-09-30）----
+   主题卡里那块迷你预览的取色来源：外圈是页面底、内嵌块是卡片底
+   （带 1px 描边）、右上角圆点是主色实心块。
+
+   色值在这里写死是**有意**的：预览画的是「这套主题长什么样」，
+   不随当前主题变化，所以它不能借用 var(--color-bg) 之类会跟着当前主题走的令牌。
+   代价是「改主题忘了改预览」，于是 check-contracts.mjs 逐项比对这四个值
+   必须等于该主题块里的 --color-bg / --color-fg / --color-border / --solid-primary-bg。 */
+[data-swatch='light'] {
+  --sw-page: #f8f5ee;
+  --sw-card: #ffffff;
+  --sw-border: #d9d9d9;
+  --sw-accent: #b15840;
+}
+[data-swatch='latte'] {
+  --sw-page: #eff1f5;
+  --sw-card: #ffffff;
+  --sw-border: #ccd0da;
+  --sw-accent: #8839ef;
+}
+[data-swatch='solarized-light'] {
+  --sw-page: #fdf6e3;
+  --sw-card: #eee8d5;
+  --sw-border: #c8c9bd;
+  --sw-accent: #186194;
+}
+[data-swatch='gruvbox-light'] {
+  --sw-page: #f2e5bc;
+  --sw-card: #fbf1c7;
+  --sw-border: #d5c4a1;
+  --sw-accent: #af3a03;
+}
+[data-swatch='dark'] {
+  --sw-page: #202020;
+  --sw-card: #303030;
+  --sw-border: #424242;
+  --sw-accent: #e8a48c;
+}
+[data-swatch='oled'] {
+  --sw-page: #0a0a0a;
+  --sw-card: #141414;
+  --sw-border: #2e2e2e;
+  --sw-accent: #e8a48c;
+}
+[data-swatch='mocha'] {
+  --sw-page: #1e1e2e;
+  --sw-card: #313244;
+  --sw-border: #45475a;
+  --sw-accent: #cba6f7;
+}
+[data-swatch='nord'] {
+  --sw-page: #2e3440;
+  --sw-card: #3b4252;
+  --sw-border: #4c566a;
+  --sw-accent: #88c0d0;
+}
+[data-swatch='dracula'] {
+  --sw-page: #282a36;
+  --sw-card: #343746;
+  --sw-border: #44475a;
+  --sw-accent: #bd93f9;
+}
+[data-swatch='tokyo-night'] {
+  --sw-page: #1a1b26;
+  --sw-card: #24283b;
+  --sw-border: #414868;
+  --sw-accent: #7aa2f7;
+}
+[data-swatch='solarized-dark'] {
+  --sw-page: #002b36;
+  --sw-card: #073642;
+  --sw-border: #274c56;
+  --sw-accent: #7fc4ea;
+}
+[data-swatch='gruvbox-dark'] {
+  --sw-page: #282828;
+  --sw-card: #3c3836;
+  --sw-border: #504945;
+  --sw-accent: #fe8019;
 }
 
 html, body, #app {
@@ -576,17 +1342,14 @@ a:hover { opacity: 0.85; }
   pointer-events: none;
   background-image: none;
 }
+/* 渐隐的颜色走 --scroll-hint-color：深浅两族的浓度不同（黑 10% / 40%），
+   2026-09-30 之前这里是两条按 data-theme='dark' 分支的规则 ——
+   多主题下那种写法表达不了「深色族」，所以收口成令牌。 */
 .log-table[data-hint-l='1'] .ant-table-cell-fix-left-last::after {
-  background-image: linear-gradient(to right, rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0));
+  background-image: linear-gradient(to right, var(--scroll-hint-color), transparent);
 }
 .log-table[data-hint-r='1'] .ant-table-cell-fix-right-first::after {
-  background-image: linear-gradient(to left, rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0));
-}
-:root[data-theme='dark'] .log-table[data-hint-l='1'] .ant-table-cell-fix-left-last::after {
-  background-image: linear-gradient(to right, rgba(0, 0, 0, 0.4), rgba(0, 0, 0, 0));
-}
-:root[data-theme='dark'] .log-table[data-hint-r='1'] .ant-table-cell-fix-right-first::after {
-  background-image: linear-gradient(to left, rgba(0, 0, 0, 0.4), rgba(0, 0, 0, 0));
+  background-image: linear-gradient(to left, var(--scroll-hint-color), transparent);
 }
 
 /* ---- 表头与表体不需要额外补宽 ----
@@ -934,8 +1697,9 @@ code,
   }
 }
 
-/* 主题切换的圆形扩散（View Transitions，动画由 themeStore.toggleWithBurst
-   用 Web Animations 驱动 clipPath）。浏览器默认给新旧快照交叉淡变，
+/* 主题切换的圆形扩散（View Transitions，动画由 themeStore.withBurst
+   用 Web Animations 驱动 clipPath；2026-09-30 之前这个函数叫 toggleWithBurst，
+   多主题改造时拆成了 setTheme + withBurst）。浏览器默认给新旧快照交叉淡变，
    不关掉的话它会和 clipPath 动画叠着放，圆形边缘带一层鬼影。
    mix-blend-mode 同理：默认的 blend 会让新旧两层互相透色。
    不支持该 API 的浏览器根本不会产生这些伪元素，规则自然不生效。 */

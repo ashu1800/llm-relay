@@ -521,7 +521,8 @@ onMounted(load)
    这里不能直接用 GroupTag 组件 —— 它读的是「已保存的分组」，
    而表单要预览的是「还没保存的颜色」，所以只共用变量约定。 */
 .group-tag {
-  --gt-l: 0.47;
+  /* 明度走主题令牌（浅色族 0.47 / 深色族 0.80），与 GroupTag 同源 */
+  --gt-l: var(--tag-tint-l);
   --gt-base: oklch(var(--gt-l) var(--gt-c) var(--gt-h));
   display: inline-block;
   max-width: 200px;
@@ -537,14 +538,13 @@ onMounted(load)
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 压暗比例必须与 GroupTag 的浅色 50% 一致：原来这里原色直出，
-   自定义色在浅色主题下「预览即最终效果」不成立（暗色分支对齐过，
-   浅色漏了 —— 两边都改过一次，值各抄一份迟早再漂） */
-.group-tag.is-custom { --gt-base: color-mix(in oklab, var(--gt-color) 50%, black); }
-:root[data-theme='dark'] .group-tag { --gt-l: 0.80; }
-/* 混白比例必须与 GroupTag 的 45% 一致（那边实测过十三个预设的最差对比度）：
-   这里曾经是 62%，同一自定义色在表单预览与列表里颜色不一样，
-   「预览就是最终效果」不成立 */
-:root[data-theme='dark'] .group-tag.is-custom { --gt-base: color-mix(in oklab, var(--gt-color) 45%, white); }
+/* 这里的预览必须与 GroupTag 的列表渲染逐字同源：混合比例与目标色走主题令牌
+   （--tag-custom-mix-*），明度走 --tag-tint-l。这两处曾经各抄一份比例
+   （这里 62%、GroupTag 45%），同一个自定义色在表单预览与列表里颜色不一样，
+   「预览即最终效果」不成立 —— 2026-09-30 多主题时把值彻底收进主题块，
+   两边不再可能各改一次。 */
+.group-tag.is-custom {
+  --gt-base: color-mix(in oklab, var(--gt-color) var(--tag-custom-mix-amount), var(--tag-custom-mix-color));
+}
 </style>
 

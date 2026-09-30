@@ -113,13 +113,18 @@ jobs:
           set -euo pipefail
           npm run build
 
-      - name: 契约检查
+      - name: 契约与主题对比度检查
         working-directory: frontend
         run: |
           set -euo pipefail
-          # check-contracts.mjs 静态比对每个页面的 DataState 用法与组件 props 声明。
-          # 它拦的是那类「只在开发期控制台警告、构建产物里被剥掉、测试也不看」
-          # 的静默错误（历史上 ProxiesView 的属性写错很久没人发现）。
-          # 该脚本在本仓库已跑通（exit 0），注意必须在 frontend/ 下执行：
-          # 它按 import.meta.url 相对定位到 ../src。
-          node scripts/check-contracts.mjs
+          # npm run check = check-contracts.mjs + check-theme-contrast.mjs：
+          #   · 契约：静态比对每个页面的 DataState 用法与组件 props 声明，
+          #     外加主题系统五处的一致性（注册表 / theme.css / index.html 预涂清单 /
+          #     光标资源 / antd 令牌映射）。它拦的是那类「只在开发期控制台警告、
+          #     构建产物里被剥掉、测试也不看」的静默错误（历史上 ProxiesView 的
+          #     属性写错很久没人发现）。
+          #   · 对比度：12 套主题的正文 / 次要文字 / 占位文字 / 语义色 / 实心块 /
+          #     提示浮层逐项实算 WCAG 比值。上游配色（Solarized、Tokyo Night 等）
+          #     本身就是低对比取向，改了主题色而不过线时必须有人拦。
+          # 注意必须在 frontend/ 下执行：脚本按 import.meta.url 相对定位到 ../src。
+          npm run check

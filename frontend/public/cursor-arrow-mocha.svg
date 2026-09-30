@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- 由 frontend/scripts/gen-theme-cursors.mjs 生成，不要手改。
+       形状取自形状模板 cursor-arrow-dark.svg（深色族的圆角轮廓），
+       默认箭头的配色取自 mocha 主题「主色实心块」那一对：fill 是块底色、stroke 是压在上面的文字色。
+       改完主题色跑 npm run gen:cursors 重新生成，check-contracts.mjs 会逐字节比对。 -->
+  <path
+    d="M16.07 11.42 A1.4 1.4 0 0 1 15.83 12.27 L11.4 12.49 A1 1 0 0 0 10.92
+       13.4 L12.98 16.79 A1.3 1.3 0 0 1 12.42 18.33 L11.74 18.57 A1.3 1.3 0 0 1
+       9.83 17.89 L7.68 14.41 A1 1 0 0 0 6.34 14.15 L3.21 16.42 A1.5 1.5 0 0 1
+       2 15.8 L2 2 L16.07 11.42 Z"
+    fill="#cba6f7"
+    stroke="#1e1e2e"
+    stroke-width="1.5"
+    stroke-linejoin="round" />
+</svg>

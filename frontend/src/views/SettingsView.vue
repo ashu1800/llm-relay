@@ -9,6 +9,7 @@ import { api } from '@/api/client'
 import { versionApi, type UpdateConfig } from '@/api/version'
 import DataState from '@/components/DataState.vue'
 import LogFxPreview from '@/components/LogFxPreview.vue'
+import ThemePicker from '@/components/ThemePicker.vue'
 import { useLogFxStore } from '@/stores/logFx'
 import { useThemeStore } from '@/stores/theme'
 import { useVersionStore } from '@/stores/version'
@@ -19,21 +20,10 @@ import { fmtTime } from '@/utils/fmtTime'
 // store 是看板那一块与这一页共用的同一个实例，所以在这里点一下，回看板立刻生效。
 const logFx = useLogFxStore()
 
-// 深色质感档位（2026-09-27）：数据来自 theme store（看板灯泡与这里是同一个实例），
-// 名字与说明只在这里写一遍 —— 它不像动效那样有跨页文案引用。
+// 界面主题（2026-09-30 起是 12 套配色，不再只有「深色质感档位」两档）：
+// 数据来自 theme store（看板那枚按钮与这里是同一个实例），
+// 选择器本体是 components/ThemePicker.vue —— 看板弹层用的是同一个组件的紧凑形态。
 const themeStore = useThemeStore()
-const darkStyleOptions = [
-  {
-    id: 'classic' as const,
-    name: '经典深灰',
-    desc: '原有深色：#202020 页面底 + #303030 卡片，与参考站同源'
-  },
-  {
-    id: 'oled' as const,
-    name: '深空纯黑',
-    desc: 'OLED 档：纯黑页面底 + #141414 卡片，夜间沉浸、纯黑像素不发光省电'
-  }
-]
 
 // ---- 版本更新设置 ----
 //
@@ -332,44 +322,19 @@ onMounted(() => {
     <section class="panel">
       <div class="panel-title">界面主题</div>
       <div class="note">
-        浅色与深色仍在<strong>数据看板右上角的灯泡</strong>切换（带圆形扩散动效）。
-        这里选的是<strong>深色的质感档位</strong>：文字与配色不变，只换表面底色 ——
-        「深空纯黑」为 OLED 屏准备（纯黑像素不发光、夜间盯盘更沉浸、也更省电），
-        选定后若当前是浅色会直接切到深色让效果立刻可见。
+        12 套内置配色：浅色 4 套、深色 8 套（深色里含为 OLED 屏准备的「深空纯黑」）。
+        本页与<strong>数据看板右上角那枚按钮</strong>用的是同一个选择器，选哪边都一样。
+        每套配色的正文、次要文字、占位文字、语义色与实心按钮都按 WCAG AA（4.5:1）实测过，
+        数值由 <span class="mono">scripts/check-theme-contrast.mjs</span> 在 CI 里重算。
+        配色取自公开项目（Catppuccin / Nord / Dracula / Tokyo Night / Gruvbox / Solarized，
+        均 MIT 许可），出处与偏差记在 <span class="mono">styles/theme.css</span> 各主题块的注释里。
       </div>
-      <!-- 与「界面动效」同一套卡片形态：原生 radio 保键盘与读屏，
-           迷你预览画的是该档深色下「页面底 + 卡片 + 边框」的真实色样 -->
-      <div class="fx-grid ds-grid" role="radiogroup" aria-label="深色主题的质感档位">
-        <label
-          v-for="opt in darkStyleOptions"
-          :key="opt.id"
-          class="fx-item"
-          :class="{ 'is-active': themeStore.darkStyle === opt.id }"
-        >
-          <input
-            class="fx-radio"
-            type="radio"
-            name="dark-style"
-            :value="opt.id"
-            :checked="themeStore.darkStyle === opt.id"
-            @change="themeStore.setDarkStyle(opt.id)"
-          />
-          <span class="ds-swatch" :class="'sw-' + opt.id" aria-hidden="true">
-            <i class="sw-page">
-              <i class="sw-card" />
-            </i>
-          </span>
-          <span class="fx-name">
-            {{ opt.name }}
-            <span v-if="opt.id === 'classic'" class="fx-default">默认</span>
-            <span v-if="themeStore.darkStyle === opt.id" class="fx-check" aria-hidden="true">✓</span>
-          </span>
-          <span class="fx-desc">{{ opt.desc }}</span>
-        </label>
-      </div>
+      <!-- 选择器是共享组件：看板弹层用的是同一个实现的紧凑形态，
+           所以「弹层里选中的」与「这一页选中的」永远说的是同一件事 -->
+      <ThemePicker />
       <div class="span-line">
         与入场动效一样是浏览器本地偏好，不进配置备份。
-        当前档位：<span class="mono">{{ themeStore.darkStyle === 'oled' ? '深空纯黑' : '经典深灰' }}</span>
+        当前主题：<span class="mono">{{ themeStore.current.name }}（{{ themeStore.current.upstream }}）</span>
       </div>
     </section>
 
@@ -631,8 +596,6 @@ onMounted(() => {
    选中的那一张用主色描边 + 主色浅底 —— 与 StatCard 的 tone 底同一手法
    （color-mix 派生，不写死色值，深色主题自动换档）。 */
 .fx-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
-/* 主题档位只有两张卡：沿用 fx-grid 的间距与响应式，只把列数改成两列 */
-.ds-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 @media (max-width: 900px) {
   .fx-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
@@ -689,33 +652,11 @@ onMounted(() => {
 .fx-check { color: var(--color-primary); }
 .fx-desc { font-size: 12px; line-height: 1.7; color: var(--color-text-secondary); }
 
-/* ---- 深色质感档位的迷你色样（2026-09-27）----
-   画的是该档深色下真实的「页面底 + 卡片 + 卡片描边」三层：外圈是页面底色，
-   内嵌的小块是卡片底，卡片的 1px 描边给出边界。色值与 theme.css 里
-   对应档位逐字一致 —— 这里是纯展示（预览的是「深色长什么样」，
-   不随当前是浅色还是深色而变），写死字面量是有意的。 */
-.ds-swatch {
-  display: block;
-  height: 60px;
-  border-radius: 6px;
-  overflow: hidden;
-}
-.sw-page {
-  display: block;
-  width: 100%;
-  height: 100%;
-  padding: 9px;
-}
-.sw-card {
-  display: block;
-  width: 100%;
-  height: 100%;
-  border-radius: 4px;
-}
-.ds-swatch.sw-classic .sw-page { background: #202020; }
-.ds-swatch.sw-classic .sw-card { background: #303030; border: 1px solid #424242; }
-.ds-swatch.sw-oled .sw-page { background: #0a0a0a; }
-.ds-swatch.sw-oled .sw-card { background: #141414; border: 1px solid rgba(255, 255, 255, 0.14); }
+/* ---- 主题预览色样（2026-09-27 立，2026-09-30 随多主题迁走）----
+   原来这里按「深色质感档位」写死两套色值（.ds-swatch.sw-classic / .sw-oled）。
+   12 套主题之后这份色样表搬到了 theme.css 的 [data-swatch='<id>'] ——
+   与主题块放在同一个文件里，check-contracts.mjs 才能逐项比对
+   「卡片上看到的样子」与「点下去得到的样子」是否一致。 */
 /* 等宽片段用全站那一套等宽字族，而不是就地写死一串：
    写死的 ui-monospace/monospace 没有中文回退，正文里「[已隐藏]」这种带中文的
    片段会落到浏览器给 monospace 配的中文字体（Windows 上又是宋体），

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- 由 frontend/scripts/gen-theme-cursors.mjs 生成，不要手改。
+       形状取自形状模板 cursor-arrow-light.svg（浅色族的锐角轮廓），
+       默认箭头的配色取自 solarized-light 主题「主色实心块」那一对：fill 是块底色、stroke 是压在上面的文字色。
+       改完主题色跑 npm run gen:cursors 重新生成，check-contracts.mjs 会逐字节比对。 -->
+  <path
+    d="M2 2 L2 20 L6.6 15.6 L9.6 22 L12.4 20.7 L9.5 14.4 L15.6 14 Z"
+    fill="#186194"
+    stroke="#ffffff"
+    stroke-width="1.5"
+    stroke-linejoin="round" />
+</svg>

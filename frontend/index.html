@@ -11,33 +11,55 @@
     <!-- 移动端浏览器地址栏/状态栏跟着站点主色，避免出现一条突兀的白带 -->
     <meta name="theme-color" content="#c87864" />
     <title>LLM Relay</title>
-    <!-- 在首次绘制之前就把 data-theme 定下来，避免深色模式闪白。
-         主题色的定义全在 styles/theme.css 里，但那份 CSS 由打包产物加载，
-         而打包产物是 module script，浏览器要等到 HTML 解析完才去取 ——
-         这段时间页面已经用浅色底画过一帧了。深色偏好的用户每次刷新都会
-         先看到一下刺眼的白屏（FOUC）。
+    <!-- 在首次绘制之前就把 data-theme 定下来，避免深色主题闪白、或某套深色
+         被画成浅色底。主题色的定义全在 styles/theme.css 里，但那份 CSS 由打包
+         产物加载，而打包产物是 module script，浏览器要等到 HTML 解析完才去取 ——
+         这段时间页面已经用默认的浅色底画过一帧了（FOUC）。
 
          注意这里只设属性、不设颜色：色值仍然只有 CSS 一份，
-         不会出现 JS/CSS 两套定义漂移的问题。 -->
+         不会出现 JS/CSS 两套定义漂移的问题。
+
+         下面这份 id 清单是**孤本**：这段脚本跑在打包产物之前，import 不了
+         src/utils/themes.ts 里的注册表，只能自己带一份。
+         它的正确性由 frontend/scripts/check-contracts.mjs 与注册表逐项比对 ——
+         漏一项的表现是「某套主题刷新时先闪一下别的配色」，肉眼很难复现，
+         所以交给脚本盯。 -->
     <script>
       (function () {
         try {
+          var THEME_IDS = [
+            'light',
+            'latte',
+            'solarized-light',
+            'gruvbox-light',
+            'dark',
+            'oled',
+            'mocha',
+            'nord',
+            'dracula',
+            'tokyo-night',
+            'solarized-dark',
+            'gruvbox-dark'
+          ]
           var saved = localStorage.getItem('llm-relay-theme')
-          // 历史遗留的非法值（例如更早版本存过的 'auto'）必须忽略，
-          // 否则 data-theme 会变成一个没有对应样式块的值
-          if (saved !== 'dark' && saved !== 'light') {
+          var legacy = localStorage.getItem('llm-relay-darkstyle')
+          // 老版本把「深空纯黑」存成独立档位（主题=dark + 档位=oled）。
+          // 迁移规则与 stores/theme.ts 的 readStoredTheme 必须逐字一致，两处都要认：
+          //   · 只有「上次停在深色」（主题键是 dark，或干脆没有主题键）才迁移成 oled ——
+          //     老版本里档位与明暗是两个键，选了 oled 之后再点灯泡切到浅色的话，
+          //     档位键仍留着 oled；那种情况下用户最后看到的是浅色，不该被拽回深色。
+          //   · 主题键是 light 时保持浅色（oled 那层表面只对深色底生效，浅色下等于没选）。
+          // 这段判断**必须**写在这里：store 里的迁移要等打包产物跑起来才生效，
+          // 不认的话 OLED 用户每次刷新都会先闪一帧经典深灰（#202020）再跳纯黑。
+          // 注意 saved 为 'dark' 时也走这条 —— 老用户的主题键恰好就是 'dark'，
+          // 「只认主题键不认识的值」这种写法会让这条迁移永远不触发。
+          if ((saved === null || saved === 'dark') && legacy === 'oled') saved = 'oled'
+          if (THEME_IDS.indexOf(saved) < 0) {
             saved = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
               ? 'dark'
               : 'light'
           }
           document.documentElement.setAttribute('data-theme', saved)
-          // 深色质感档位（classic / oled）一起带上：OLED 用户刷新时
-          // 若漏了这个属性，首帧是深灰底、下一帧才跳成纯黑 —— 闪一下。
-          // 浅色下这个属性没有任何样式命中，带着无害。
-          var darkStyle = localStorage.getItem('llm-relay-darkstyle')
-          if (darkStyle === 'oled' || darkStyle === 'classic') {
-            document.documentElement.setAttribute('data-darkstyle', darkStyle)
-          }
         } catch (e) {
           // localStorage 在隐私模式下会抛异常。取不到偏好不算错误，
           // 用默认的浅色继续渲染即可 —— 绝不能让这段脚本阻断页面。
