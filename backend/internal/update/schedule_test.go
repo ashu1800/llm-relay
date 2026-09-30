@@ -164,38 +164,66 @@ func TestScheduledCheckSkipsWhileAnotherCheckRuns(t *testing.T) {
 	}
 }
 
-func TestCheckCoalescesQueuedCallIntoFreshCache(t *testing.T) {
+// 排队合并的判定就是这一句：fetchAndCache 拿到的 startedAt 早于缓存的写入时刻。
+//
+// 直接调它（跳过锁）把这个状态**精确**造出来，而不是用 goroutine 去撞锁 ——
+// 撞锁的写法要靠 sleep 猜「它现在应该卡在锁上了」，慢且偶发失败，
+// 而这里要验的规则只有「排队期间别人刷过缓存 → 复用，不再发请求」。
+func TestFetchAndCacheReusesCacheWrittenWhileWaiting(t *testing.T) {
 	stub := &githubStub{tag: "v1.0.0"}
 	var logBuf bytes.Buffer
 	s := newScheduledTestService(t, stub, &logBuf)
 
-	s.checkMu.Lock()
-	result := make(chan *Info, 1)
-	go func() { result <- s.Check(context.Background(), true) }() // force：会去抢锁
-	time.Sleep(50 * time.Millisecond)                             // 让它先卡在锁上
-	// 模拟「持锁的那次检测刚查完并写了缓存」
+	// startedAt 取「一秒前」而不是 time.Now()：这个用例要造的是「调用方先开始排队，
+	// 之后别人写完缓存」，而 Windows 上 time.Now() 的分辨率可能粗到让前后两次取值
+	// 完全相等（After 为 false），用相对时间就没有这个坑。
+	startedAt := time.Now().Add(-time.Second)
 	s.toCache(&Info{Current: "0.1.0", Latest: "9.9.9", HasUpdate: true, CheckedAt: time.Now().UTC()}, "o/n")
-	s.checkMu.Unlock()
 
-	select {
-	case info := <-result:
-		if info.Latest != "9.9.9" {
-			t.Fatalf("应当复用排队期间刷新的缓存，实际 latest=%q", info.Latest)
-		}
-		if !info.Cached {
-			t.Error("复用缓存的结果应当标 Cached=true")
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("Check 没有返回")
+	info := s.fetchAndCache(context.Background(), s.GetConfig(), s.currentState(), s.client, startedAt)
+	if info.Latest != "9.9.9" {
+		t.Fatalf("应当复用排队期间刷新的缓存，实际 latest=%q", info.Latest)
+	}
+	if !info.Cached {
+		t.Error("复用缓存的结果应当标 Cached=true")
 	}
 	if n := stub.callCount(); n != 0 {
 		t.Fatalf("排队期间已有人查过，不该再发请求，实际 %d 次", n)
 	}
 }
 
+// fromCacheSince 的语义：只认「在 since 之后刷新过」的缓存，且必须同仓库。
+func TestFromCacheSinceOnlyAcceptsNewerEntries(t *testing.T) {
+	stub := &githubStub{tag: "v1.0.0"}
+	var logBuf bytes.Buffer
+	s := newScheduledTestService(t, stub, &logBuf)
+
+	// 同样避开时钟分辨率：用「一秒前 / 一秒后」而不是 time.Now() 的两次取值
+	before := time.Now().Add(-time.Second)
+	s.toCache(&Info{Latest: "1.2.3"}, "o/n")
+
+	if got := s.fromCacheSince("o/n", time.Now().Add(time.Second)); got != nil {
+		t.Error("since 晚于写入时刻时不该命中（那是「排队前就有的旧数据」）")
+	}
+	got := s.fromCacheSince("o/n", before)
+	if got == nil || got.Latest != "1.2.3" || !got.Cached {
+		t.Fatalf("since 早于写入时刻时应当命中并标 Cached，实际 %+v", got)
+	}
+	if got := s.fromCacheSince("other/repo", before); got != nil {
+		t.Error("仓库不匹配时不该命中")
+	}
+}
+
 // 日志策略：只记事件。这条测试同时是「会不会刷屏」的回归。
+//
+// tag 用 v999.x 这种**远大于任何真实版本**的号，而不是「当前版本 +1」：
+// 后者的行为取决于构建时注入的版本号（CI 的发布任务用 ldflags 把 Version 设成
+// 正在发的那个 tag，本地跑时它是 VERSION 文件里的值），同一份代码在两处结论不同 ——
+// 2026-09-30 发布 v0.1.12 时就因为这个红了：stub 的 v0.1.12 与当时的 0.1.12 相等，
+// version.Newer 为 false，「检测到新版本」那条日志压根没出现。
+// 这条用例要验的是「latest 变了才记」，与当前版本无关。
 func TestScheduledCheckLogsOnlyOnEvents(t *testing.T) {
-	stub := &githubStub{tag: "v0.1.11"}
+	stub := &githubStub{tag: "v999.0.0"}
 	var logBuf bytes.Buffer
 	s := newScheduledTestService(t, stub, &logBuf)
 	ctx := context.Background()
@@ -211,7 +239,7 @@ func TestScheduledCheckLogsOnlyOnEvents(t *testing.T) {
 		t.Errorf("状态没变时不该再记日志：%s", logBuf.String())
 	}
 
-	stub.setTag("v0.1.12") // 出现新版本
+	stub.setTag("v999.0.1") // 更新的版本出现
 	s.runScheduledCheck(ctx)
 	if count("检测到新版本") != 1 {
 		t.Fatalf("应当记一条「检测到新版本」：%s", logBuf.String())
@@ -259,11 +287,13 @@ func TestStartCheckLoopRunsAndStopsWithContext(t *testing.T) {
 	}
 
 	cancel()
-	time.Sleep(50 * time.Millisecond)
+	// 取消后留出足够时间让「已经起跳的那一拍」跑完（它在 ctx 取消后仍会走完
+	// 那一次 fetch —— 我们只要求之后不再有新的一拍），再取两次样本比对
+	time.Sleep(200 * time.Millisecond)
 	after := stub.callCount()
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	if n := stub.callCount(); n != after {
-		t.Fatalf("ctx 结束后不该再检测：取消时 %d 次，100ms 后 %d 次", after, n)
+		t.Fatalf("ctx 结束后不该再检测：取消后 %d 次，300ms 后 %d 次", after, n)
 	}
 }
 
@@ -325,7 +355,9 @@ func TestRealGitHubCheckAgainstDefaultRepo(t *testing.T) {
 // 首次检测延后：这一条防的是「进程一启动就打 GitHub」——
 // 崩溃重启循环里那会持续烧共享限额。
 func TestStartCheckLoopDelaysFirstCheck(t *testing.T) {
-	shortenInitialCheckDelay(t, 150*time.Millisecond)
+	// 延迟取 300ms、只等 100ms 就断言「还没请求」：两边留 200ms 余量，
+	// 免得在慢机器上被调度抖动搞成偶发红
+	shortenInitialCheckDelay(t, 300*time.Millisecond)
 	stub := &githubStub{tag: "v9.9.9"}
 	var logBuf bytes.Buffer
 	s := newScheduledTestService(t, stub, &logBuf)
@@ -334,9 +366,9 @@ func TestStartCheckLoopDelaysFirstCheck(t *testing.T) {
 	defer cancel()
 	s.StartCheckLoop(ctx, time.Hour) // 间隔足够长，只看首次
 
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	if n := stub.callCount(); n != 0 {
-		t.Fatalf("首次检测应当延后，启动 50ms 内不该有请求，实际 %d 次", n)
+		t.Fatalf("首次检测应当延后，启动 100ms 内不该有请求，实际 %d 次", n)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for stub.callCount() == 0 && time.Now().Before(deadline) {

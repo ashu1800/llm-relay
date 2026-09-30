@@ -512,8 +512,12 @@ func (s *Service) StartCheckLoop(ctx context.Context, interval time.Duration) {
 		"first_check_in", initialCheckDelay.String(),
 		"enabled", s.GetConfig().Enabled,
 	)
+	// 在这里（同步）把首次延迟读出来，而不是在 goroutine 里读：
+	// 一来值在启动这一刻就定下，二来测试会临时改写这个包级变量，
+	// 让 goroutine 去读会与那次写入构成数据竞争（go test -race 会报）。
+	delay := initialCheckDelay
 	go func() {
-		timer := time.NewTimer(initialCheckDelay)
+		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
