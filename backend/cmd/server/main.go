@@ -231,6 +231,11 @@ func run() error {
 	groupLimit.StartSweeper(ctx, 10*time.Minute)
 	srv.StartRetentionLoop(ctx)
 
+	// 版本检测同理：服务端每 5 分钟自己查一次发布源，结果写进更新服务的缓存。
+	// 原先只在打开版本面板时检测，于是「有没有新版本」在没人打开面板时
+	// 永远没有答案（见 update.BackgroundCheckInterval 的说明）。
+	updateSvc.StartCheckLoop(ctx, update.BackgroundCheckInterval)
+
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("LLM Relay 已启动",

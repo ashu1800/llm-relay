@@ -101,12 +101,45 @@ onMounted(async () => {
   // 版本信息在挂载时就要有：徽标是常驻元素，等用户点开才显示
   // 会让侧栏在首屏闪一下空白
   if (!store.infoLoaded) await store.fetchInfo()
+  // 跟着问一次服务端的后台检测结果（见 followBackgroundCheck 的说明）
+  followBackgroundCheck()
+  checkTimer = setInterval(followBackgroundCheck, CHECK_FOLLOW_MS)
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onBeforeUnmount(() => {
   if (pollTimer) clearInterval(pollTimer)
   if (restartTimer) clearInterval(restartTimer)
+  if (checkTimer) clearInterval(checkTimer)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
+
+// ---- 跟进后台定时检测的结果 ----
+//
+// 服务端 2026-09-30 起每 5 分钟自己查一次发布源（backend/internal/update
+// 的 StartCheckLoop），结果写进与手动检测同一份缓存。所以这里只跟**我们自己的
+// 后端**要：命中缓存，不产生任何 GitHub 请求（限额只花在服务端那一次定时上）。
+//
+// 不跟的话，「有没有新版本」只在你打开面板或刷新页面时才更新 ——
+// 服务端那份新鲜数据没人读，定时检测就等于白做。
+//
+// 两个细节：
+//   · 标签页在后台时不问（没人看），回到前台时补一次；
+//   · 按服务端给的 checked_at 判断本地这份是不是还新 —— 服务端刚查过就别问，
+//     一份 5 分钟内的数据再问一次还是它。
+const CHECK_FOLLOW_MS = 5 * 60 * 1000
+let checkTimer: ReturnType<typeof setInterval> | null = null
+
+function followBackgroundCheck() {
+  if (document.hidden) return
+  const at = store.check?.checked_at ? Date.parse(store.check.checked_at) : 0
+  if (Date.now() - at < CHECK_FOLLOW_MS) return
+  void store.fetchCheck(false)
+}
+
+function onVisibilityChange() {
+  if (!document.hidden) followBackgroundCheck()
+}
 
 // 面板打开时：检测一次更新 + 捞一次进行中的任务（可能是上次留下的，
 // 这让「刷新页面后回来还能看到进度」成立）。

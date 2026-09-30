@@ -50,7 +50,32 @@ const (
 	// 「下载还在正常跑，外层先超时把它掐了」——现象是更新偶尔在
 	// 网络慢的时候莫名失败，而日志里只有一句 context deadline exceeded。
 	updateTimeout = 20 * time.Minute
+
+	// BackgroundCheckInterval 是后台定时检测的间隔（2026-09-30 立）。
+	//
+	// 原先只在「打开版本面板」时才检测一次（结果缓存 20 分钟），于是
+	// 「有没有新版本」这个问题在没人打开面板的时候永远没有答案 ——
+	// 而一键更新的价值恰恰在于早点知道。现在服务端自己按这个间隔查一次，
+	// 结果写进与手动检测同一个缓存：面板与徽标拿到的永远是 5 分钟内的结果，
+	// 而且**不需要**管理台为了这件事去轮询 GitHub。
+	//
+	// 5 分钟与限额的关系：GitHub 未带 token 时是 60 次/小时的**共享**限额，
+	// 每小时 12 次只占五分之一，留足了余量；配 token 后是 5000 次/小时。
+	// 再密就只是白烧限额，不会让人更早知道 —— 发布本身也不是分钟级的。
+	BackgroundCheckInterval = 5 * time.Minute
+
+	// initialCheckDelay 见下方变量声明（它必须是变量：测试要缩短它）。
 )
+
+// initialCheckDelay 是进程启动后第一次后台检测之前的等待。
+//
+// 不立刻查：崩溃重启循环里每次启动都会打一次 GitHub，而限额是共享的。
+// 一分钟也足够让「刚重启完就想看版本」的人打开面板时拿到结果
+// （面板自己会触发一次检测，不必等这个循环）。
+//
+// 是变量而不是常量，只因为测试要把这一分钟缩到毫秒
+// （与 release.go 的 retryBackoffBase 同一手法，见 shortenInitialCheckDelay）。
+var initialCheckDelay = time.Minute
 
 // Config 是更新功能的可配置项（存在 settings 表里）。
 type Config struct {
@@ -153,6 +178,21 @@ type Service struct {
 	cache     *Info
 	cacheAt   time.Time
 	cacheRepo string
+
+	// checkMu 串行化「真的要访问 GitHub」的那一段（见 Check 里的合并逻辑）。
+	//
+	// 定时检测让并发从偶然变成常态：后台循环、打开面板、手点「检测更新」
+	// 三者很可能撞在同一秒上，各发一次请求既浪费共享限额，也可能让两次
+	// 结果互相覆盖（迟到的那个带着更旧的 release）。
+	checkMu sync.Mutex
+
+	// 后台检测的日志状态：只记「事件」——首次成功 / 发现新版本 / 开始失败 /
+	// 恢复成功。不每次一条的原因很具体：国内直连 GitHub 常年不通、要靠代理，
+	// 每 5 分钟一条 WARN 会把这台机器上真正重要的日志淹掉。
+	schedMu      sync.Mutex
+	schedFailing bool
+	schedLogged  bool
+	schedLatest  string
 
 	// task 是当前正在跑的更新任务（binary 形态的自我替换）。
 	// 全局只允许一个：两个人同时点「更新」去做同一件事没有意义，
@@ -401,6 +441,31 @@ func (s *Service) Check(ctx context.Context, force bool) *Info {
 		}
 	}
 
+	// 走到这里说明要真的发一次请求（缓存过期、或调用方要求强制检测）。
+	//
+	// 串行化并合并并发调用：排队期间若别人刚查过（最典型的组合是
+	// 后台定时任务与「打开面板」撞在一起），直接用那份结果，不再发第二次 ——
+	// 既省共享限额，也避免两次请求的结果互相覆盖（迟到的那个可能带着更旧的 release）。
+	startedAt := time.Now()
+	s.checkMu.Lock()
+	defer s.checkMu.Unlock()
+	return s.fetchAndCache(ctx, cfg, base, client, startedAt)
+}
+
+// fetchAndCache 在**已持有 checkMu** 的前提下访问 GitHub 并把结果写进缓存。
+//
+// 拆出来是为了让「定时检测」与「手动检测」共用同一条路径：
+// 两条路径的差别只在 force 与谁先拿到锁，取数、判定、写缓存的逻辑必须只有一份，
+// 否则迟早出现「面板看到的样子与定时检测写进去的不一样」。
+//
+// startedAt 是调用方开始这次检测的时刻：若缓存在这之后被刷新过，
+// 说明排队期间已经有人查过了，直接用它（见 Check 的说明）。
+func (s *Service) fetchAndCache(ctx context.Context, cfg Config, base *Info, client *Client, startedAt time.Time) *Info {
+	if cached := s.fromCacheSince(cfg.Repo, startedAt); cached != nil {
+		cached.CanApply, cached.ApplyMode, cached.BlockedReason = s.applyMode()
+		return cached
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
@@ -432,6 +497,87 @@ func (s *Service) Check(ctx context.Context, force bool) *Info {
 
 	s.toCache(info, cfg.Repo)
 	return info
+}
+
+// StartCheckLoop 启动后台定时检测，跟着进程生命周期走（ctx 结束即退出）。
+//
+// interval <= 0 时用 BackgroundCheckInterval。第一次检测延后 initialCheckDelay
+// （见那里的说明），之后每 interval 一次。
+func (s *Service) StartCheckLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = BackgroundCheckInterval
+	}
+	s.logger.Info("后台版本检测已启动",
+		"interval", interval.String(),
+		"first_check_in", initialCheckDelay.String(),
+		"enabled", s.GetConfig().Enabled,
+	)
+	go func() {
+		timer := time.NewTimer(initialCheckDelay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		s.runScheduledCheck(ctx)
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.runScheduledCheck(ctx)
+			}
+		}
+	}()
+}
+
+// runScheduledCheck 跑一次后台检测，并按「状态变化」决定要不要记日志。
+//
+// 拿不到锁时**不排队**：那一拍已经有别人在查（用户正打开面板/正点检测），
+// 等它不如跳过 —— 五分钟后还有下一拍，而现在等来的也只是同一份缓存。
+func (s *Service) runScheduledCheck(ctx context.Context) {
+	if !s.GetConfig().Enabled {
+		// 更新检测被关掉时连请求都不发：Check 会返回一条「已关闭」的 warning，
+		// 那不算故障，每 5 分钟记一条纯属噪音
+		return
+	}
+	if !s.checkMu.TryLock() {
+		return
+	}
+	defer s.checkMu.Unlock()
+
+	s.mu.RLock()
+	client := s.client
+	s.mu.RUnlock()
+	if client == nil {
+		// 配置有误（客户端构造失败）时 applyConfig 已经 Warn 过了，这里不重复
+		return
+	}
+
+	info := s.fetchAndCache(ctx, s.GetConfig(), s.currentState(), client, time.Now())
+
+	s.schedMu.Lock()
+	defer s.schedMu.Unlock()
+	warn := info.Warning != ""
+	switch {
+	case warn && !s.schedFailing:
+		s.logger.Warn("后台检测更新失败（同类失败不再重复记录，恢复时会说明）", "reason", info.Warning)
+	case !warn && s.schedFailing:
+		s.logger.Info("后台检测更新已恢复", "latest", info.Latest, "has_update", info.HasUpdate)
+	case !warn && !s.schedLogged:
+		s.logger.Info("后台检测更新就绪", "current", info.Current, "latest", info.Latest, "has_update", info.HasUpdate)
+	case !warn && info.HasUpdate && info.Latest != s.schedLatest:
+		s.logger.Info("检测到新版本", "latest", info.Latest, "current", info.Current, "can_apply", info.CanApply)
+	}
+	s.schedFailing = warn
+	if !warn {
+		s.schedLogged = true
+		s.schedLatest = info.Latest
+	}
 }
 
 // currentState 组装与网络无关的那部分信息。
@@ -482,6 +628,21 @@ func (s *Service) fromCache(repo string) *Info {
 		return nil
 	}
 	if time.Since(s.cacheAt) > checkCacheTTL {
+		return nil
+	}
+	cp := *s.cache
+	cp.Cached = true
+	return &cp
+}
+
+// fromCacheSince 取「在 since 之后刷新过」的缓存，**不看** 20 分钟的 TTL。
+//
+// 只给 Check 的合并逻辑用：排队期间别人刚查过，那份数据比我这次能拿到的还新，
+// 就不必再发一次请求了。
+func (s *Service) fromCacheSince(repo string, since time.Time) *Info {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	if s.cache == nil || s.cacheRepo != repo || !s.cacheAt.After(since) {
 		return nil
 	}
 	cp := *s.cache

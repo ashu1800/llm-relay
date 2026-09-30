@@ -12,8 +12,13 @@ import { versionApi, type UpdateCheck, type UpdateTask, type VersionInfo } from 
 //
 // 缓存策略与 Sub2api 一致：内存缓存 + force 穿透，不落 localStorage
 // （版本检查的结果几分钟就可能过期，存下来只会在下次打开时显示一个
-// 早已不成立的「有新版本」）。不做定时轮询 —— 服务端自己缓存 20 分钟，
-// 而「有没有新版本」这件事不值得让管理台每隔几分钟打一次 GitHub。
+// 早已不成立的「有新版本」）。
+//
+// 2026-09-30 起**服务端**每 5 分钟自己检测一次（backend/internal/update 的
+// StartCheckLoop），结果写进与手动检测同一份缓存。所以管理台这边不做
+// 「打 GitHub 的轮询」这件事仍然成立 —— 但会跟着问一次我们自己的后端
+// （VersionBadge 里的 followBackgroundCheck），否则服务端那份新鲜结果
+// 没人读，定时检测等于白做。
 export const useVersionStore = defineStore('version', () => {
   // ---- 当前版本（永远可用）----
   const info = ref<VersionInfo | null>(null)
