@@ -237,17 +237,23 @@ ok "tag $NEW_TAG 已推送，release.yml 应已触发"
 # ---------------------------------------------------------------
 step "观察发布流水线"
 
-# 推完 tag 到 Actions 注册有秒级延迟，轮询等它出现
+# 推完 tag 到 Actions 注册有秒级延迟，轮询等它出现。
+#
+# 必须同时按 headSha 匹配，不能只看 headBranch：tag 名是可以重用的 ——
+# 上一次发布失败后按提示删掉 tag 重发，库里就会同时存在两个 headBranch 相同的 run
+# （旧的已失败、新的刚排队）。只按分支名取 [0] 会挑到旧的那个，于是「tag 刚推完
+# 就立刻报 run 失败」，而真正的新 run 还在跑，很容易被当成「又失败了一次」。
+# 2026-09-30 重发 v0.1.12 时正是这样踩到的。
 RUN_ID=""
 for _ in $(seq 1 12); do
-  RUN_ID="$(gh run list --repo "$REPO" --workflow release.yml --limit 5 \
-    --json databaseId,headBranch \
-    --jq "[.[] | select(.headBranch == \"$NEW_TAG\")][0].databaseId" 2>/dev/null || true)"
+  RUN_ID="$(gh run list --repo "$REPO" --workflow release.yml --limit 10 \
+    --json databaseId,headBranch,headSha \
+    --jq "[.[] | select(.headBranch == \"$NEW_TAG\" and .headSha == \"$HEAD_SHA\")][0].databaseId" 2>/dev/null || true)"
   [ -n "$RUN_ID" ] && [ "$RUN_ID" != "null" ] && break
   sleep 5
 done
 [ -n "$RUN_ID" ] && [ "$RUN_ID" != "null" ] \
-  || die "tag 已推但找不到 release.yml 的 run。检查：gh run list --repo $REPO --workflow release.yml（Actions 可能被禁用）"
+  || die "tag 已推但找不到 release.yml 的 run（tag=$NEW_TAG sha=${HEAD_SHA:0:10}）。检查：gh run list --repo $REPO --workflow release.yml（Actions 可能被禁用）"
 
 log "run #$RUN_ID：https://github.com/$REPO/actions/runs/$RUN_ID"
 # --exit-status：run 失败时命令返回非零；--interval 15 降低 API 用量
