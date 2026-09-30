@@ -41,9 +41,9 @@ import { rafThrottle } from '@/utils/rafThrottle'
 // 耗时家族（fmtMs / 档位 / 瀑布）与列宽纯逻辑（键 / 权重 / 摊法）已抽成独立模块：
 // 三条分摊不变量与档位边界在 spec 里钉着，契约检查的阈值锚点也移了过去
 import { fmtMs, latencyClass, latencyTitle, latencyWaterfall } from '@/components/latency'
-// 速度的分母口径也抽成独立模块（2026-09-29）：它出过「几千 tok/s」的假值事故，
-// 三种分母的判据在 speed.spec.ts 里逐条钉着
-import { speedOf, speedText } from '@/components/speed'
+// 速度的口径抽成独立模块（2026-09-29）：它出过「几千 tok/s」的假值事故，
+// 「一列一个口径」与四种量不到的情形在 speed.spec.ts 里逐条钉着
+import { speedMissReason, speedOf, speedText } from '@/components/speed'
 import {
   COL_KEYS,
   allocateWidths,
@@ -917,31 +917,44 @@ function tokenTitle(row: RequestLog) {
   )
 }
 
-// 输出速度（词元/秒）：分母的判据在 components/speed.ts —— 三种口径
-// （首字后生成 / 总耗时 / 上游整段返回时的总耗时）连「首字窗口塌缩」的阈值
-// 都有单元测试钉着，这里只剩显示层。
-// 返回空串表示算不出（没有输出词元、没量到耗时），单元格显示 —，不猜数 ——
-// 估出来的速度比没有速度更误导。
+// 输出速度（词元/秒）：判据在 components/speed.ts —— 只有一个含义
+// 「输出词元 ÷ 首字后生成时段」，量不到生成时段时返回空串、单元格显示 —，
+// 悬停说明讲清是哪种量不到（四种原因见下面的 speedMissTitle）。
+// 返回空串不猜数：换分母（总耗时）凑出来的数含排队与首字等待，比没有数更误导。
 function tokPerSec(row: RequestLog): string {
   return speedText(row)
 }
 
+// 「—」的悬停说明：说清为什么量不到，而不是让人以为是没数据。
+// 塌缩那一种把窗口摆出来（「只剩 0.53s（占 6%）」）—— 判据是「窗口相对整次请求
+// 塌缩了」，把两个数给出来，站主可以自己判断这一行值不值得再查。
+function speedMissTitle(row: RequestLog) {
+  switch (speedMissReason(row)) {
+    case 'burst': {
+      const win = (row.total_ms || 0) - (row.first_byte_ms || 0)
+      if (win <= 0) return '算不出速度：首字与收尾落在同一毫秒，量不到生成时段'
+      const share = row.total_ms ? ((win / row.total_ms) * 100).toFixed(1) : '0'
+      return '算不出速度：首字之后只剩 ' + fmtMs(win) + '（占整次请求 ' + share + '%，疑似上游整段返回）'
+    }
+    case 'noStream':
+      return '算不出速度：非流式请求，响应头与整段正文一起到达'
+    case 'noOutput':
+      return '算不出速度：这次请求没有输出词元（多为失败请求）'
+    case 'noTime':
+      return '算不出速度：没有量到耗时'
+    default:
+      return ''
+  }
+}
+
 // 速度的悬停说明：把分子分母摊开，速度怎么来的一眼可查。
-// 三种分母分三种写法 —— 口径不同的分叉必须让用户看得见：
-//   · 首字后生成 X —— 流式，上游逐帧返回；
-//   · 整段耗时 X（上游未逐帧返回正文）—— 首字之后没有可用的生成时段，
-//     窗口里量到的只是尾包传输，退回总耗时（见 speed.ts 的阈值）；
-//   · 总耗时 X —— 非流式，响应头与整段正文一起到达。
+// 两种写法（有数 / 量不到）与 tokPerSec 同进同退 —— 有数就一定说得出分母。
 function speedTitle(row: RequestLog) {
   const r = speedOf(row)
-  if (!r) return ''
-  const denom =
-    r.kind === 'firstByte'
-      ? '首字后生成 ' + fmtMs(r.denomMs)
-      : r.kind === 'burst'
-        ? '整段耗时 ' + fmtMs(r.denomMs) + '（上游未逐帧返回正文）'
-        : '总耗时 ' + fmtMs(r.denomMs)
-  return '输出 ' + fmtTokens(row.completion_tokens) + ' 词元 ÷ ' + denom
+  if (r) {
+    return '输出 ' + fmtTokens(row.completion_tokens) + ' 词元 ÷ 首字后生成 ' + fmtMs(r.denomMs)
+  }
+  return speedMissTitle(row)
 }
 
 // 计价时刻：快照里存的是 RFC3339（如 2026-09-14T09:58:08+08:00），原样摆出来是给机器看的
@@ -1522,18 +1535,19 @@ onMounted(() => {
             <span class="txt-cell">{{ fmtCost(record.estimated_cost, record.cost_currency) }}</span>
           </template>
         </a-table-column>
-        <!-- 速度列：每秒词元输出速度。流式请求在数值前带「流」胶囊（同一行）——
-             输出速度必须结合输出方式才读得懂：流式的分母通常是首字之后的生成时段，
-             上游整段返回时退回总耗时，非流式也只能用总耗时近似（口径判据见
-             components/speed.ts），胶囊就是那个分叉的可视标记。失败请求通常
-             没有输出词元，显示 — -->
+        <!-- 速度列：每秒词元输出速度。只有一个含义 —— 输出词元 ÷ 首字后生成时段
+             （口径与四种「量不到」的判据见 components/speed.ts）。量不到的行显示 —，
+             悬停说明讲清是哪种量不到（非流式 / 上游整段返回 / 没有输出词元 / 没量到
+             耗时）—— 不换分母凑数：总耗时口径含排队与首字等待，与生成速度不是一回事。
+             流式且量得到的行在数值前带「流」胶囊（同一行）—— 输出速度要结合输出
+             方式才读得懂。失败请求通常没有输出词元，显示 — -->
         <a-table-column title="速度" :width="colW.speed">
           <template #default="{ record }">
             <span v-if="tokPerSec(record)" class="spd-cell" :title="speedTitle(record)">
               <span v-if="record.stream" class="stream-pill">流</span>
               <span class="spd">{{ tokPerSec(record) }} tok/s</span>
             </span>
-            <span v-else class="muted">—</span>
+            <span v-else class="muted" :title="speedTitle(record)">—</span>
           </template>
         </a-table-column>
         <!-- 状态列移到费用之后（站主 2026-09-20 要求）：数字区（词元/耗时/费用）
@@ -1693,10 +1707,9 @@ onMounted(() => {
         <a-descriptions-item label="耗时">
           首字 {{ fmtMs(current.first_byte_ms) }} · 上游握手 {{ fmtMs(current.upstream_ms) }} ·
           总共 {{ fmtMs(current.total_ms) }}
-          <!-- 速度口径与列表一致（见 tokPerSec）：算不出就不显示这一段 -->
-          <span v-if="tokPerSec(current)">
-            · 速度 <span :title="speedTitle(current)">{{ tokPerSec(current) }} tok/s</span>
-          </span>
+          <!-- 速度口径与列表一致（见 tokPerSec）：量不到生成时段就显示 —，
+               悬停说明讲原因 —— 与列表同款处理，不在这里悄悄少一段 -->
+          <span> · 速度 <span :title="speedTitle(current)">{{ tokPerSec(current) || '—' }}<template v-if="tokPerSec(current)"> tok/s</template></span></span>
           <!-- 时序瀑布：条长 = 该阶段占总耗时的比例，条色沿用耗时分级 -->
           <div v-if="waterfallRows.length" class="wf">
             <div v-for="r in waterfallRows" :key="r.label" class="wf-row">
