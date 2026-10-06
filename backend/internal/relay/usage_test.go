@@ -134,6 +134,97 @@ func TestNormalizeUsageMixedDialectCache(t *testing.T) {
 	}
 }
 
+// 上游只报「未命中」、完全不报「命中」时，命中数只能从上游总量反推。
+//
+// 报文原样取自 2026-10-07 生产 trace 564b83d907a4ab6c80a38466（渠道
+// WorkBuddy美模 → 本机 workbuddy2api → global:gpt-6-luna）。修复前：
+// ↑输入只剩未命中的 3、缓存 0、命中率 0.00%，总量却写着 15293 ——
+// 四项互相打架，差出来的 15075 个缓存读 token 既不计费也不统计。
+func TestNormalizeUsageMissOnlyDerivesCacheHit(t *testing.T) {
+	u := NormalizeUsage(mustJSON(t, `{
+		"cache_creation_input_tokens": 0,
+		"cache_read_input_tokens": 0,
+		"cached_tokens": 0,
+		"completion_thinking_tokens": 64,
+		"completion_tokens": 215,
+		"completion_tokens_details": {"cached_tokens": 0, "reasoning_tokens": 64},
+		"prompt_cache_hit_tokens": 0,
+		"prompt_cache_miss_tokens": 3,
+		"prompt_tokens": 15078,
+		"prompt_tokens_details": {"cached_tokens": 0, "reasoning_tokens": 0},
+		"total_tokens": 15293
+	}`))
+
+	if u.PromptTokens != 3 {
+		t.Fatalf("未命中输入应为 3，实际 %d", u.PromptTokens)
+	}
+	if u.CachedTokens != 15075 {
+		t.Fatalf("缓存命中应反推为 15075，实际 %d（记 0 会让命中率与费用系统性偏低）", u.CachedTokens)
+	}
+	if u.CompletionTokens != 215 || u.ReasoningTokens != 64 {
+		t.Fatalf("输出/推理应为 215/64，实际 %d/%d", u.CompletionTokens, u.ReasoningTokens)
+	}
+	if u.TotalTokens != 15293 {
+		t.Fatalf("总量应沿用上游的 15293，实际 %d", u.TotalTokens)
+	}
+	// 四项之和必须与上游总量相等：对不上就是日志里 ↑/↓/缓存 三个数在打架
+	if got := UsageTotal(u.PromptTokens, u.CompletionTokens, u.CachedTokens, u.CacheCreationTokens); got != 15293 {
+		t.Fatalf("四项之和应为 15293，实际 %d", got)
+	}
+	if r := u.CacheHitRate(); r < 0.999 || r > 1 {
+		t.Fatalf("命中率应约为 0.9998，实际 %f", r)
+	}
+}
+
+// 冷请求（未命中就是全部输入）不能反推出任何缓存。
+func TestNormalizeUsageMissOnlyColdRequestKeepsZeroCache(t *testing.T) {
+	u := NormalizeUsage(mustJSON(t, `{
+		"cache_read_input_tokens": 0, "cached_tokens": 0,
+		"completion_tokens": 16,
+		"prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 21,
+		"prompt_tokens": 21,
+		"prompt_tokens_details": {"cached_tokens": 0},
+		"total_tokens": 37
+	}`))
+
+	if u.CachedTokens != 0 {
+		t.Fatalf("冷请求命中应为 0，实际 %d（反推不该凭空造缓存）", u.CachedTokens)
+	}
+	if u.PromptTokens != 21 || u.TotalTokens != 37 {
+		t.Fatalf("输入/总量应为 21/37，实际 %d/%d", u.PromptTokens, u.TotalTokens)
+	}
+}
+
+// 没有上游总量时无从反推：宁可记 0，也不臆造缓存读。
+func TestNormalizeUsageMissOnlyWithoutTotalKeepsZeroCache(t *testing.T) {
+	u := NormalizeUsage(mustJSON(t, `{
+		"prompt_tokens": 800, "prompt_cache_miss_tokens": 160, "completion_tokens": 20
+	}`))
+
+	if u.CachedTokens != 0 {
+		t.Fatalf("无总量时命中应为 0，实际 %d", u.CachedTokens)
+	}
+	if u.PromptTokens != 160 || u.TotalTokens != 180 {
+		t.Fatalf("输入/总量应为 160/180，实际 %d/%d", u.PromptTokens, u.TotalTokens)
+	}
+}
+
+// 命中字段在场时按原口径，反推必须让路 —— 否则同一笔命中会被记两遍。
+func TestNormalizeUsageMissOnlyIgnoresExplicitHit(t *testing.T) {
+	u := NormalizeUsage(mustJSON(t, `{
+		"prompt_tokens": 15078, "completion_tokens": 215, "total_tokens": 15293,
+		"prompt_cache_hit_tokens": 15075, "prompt_cache_miss_tokens": 3,
+		"prompt_tokens_details": {"cached_tokens": 15075}
+	}`))
+
+	if u.CachedTokens != 15075 {
+		t.Fatalf("命中应为 15075（只认一套口径），实际 %d", u.CachedTokens)
+	}
+	if u.PromptTokens != 3 || u.TotalTokens != 15293 {
+		t.Fatalf("输入/总量应为 3/15293，实际 %d/%d", u.PromptTokens, u.TotalTokens)
+	}
+}
+
 func TestCacheHitRate(t *testing.T) {
 	u := Usage{PromptTokens: 66, CachedTokens: 294}
 	got := u.CacheHitRate()

@@ -180,8 +180,31 @@ func NormalizeUsage(raw map[string]any) Usage {
 	}
 
 	// DeepSeek 原生会把输入拆成命中/未命中两个字段，未命中即 PromptTokens
-	if miss := getInt(raw, "prompt_cache_miss_tokens"); miss > 0 {
+	miss := getInt(raw, "prompt_cache_miss_tokens")
+	if miss > 0 {
 		u.PromptTokens = miss
+	}
+
+	upstreamTotal := firstNonZero(getInt(raw, "total_tokens"), getInt(raw, "totalTokenCount"))
+
+	// 只报「未命中」、完全不报「命中」的报文：命中数只能从上游总量反推。
+	//
+	// 实测 2026-10-07 生产 trace 564b83d907a4ab6c80a38466（渠道 WorkBuddy美模
+	// → 本机 workbuddy2api → global:gpt-6-luna）：上游给的是
+	// prompt_tokens=15078（含缓存的全部输入）、prompt_cache_miss_tokens=3、
+	// total_tokens=15293，而五个命中字段要么缺席、要么全是 0。于是命中记 0、
+	// 输入被改写成未命中的 3 —— 四项之和 218，上游总量 15293，差出来的
+	// 15075 个缓存读 token 就此蒸发：命中率恒显示 0.00%，费用按 3 个输入
+	// token 计（实测这批请求的真实费用是记账值的 4.7 倍）。
+	//
+	// 反推只在三个条件同时成立时做：显式给了未命中、一个命中字段都没有
+	// （parallelN/subsetN 都是 0）、上游给了总量。命中 = 总量 − 未命中 − 输出
+	// − 缓存写入。有命中字段的报文走原口径；冷请求（总量本就等于未命中+输出）
+	// 残差为 0，不会凭空造出缓存。
+	if miss > 0 && parallelN == 0 && subsetN == 0 && upstreamTotal > 0 {
+		if hit := upstreamTotal - u.PromptTokens - u.CompletionTokens - u.CacheCreationTokens; hit > 0 {
+			u.CachedTokens = hit
+		}
 	}
 
 	// ---- 总量 ----
@@ -196,8 +219,8 @@ func NormalizeUsage(raw map[string]any) Usage {
 	// candidatesTokenCount 的（不同于 OpenAI 的 reasoning_tokens 已含在
 	// completion_tokens 里），此时总量确实大于四项之和，上游值才是对的。
 	sum := u.PromptTokens + u.CompletionTokens + u.CachedTokens + u.CacheCreationTokens
-	if upstream := firstNonZero(getInt(raw, "total_tokens"), getInt(raw, "totalTokenCount")); upstream > sum {
-		u.TotalTokens = upstream
+	if upstreamTotal > sum {
+		u.TotalTokens = upstreamTotal
 	} else {
 		u.TotalTokens = sum
 	}
