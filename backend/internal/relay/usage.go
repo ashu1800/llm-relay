@@ -158,6 +158,21 @@ func NormalizeUsage(raw map[string]any) Usage {
 	}
 
 	// ---- 缓存写入 ----
+	//
+	// prompt_cache_write_tokens 是 WorkBuddy/ChatGPT 那一系的方言（实测
+	// 2026-10-07，渠道 WorkBuddy美模 → global:gpt-6-luna）。它把输入**并列**
+	// 拆成三段，且三者恰好等于 prompt_tokens：
+	//
+	//	prompt_cache_hit_tokens + prompt_cache_miss_tokens + prompt_cache_write_tokens
+	//	  = prompt_tokens
+	//
+	// 实测报文：hit=0、miss=3、write=4013、prompt=4016、total=4021。
+	// 不认 write 这一项，它就整段（实测 4013；生产 trace 564b83d9… 是 15075）
+	// 从四项里凭空消失：日志显示 ↑3、缓存 0、命中率 0.00%，而总量写着 4021，
+	// 两边永远对不上。它记的是**写入**（与 cache_read 不同价），所以进
+	// CacheCreationTokens，不能并进命中。
+	writeTokens := getInt(raw, "prompt_cache_write_tokens")
+	u.CacheCreationTokens += writeTokens
 	u.CacheCreationTokens += getInt(raw, "cache_creation_input_tokens")
 	u.CacheCreationTokens += getInt(raw, "claude_cache_creation_5_m_tokens")
 	u.CacheCreationTokens += getInt(raw, "claude_cache_creation_1_h_tokens")
@@ -187,21 +202,19 @@ func NormalizeUsage(raw map[string]any) Usage {
 
 	upstreamTotal := firstNonZero(getInt(raw, "total_tokens"), getInt(raw, "totalTokenCount"))
 
-	// 只报「未命中」、完全不报「命中」的报文：命中数只能从上游总量反推。
+	// 只报「未命中」、既不报「命中」也不报「写入」的报文：命中数只能从总量反推。
 	//
-	// 实测 2026-10-07 生产 trace 564b83d907a4ab6c80a38466（渠道 WorkBuddy美模
-	// → 本机 workbuddy2api → global:gpt-6-luna）：上游给的是
-	// prompt_tokens=15078（含缓存的全部输入）、prompt_cache_miss_tokens=3、
-	// total_tokens=15293，而五个命中字段要么缺席、要么全是 0。于是命中记 0、
-	// 输入被改写成未命中的 3 —— 四项之和 218，上游总量 15293，差出来的
-	// 15075 个缓存读 token 就此蒸发：命中率恒显示 0.00%，费用按 3 个输入
-	// token 计（实测这批请求的真实费用是记账值的 4.7 倍）。
+	// 与上一条互补：报文里只有 prompt_cache_miss_tokens 和 total_tokens，
+	// 命中、写入字段一个都没有，四项之和与上游总量差出来的那段没有归属。
+	// 输入只有命中/未命中两段，未命中已经记了，所以残差按命中记。
 	//
-	// 反推只在三个条件同时成立时做：显式给了未命中、一个命中字段都没有
-	// （parallelN/subsetN 都是 0）、上游给了总量。命中 = 总量 − 未命中 − 输出
-	// − 缓存写入。有命中字段的报文走原口径；冷请求（总量本就等于未命中+输出）
-	// 残差为 0，不会凭空造出缓存。
-	if miss > 0 && parallelN == 0 && subsetN == 0 && upstreamTotal > 0 {
+	// 四个条件必须同时成立：显式给了未命中、一个命中字段都没有
+	// （parallelN/subsetN 都是 0）、**也没有写入字段**（writeTokens == 0）、
+	// 上游给了总量。有命中字段的报文走原口径；有写入字段的报文由上面那段
+	// 记进 CacheCreationTokens —— 曾经漏掉这个前提，把 15075 个写入记成了
+	// 命中，命中率虚报成 100%（gpt-6-luna 的报文正是这种）；冷请求
+	// （总量本就等于未命中+输出）残差为 0，不会凭空造出缓存。
+	if miss > 0 && parallelN == 0 && subsetN == 0 && writeTokens == 0 && upstreamTotal > 0 {
 		if hit := upstreamTotal - u.PromptTokens - u.CompletionTokens - u.CacheCreationTokens; hit > 0 {
 			u.CachedTokens = hit
 		}

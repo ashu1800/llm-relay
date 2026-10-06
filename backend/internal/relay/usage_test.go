@@ -134,12 +134,11 @@ func TestNormalizeUsageMixedDialectCache(t *testing.T) {
 	}
 }
 
-// 上游只报「未命中」、完全不报「命中」时，命中数只能从上游总量反推。
+// 上游只报「未命中」、既不报「命中」也不报「写入」时，命中数只能从总量反推。
 //
-// 报文原样取自 2026-10-07 生产 trace 564b83d907a4ab6c80a38466（渠道
-// WorkBuddy美模 → 本机 workbuddy2api → global:gpt-6-luna）。修复前：
-// ↑输入只剩未命中的 3、缓存 0、命中率 0.00%，总量却写着 15293 ——
-// 四项互相打架，差出来的 15075 个缓存读 token 既不计费也不统计。
+// 这是「写入方言」（见下面两个用例）的互补情形：残差没有别的归属，
+// 而输入只剩命中一段，只能记成命中。修复前这段残差既不计费也不统计，
+// 四项之和与上游总量对不上。
 func TestNormalizeUsageMissOnlyDerivesCacheHit(t *testing.T) {
 	u := NormalizeUsage(mustJSON(t, `{
 		"cache_creation_input_tokens": 0,
@@ -173,6 +172,71 @@ func TestNormalizeUsageMissOnlyDerivesCacheHit(t *testing.T) {
 	}
 	if r := u.CacheHitRate(); r < 0.999 || r > 1 {
 		t.Fatalf("命中率应约为 0.9998，实际 %f", r)
+	}
+}
+
+// WorkBuddy/ChatGPT 方言把输入并列拆成 hit / miss / write 三段，三者之和
+// 恰为 prompt_tokens。报文原样取自 2026-10-07 实测（渠道 WorkBuddy美模 →
+// 本机 workbuddy2api → global:gpt-6-luna）。不认 write 这一项，4013 就整段
+// 消失：↑3、缓存 0、命中率 0.00%，而总量写着 4021，两边对不上。
+func TestNormalizeUsageWriteTokensAreCacheCreation(t *testing.T) {
+	u := NormalizeUsage(mustJSON(t, `{
+		"cache_creation_input_tokens": 0,
+		"cache_read_input_tokens": 0,
+		"cached_tokens": 0,
+		"completion_tokens": 5,
+		"completion_tokens_details": {"cached_tokens": 0, "reasoning_tokens": 0},
+		"prompt_cache_hit_tokens": 0,
+		"prompt_cache_miss_tokens": 3,
+		"prompt_cache_write_tokens": 4013,
+		"prompt_tokens": 4016,
+		"prompt_tokens_details": {"cached_tokens": 0},
+		"total_tokens": 4021
+	}`))
+
+	if u.PromptTokens != 3 || u.CompletionTokens != 5 {
+		t.Fatalf("未命中/输出应为 3/5，实际 %d/%d", u.PromptTokens, u.CompletionTokens)
+	}
+	if u.CacheCreationTokens != 4013 {
+		t.Fatalf("写入应记进 CacheCreationTokens=4013，实际 %d", u.CacheCreationTokens)
+	}
+	if u.CachedTokens != 0 {
+		t.Fatalf("命中应为 0（写入不是命中，记成命中会把命中率虚报成 100%%），实际 %d", u.CachedTokens)
+	}
+	if u.TotalTokens != 4021 {
+		t.Fatalf("总量应为 4021，实际 %d", u.TotalTokens)
+	}
+	if got := UsageTotal(u.PromptTokens, u.CompletionTokens, u.CachedTokens, u.CacheCreationTokens); got != 4021 {
+		t.Fatalf("四项之和应为 4021，实际 %d", got)
+	}
+	if r := u.CacheHitRate(); r != 0 {
+		t.Fatalf("上游没报命中，命中率应为 0，实际 %f", r)
+	}
+}
+
+// 生产 trace 564b83d907a4ab6c80a38466 的真实形状：15078 个输入里 15075 是写入。
+// 修复前 ↑3、缓存 0、写入 0，总量却写着 15293（四项只有 218）；修复后三段齐全。
+func TestNormalizeUsageTraceWriteTokens(t *testing.T) {
+	u := NormalizeUsage(mustJSON(t, `{
+		"completion_tokens": 215,
+		"completion_tokens_details": {"reasoning_tokens": 64},
+		"prompt_cache_hit_tokens": 0,
+		"prompt_cache_miss_tokens": 3,
+		"prompt_cache_write_tokens": 15075,
+		"prompt_tokens": 15078,
+		"prompt_tokens_details": {"cached_tokens": 0},
+		"total_tokens": 15293
+	}`))
+
+	if u.PromptTokens != 3 || u.CachedTokens != 0 || u.CacheCreationTokens != 15075 {
+		t.Fatalf("未命中/命中/写入应为 3/0/15075，实际 %d/%d/%d",
+			u.PromptTokens, u.CachedTokens, u.CacheCreationTokens)
+	}
+	if u.TotalTokens != 15293 {
+		t.Fatalf("总量应为 15293，实际 %d", u.TotalTokens)
+	}
+	if got := UsageTotal(u.PromptTokens, u.CompletionTokens, u.CachedTokens, u.CacheCreationTokens); got != 15293 {
+		t.Fatalf("四项之和应为 15293（修复前是 218），实际 %d", got)
 	}
 }
 
