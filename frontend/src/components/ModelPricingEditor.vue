@@ -209,7 +209,9 @@ export function validatePeakRules(rules: RateRule[], idx?: number): string | nul
 import { computed, ref, watch } from 'vue'
 import { symbolOf } from '@/utils/money'
 import { writeClipboard } from '@/utils/clipboard'
-import { message, Modal } from 'ant-design-vue'
+import { modalWidth } from '@/utils/modalWidth'
+import { useDirtyClose } from '@/composables/useDirtyClose'
+import { message, modal } from '@/utils/feedback'
 import { PlusOutlined, DeleteOutlined, CopyOutlined, ImportOutlined } from '@ant-design/icons-vue'
 
 const props = defineProps<{
@@ -243,9 +245,29 @@ watch(
     if (open) {
       form.value = { ...emptyPrice(), ...(props.value || {}), peak_rules: (props.value?.peak_rules || []).map((r) => ({ ...r, days: [...(r.days || [])] })) }
       openedWith.value = JSON.parse(JSON.stringify(form.value))
+      // 基线同样在这一刻记：上面这段回填不是用户改动
+      dirty.markClean()
     }
   }
 )
+
+// 受控组件的关闭通道：open 是父级的 prop，这里只能通过事件请求关闭。
+// computed 的 setter 让 useDirtyClose 能像操作一个 ref 那样操作它。
+const openModel = computed({
+  get: () => props.open,
+  set: (v: boolean) => emit('update:open', v)
+})
+
+// 防误关：遮罩不再能关掉弹窗，改过单价再按 X / Esc 要先确认
+// （定价改错的后果是「费用恒为 0」或「多算」，误触丢改动尤其不该发生）
+const dirty = useDirtyClose({
+  open: openModel,
+  snapshot: () => JSON.stringify(form.value),
+  onDiscard: () => {
+    form.value = emptyPrice()
+    openedWith.value = null
+  }
+})
 
 const WEEK = ['日', '一', '二', '三', '四', '五', '六']
 
@@ -320,9 +342,20 @@ async function copyPrice() {
 const importOpen = ref(false)
 const importText = ref('')
 
+// 导入弹窗的防误关：与白名单的「批量粘贴」同一形态 ——
+// 框里可能已经贴了一大段 JSON，误触遮罩丢掉要重来一遍
+const importDirty = useDirtyClose({
+  open: importOpen,
+  snapshot: () => importText.value,
+  onDiscard: () => {
+    importText.value = ''
+  }
+})
+
 function openImport() {
   importText.value = ''
   importOpen.value = true
+  importDirty.markClean()
 }
 
 function applyImport() {
@@ -475,7 +508,7 @@ function submit() {
       return was !== '' && now === ''
     }).map(([label]) => label)
     if (wiped.length) {
-      Modal.confirm({
+      modal.confirm({
         centered: true,
         title: '确认清空' + wiped.join('、') + '？',
         content: '清空后按 0 计费，这条模型的对应费用会被记成 0 元。',
@@ -499,9 +532,11 @@ function doSave() {
   <a-modal
     :open="open"
     :title="'定价 · ' + modelName"
-    :width="'min(640px, 94vw)'"
+    :width="modalWidth(640)"
     centered
+    :mask-closable="false"
     @update:open="(v: boolean) => emit('update:open', v)"
+    @cancel="dirty.guardCancel"
   >
     <a-form layout="vertical">
       <div class="price-grid">
@@ -599,7 +634,10 @@ function doSave() {
             </a-button>
           </a-tooltip>
         </div>
-        <a-button @click="emit('update:open', false)">取消</a-button>
+        <!-- 「取消」必须和 X / Esc 走同一条守卫（2026-10-11）：原来它直接关弹窗，
+             于是同一个弹窗「X 会问、取消不问」—— 刚调好的单价无提示消失。
+             与 ProxiesView 的同名按钮是同一次修复。 -->
+        <a-button @click="dirty.guardCancel">取消</a-button>
         <a-button type="primary" @click="submit">保存</a-button>
       </div>
     </template>
@@ -609,8 +647,10 @@ function doSave() {
   <a-modal
     v-model:open="importOpen"
     title="导入定价参数"
-    :width="'min(560px, 94vw)'"
+    :width="modalWidth(560)"
     centered
+    :mask-closable="false"
+    @cancel="importDirty.guardCancel"
     ok-text="导入"
     cancel-text="取消"
     @ok="applyImport"
@@ -635,7 +675,7 @@ function doSave() {
 .day-chip {
   width: 22px; height: 22px; line-height: 22px; text-align: center;
   border: 1px solid var(--color-border); border-radius: 4px;
-  font-size: 12px; cursor: var(--cursor-hand); color: var(--color-text-secondary);
+  font-size: var(--font-size-sm); cursor: var(--cursor-hand); color: var(--color-text-secondary);
   background: transparent; padding: 0;
 }
 /* 焦点环交给 theme.css 的全站 :focus-visible（2026-09-24 UI 审评 P1-7）。
@@ -649,15 +689,15 @@ function doSave() {
 .day-chip.on { background: var(--solid-primary-bg); border-color: var(--solid-primary-bg); color: var(--solid-primary-fg); }
 .time-input {
   border: 1px solid var(--color-border); border-radius: var(--radius-control);
-  padding: 1px 4px; font-family: var(--font-family-mono); font-size: 12px;
+  padding: 1px 4px; font-family: var(--font-family-mono); font-size: var(--font-size-sm);
   background: transparent; color: inherit;
 }
-.rule-sep { color: var(--color-text-secondary); font-size: 12px; }
-.rule-hint { color: var(--color-text-secondary); font-size: 12px; margin-top: 4px; }
-.currency-hint { margin: -4px 0 12px; color: var(--color-text-secondary); font-size: 12px; line-height: 1.7; }
+.rule-sep { color: var(--color-text-secondary); font-size: var(--font-size-sm); }
+.rule-hint { color: var(--color-text-secondary); font-size: var(--font-size-sm); margin-top: 4px; }
+.currency-hint { margin: -4px 0 12px; color: var(--color-text-secondary); font-size: var(--font-size-sm); line-height: 1.7; }
 /* footer 三段式：工具组贴左，取消/保存贴右（modal footer 默认右对齐，
    外面这层 flex 把两个区域分开） */
 .pricing-footer { display: flex; align-items: center; gap: 8px; }
 .pricing-tools { display: flex; gap: 2px; margin-right: auto; }
-.import-hint { margin: 8px 0 0; color: var(--color-text-secondary); font-size: 12px; line-height: 1.7; }
+.import-hint { margin: 8px 0 0; color: var(--color-text-secondary); font-size: var(--font-size-sm); line-height: 1.7; }
 </style>

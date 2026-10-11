@@ -10,10 +10,20 @@ import { onUnmounted, ref, useSlots, watch } from 'vue'
 //   summary-value  24px / 700，颜色 = 该卡的色调色
 const props = withDefaults(defineProps<{
   label: string
-  value: string | number
+  /** 数值文本。loading 为真时可以不传（骨架态不显示数值） */
+  value?: string | number
   /** 语义色：purple | orange | blue | green | red | gray */
   tone?: 'purple' | 'orange' | 'blue' | 'green' | 'red' | 'gray'
   hint?: string
+  /**
+   * 骨架态（2026-10-11）：首屏还没拿到数据时用。
+   *
+   * 为什么需要它：原来看板首屏是 DataState 的「转圈面板」，而四张卡与日志表是
+   * 兄弟节点 —— 日志表先取数成功，卡片随后整块长出，把下面的表格往下推
+   * 90~150px 并触发一次列宽重测。观感是「页面自己跳了一下」。
+   * 用与加载完成态同形的骨架卡，首屏形状 = 加载完成形状，位移就没有了。
+   */
+  loading?: boolean
   /**
    * 数值变化闪光的触发戳：值一变卡片泛起一次本色调的微光。
    * 传时间戳由父组件决定何时闪（通常是实时推送里数字真的变了）。
@@ -25,7 +35,7 @@ const props = withDefaults(defineProps<{
    * hot = 超支（红晕 + 缓慢脉动）。不传 = 常态。
    */
   heat?: 'warm' | 'hot'
-}>(), { tone: 'purple' })
+}>(), { tone: 'purple', value: '' })
 
 // 右侧附加区只在被使用时渲染（useSlots 判断）：
 // 空插槽也渲染容器的话，margin-left:auto 会凭空多出一个
@@ -62,12 +72,23 @@ onUnmounted(() => {
     </div>
     <div class="summary-body">
       <div class="summary-label">{{ label }}</div>
-      <!-- 需要滚动动画的数值走这个插槽（看板接的是实时推送）；
-           不传插槽时行为完全不变 -->
-      <div class="summary-value">
-        <slot name="value">{{ value }}</slot>
-      </div>
-      <div v-if="hint" class="summary-hint">{{ hint }}</div>
+      <!-- 骨架态：用与真数值同高、同行的占位条，形状一致才不会在数据到达时跳动 -->
+      <template v-if="loading">
+        <div class="summary-value" aria-hidden="true">
+          <span class="sk-bar sk-value" />
+        </div>
+        <div class="summary-hint" aria-hidden="true">
+          <span class="sk-bar sk-hint" />
+        </div>
+      </template>
+      <template v-else>
+        <!-- 需要滚动动画的数值走这个插槽（看板接的是实时推送）；
+             不传插槽时行为完全不变 -->
+        <div class="summary-value">
+          <slot name="value">{{ value }}</slot>
+        </div>
+        <div v-if="hint" class="summary-hint">{{ hint }}</div>
+      </template>
     </div>
     <!-- 右侧附加区：放「切换显示格式」这类只作用于本卡的小控件。
          margin-left:auto 把它推到卡片最右、垂直居中；
@@ -143,7 +164,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   border-radius: 8px;
-  font-size: 24px;
+  font-size: var(--font-size-display);
   color: var(--tone-color);
   background: var(--tone-bg);
 }
@@ -151,7 +172,7 @@ onUnmounted(() => {
 .summary-body { min-width: 0; }
 
 .summary-label {
-  font-size: 16px;
+  font-size: var(--font-size-base);
   font-weight: 400;
   line-height: 1.15;
   /* 用变量而不是写死 rgba(48,48,48,0.65)：
@@ -161,7 +182,7 @@ onUnmounted(() => {
 }
 
 .summary-value {
-  font-size: 24px;
+  font-size: var(--font-size-display);
   font-weight: 700;
   line-height: 1.2;
   /* 数值是正文内容，用 --tone-ink 而不是 --tone-color：
@@ -172,9 +193,44 @@ onUnmounted(() => {
 }
 
 .summary-hint {
-  font-size: 14px;
+  font-size: var(--font-size-panel);
   line-height: 1.3;
   color: var(--color-text-secondary);
+}
+
+/* ---- 骨架条（loading 态）----
+   宽度按「真内容大概多长」给：数值那一行是最长的（24px 大字号），
+   副标短一些。两条都用边框色做底 —— 它是主题令牌，12 套配色下都成立，
+   不引入新的灰。脉动只改透明度，不引起布局变化。
+   （系统开了「减弱动态效果」时，theme.css 的全站规则会把它压成静态 —— 那是对的：
+   骨架条不需要靠闪烁来表达「在加载」，它本身的存在就是。） */
+.sk-bar {
+  display: inline-block;
+  border-radius: var(--radius-control);
+  background: var(--color-border);
+  animation: sk-pulse 1.4s ease-in-out infinite;
+}
+
+/* 与 .summary-value 的 24px 行高对齐 */
+.sk-value {
+  width: 96px;
+  height: 22px;
+}
+
+/* 与 .summary-hint 的 12px 行高对齐，短一些（副标本来就短） */
+.sk-hint {
+  width: 64px;
+  height: 11px;
+}
+
+@keyframes sk-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
 }
 
 /* 右侧附加区。色调变量（--tone-*）定义在卡片根上，

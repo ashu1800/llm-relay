@@ -53,7 +53,7 @@ const vars = computed(() => groupVars(style.value))
   border: 1px solid color-mix(in oklab, var(--gt-base) 32%, transparent);
   background: color-mix(in oklab, var(--gt-base) 13%, transparent);
   color: var(--gt-base);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   font-weight: 500;
   line-height: 20px;
   overflow: hidden;

@@ -1,10 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { message, Modal } from 'ant-design-vue'
-import { PlusOutlined, ReloadOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons-vue'
+import { message, modal } from '@/utils/feedback'
+import { modalWidth } from '@/utils/modalWidth'
+import { PlusOutlined, ReloadOutlined, DeleteOutlined, EditOutlined, SearchOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import { useFormValidate } from '@/composables/useFormValidate'
+import { useDirtyClose } from '@/composables/useDirtyClose'
+// 本地搜索 + 客户端分页（四张管理表共用，判据在 components/tableTools.ts 有单测）
+import { useTableTools } from '@/composables/useTableTools'
 import DataState from '@/components/DataState.vue'
+import EmptyState from '@/components/EmptyState.vue'
 import GroupTag from '@/components/GroupTag.vue'
 import { groupStyle } from '@/utils/groupStyle'
 import { moneyText } from '@/utils/money'
@@ -28,6 +33,20 @@ const STRATEGY_OPTIONS = STRATEGIES
 const loading = ref(false)
 const rows = ref<ChannelGroup[]>([])
 const loadError = ref('')
+
+// 本地搜索 + 客户端分页（2026-10-11）：接口一次返回全量分组。
+// 可搜字段覆盖这一页能看到的文本列 —— 策略也放进来：
+// 「哪些分组开了 fallback」是配渠道时真的要问的问题，而策略列在表格右侧，
+// 窄窗口下常常要横向滚动才看得到。
+const {
+  q,
+  rows: pagedRows,
+  pagination,
+  total
+} = useTableTools(rows, {
+  storageKey: 'groups-page-size',
+  searchText: (g) => [g.name, g.remark, strategyLabel(g.strategy)].join(' ')
+})
 
 const modalOpen = ref(false)
 const editing = ref<ChannelGroup | null>(null)
@@ -146,8 +165,8 @@ function strategyLabel(v: string) {
   return found ? found.label : v
 }
 
-function openCreate() {
-  editing.value = null
+// 新建时的空白表单。抽成函数是为了给防误关复用 —— 放弃改动时也要回到这个状态
+function blankForm() {
   Object.assign(form, {
     name: '',
     remark: '',
@@ -160,7 +179,23 @@ function openCreate() {
     budgetCny: null,
     budgetUsd: null
   })
+}
+
+// 防误关：遮罩不再能关掉弹窗，有改动时按 X / Esc 要先确认（见 composable 顶部）
+const dirty = useDirtyClose({
+  open: modalOpen,
+  snapshot: () => JSON.stringify(form),
+  onDiscard: () => {
+    editing.value = null
+    blankForm()
+  }
+})
+
+function openCreate() {
+  editing.value = null
+  blankForm()
   modalOpen.value = true
+  dirty.markClean()
 }
 
 function openEdit(row: ChannelGroup) {
@@ -178,6 +213,7 @@ function openEdit(row: ChannelGroup) {
     budgetUsd: row.daily_budget?.USD ?? null
   })
   modalOpen.value = true
+  dirty.markClean()
 }
 
 async function save() {
@@ -217,7 +253,7 @@ async function save() {
 }
 
 function confirmDelete(row: ChannelGroup) {
-  Modal.confirm({
+  modal.confirm({
     centered: true,
     title: '确认删除分组',
     content: '删除后不可恢复。若分组下仍有渠道、或仍被密钥的分组白名单引用，后端会拒绝删除并说明原因。',
@@ -245,12 +281,27 @@ onMounted(load)
         <div class="toolbar-left">
           <a-button type="primary" @click="openCreate"><PlusOutlined /> 新建分组</a-button>
           <!-- 图标化与看板/渠道/代理三页的工具栏统一：位置固定后图标即可辨认 -->
-          <a-button :loading="loading" title="刷新" aria-label="刷新" @click="load">
+          <a-button :loading="loading" title="刷新（快捷键 R）" aria-label="刷新" aria-keyshortcuts="r" @click="load">
             <ReloadOutlined />
           </a-button>
         </div>
         <div class="toolbar-spacer" />
-        <span class="toolbar-hint">共 {{ rows.length }} 个分组</span>
+        <!-- 本地搜索（2026-10-11）：分组不多，但「哪个分组开了 fallback 策略」
+             这类查询靠眼睛扫表格并不快。可搜的字段见 script 里的 searchText -->
+        <a-input
+          v-model:value="q"
+          class="toolbar-search"
+          placeholder="搜索名称 / 备注 / 策略"
+          allow-clear
+          aria-label="搜索分组"
+          aria-keyshortcuts="/"
+        >
+          <template #prefix><SearchOutlined aria-hidden="true" /></template>
+        </a-input>
+        <span class="toolbar-hint">
+          <template v-if="q.trim()">找到 {{ total }} 个 / 共 {{ rows.length }} 个</template>
+          <template v-else>共 {{ rows.length }} 个分组</template>
+        </span>
       </div>
 
       <DataState
@@ -269,9 +320,9 @@ onMounted(load)
            +170 日预算是「分组日预算」这一次，见上方该列的注释。
            核对脚本：scripts/check-table-widths.mjs -->
       <a-table
-        :data-source="rows"
+        :data-source="pagedRows"
         :loading="loading"
-        :pagination="false"
+        :pagination="pagination"
         row-key="id"
         size="small"
         :scroll="{ x: 1164 }"
@@ -353,13 +404,26 @@ onMounted(load)
           </template>
         </a-table-column>
         <template #emptyText>
-          <a-empty description="还没有分组，点「新建分组」创建第一个" />
+          <!-- 空态自带行动按钮（理由同 KeysView，2026-10-10）。
+               2026-10-11 补搜索分支：搜索无结果 ≠ 一个分组都没有 ——
+               后者给「新建」，前者给「清空搜索」（否则用户会去新建一个
+               同名分组，而他要找的那个其实就在库里） -->
+          <EmptyState v-if="q.trim()" size="sm" text="没有匹配的分组">
+            <template #action>
+              <a-button size="small" @click="q = ''">清空搜索</a-button>
+            </template>
+          </EmptyState>
+          <EmptyState v-else size="sm" text="还没有分组">
+            <template #action>
+              <a-button type="primary" @click="openCreate"><PlusOutlined /> 新建分组</a-button>
+            </template>
+          </EmptyState>
         </template>
       </a-table>
       </DataState>
     </section>
 
-    <a-modal v-model:open="modalOpen" :title="title" :confirm-loading="saving" :width="'min(560px, 94vw)'" centered @ok="save">
+    <a-modal v-model:open="modalOpen" :title="title" :confirm-loading="saving" :width="modalWidth(560)" centered :mask-closable="false" @cancel="dirty.guardCancel" @ok="save">
       <a-form ref="formRef" :model="form" :rules="formRules" layout="vertical">
         <a-form-item label="分组名称" name="name">
           <a-input v-model:value="form.name" placeholder="例如 高优先级" />
@@ -394,12 +458,21 @@ onMounted(load)
           <div class="field-hint">
             留空则按分组名自动配色（同一个名字永远同一种颜色）。色板：
             <span class="swatches">
+              <!-- type="button" 不能省（2026-10-11）：它在 <a-form> 内部，而
+                   a-form 渲染的是真正的 <form> —— 缺 type 的按钮会被当成提交按钮，
+                   点一下色块就跑一遍整表校验，「分组名称」立刻标红报错。
+                   用户只是想先挑个颜色，却像被系统提前指责了一句。
+                   同仓 ModelPricingEditor 的星期胶囊与 ModelWhitelistEditor
+                   的控件都写了 type="button"，这里是漏的。
+                   aria-label 也补上：色块只有颜色，title 在触屏上没有出口。 -->
               <button
                 v-for="c in COLOR_PRESETS"
                 :key="c"
+                type="button"
                 class="swatch"
                 :style="{ background: c }"
                 :title="c"
+                :aria-label="'使用颜色 ' + c"
                 @click="form.color = c"
               />
             </span>
@@ -462,7 +535,7 @@ onMounted(load)
 }
 .toolbar-left { display: flex; gap: var(--gap); }
 .toolbar-spacer { flex: 1; }
-.toolbar-hint { color: var(--color-text-secondary); font-size: 13px; }
+.toolbar-hint { color: var(--color-text-secondary); font-size: var(--font-size-md); }
 .muted { color: var(--color-text-secondary); }
 
 /* 日预算一格：花费/限额 占比。常态走正文色 —— 它是每天要扫的内容，
@@ -473,9 +546,9 @@ onMounted(load)
 }
 .budget-pct { color: var(--color-text-secondary); }
 .budget-cell.is-warn { color: var(--text-amber); font-weight: 500; }
-.budget-cell.is-over { color: var(--color-red); font-weight: 600; }
-.budget-cell.is-over .budget-pct { color: var(--color-red); }
-.field-hint { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
+.budget-cell.is-over { color: var(--text-red); font-weight: 600; }
+.budget-cell.is-over .budget-pct { color: var(--text-red); }
+.field-hint { margin-top: 4px; font-size: var(--font-size-sm); color: var(--color-text-secondary); }
 .color-row { display: flex; align-items: center; gap: 8px; }
 .color-input {
   width: 28px;
@@ -531,7 +604,7 @@ onMounted(load)
   border: 1px solid color-mix(in oklab, var(--gt-base) 32%, transparent);
   background: color-mix(in oklab, var(--gt-base) 13%, transparent);
   color: var(--gt-base);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   font-weight: 500;
   line-height: 20px;
   overflow: hidden;

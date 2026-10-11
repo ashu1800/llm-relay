@@ -10,6 +10,11 @@
 //     而不是显示一个空表格
 //   - 已有数据后刷新失败：保留用户正在看的内容，只在顶部提示，
 //     把表格清空反而是帮倒忙
+// 空态改用站内自绘的 EmptyState（主题感知插画 + 行动按钮插槽）：
+// antd 的 a-empty 插画是写死浅色的 SVG，在 8 套深色主题下是一块发亮图形
+// （2026-10-10 打磨，理由详见 components/EmptyState.vue 顶部）。
+import EmptyState from '@/components/EmptyState.vue'
+
 withDefaults(
   defineProps<{
     // 非空即表示加载失败
@@ -65,15 +70,29 @@ const emit = defineEmits<{ retry: [] }>()
     <a-button type="primary" @click="emit('retry')">重试</a-button>
   </div>
 
-  <!-- 首次加载中：给一个明确的加载态，而不是先闪一下「暂无数据」 -->
-  <div v-else-if="loading && !hasData" class="ds-panel">
-    <a-spin />
-    <div class="ds-hint">加载中…</div>
-  </div>
+  <!-- 首次加载中：给一个明确的加载态，而不是先闪一下「暂无数据」。
+       调用方可以传 #loading 插槽，换成与加载完成态**同形**的骨架
+       （看板的四张概览卡就是这么做的：卡片先占住位置，数据到达时不整块跳动）。
+       不传插槽时与从前逐字一致：一个转圈 + 「加载中…」。 -->
+  <slot v-else-if="loading && !hasData" name="loading">
+    <div class="ds-panel">
+      <a-spin />
+      <div class="ds-hint">加载中…</div>
+    </div>
+  </slot>
 
   <!-- 加载成功但确实没有数据 -->
   <div v-else-if="empty && !loading" class="ds-panel">
-    <a-empty :description="emptyText" />
+    <EmptyState :text="emptyText">
+      <!-- 行动按钮：空态只说「还没有 X」等于把用户丢在原地，
+           把「新建 X」直接放在他眼前才是可行动的（2026-10-10）。
+           判空不能省：无条件转发 <slot name="action" /> 会让 EmptyState 的
+           $slots.action 恒为真，多渲染一个空的 .es-action（带 gap 的盒子），
+           空态底部凭空多出一段留白。 -->
+      <template v-if="$slots.action" #action>
+        <slot name="action" />
+      </template>
+    </EmptyState>
   </div>
 
   <slot v-else />
@@ -93,7 +112,7 @@ const emit = defineEmits<{ retry: [] }>()
   text-align: center;
 }
 .ds-title {
-  font-size: 15px;
+  font-size: var(--font-size-lg);
   font-weight: 600;
   /* 标题是正文文字，用 --text-red（白底 5.44:1）而不是 --color-red。
      后者 #ea4343 在白底上只有 3.90:1、深色底上 3.38:1，都不达标 ——
@@ -110,6 +129,6 @@ const emit = defineEmits<{ retry: [] }>()
 }
 .ds-hint {
   color: var(--color-text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-md);
 }
 </style>

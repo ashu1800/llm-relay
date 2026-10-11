@@ -13,7 +13,7 @@
 // 热力图与四张图表（消耗趋势 / 消耗分布 / 模型调用分析 / 模型消耗占比）已移除：
 // 概览卡与日志列表已经覆盖了「多少 / 多少钱 / 多快 / 哪些失败」这几个问题，
 // 图表属于「再往下研究」的需求，等真有人用再看要不要以别的方式补回。
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   ApiOutlined,
   DollarOutlined,
@@ -21,26 +21,59 @@ import {
   CheckCircleOutlined,
   ReloadOutlined,
   SwapOutlined,
-  BgColorsOutlined
+  BgColorsOutlined,
+  CheckOutlined,
+  LinkOutlined,
+  DownloadOutlined
 } from '@ant-design/icons-vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { api } from '@/api/client'
 import { useThemeStore } from '@/stores/theme'
 import ThemePicker from '@/components/ThemePicker.vue'
+import ColumnSettings from '@/components/ColumnSettings.vue'
+import { COL_KEYS, COL_LABELS, COL_LOCKED, type ColKey } from '@/components/logColumns'
+import { logColumns, logDensity } from '@/components/logColumnVisibility'
 import PageToolbar from '@/components/PageToolbar.vue'
 import StatCard from '@/components/StatCard.vue'
 import AnimatedNumber from '@/components/AnimatedNumber.vue'
 import DataState from '@/components/DataState.vue'
 import PulseBar from '@/components/PulseBar.vue'
+import LiveStatus from '@/components/LiveStatus.vue'
 import DailyReport from '@/components/DailyReport.vue'
 import RequestLogPanel from '@/components/RequestLogPanel.vue'
 import { onLive, createThrottledLiveReloader } from '@/composables/useLive'
+// 弹层的键盘可达性（打开移焦 / Esc 关闭 / 关闭还焦）：主题弹层、版本面板、列设置共用
+import { usePopoverA11y } from '@/composables/usePopoverA11y'
+// 轻提示走 utils/feedback 的出口（不是 antd 静态方法）：静态方法拿不到
+// ConfigProvider 的主题上下文，8 套深色主题下会弹出浅色默认皮肤（见该文件说明）
+import { message } from '@/utils/feedback'
 // 金额一律走 utils/money.ts：符号与小数位数只此一份（见那里的说明）
 import { currencyKeys, moneyText, primaryCurrency, symbolOf } from '@/utils/money'
 import type { Channel, ChannelGroup } from '@/api/types'
 import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
+// 复制当前视角链接走与密钥页同一个降级实现（http 非 localhost 也能复制）
+import { writeClipboard } from '@/utils/clipboard'
 import { groupedChannelOptions } from '@/utils/channelOption'
 import ChannelOption from '@/components/ChannelOption.vue'
+
+// ---- 请求日志表的列显隐（2026-10-10）----
+//
+// 状态是单例（与 RequestLogPanel 共用），这里只负责把「有哪些列、哪几列不许关」
+// 递给工具栏上的勾选面板。选项从 logColumns 的 COL_KEYS/COL_LABELS 生成 ——
+// 面板文案与表头同源，改表头不会漏掉面板。
+//
+// 解构成 ref：模板只自动解包顶层绑定（理由见 RequestLogPanel 里的同款注释）。
+// 「只剩一列不许再关」由 ColumnSettings 自己判断，这里不用管。
+const { visible: logColShown, toggle: toggleLogColumnKey, reset: resetLogColumns } = logColumns
+const logColumnOptions = COL_KEYS.map((k) => ({
+  key: k,
+  label: COL_LABELS[k],
+  locked: COL_LOCKED.includes(k)
+}))
+// 勾选面板是通用组件（键是 string），这里收窄回 ColKey
+function toggleLogColumn(key: string): void {
+  toggleLogColumnKey(key as ColKey)
+}
 
 type Summary = {
   requests: number
@@ -117,9 +150,17 @@ const modelFilter = ref<string>(ALL)
 // 而且不记得自己什么时候套上的。
 const traceId = ref('')
 const statusClass = ref('')
+/**
+ * 详情抽屉当前打开的那一条（?log=123，2026-10-11 加）。
+ *
+ * 为什么不放在 RequestLogPanel 内部：它属于「这一页正在看什么」，
+ * 与 trace/status 是同一类东西，都由 URL 与看板持有 —— 面板只管按它开抽屉。
+ */
+const logId = ref<number | null>(null)
 // 只在进入页面时读一次（见 applyUrlFilters）：筛选状态不进地址栏，
 // 免得用户以为地址栏能当书签用、却越用越乱
 const route = useRoute()
+const router = useRouter()
 
 // 主题选择（工具栏右上角那枚按钮，2026-09-26 从侧栏底部迁来、
 // 2026-09-30 从「一键翻浅深」改成「弹层里自选 12 套」——12 套主题再靠
@@ -137,33 +178,30 @@ function quickSwitch(tone: 'light' | 'dark') {
   themeStore.setTone(tone)
 }
 
-// 弹层打开后把焦点移进选择器。
+// 弹层打开后把焦点移进选择器、Esc 关掉、关闭后焦点还给触发按钮。
 //
-// 不主动移焦的话弹层对纯键盘用户等于不可达：antd 把内容 teleport 到 body 外层，
-// 触发按钮的焦点不会跟着进去 —— 实测点开后按 Tab 落到的是弹层**外面**的「刷新」按钮。
-// 聚焦到当前选中那张卡的 radio（它在 radiogroup 里），于是方向键可以直接换主题、
-// Tab 也不会漏掉这 12 张卡。鼠标路径下浏览器认为这次聚焦不是键盘发起的，
-// 不会画出焦点环（:focus-visible 的判定），所以观感不受影响。
+// 三件事都在 composables/usePopoverA11y.ts 里（版本面板与列设置共用同一套）：
+// 不主动移焦的话弹层对纯键盘用户等于不可达 —— antd 把内容 teleport 到 body 外层，
+// 触发按钮的焦点不会跟着进去（实测点开后按 Tab 落到的是弹层**外面**的「刷新」按钮）；
+// 而全仓除了移动端抽屉之外没有任何 Esc 处理，按了没反应。
 //
-// 用 watch 而不是弹层的 @open-change：内容是被 teleport 出来的，打开这一拍
-// DOM 里还没有那 12 张卡（实测 openChange 后立刻查是 null），所以这里要轮询几拍；
-// 顺带也不必关心 antd 事件名的细节。
-watch(themePanelOpen, (open) => {
-  if (!open) return
-  let tries = 0
-  const focusPicker = () => {
-    const el = document.querySelector<HTMLInputElement>('.theme-popover .theme-radio:checked')
-    if (el) {
-      el.focus()
-      if (document.activeElement === el) return
-    }
-    if (++tries < 12) setTimeout(focusPicker, 50)
-  }
-  void nextTick(focusPicker)
+// 这里额外指定优先聚焦「当前选中那张卡的 radio」：它在 radiogroup 里，
+// 于是方向键可以直接换主题、Tab 也不会漏掉这 12 张卡。鼠标路径下浏览器认为
+// 这次聚焦不是键盘发起的，不会画出焦点环（:focus-visible 的判定），观感不受影响。
+const themeBtn = ref<HTMLElement | null>(null)
+const themePanel = ref<HTMLElement | null>(null)
+usePopoverA11y({
+  open: themePanelOpen,
+  trigger: themeBtn,
+  panel: themePanel,
+  preferred: '.theme-radio:checked'
 })
 
 // 列表面板的句柄：工具栏的「刷新」要连它一起刷（一页一个刷新按钮）
-const logPanel = ref<{ reload: () => void } | null>(null)
+// 面板对外暴露的两个动作（见 RequestLogPanel 的 defineExpose）：
+//   reload()      —— 让列表重取一次（工具栏那唯一的「刷新」）
+//   exportQuery() —— 取导出用的查询串，与列表同一份条件（只去掉分页）
+const logPanel = ref<{ reload: () => void; exportQuery: () => string } | null>(null)
 // 筛选下拉的候选：来自管理接口，不是统计接口 —— 统计接口只回有流量的渠道，
 // 而「筛一条今天还没被用过的渠道」是合理需求（结果就是 0）。
 // filterGroups 不喂任何筛选（分组筛选 2026-09-26 移除），但渠道选项的
@@ -258,11 +296,55 @@ async function loadFilters() {
 // 免得用户以为地址栏能当书签用、却越用越乱（工具栏那几个筛选记在本地，
 // 见上面的 dashboard-* 键 —— 「下次打开还是这个视角」与「地址栏当书签」是两件事）。
 // 用法上它是排障深链：?trace_id=… 看一条链路、?status_class=error 只看失败。
+// applyUrlFilters 只在进入页面时读一次 URL。
+//
+// 两类参数在这里合流，但**来源不同**，别把它们混成一件事：
+//   1. 排障深链（trace_id / status_class / log）—— 这些会随操作写回地址栏
+//      （见 syncUrl），因为它们描述的是「我正在看哪一条 / 哪一批」，交接得出去；
+//   2. 分享链接里带的视角（range / channel / model）—— 工具栏上的筛选**变化时
+//      不写地址栏**（见 syncUrl 的说明：那会让返回键变成「上一个筛选」），
+//      但「复制当前视角链接」会显式带上它们，所以这里必须读 ——
+//      否则复制出去的链接打开后是另一个视角，而收链接的人无从察觉。
+//      `range` 的合法性交给后端（认不出就退回「今天」），这里不复制一份白名单。
 function applyUrlFilters() {
   const tid = String(route.query.trace_id || '').trim()
   if (tid) traceId.value = tid
   const sc = String(route.query.status_class || '').trim()
   if (sc === 'error' || sc === 'success') statusClass.value = sc
+  // ?log=123：直接展开那一条的详情（2026-10-11）。
+  // 非法值当没传：地址栏里的东西是用户能改的，解析失败不该让页面出错
+  const lid = Number(String(route.query.log || '').trim())
+  if (Number.isInteger(lid) && lid > 0) logId.value = lid
+  const rg = String(route.query.range || '').trim()
+  if (rg) range.value = rg
+  const ch = String(route.query.channel || '').trim()
+  if (ch) channelFilter.value = ch
+  const md = String(route.query.model || '').trim()
+  if (md) modelFilter.value = md
+}
+
+/**
+ * 把「当前视角」写回地址栏（2026-10-11）。
+ *
+ * 只写三类东西：**排障深链**（trace_id / status_class / 打开的 log）。
+ * 工具栏那几个筛选（时间范围 / 分组 / 模型）仍然不进 URL ——
+ * 它们记在本地、是「下次打开还是这个视角」的长期偏好，每变一次就写 URL
+ * 会让历史记录变成一串筛选状态，返回键再也不是「上一个页面」。
+ *
+ * 用 replace 而不是 push：在抽屉里按 ↑ / ↓ 连看十条，不该在历史里留下十条。
+ * 相同的 query 不重复导航（replace 同一条也会触发一次导航，白跑一遍守卫）。
+ */
+function syncUrl() {
+  const q: Record<string, string> = {}
+  if (traceId.value) q.trace_id = traceId.value
+  if (statusClass.value) q.status_class = statusClass.value
+  if (logId.value != null) q.log = String(logId.value)
+  const cur = route.query
+  const same =
+    Object.keys(q).length === Object.keys(cur).length &&
+    Object.entries(q).every(([k, v]) => cur[k] === v)
+  if (same) return
+  void router.replace({ query: q })
 }
 
 // 注意：a-radio-group 的 change 给的是**事件对象**，不是值（a-select 给的是值，
@@ -312,6 +394,67 @@ function clearExtra(key: 'trace' | 'status') {
   else statusClass.value = ''
 }
 
+// 三类深链状态变化就同步地址栏（见 syncUrl）。
+//
+// 用 watch 而不是在每个赋值的旁边手写一次：赋值点有五个（URL 初始读取、
+// 工具栏关标签、详情里的「只看这条链路」、空表上的清除条件、抽屉的开与关），
+// 漏掉任何一处，地址栏讲的就是另一个故事。
+watch([traceId, statusClass, logId], syncUrl)
+
+/**
+ * 复制「当前视角」的链接（2026-10-11）。
+ *
+ * 为什么需要一个按钮而不是「让用户自己复制地址栏」：地址栏里只有排障深链，
+ * 而排障时真正要交接的往往是「我在看的这个视角」—— 一旦将来把筛选也放进 URL，
+ * 用户仍会照着地址栏抄。这里显式生成一次完整链接，边界清楚：点它就是分享当前视角。
+ *
+ * 用 location.origin 拼绝对地址：粘进聊天工具要能直接点开，
+ * 相对路径在别人那里是拼到他自己的域名上的。
+ */
+const copiedLink = ref(false)
+async function copyViewLink() {
+  const q = new URLSearchParams()
+  if (traceId.value) q.set('trace_id', traceId.value)
+  if (statusClass.value) q.set('status_class', statusClass.value)
+  if (logId.value != null) q.set('log', String(logId.value))
+  // 时间范围是「这些数字算的是哪一段」，它决定了卡片的口径，必须带上；
+  // 分组 / 模型同理（它们只影响卡片，但收链接的人看到的第一屏就是卡片）
+  if (range.value !== 'today') q.set('range', range.value)
+  if (channelFilter.value !== ALL) q.set('channel', channelFilter.value)
+  if (modelFilter.value !== ALL) q.set('model', modelFilter.value)
+  const qs = q.toString()
+  const url = location.origin + route.path + (qs ? '?' + qs : '')
+  if (!(await writeClipboard(url))) {
+    message.warning('复制失败，请手动复制地址栏')
+    return
+  }
+  copiedLink.value = true
+  window.setTimeout(() => { copiedLink.value = false }, 2000)
+}
+
+// 导出（2026-10-11 加回来）：
+//
+// 站主 2026-09-16 把导出按钮从**日志面板**撤掉了，理由是那张面板的标题栏
+// 整个要删（表体刚好能多放一整行）。现在它回到**看板工具栏**、做成图标 ——
+// 与刷新、列设置、主题并列，不占表格面板的高度，也不给那张面板加回标题栏。
+//
+// 参数取自面板暴露的 exportQuery()（与列表同一份条件，只去掉分页）。
+// 下载走一个临时的 <a>：不用 window.open（会被当成弹窗拦掉），
+// 也不用 fetch + blob（几万行 CSV 全进内存，还要自己解析 Content-Disposition
+// 里的文件名）。<a> 是浏览器原生的下载路径，同源请求带着会话 Cookie。
+function exportLogs() {
+  const qs = logPanel.value?.exportQuery?.() || ''
+  const a = document.createElement('a')
+  a.href = '/api/admin/logs/export' + (qs ? '?' + qs : '')
+  a.rel = 'noopener'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  // 后端的 maxExportRows 会截断（响应头里有 X-Exported-Truncated，但 <a> 下载
+  // 读不到它），所以提示里明说「不超过上限」——比默默给一个少了几万行的文件好
+  message.success('已开始下载 CSV（超出后端单次上限时会截断，文件里的行数是实际导出的条数）')
+}
+
 // 一页只有一个「刷新」：卡片与列表一起刷。
 // 拆成两个按钮的话，用户永远要猜「哪个按钮刷的是哪块」。
 //
@@ -337,6 +480,22 @@ function n(v: number | undefined) {
   return (v ?? 0).toLocaleString('zh-CN')
 }
 
+// ---- 首屏副标：没数据时给「—」，不能拿 null 当 0 用（2026-10-11）----
+//
+// 原来这三行是 `'失败 ' + n(summary?.errors) + ' 次'` 这类写法：summary 还没到时
+// `?? 0` 会拼出「失败 0 次」「命中率 0.0%」「平均首字耗时 0ms」——
+// 三条都是**错误的结论**，而它们看起来和真实数据完全一样，用户会照着它下判断。
+// 加载中显示「—」既诚实又和加载完成后的形状一致（不会因为文字变长而换行）。
+const errorsHint = computed(() =>
+  summary.value ? '失败 ' + n(summary.value.errors) + ' 次' : '—'
+)
+const cacheHint = computed(() =>
+  summary.value ? '命中率 ' + ((summary.value.cache_hit_rate ?? 0) * 100).toFixed(1) + '%' : '—'
+)
+const firstByteHint = computed(() =>
+  summary.value ? '平均首字耗时 ' + Math.round(summary.value.avg_first_byte_ms ?? 0) + 'ms' : '—'
+)
+
 /**
  * 取当前时间范围与筛选下的概览统计。
  *
@@ -349,6 +508,19 @@ function n(v: number | undefined) {
  * 看板显示的就一直是错的时间范围，直到下一次操作才纠正。
  */
 let loadSeq = 0
+
+// ---- 静默重取失败的留痕（2026-10-11）----
+//
+// 实时推送驱动的重取是静默的（不点加载态、失败不弹提示）—— 一次抖动确实不该
+// 打断视线。但**连续**失败是另一回事：那时卡片会一直停在几分钟前的数字，
+// 看起来却和「刚刷新过」一模一样，用户会据此判断「今天就这么点请求」。
+// 连续失败达到阈值就把 loadError 写进去，复用 DataState 现成的
+// 「顶部告警 + 保留数据 + 重试」那条分支，不新增组件、不清空用户正在看的内容。
+// 弹窗另加 10 分钟限流（持续失败时每秒弹一次比不提示更烦）。
+const SILENT_FAIL_LIMIT = 3
+const SILENT_ALERT_MS = 10 * 60 * 1000
+let silentFailures = 0
+let lastSilentAlertAt = 0
 
 async function load(opts: { silent?: boolean } = {}) {
   const silent = !!opts.silent
@@ -363,9 +535,27 @@ async function load(opts: { silent?: boolean } = {}) {
     // 已经有更新的请求发出去了：这次的结果（以及它的错误、它的 loading）都作废
     if (seq !== loadSeq) return
     summary.value = data
+    // 取到了数据：连续失败计数归零，并把静默失败留下的告警收掉
+    // （原来 loadError 只在**非静默**请求开始时清，于是静默重取成功之后
+    //  那条红色告警会一直挂在页面上 —— 粘住的告警）
+    silentFailures = 0
+    loadError.value = ''
   } catch (e: any) {
-    if (silent || seq !== loadSeq) return
-    loadError.value = e.message || '加载失败'
+    // 已经有更新的请求发出去了：这次失败也作废
+    if (seq !== loadSeq) return
+    const text = e?.message || '加载失败'
+    if (silent) {
+      silentFailures++
+      if (silentFailures >= SILENT_FAIL_LIMIT) {
+        loadError.value = `数据刷新已连续失败 ${silentFailures} 次，以下是最后一次成功取到的数字`
+        if (Date.now() - lastSilentAlertAt > SILENT_ALERT_MS) {
+          lastSilentAlertAt = Date.now()
+          message.error(text)
+        }
+      }
+      return
+    }
+    loadError.value = text
   } finally {
     // 与 RequestLogPanel.load 同款（那边有完整说明）：loading 只由非静默请求
     // 开关。写成 `!silent && seq === loadSeq` 时，被静默重取顶掉的那次非静默
@@ -424,6 +614,35 @@ const statsReloader = createThrottledLiveReloader(() => load({ silent: true }))
 onUnmounted(() => {
   statsReloader.dispose()
 })
+
+// ---- 读屏播报：把「数字在变」这件事也说给读屏用户（2026-10-10）----
+//
+// 为什么需要：四个概览卡由 WebSocket 实时推送驱动，视觉上是数字在滚，
+// 而读屏用户拿到的是一个静止的页面 —— 「此刻还有人在用」这个信息
+// 完全传达不到（这是页面上唯一一处纯视觉的实时反馈）。
+//
+// 为什么是「首帧立即 + 之后最多 30 秒一次」，而不是每次变化都播：
+// aria-live 会把每一处文本变化都念出来，持续流量下就是每几秒念一长串
+// 数字，比不播更烦。30 秒是一个「还在动」的心跳节拍；首帧那一次是让用户
+// 确认数据已经到位（否则只能靠猜）。数值没变时不播 —— 服务端本来也只在
+// 数据真的变了才推。
+const liveText = ref('')
+let liveAnnouncedAt = 0
+const LIVE_ANNOUNCE_MS = 30_000
+watch(
+  () => [summary.value?.requests, summary.value?.total_tokens, summary.value?.success_rate],
+  () => {
+    const s = summary.value
+    if (!s) return
+    const now = Date.now()
+    // 0 表示还没播过：首帧立即播，之后按节拍
+    if (liveAnnouncedAt !== 0 && now - liveAnnouncedAt < LIVE_ANNOUNCE_MS) return
+    liveAnnouncedAt = now
+    liveText.value =
+      '数据已更新：请求 ' + n(s.requests) + ' 次，词元 ' + n(s.total_tokens) +
+      '，成功率 ' + ((s.success_rate ?? 0) * 100).toFixed(1) + '%'
+  }
+)
 
 // ---- 金钱流：花费卡对「进账」的即时反馈 ----
 //
@@ -562,6 +781,7 @@ onMounted(async () => {
           overlay-class-name="theme-popover"
         >
           <button
+            ref="themeBtn"
             type="button"
             class="theme-btn"
             :title="`界面主题（当前：${themeStore.current.name}）`"
@@ -572,7 +792,7 @@ onMounted(async () => {
             <BgColorsOutlined aria-hidden="true" />
           </button>
           <template #content>
-            <div class="theme-panel" role="dialog" aria-label="界面主题">
+            <div ref="themePanel" class="theme-panel" role="dialog" aria-label="界面主题">
               <div class="theme-panel-head">
                 <span class="theme-panel-title">界面主题</span>
                 <!-- 快捷切换：回到该族上次用过的那一套（默认就是浅色/深色） -->
@@ -601,18 +821,53 @@ onMounted(async () => {
             </div>
           </template>
         </a-popover>
+        <!-- 请求日志表的列显隐（2026-10-10）。按钮放在这里而不是表格面板里：
+             那张面板 2026-09-26 特意去掉了 40px 标题栏（表体刚好能多放一整行），
+             为一个设置按钮把它加回来等于把那次优化退回去；而工具栏本来就是
+             「这一页怎么看」的开关区（时间范围、分组、模型、主题都在这儿）。
+             状态与 RequestLogPanel 共用同一份单例，见 logColumnVisibility.ts -->
+        <!-- 行密度（2026-10-11）与列显隐同属「这张表怎么看」，所以放在同一个
+             弹层里，而不是再加一枚工具栏按钮（工具栏已经 6 件东西了） -->
+        <ColumnSettings
+          :options="logColumnOptions"
+          :visible="logColShown"
+          :density="logDensity"
+          @toggle="toggleLogColumn"
+          @reset="resetLogColumns"
+          @update:density="logDensity = $event"
+        />
+        <!-- 复制当前视角的链接（2026-10-11）。图标化，与另外几枚并列 ——
+             这个动作低频但关键时刻很省事（把「我在看的这个视角」发给同事），
+             而文字按钮会占掉工具栏本来就不多的一行宽度 -->
+        <a-button
+          :title="copiedLink ? '已复制当前视角链接' : '复制当前视角链接'"
+          :aria-label="copiedLink ? '已复制当前视角链接' : '复制当前视角链接'"
+          @click="copyViewLink"
+        >
+          <CheckOutlined v-if="copiedLink" class="copy-link-ok" />
+          <LinkOutlined v-else />
+        </a-button>
+        <!-- 导出 CSV（2026-10-11 回到工具栏，见 exportLogs 的说明） -->
+        <a-button title="导出当前条件的请求日志（CSV）" aria-label="导出请求日志 CSV" @click="exportLogs">
+          <DownloadOutlined />
+        </a-button>
         <!-- 一页一个「刷新」：卡片与列表一起刷（见 reloadAll）。
              图标化与另外三页的工具栏统一 —— 刷新是高频动作，位置固定后
              图标即可辨认；title 与 aria-label 兜住悬停提示与读屏 -->
-        <a-button :loading="loading" title="刷新" aria-label="刷新" @click="reloadAll()">
+        <a-button :loading="loading" title="刷新（快捷键 R）" aria-label="刷新" aria-keyshortcuts="r" @click="reloadAll()">
           <ReloadOutlined />
         </a-button>
       </template>
     </PageToolbar>
 
     <!-- 请求脉搏条：一个请求一道流光，失败闪红。它回答的是数字回答不了的
-         「此刻还有没有人用」—— 光带安静了就是没流量 -->
-    <PulseBar class="dash-pulse" />
+         「此刻还有没有人用」—— 光带安静了就是没流量。
+         右侧那枚胶囊回答的是另一半：「光带安静」到底是因为没流量，
+         还是因为实时连接断了（两者看起来一模一样，而处置完全不同）。 -->
+    <div class="dash-live-row">
+      <PulseBar class="dash-pulse" />
+      <LiveStatus class="dash-live-status" />
+    </div>
 
     <DataState
       :error="loadError"
@@ -622,10 +877,30 @@ onMounted(async () => {
       hint="看板数据来自后端统计接口，请确认后端服务是否正常，然后重试。"
       @retry="load()"
     >
+    <!-- 首屏骨架（2026-10-11）：四张与加载完成态同形的卡片。
+         原来首屏是 DataState 的「转圈面板」，而下面的日志面板是兄弟节点 ——
+         它先取数成功，卡片随后整块长出，把表格往下推 90~150px 并触发一次
+         列宽重测。用骨架卡占住位置，首屏形状 = 加载完成形状，位移消失。 -->
+    <template #loading>
+      <section class="summary-grid">
+        <StatCard label="请求数量" loading tone="purple">
+          <template #icon><ApiOutlined /></template>
+        </StatCard>
+        <StatCard label="消耗金额" loading tone="orange">
+          <template #icon><DollarOutlined /></template>
+        </StatCard>
+        <StatCard label="词元数量" loading tone="blue">
+          <template #icon><ThunderboltOutlined /></template>
+        </StatCard>
+        <StatCard label="成功率" loading tone="green">
+          <template #icon><CheckCircleOutlined /></template>
+        </StatCard>
+      </section>
+    </template>
     <!-- 概览四卡：一排四张（原来在左半边排成 2x2，右边的位置留给热力图；
          热力图与图表区移除后，四张卡占满整行，信息密度与参考站一致） -->
     <section class="summary-grid">
-      <StatCard label="请求数量" :value="n(summary?.requests)" tone="purple" :hint="'失败 ' + n(summary?.errors) + ' 次'">
+      <StatCard label="请求数量" :value="n(summary?.requests)" tone="purple" :hint="errorsHint">
       <template #value>
         <AnimatedNumber :value="summary?.requests ?? null" />
       </template>
@@ -647,7 +922,7 @@ onMounted(async () => {
       </template>
       <template #icon><DollarOutlined /></template>
     </StatCard>
-    <StatCard label="词元数量" :value="n(summary?.total_tokens)" tone="blue" :hint="'命中率 ' + ((summary?.cache_hit_rate ?? 0) * 100).toFixed(1) + '%'">
+    <StatCard label="词元数量" :value="n(summary?.total_tokens)" tone="blue" :hint="cacheHint">
       <template #value>
         <!-- 格式切换的过渡：key 只绑格式，所以数值推送（每 2s）不触发这里，
              补间仍由 AnimatedNumber 自己做；点按钮换格式时旧值淡出上移、新值淡入 -->
@@ -680,7 +955,7 @@ onMounted(async () => {
       label="成功率"
       :value="summary ? (summary.success_rate * 100).toFixed(1) + '%' : '--'"
       tone="green"
-      :hint="'平均首字耗时 ' + Math.round(summary?.avg_first_byte_ms ?? 0) + 'ms'"
+      :hint="firstByteHint"
     >
       <template #value>
         <AnimatedNumber :value="rateValue" format="percent" />
@@ -688,6 +963,14 @@ onMounted(async () => {
       <template #icon><CheckCircleOutlined /></template>
     </StatCard>
     </section>
+
+    <!-- 读屏播报（2026-10-10）：四个卡片是实时推送的，视觉上数字在滚、
+         读屏用户却完全无感 —— 页面「看起来是活的」这件事对他们不存在。
+         节流规则见 liveText：首帧立即播一次（确认数据到了），之后最多
+         每 30 秒一次，且只在数值真的变了时才播。
+         用 .sr-only 而不是 display:none：后者会让内容从无障碍树上消失，
+         aria-live 也就无从播报。 -->
+    <p class="sr-only" aria-live="polite">{{ liveText }}</p>
     </DataState>
 
     <!-- 请求日志列表：**不**吃上面那组筛选 —— 它恒定显示全部最新请求
@@ -701,9 +984,12 @@ onMounted(async () => {
       ref="logPanel"
       :trace-id="traceId"
       :status-class="statusClass"
+      :log-id="logId"
       :groups="filterGroups"
       :channels="filterChannels"
       @update:trace-id="traceId = $event"
+      @update:status-class="statusClass = $event"
+      @update:log-id="logId = $event"
     />
 
     <!-- 昨日战报：每天第一次打开看板时自弹（含里程碑彩带判定），
@@ -758,10 +1044,25 @@ onMounted(async () => {
   margin-bottom: var(--gap);
 }
 
-/* 脉搏条贴在工具栏与概览卡之间：间距取 gap 的一半，
-   它是仪器读数不是内容块，不该与卡片抢视觉重量 */
-.dash-pulse {
+/* 脉搏条与连接状态胶囊同占一行：脉搏条吃掉剩余宽度，胶囊贴右。
+   两者回答的是同一个问题的两半（「有没有流量」与「这条线还通不通」），
+   放在一行里才读得通。间距取 gap 的一半 —— 它们是仪器读数不是内容块，
+   不该与卡片抢视觉重量。 */
+.dash-live-row {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
   margin: calc(var(--gap) / 2) 0;
+}
+
+.dash-pulse {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 胶囊本身是 flex 项，别被压扁（它里面的文字不允许换行） */
+.dash-live-status {
+  flex: 0 0 auto;
 }
 
 /* 工具栏右上角的主题按钮：32px 圆形描边，形态沿用原侧栏底部那枚
@@ -779,7 +1080,7 @@ onMounted(async () => {
   border-radius: 50%;
   background: transparent;
   color: var(--color-icon);
-  font-size: 15px;
+  font-size: var(--font-size-lg);
   cursor: var(--cursor-hand);
   transition: background 0.2s var(--ease-expo);
 }
@@ -803,7 +1104,7 @@ onMounted(async () => {
   margin-bottom: 10px;
 }
 .theme-panel-title {
-  font-size: 13px;
+  font-size: var(--font-size-md);
   font-weight: 600;
   color: var(--color-text);
 }
@@ -819,7 +1120,7 @@ onMounted(async () => {
   border: none;
   background: transparent;
   color: var(--color-text-secondary);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   padding: 2px 10px;
   cursor: var(--cursor-hand);
   transition: background-color 0.15s ease, color 0.15s ease;

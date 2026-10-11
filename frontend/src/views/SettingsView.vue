@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { message, Modal } from 'ant-design-vue'
+import { message, modal } from '@/utils/feedback'
 import {
   ReloadOutlined, DeleteOutlined,
   DownloadOutlined, UploadOutlined
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import { versionApi, type UpdateConfig } from '@/api/version'
+import { modalWidth } from '@/utils/modalWidth'
 import DataState from '@/components/DataState.vue'
+import EmptyState from '@/components/EmptyState.vue'
 import LogFxPreview from '@/components/LogFxPreview.vue'
 import ThemePicker from '@/components/ThemePicker.vue'
 import { useLogFxStore } from '@/stores/logFx'
@@ -202,7 +204,7 @@ async function load() {
 
 function confirmCleanup() {
   const days = runtime.value.log_retention_days
-  Modal.confirm({
+  modal.confirm({
     centered: true,
     title: '清理过期数据',
     content: '将删除 ' + days + ' 天前的请求日志及其报文，此操作不可撤销。',
@@ -307,7 +309,7 @@ onMounted(() => {
       @retry="load"
     >
     <section class="panel">
-      <div class="panel-title">数据概览</div>
+      <h2 class="panel-title">数据概览</h2>
       <div class="count-grid">
         <div v-for="c in countCards" :key="c.key" class="count-item">
           <div class="count-value">{{ counts[c.key] ?? 0 }}</div>
@@ -320,7 +322,7 @@ onMounted(() => {
     </section>
 
     <section class="panel">
-      <div class="panel-title">界面主题</div>
+      <h2 class="panel-title">界面主题</h2>
       <div class="note">
         12 套内置配色：浅色 4 套、深色 8 套（深色里含为 OLED 屏准备的「深空纯黑」）。
         本页与<strong>数据看板右上角那枚按钮</strong>用的是同一个选择器，选哪边都一样。
@@ -339,7 +341,7 @@ onMounted(() => {
     </section>
 
     <section class="panel">
-      <div class="panel-title">界面动效</div>
+      <h2 class="panel-title">界面动效</h2>
       <div class="note">
         请求日志列表里<strong>实时新增</strong>一条记录时播的入场动画。选中即刻生效，
         回数据看板就能看到；手动刷新、翻页、改筛选时都不会播 —— 那些操作整屏都在换，
@@ -381,7 +383,7 @@ onMounted(() => {
     </section>
 
     <section class="panel">
-      <div class="panel-title">运行参数</div>
+      <h2 class="panel-title">运行参数</h2>
       <a-table
         :data-source="runtimeRows"
         :loading="loading"
@@ -403,7 +405,7 @@ onMounted(() => {
           </template>
         </a-table-column>
         <template #emptyText>
-          <a-empty description="运行参数列表为空，请确认后端版本与前端的参数项一致，然后点「刷新」重试" />
+          <EmptyState size="sm" text="运行参数列表为空，请确认后端版本与前端的参数项一致，然后点「刷新」重试" />
         </template>
       </a-table>
 
@@ -416,7 +418,7 @@ onMounted(() => {
     </section>
 
     <section class="panel">
-      <div class="panel-title">登录认证</div>
+      <h2 class="panel-title">登录认证</h2>
       <!-- 登录鉴权的现状总览。密钥永远不回显（后端只存哈希、接口只出布尔位），
            这里回答的是三件事：开没开、会话多久、想改去哪里改 -->
       <div class="auth-line">
@@ -441,7 +443,7 @@ onMounted(() => {
     </section>
 
     <section class="panel">
-      <div class="panel-title">版本更新</div>
+      <h2 class="panel-title">版本更新</h2>
       <!-- 更新检测的来源与凭据。侧栏那枚版本徽标是操作入口，
            这里是它背后的设置 —— 为什么需要设置见下面的说明文字。 -->
       <div v-if="!updateCfg" class="dim">正在加载…</div>
@@ -504,7 +506,7 @@ onMounted(() => {
     </section>
 
     <section class="panel">
-      <div class="panel-title">配置备份</div>
+      <h2 class="panel-title">配置备份</h2>
       <div class="note">
         导出渠道、模型、绑定、模板、密钥与手工定价，用于换机或重装后快速恢复。
         调用日志与统计属于运行数据，请直接备份数据库卷。
@@ -522,7 +524,7 @@ onMounted(() => {
     </section>
 
     <section class="panel note-panel">
-      <div class="panel-title">关于报文留存</div>
+      <h2 class="panel-title">关于报文留存</h2>
       <div class="note">
         当前模式为 <span class="mono">{{ runtime.payload_storage_mode }}</span>。
         留存的请求与响应原文会写入 <span class="mono">request_payloads</span> 表
@@ -535,7 +537,7 @@ onMounted(() => {
     </section>
     </DataState>
 
-    <a-modal v-model:open="reportOpen" title="导入结果" :footer="null" :width="'min(520px, 94vw)'" centered>
+    <a-modal v-model:open="reportOpen" title="导入结果" :footer="null" :width="modalWidth(520)" centered>
       <a-descriptions :column="1" bordered size="small">
         <a-descriptions-item label="新增">
           {{ sumOf(report.created) }} 项
@@ -569,37 +571,45 @@ onMounted(() => {
 <style scoped>
 .page { padding: var(--gap); display: flex; flex-direction: column; gap: var(--gap); }
 .panel { padding: 16px 18px; }
-.panel-title { font-weight: 600; margin-bottom: 12px; }
+/* 面板标题是 <h2>（2026-10-10 标题层级收口）：文档结构变成
+   h1（MainLayout 的 .sr-only 页面名）→ h2（本页八个面板）→ h3（子块）。
+   字号与字重显式写出来 —— h2 的浏览器默认样式是 1.5em + 上下 margin，
+   不覆盖的话这八个标题会从 16px 跳到 24px 并把面板撑高。 */
+.panel-title { margin: 0 0 12px; font-size: var(--font-size-base); font-weight: 600; }
 .head-panel { padding: 0; }
 .head {
   display: flex; align-items: center; justify-content: space-between;
   gap: var(--gap); padding: 16px 18px; flex-wrap: wrap;
 }
-.head-title { font-size: 16px; font-weight: 600; }
-.head-sub { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
+.head-title { font-size: var(--font-size-base); font-weight: 600; }
+.head-sub { margin-top: 4px; font-size: var(--font-size-sm); color: var(--color-text-secondary); }
 .count-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 12px; }
-/* 窄屏退档：7 列在 <900px 时每格只剩几十像素，四五个字的标签（「已定价模型」）
-   换行、卡高参差；对照看板四卡的两档退档 */
-@media (max-width: 900px) {
+/* 窄屏退档：7 列在窄视口下每格只剩几十像素，四五个字的标签（「已定价模型」）
+   换行、卡高参差；对照看板四卡的两档退档。
+   断点走 theme.css 的刻度（640 / 768），不再用 900 / 600 ——
+   刻度那一节写明 900 只属于「侧栏自动折叠」这一个功能断点
+   （MainLayout 的 JS 常量），面板内栅格向刻度对齐。2026-10-10 收口。 */
+@media (max-width: 768px) {
   .count-grid { grid-template-columns: repeat(4, 1fr); }
 }
-@media (max-width: 600px) {
+@media (max-width: 640px) {
   .count-grid { grid-template-columns: repeat(2, 1fr); }
 }
 .count-item { text-align: center; padding: 10px 4px; border-radius: 8px; background: var(--color-bg); }
 /* 数值是正文，用 ink 版；--color-primary 在 --color-bg 上只有 3.05:1 */
-.count-value { font-size: 20px; font-weight: 600; color: var(--text-primary-ink); }
-.count-label { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
-.span-line { margin-top: 12px; font-size: 12px; color: var(--color-text-secondary); line-height: 1.9; }
+.count-value { font-size: var(--font-size-display-sm); font-weight: 600; color: var(--text-primary-ink); }
+.count-label { margin-top: 4px; font-size: var(--font-size-sm); color: var(--color-text-secondary); }
+.span-line { margin-top: 12px; font-size: var(--font-size-sm); color: var(--color-text-secondary); line-height: 1.9; }
 
 /* 界面动效那三张卡：一格一张，整格可点（label 包着 radio）。
    选中的那一张用主色描边 + 主色浅底 —— 与 StatCard 的 tone 底同一手法
    （color-mix 派生，不写死色值，深色主题自动换档）。 */
 .fx-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
-@media (max-width: 900px) {
+/* 断点同上面的 count-grid：向 theme.css 的刻度对齐（原为 900 / 600） */
+@media (max-width: 768px) {
   .fx-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-@media (max-width: 600px) {
+@media (max-width: 640px) {
   .fx-grid { grid-template-columns: 1fr; }
 }
 .fx-item {
@@ -637,11 +647,11 @@ onMounted(() => {
   outline-offset: var(--focus-ring-offset);
   box-shadow: var(--focus-ring-halo-shadow);
 }
-.fx-name { font-size: 13px; font-weight: 600; color: var(--text-primary-ink); display: flex; align-items: center; gap: 6px; }
+.fx-name { font-size: var(--font-size-md); font-weight: 600; color: var(--text-primary-ink); display: flex; align-items: center; gap: 6px; }
 .fx-item:not(.is-active) .fx-name { color: var(--color-text); }
 /* 「默认」小标：告诉用户这一档是没人选过时的行为，换档之后想改回来是哪一个 */
 .fx-default {
-  font-size: 10px;
+  font-size: var(--font-size-2xs);
   font-weight: 500;
   line-height: 1;
   padding: 3px 5px;
@@ -649,8 +659,11 @@ onMounted(() => {
   color: var(--color-text-secondary);
   background: var(--color-border);
 }
-.fx-check { color: var(--color-primary); }
-.fx-desc { font-size: 12px; line-height: 1.7; color: var(--color-text-secondary); }
+/* 勾选标记：图标也要 ≥3:1（WCAG 1.4.11）。--color-primary 在
+   solarized-light 上恰好 3.00:1，贴线没有余量，改用主色的文字档
+   （同一色相压深/提亮后的那一档，各主题都留了余量）。 */
+.fx-check { color: var(--text-primary-ink); }
+.fx-desc { font-size: var(--font-size-sm); line-height: 1.7; color: var(--color-text-secondary); }
 
 /* ---- 主题预览色样（2026-09-27 立，2026-09-30 随多主题迁走）----
    原来这里按「深色质感档位」写死两套色值（.ds-swatch.sw-classic / .sw-oled）。
@@ -663,14 +676,14 @@ onMounted(() => {
    于是又出现一种和左侧菜单不一致的中文字。变量里已经补好了中文回退。 */
 .mono { font-family: var(--font-family-mono); }
 .muted { color: var(--color-text-secondary); }
-.dim { color: var(--color-text-secondary); font-size: 12px; }
+.dim { color: var(--color-text-secondary); font-size: var(--font-size-sm); }
 .db-line { margin-top: 12px; display: flex; align-items: center; gap: 8px; }
 .auth-line { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
-.note-panel .note { font-size: 13px; line-height: 1.9; color: var(--color-text-secondary); }
-.note { font-size: 13px; line-height: 1.9; color: var(--color-text-secondary); }
+.note-panel .note { font-size: var(--font-size-md); line-height: 1.9; color: var(--color-text-secondary); }
+.note { font-size: var(--font-size-md); line-height: 1.9; color: var(--color-text-secondary); }
 .backup-note {
   margin-top: 8px; padding: 10px 12px; border-radius: 8px;
-  background: var(--color-bg); font-size: 12px; line-height: 1.8;
+  background: var(--color-bg); font-size: var(--font-size-sm); line-height: 1.8;
   color: var(--color-text-secondary);
 }
 

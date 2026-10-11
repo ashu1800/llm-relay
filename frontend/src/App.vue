@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { theme as antdTheme } from 'ant-design-vue'
+import { theme as antdTheme, message as antdMessage, Modal } from 'ant-design-vue'
 // 组件内置文案（分页、空表格、弹窗按钮、日期面板等）走 Ant Design Vue 的 locale，
 // 不配的话这些地方一律是英文：分页显示「10 / page」、确认弹窗是 OK / Cancel，
 // 而页面其余部分全是中文，混在一起很突兀。
@@ -10,6 +10,10 @@ import 'dayjs/locale/zh-cn'
 import { useThemeStore } from '@/stores/theme'
 import { buildAntdTokens, isDarkTone, readCssVar } from '@/utils/antdTheme'
 import { themeById } from '@/utils/themes'
+import { installFeedback } from '@/utils/feedback'
+// 错误边界（2026-10-11）：视图渲染抛异常时兜住它，给一个可恢复的界面。
+// 在此之前那种情况下整棵树被卸载，用户看到的是一张完全空白的页面。
+import ErrorBoundary from '@/components/ErrorBoundary.vue'
 
 // dayjs 的 locale 决定日期选择器、相对时间等文案，与上面的 locale 是两套，
 // 必须一起设置，否则日期面板仍是英文
@@ -48,10 +52,35 @@ const themeConfig = computed(() => {
     }
   }
 })
+
+// ---- 轻提示与确认弹窗的主题上下文（2026-10-10 UI 打磨）----
+//
+// antd 的静态方法（message.xxx / Modal.confirm）拿不到上面这层 ConfigProvider
+// 的令牌 —— 它们各自 render 到 body 下的游离容器里。实测后果：8 套深色主题下
+// 删除确认弹窗是浅色默认皮肤 + 默认蓝主按钮，message 是白底气泡。
+//
+// useMessage() / useModal() 是官方给的正路：它们返回「实例 + contextHolder」，
+// 把 holder 挂进组件树就拿到了当前 ConfigProvider 的上下文。两个实例注入
+// utils/feedback.ts 之后，全站 104 处 message.* 与 12 处静态 Modal 调用
+// （confirm / info / warning / success / error）自动跟随主题 ——
+// 调用点写法不变，只换了 import 来源。
+//
+// holder 必须渲染在 <a-config-provider> **内部**，否则拿到的还是默认令牌。
+// 两个 holder 自身不产生可见 DOM（内容都 portal 到 body）。
+const [msgApi, msgHolder] = antdMessage.useMessage()
+const [modalApi, modalHolder] = Modal.useModal()
+installFeedback(msgApi, modalApi)
 </script>
 
 <template>
   <a-config-provider :locale="zhCN" :theme="themeConfig">
-    <router-view />
+    <component :is="msgHolder" />
+    <component :is="modalHolder" />
+    <!-- 边界包住 router-view 而不是每个视图各包一层：MainLayout 自己也是路由
+         组件，包在这里才能同时兜住「外壳坏了」与「某一页坏了」两种情况。
+         它正常时只是透传（不产生额外 DOM），不会打断看板那条弹性链。 -->
+    <ErrorBoundary>
+      <router-view />
+    </ErrorBoundary>
   </a-config-provider>
 </template>

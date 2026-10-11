@@ -27,7 +27,7 @@
 // 192px）。popover 默认渲染进 body，天然脱离裁剪上下文，且自带
 // 视口翻转/钳制 —— 不需要自己维护那套定位数学。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { message } from 'ant-design-vue'
+import { message } from '@/utils/feedback'
 import {
   ReloadOutlined,
   DownloadOutlined,
@@ -35,15 +35,33 @@ import {
   CheckCircleOutlined,
   ExclamationCircleOutlined,
   SyncOutlined,
-  GithubOutlined
+  GithubOutlined,
+  CloudDownloadOutlined,
+  InfoCircleOutlined
 } from '@ant-design/icons-vue'
 import { useVersionStore } from '@/stores/version'
 import { versionApi, type RollbackCandidate } from '@/api/version'
 import { RESTART_COUNTDOWN_MS, canReloadAfterRestart } from '@/components/restartGate'
+// 弹层的键盘可达性（打开移焦 / Esc 关闭 / 关闭还焦）：与看板主题弹层、列设置共用
+import { usePopoverA11y } from '@/composables/usePopoverA11y'
 
 const store = useVersionStore()
 
+// 图标栏形态（2026-10-11）：侧栏收成 56px 时，品牌名下方那枚徽标被整块隐藏，
+// 于是「有没有新版本」「能不能一键更新」在图标栏形态下**完全没有入口** ——
+// 而更新提示的红点恰恰是「用户需要知道」的那一类信息，藏起来等于没有。
+// 传 true 时只渲染一枚图标（文字塞不进 40px 的宽度），面板完全一致。
+const props = withDefaults(defineProps<{ iconOnly?: boolean }>(), { iconOnly: false })
+
 const open = ref(false)
+
+// 弹层（版本与更新）的键盘可达性。
+// 这个面板尤其需要它：内容是 teleport 到 body 末尾的，不主动移焦的话
+// 纯键盘用户 Tab 要绕整页才能走到「检测更新 / 一键更新」这些按钮 ——
+// 而它们在侧栏里，用户根本想不到内容跑到页面最后去了。
+const triggerEl = ref<HTMLElement | null>(null)
+const panelEl = ref<HTMLElement | null>(null)
+usePopoverA11y({ open, trigger: triggerEl, panel: panelEl })
 
 // ---- 更新流程的本地状态 ----
 // 这些不进 store：它们是「这一次交互」的状态（按钮是不是正在转圈、
@@ -367,13 +385,24 @@ const phaseText = computed(() => {
       overlay-class-name="vb-popover"
     >
       <button
+        ref="triggerEl"
+        type="button"
         class="version-badge-trigger"
-        :class="badgeClass"
+        :class="[badgeClass, { 'is-icon-only': props.iconOnly }]"
         :title="hasUpdate ? '有新版本可用，点击查看' : '当前版本：' + fullVersion"
+        aria-haspopup="dialog"
         :aria-expanded="open"
       >
-        <span v-if="display" class="version-text">{{ display }}</span>
-        <span v-else class="version-skeleton" aria-hidden="true"></span>
+        <!-- 图标栏：只留一枚图标。有更新时用它本身表达（下面的红点仍在），
+             不再另加角标 —— 56px 的侧栏里多一层嵌套只会更糊 -->
+        <template v-if="props.iconOnly">
+          <CloudDownloadOutlined v-if="hasUpdate" class="version-icon" aria-hidden="true" />
+          <InfoCircleOutlined v-else class="version-icon" aria-hidden="true" />
+        </template>
+        <template v-else>
+          <span v-if="display" class="version-text">{{ display }}</span>
+          <span v-else class="version-skeleton" aria-hidden="true"></span>
+        </template>
         <!-- 有更新时的呼吸圆点。只在「能更新」时亮，理由见 store 的 shouldNotify -->
         <span v-if="store.shouldNotify" class="version-dot" aria-hidden="true">
           <span class="version-dot-ping"></span>
@@ -382,7 +411,7 @@ const phaseText = computed(() => {
       </button>
 
       <template #content>
-        <div class="version-panel" role="dialog" aria-label="版本与更新">
+        <div ref="panelEl" class="version-panel" role="dialog" aria-label="版本与更新">
           <!-- 头部：标题 + 刷新 -->
           <div class="vb-head">
             <span class="vb-title">版本与更新</span>
@@ -678,7 +707,7 @@ const phaseText = computed(() => {
   background: transparent;
   color: var(--color-text-secondary);
   font-family: var(--font-family-mono);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   line-height: 1.3;
   cursor: var(--cursor-hand);
   transition: background 0.2s var(--ease-expo), color 0.2s var(--ease-expo),
@@ -702,6 +731,20 @@ const phaseText = computed(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 图标栏形态（icon-only）：收成 28px 的方形图标按钮，与侧栏另外几枚图标
+   （.console-menu-icon）同一视觉重量。32×28 的命中区略大于 WCAG 2.5.8 的
+   24px 下限，触屏上也点得中。 */
+.version-badge-trigger.is-icon-only {
+  padding: 3px 8px;
+  border-color: transparent;
+  gap: 0;
+}
+
+.version-icon {
+  font-size: var(--font-size-panel);
+  line-height: 1;
 }
 
 .version-skeleton {
@@ -769,7 +812,7 @@ const phaseText = computed(() => {
 }
 
 .vb-title {
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   font-weight: 600;
   color: var(--color-text);
 }
@@ -825,27 +868,31 @@ const phaseText = computed(() => {
 
 .vb-version {
   font-family: var(--font-family-mono);
-  font-size: 20px;
+  font-size: var(--font-size-display-sm);
   font-weight: 700;
   color: var(--color-text);
 }
 
+/* 「已是最新」那句话是正文：用 --text-green（压卡片 5.13:1）而不是
+   --color-green —— 后者是填充/图表档，白卡上只有 2.70:1，不达 AA。 */
 .vb-ok {
-  color: var(--color-green);
-  font-size: 14px;
+  color: var(--text-green);
+  font-size: var(--font-size-panel);
 }
 
 .vb-sub {
   margin-top: 2px;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
 }
 
+/* 补充信息（构建形态、发布时间之类）：用三级文字令牌，不再叠 opacity ——
+   secondary + 0.75 的合成对比度只剩 ≈2.3:1，而 tertiary 这一档是
+   theme.css 里明确定义好的「读不到也不影响操作」的补充信息档。 */
 .vb-meta {
   margin-top: 2px;
-  font-size: 11px;
-  color: var(--color-text-secondary);
-  opacity: 0.75;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
 }
 
 /* 提示条 */
@@ -855,7 +902,7 @@ const phaseText = computed(() => {
   padding: 8px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-control);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
 }
 
 .vb-alert-icon {
@@ -866,12 +913,12 @@ const phaseText = computed(() => {
 .vb-alert-body strong {
   display: block;
   margin-bottom: 2px;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
 }
 
 .vb-alert-body p {
   margin: 0;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   line-height: 1.5;
   color: var(--color-text-secondary);
   word-break: break-word;
@@ -907,7 +954,7 @@ const phaseText = computed(() => {
   border: 1px solid transparent;
   border-radius: var(--radius-control);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   cursor: var(--cursor-hand);
   transition: background 0.2s var(--ease-expo);
 }
@@ -917,9 +964,16 @@ const phaseText = computed(() => {
   opacity: 0.6;
 }
 
+/* 实心主按钮：必须用 --solid-primary-bg / --solid-primary-fg 这一对。
+   原来写的是 --color-primary + #fff —— #c87864 上压白字只有 3.32:1，
+   12px 按钮文字达不到 AA；而这一对令牌就是专为「主色铺底 + 上面写字」
+   挑的（浅色族深底白字 4.84:1、深色族浅底深字 6.98:1，见 theme.css）。
+   hover 保持 --text-primary-ink：它在两族里都与 solid 底色同向
+   （浅色族更深、深色族更亮），而按钮文字取的是 solid-primary-fg，
+   两个主题下都仍是对比足够的一对。 */
 .vb-btn.is-primary {
-  background: var(--color-primary);
-  color: #fff;
+  background: var(--solid-primary-bg);
+  color: var(--solid-primary-fg);
 }
 
 .vb-btn.is-primary:hover:not(:disabled) {
@@ -951,7 +1005,7 @@ const phaseText = computed(() => {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-secondary);
   text-decoration: none;
 }
@@ -971,14 +1025,14 @@ const phaseText = computed(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   color: var(--color-text);
 }
 
 .vb-task-pct {
   margin-left: auto;
   font-family: var(--font-family-mono);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-secondary);
 }
 
@@ -998,7 +1052,7 @@ const phaseText = computed(() => {
 
 .vb-task-msg {
   margin: 0;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-secondary);
 }
 
@@ -1024,7 +1078,7 @@ const phaseText = computed(() => {
   background: transparent;
   color: var(--color-text-secondary);
   font-family: inherit;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   cursor: var(--cursor-hand);
 }
 
@@ -1056,7 +1110,7 @@ const phaseText = computed(() => {
 
 .vb-hint {
   margin: 0;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   line-height: 1.5;
   color: var(--color-text-secondary);
 }
@@ -1072,7 +1126,7 @@ const phaseText = computed(() => {
   justify-content: center;
   gap: 6px;
   padding: 8px;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-secondary);
 }
 
@@ -1086,7 +1140,7 @@ const phaseText = computed(() => {
   border-radius: var(--radius-control);
   background: transparent;
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   color: var(--color-text);
   cursor: var(--cursor-hand);
 }
@@ -1117,7 +1171,7 @@ const phaseText = computed(() => {
 
 .vb-rb-date {
   margin-left: auto;
-  font-size: 10px;
+  font-size: var(--font-size-2xs);
   color: var(--color-text-secondary);
 }
 
@@ -1132,7 +1186,7 @@ const phaseText = computed(() => {
   align-items: flex-start;
   gap: 4px;
   margin: 0;
-  font-size: 10px;
+  font-size: var(--font-size-2xs);
   line-height: 1.5;
   color: var(--text-amber);
 }

@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { setOnUnauthorized } from '@/api/client'
+import { message } from '@/utils/feedback'
 
 // 路由结构对齐参考站 /console/* 的命名，剔除登录/用户/订单/工单/兑换/礼品/邮件/公告。
 // 登录页在管理后台部署到公网后成为入口（无账号模型：只认管理密钥）。
@@ -112,6 +113,25 @@ const APP_NAME = 'LLM Relay'
 router.afterEach((to) => {
   const page = typeof to.meta.title === 'string' ? to.meta.title : ''
   document.title = page ? `${page} · ${APP_NAME}` : APP_NAME
+})
+
+// ---- 懒加载 chunk 取不到（2026-10-11）----
+//
+// 六个管理页都是 `() => import(...)`，chunk 名字带内容哈希。取不到只有三种可能：
+//   1. 部署过程中刷新 —— 手里的 index.html 指向的 chunk 已被新版本替换掉；
+//   2. 网络抖动 / 代理 502；
+//   3. 浏览器缓存了一份过期的 index.html。
+// 三种都表现为「点了菜单没反应」：导航被中止、界面停在原页面、控制台里只有一句
+// ChunkLoadError。用户完全不知道发生了什么，也不知道刷新就能好。
+//
+// 这里只处理「模块加载失败」这一类（用消息特征判断，因为 vue-router 的
+// NavigationFailure 不带错误类型），其余导航错误照旧抛出 ——
+// 吞掉未知错误会让真正的 bug 更难查。
+router.onError((e) => {
+  const msg = String((e as Error)?.message || '')
+  if (/dynamically imported module|Loading chunk|Importing a module script failed/i.test(msg)) {
+    message.error('页面资源加载失败，可能刚发布了新版本。请刷新页面后重试', 6)
+  }
 })
 
 export default router

@@ -22,20 +22,22 @@
 // 只是界面上不再开这个口子）。面板本身（背景 / 边框 / 圆角 / 内边距）
 // 仍用 PanelCard，不传 title 时它不会渲染标题栏。
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { message } from 'ant-design-vue'
-import { CheckOutlined, CopyOutlined, ProfileOutlined } from '@ant-design/icons-vue'
+import { message } from '@/utils/feedback'
+import { ArrowUpOutlined, CheckOutlined, CloseOutlined, CopyOutlined, ProfileOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
+import EmptyState from '@/components/EmptyState.vue'
 import PanelCard from '@/components/PanelCard.vue'
 import GroupTag from '@/components/GroupTag.vue'
 import ChannelIcon from '@/components/ChannelIcon.vue'
-import { onLive, createThrottledLiveReloader } from '@/composables/useLive'
+import { onLive, createThrottledLiveReloader, liveConnected } from '@/composables/useLive'
 import { useCopyFeedback } from '@/composables/useCopyFeedback'
 import NewLogEffect, { type FxTarget } from '@/components/NewLogEffect.vue'
 import { useLogFxStore } from '@/stores/logFx'
 import { costText, symbolOf } from '@/utils/money'
 import { writeClipboard } from '@/utils/clipboard'
 import { fmtTime, fmtTimeCompact, pad2 } from '@/utils/fmtTime'
+import { modalWidth } from '@/utils/modalWidth'
 import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
 import { rafThrottle } from '@/utils/rafThrottle'
 // 耗时家族（fmtMs / 档位 / 瀑布）与列宽纯逻辑（键 / 权重 / 摊法）已抽成独立模块：
@@ -50,6 +52,10 @@ import {
   clampColumnWidth,
   type ColKey
 } from '@/components/logColumns'
+// 实时插行的处置判据（2026-10-11 抽出）：它有四种输入组合要测，
+// 埋在 onLive 回调里测不到，而判错的表现是静默的 —— 见 logLive.ts 顶部
+import { decideLiveInsert, pendingLogText } from '@/components/logLive'
+import { logColumns, logDensity } from '@/components/logColumnVisibility'
 import type { Channel, ChannelGroup, Paged, RequestLog } from '@/api/types'
 
 const props = defineProps<{
@@ -57,15 +63,28 @@ const props = defineProps<{
    *  这是列表仅有的两个条件 —— 时间范围 / 分组 / 渠道 / 模型不再传给列表。 */
   traceId: string
   statusClass: string
+  /**
+   * 从 URL 带进来的日志 id（?log=123，2026-10-11 加）：打开页面就直接展开
+   * 那一条的详情抽屉。
+   *
+   * 为什么值得加：站内唯一的「把一条请求发给别人看」的方式原来是截屏或
+   * 口述「第 3 行那个」，而排障常常是两个人一起看。列表本身不吃筛选条件，
+   * 所以「第 3 行」换个时间打开就不是同一条了。
+   */
+  logId?: number | null
   /** 低频配置：标签配色与渠道图标取自它们，由看板取一次传下来 */
   groups: ChannelGroup[]
   channels: Channel[]
 }>()
 
 // 「只看这条链路」是详情抽屉里的入口，改的是看板持有的那个条件，所以只能往上抛。
-// （statusClass 没有往上抛的入口了：面板顶部的「仅失败」开关 2026-09-26 移除。）
+// statusClass 2026-10-11 起也往上抛了：面板内新增了条件胶囊（就在排序说明那一行），
+// 「仅失败」的清除入口因此回到面板里 —— 原来只能去屏幕另一端的看板工具栏关标签。
+// logId 同理：抽屉开了哪一条属于「当前视角」的一部分，URL 由看板持有。
 const emit = defineEmits<{
   (e: 'update:traceId', v: string): void
+  (e: 'update:statusClass', v: string): void
+  (e: 'update:logId', v: number | null): void
 }>()
 
 // 分组表：日志里的模型、密钥、分组三处标签共用该请求所属分组的颜色。
@@ -190,6 +209,15 @@ const baseW: Record<ColKey, number> = {
  *  首屏先按它们渲染、测量与均摊随后覆盖 —— 避免「先窄后宽」闪一下。 */
 const colW = ref<Record<ColKey, number>>({ ...baseW })
 
+// 列显隐（2026-10-10）：状态是单例，按钮在看板工具栏上
+// （见 components/logColumnVisibility.ts 里「为什么不放在面板标题栏」）。
+// 它影响三处：模板里各列的 v-if、列宽合计 scroll.x、以及余量分摊的对象。
+//
+// 这里**解构**成两个 ref 而不是留成 `logColumns.visible`：模板只会自动解包
+// 顶层绑定，`logColumns.visible` 拿到的是 computed 本身（`.time` 恒为 undefined，
+// 表现是所有列一起消失），解构之后模板里写 colShown.time 才是值。
+const { visible: colShown, visibleKeys: colShownKeys } = logColumns
+
 /**
  * 每列的内容锚点与固定前缀宽（px）。
  *
@@ -253,7 +281,9 @@ const CONTENT_MEASURE: Partial<Record<ColKey, { sel: string; pad: number }>> = {
  *  列宽含余量均摊份额（见 distribute）：宽窗口下合计恰好等于容器可用宽，
  *  scroll.x 作为 min-width 不再与容器打架；窄窗口下合计即声明宽，
  *  横向滚动的边界与声明一致。 */
-const columnsTotal = computed(() => COL_KEYS.reduce((sum, k) => sum + colW.value[k], 0))
+const columnsTotal = computed(() =>
+  colShownKeys.value.reduce((sum, k) => sum + colW.value[k], 0)
+)
 
 /** 弹性列（模板里那列不绑 width 的空列）的单元格属性：内联清零内边距 ——
  *  antd 的 th/td 自带 8px 左右内边距，不清零的话，横向滚动时收到 0 宽的
@@ -295,7 +325,9 @@ function distribute(): boolean {
   // 余量必须按 1686 摊，否则合计超宽、表格出现 1~8px 的假横向滚动
   const avail = body.clientWidth
   if (!avail) return false
-  const want = allocateWidths(avail, baseW)
+  // 只按**可见列**分摊：关掉的列不渲染，也就不该分走余量
+  // （allocateWidths 的 keys 参数，不变量在可见子集上仍然成立）
+  const want = allocateWidths(avail, baseW, colShownKeys.value)
   let changed = false
   for (const key of COL_KEYS) {
     // 同值不写：resize 事件连发时每帧都进来，写同样的值不该触发整表重渲染
@@ -309,43 +341,73 @@ function distribute(): boolean {
 }
 
 /**
+ * 各列当前量到的**内容宽**（不含内边距），按列存。
+ *
+ * 为什么要留这一份：实时插行只量新插入的那几行，而列宽必须容纳**整页**最宽
+ * 的那条内容 —— 只看新行的话，一条窄内容会让列宽缩回去（`changed` 判断会写回
+ * 一个更小的值），整页跟着重排一次，观感是「列宽自己跳了一下」。
+ * 全量测量时重置它（那一页的行集合整个换了，旧行不该再影响宽度）。
+ */
+let measuredW: Partial<Record<ColKey, number>> = {}
+
+/**
  * 按当前页内容重算各列宽度。
+ *
+ * @param rowEls 只量这几行（实时插行的增量路径）；不传 = 量整页（翻页 / 换筛选 /
+ *   首屏 / 列显隐变化）。传了它就不再重置 measuredW —— 增量与累计要相加。
  *
  * 一次把所有锚点读完再统一写回：读一次写一次会让浏览器反复重排 ——
  * 100 行 × 7 列这个量级下，两种写法的差别是肉眼可见的卡顿。
  */
-function remeasureColumns() {
+function remeasureColumns(rowEls?: HTMLElement[]) {
   const wrap = tableWrap.value
   if (!wrap) return
   // 空表不量：加载中 / 筛选无结果时量不到内容，会把列宽收到下限白闪一下
   if (!wrap.querySelector('.ant-table-tbody tr[data-row-key]')) return
 
+  const incremental = !!rowEls
+  // 全量测量：这一页的行集合换了，旧的累计值作废
+  if (!incremental) measuredW = {}
+  // 增量测量只在这些行里查锚点；全量测量在整张表里查。
+  // 两者选择器必须不同：增量时 root 是 <tr>，`tr.querySelectorAll('.ant-table-tbody X')`
+  // 会在这一行**内部**找一个 tbody 后代，永远查不到。
+  const roots: HTMLElement[] = rowEls ?? [wrap]
+  const sel = (spec: { sel: string }) => (incremental ? spec.sel : `.ant-table-tbody ${spec.sel}`)
+
   const next: Partial<Record<ColKey, number>> = {}
   for (const key of COL_KEYS) {
+    // 关掉的列不在 DOM 里，量它只会得到 0（然后被 max===0 分支静默跳过，
+    // 看起来「没事」）；显式跳过，读起来才知道这里是有意为之
+    if (!colShown.value[key]) continue
     const spec = CONTENT_MEASURE[key]
     if (!spec) continue
     let max = 0
-    wrap.querySelectorAll<HTMLElement>(`.ant-table-tbody ${spec.sel}`).forEach((el) => {
-      // getBoundingClientRect 而不是 scrollWidth。两者对**块级/行内块**锚点
-      // 是同一个数（实测 .model-cell 172.2 对 172、.key-tag 72.8 对 71，
-      // 差的是亚像素舍入），但对 **display: inline** 的锚点只有前者有效：
-      // inline 元素不生成盒子，scrollWidth / clientWidth 恒为 0。
-      //
-      // 费用列的锚点 .txt-cell 必须是 inline（inline-block 会参与行盒、
-      // 把单元格行高从 44px 顶到 49px，见那里的注释），于是 2026-09-24
-      // 之前的 `const w = el.scrollWidth` 在这列上永远读到 0，
-      // 走进下面的 `max === 0 → continue` 分支 —— 费用列因此**从未**随内容
-      // 变过宽，一直停在初值 90px。这是本次 UI 审评实测发现的：
-      // 该列金额最长 72.3px，加内边距与呼吸位需要 94px，90px 是差一点的，
-      // 而列宽自适应看起来「生效了」，所以一直没被发现。
-      //
-      // 亚像素：rect.width 带小数（72.3），取整后再进下面的 ≥2px 抖动判断
-      const w = Math.ceil(el.getBoundingClientRect().width)
-      if (w > max) max = w
-    })
+    for (const root of roots) {
+      root.querySelectorAll<HTMLElement>(sel(spec)).forEach((el) => {
+        // getBoundingClientRect 而不是 scrollWidth。两者对**块级/行内块**锚点
+        // 是同一个数（实测 .model-cell 172.2 对 172、.key-tag 72.8 对 71，
+        // 差的是亚像素舍入），但对 **display: inline** 的锚点只有前者有效：
+        // inline 元素不生成盒子，scrollWidth / clientWidth 恒为 0。
+        //
+        // 费用列的锚点 .txt-cell 必须是 inline（inline-block 会参与行盒、
+        // 把单元格行高从 44px 顶到 49px，见那里的注释），于是 2026-09-24
+        // 之前的 `const w = el.scrollWidth` 在这列上永远读到 0，
+        // 走进下面的 `max === 0 → continue` 分支 —— 费用列因此**从未**随内容
+        // 变过宽，一直停在初值 90px。这是本次 UI 审评实测发现的：
+        // 该列金额最长 72.3px，加内边距与呼吸位需要 94px，90px 是差一点的，
+        // 而列宽自适应看起来「生效了」，所以一直没被发现。
+        //
+        // 亚像素：rect.width 带小数（72.3），取整后再进下面的 ≥2px 抖动判断
+        const w = Math.ceil(el.getBoundingClientRect().width)
+        if (w > max) max = w
+      })
+    }
     if (max === 0) continue // 本页该列没有锚点（如全是空值），保持原宽
+    // 增量：与已累计的内容宽取大者；全量：这一列就是本次量到的值
+    const acc = incremental ? Math.max(measuredW[key] ?? 0, max) : max
+    measuredW[key] = acc
     const [lo, hi] = COL_BOUNDS[key]
-    next[key] = clampColumnWidth(max, spec.pad, lo, hi)
+    next[key] = clampColumnWidth(acc, spec.pad, lo, hi)
   }
 
   let changed = false
@@ -383,6 +445,9 @@ function remeasureColumns() {
 // 先渲染、下一帧才定列宽），对 2px 阈值的自适应列宽完全无感。
 const remeasureRaf = rafThrottle(remeasureColumns)
 watch(rows, () => remeasureRaf())
+// 列显隐变化后同样要重量：可见列的集合变了 → 分摊对象与 scroll.x 都变了。
+// （distribute 走的是同一套读数，所以复用同一个 rAF 节流入口即可）
+watch(colShownKeys, () => remeasureRaf())
 
 // ---- 新日志的扫光（那条彩虹只为「刚插进来的行」而闪）----
 //
@@ -602,6 +667,29 @@ function thinkingColor(level?: string) {
   return THINKING_COLORS[level] ?? '#8c8c8c'
 }
 
+/**
+ * 思考胶囊的悬停说明（2026-10-11 补）。
+ *
+ * 胶囊上只有档位原文（off / minimal / low / medium / high / on / auto，
+ * 新版 Anthropic 还有 xhigh / max），而全表没有一处解释它是什么、从哪来的 ——
+ * 站主对这个胶囊的疑问正是「这个 low 是我设的还是上游返回的」。
+ *
+ * 准确的答案：**来自入站请求体**，由后端按协议归一化
+ * （OpenAI 的 reasoning_effort、Responses 的 reasoning.effort、
+ * Anthropic 的 output_config.effort 与旧版的 thinking.budget_tokens，
+ * 见 backend/internal/relay/thinking.go）。它记录的是「客户端要求什么强度」，
+ * 不是「上游实际思考了多少」—— 上游把预算用满还是用一半，这一格看不出来。
+ *
+ * 空档不渲染胶囊（没带思考参数 ≠ off），所以这里不需要处理空值。
+ */
+function thinkingTitle(level: string) {
+  return (
+    level +
+    '：客户端在这次请求里要求的思考强度（后端按协议归一化后的值）。' +
+    '它来自请求体而不是上游的返回 —— 上游实际思考了多少，这一格看不出来。'
+  )
+}
+
 // 兜底胶囊的颜色。用紫色：它不在思考档位的九色里（那九色各自已有明确语义），
 // 也不与「未定价」的橙色系撞车 —— 橙色在全站的含义是「这里缺东西、待处理」，
 // 而兜底是用户主动配好的一项能力，不是待办。
@@ -635,8 +723,26 @@ const pageSize = ref(Number(readStoredChoice(PAGE_SIZE_KEY, PAGE_SIZE_OPTIONS, '
 // 标成「需要后端加 sort= 参数」。
 //
 // 值为空串 = 默认（最新在前），由后端 orderLogs 兜底。
-const sort = ref('')
+//
+// 排序偏好持久化（2026-10-10）：与每页条数同一个道理 —— 「按耗时倒序」
+// 是排障时的常态视角，刷新一次就回到默认顺序是纯重复劳动。
+// 允许值就是下面三列的两个方向 + 空串，读的时候走白名单校验：
+// 旧版本、手改的脏值一律回落到默认（否则会带着一个后端不认的 sort= 去取数）。
+const SORT_ALLOWED = ['', 'elapsed', '-elapsed', 'cost', '-cost', 'status', '-status']
+const SORT_KEY = 'log-sort'
+const sort = ref(readStoredChoice(SORT_KEY, SORT_ALLOWED, ''))
+watch(sort, (v) => writeStoredChoice(SORT_KEY, v))
 const SORTABLE = ['elapsed', 'cost', 'status'] as const
+
+// ---- 第 1 页之外攒下的新日志（2026-10-11）----
+//
+// 新日志按定义属于第 1 页，所以用户翻到第 3 页看历史时，推送来的行既不该插进来
+// （会让这一页错位），也没必要为它重取（用户看的不是最新）。但「刚才又来了 N 条」
+// 这件事要让他知道 —— 否则「翻页之后列表就冻住了」和「真的没有新请求」长得一模一样。
+// 处置判据在 components/logLive.ts（有单测）；这里只负责累计与提示。
+// 回到第 1 页（点提示条或点分页器）即清零。
+const pendingNew = ref(0)
+const pendingText = computed(() => pendingLogText(pendingNew.value, page.value === 1))
 
 // 表头用的 sortOrder：antd 据此画箭头（升/降/无）。
 function sortOrderOf(key: string): 'ascend' | 'descend' | null {
@@ -668,6 +774,9 @@ function onTableChange(_pag: unknown, _filters: unknown, sorter: any, extra: any
   sort.value = order === 'ascend' ? key : order === 'descend' ? '-' + key : ''
   // 换了次序，原来那一页的偏移量已经没有意义（第 7 页的「最慢的 50 条」
   // 与第 1 页的不是同一批）——排序变动一律回第一页
+  // 表体也滚回顶部：`search()` 会回第 1 页，但滚动条留在原处的话，
+  // 用户看到的是第 1 页的中段（「点了排序，列表没动」）。
+  scrollBodyTop()
   search()
 }
 
@@ -746,8 +855,25 @@ function buildParams(): URLSearchParams {
 // watch 的是 props 本身，所以无论是谁改的（详情里的「只看这条链路」、
 // 工具栏上关掉那个小标签、还是一个带 query 参数的链接）都会重新取数，
 // 不需要各处都记得手写一次 load()。
+// 深链条件变化的读屏播报文案（见下面 watch 里的说明）
+const conditionAnnounce = ref('')
+
 // 只盯这两个：工具栏那四个筛选已经不传进来了，它们不再影响列表。
-watch(() => [props.traceId, props.statusClass], () => search())
+//
+// 顺带把「条件变了」这件事说给读屏（2026-10-11）：深链条件可以由面板内部触发
+// （详情里的「只看这条链路」、空表上的「清除排障条件」），也可以由外链带进来。
+// 视觉上列表整体换了一批行、上方多/少一枚条件标签，而读屏用户只听到
+// 「焦点回来了」—— 不知道视角已经变了。用一个不 immediate 的 watch：
+// 首屏不该播报（那时用户刚进页面，条件是什么由页面本身读出来）。
+watch(() => [props.traceId, props.statusClass], () => {
+  const parts: string[] = []
+  if (props.traceId) parts.push('只看链路 ' + props.traceId)
+  if (props.statusClass) parts.push(props.statusClass === 'error' ? '只看失败' : '只看成功')
+  conditionAnnounce.value = parts.length
+    ? '排障条件已更新：' + parts.join('，')
+    : '排障条件已清除，显示全部最新请求'
+  search()
+})
 
 // 详情里的「只看这条链路」：原来工具栏上有个 trace_id 输入框，
 // 但 trace_id 是从日志详情里才看得到的东西 —— 入口放在看得见它的地方更顺手。
@@ -756,6 +882,16 @@ function onlyThisTrace() {
   if (!current.value) return
   emit('update:traceId', current.value.trace_id)
   detailOpen.value = false
+  // 关抽屉 + 换列表之后，触发它的那个按钮已经随抽屉一起销毁，焦点会掉回 body。
+  // 交给面板容器（它带 tabindex="-1"）；新条件由下面的 aria-live 播报 ——
+  // 否则读屏用户只知道「抽屉没了」，不知道列表已经换了内容。
+  void nextTick(() => tableWrap.value?.focus())
+}
+
+/** 空表上的「清除排障条件」：两个深链条件都归零，列表随之回到全量最新 */
+function clearConditions() {
+  emit('update:traceId', '')
+  emit('update:statusClass', '')
 }
 
 // 「仅失败」切换按钮 2026-09-26 应站主要求移除（连同一行的实时状态显示）。
@@ -778,6 +914,29 @@ async function copyTraceId() {
 async function copyError() {
   if (!current.value?.error) return
   if (await writeClipboard(current.value.error)) markCopied('err')
+  else message.warning('复制失败，请手动选择复制')
+}
+
+/**
+ * 抽屉里另外四个「要拿去别处用」的字段（2026-10-11 补）：渠道名 / 密钥名 /
+ * 上游模型 / 客户端 IP。
+ *
+ * 为什么是这四个：它们都是**查别的东西的入口** —— 渠道名要贴进渠道页搜索、
+ * 密钥名要贴进密钥页、上游模型要贴进上游控制台或工单、客户端 IP 要贴进
+ * 访问日志或防火墙。而抽屉是锁宽的（键盘用户还不好划选），一个一个手打
+ * 很容易错一个字符。
+ *
+ * 没有给「请求模型 / 分组」加：那两个在页面上随处都有、且是点出来的
+ * （不是打出来的），复制价值低。也没有给 trace_id 之外加第二个「只看这条链路」——
+ * 一个入口够了。
+ *
+ * key 用 `field:<名字>` 而不是给每个字段起一个标识符：markCopied 的 state 是
+ * 一个字符串，加字段时不必再回来多写一个常量。
+ */
+async function copyField(text: string | undefined | null, field: string) {
+  const v = (text || '').trim()
+  if (!v || v === '-') return
+  if (await writeClipboard(v)) markCopied('field:' + field)
   else message.warning('复制失败，请手动选择复制')
 }
 
@@ -807,6 +966,22 @@ const loadError = ref('')
  */
 let loadSeq = 0
 
+// ---- 静默重取失败的留痕（2026-10-11）----
+//
+// 静默那条路（实时推送触发的重取）以前失败得一声不吭：`if (silent) return`
+// 把错误整个吞掉。一次网络抖动确实不该弹提示，但**连续**失败是另一回事 ——
+// 那时屏幕上的数字与列表会一直停在几分钟前，看起来却和「刚刷新过」完全一样，
+// 用户会据此得出错误结论（「今天就这么点请求」）。
+//
+// 所以连续失败达到阈值就把 loadError 写进去，直接复用 DataState 现成的
+// 「顶部告警 + 保留数据 + 重试按钮」那条分支（DataState.vue 的 error && hasData），
+// 不新增组件、也不清空用户正在看的内容。弹窗另加 10 分钟限流：
+// 持续失败时不能每秒弹一次 —— 那比不提示更烦（限流写法照抄上面的队列丢弃告警）。
+const SILENT_FAIL_LIMIT = 3
+const SILENT_ALERT_MS = 10 * 60 * 1000
+let silentFailures = 0
+let lastSilentAlertAt = 0
+
 async function load(opts: { silent?: boolean } = {}) {
   const silent = !!opts.silent
   const seq = ++loadSeq
@@ -828,13 +1003,31 @@ async function load(opts: { silent?: boolean } = {}) {
     if (seq !== loadSeq) return
     rows.value = res.items || []
     total.value = res.total || 0
+    // 取到了数据：连续失败计数归零，并把静默失败留下的那条告警收掉。
+    // 成功分支必须清 loadError —— 原来只在**非静默**请求开始时清，
+    // 于是静默重取成功之后那条红色告警会一直挂在表格上方（粘住的告警）。
+    silentFailures = 0
+    loadError.value = ''
     // 首屏落地：从这一刻起，实时推送标出来的行才真的是「新来的」
     if (!silent) loadedOnce = true
     if (before) markFresh(rows.value.filter((r) => !before.has(r.id)).map((r) => r.id))
   } catch (e: any) {
-    if (silent || seq !== loadSeq) return
-    loadError.value = e.message || '加载失败'
-    message.error(e.message)
+    // 已经有更新的请求发出去了：这次失败也作废（它要报的问题可能已经被后来者解决）
+    if (seq !== loadSeq) return
+    const text = e?.message || '加载失败'
+    if (silent) {
+      silentFailures++
+      if (silentFailures >= SILENT_FAIL_LIMIT) {
+        loadError.value = `日志刷新已连续失败 ${silentFailures} 次，以下是最后一次成功取到的记录`
+        if (Date.now() - lastSilentAlertAt > SILENT_ALERT_MS) {
+          lastSilentAlertAt = Date.now()
+          message.error(text)
+        }
+      }
+      return
+    }
+    loadError.value = text
+    message.error(text)
   } finally {
     // 熄灯的责任跟着「谁点的灯」走，不跟着「谁最新」走（第三轮审查 F-中2）：
     // 非静默的这次请求可能已经被随后的静默重取顶掉（seq 不再最新），数据
@@ -847,6 +1040,8 @@ async function load(opts: { silent?: boolean } = {}) {
 
 function search() {
   page.value = 1
+  // 换了视角（深链条件、排序）：第 1 页会重新取数，攒下的计数没有意义了
+  pendingNew.value = 0
   load()
 }
 
@@ -854,24 +1049,215 @@ function search() {
 // 而不是「上面那个刷卡片、下面这个刷列表」两个都叫刷新）。
 // 用 defineExpose 而不是再加一个 refreshToken prop：这里就是「叫它重取一次」，
 // 传一个计数器反而让人以为它是个状态。
-defineExpose({ reload: () => load() })
+//
+// exportQuery 同理（2026-10-11 加导出按钮）：导出必须与列表**同一份条件** ——
+// 同一个 trace_id / status_class / sort，只去掉分页。把拼参数这件事留在这里，
+// 看板那边只负责触发下载，两处就不会各写一遍而慢慢漂移
+// （漂移的表现是「列表里 12 条、导出 3400 条」，而且没人会立刻发现）。
+function exportQuery(): string {
+  const p = buildParams()
+  p.delete('page')
+  p.delete('page_size')
+  return p.toString()
+}
 
-// 空列表的文案分两种：带深链时是被那两个条件滤空的（要告诉用户怎么退回去），
-// 不带条件时就是真的一条日志都没有。原来只有前一种，因为列表总在筛选之下；
-// 现在「全量最新」是默认视角，一进来就空着的情况必须说清是「还没有调用」，
-// 否则看起来像坏了。
-const emptyText = computed(() =>
-  props.traceId || props.statusClass
-    ? '当前排障条件下没有日志：关掉工具栏上的「链路」或「仅失败」标签即可回到全部最新请求'
-    : '还没有请求日志；发起一次调用后，这里会实时出现记录',
-)
+defineExpose({ reload: () => load(), exportQuery })
+
+// 空列表的文案分三种：带深链时是被那两个条件滤空的（要告诉用户怎么退回去）、
+// 实时连接断了时是「看不到新记录」而不是「没有记录」、其余才是真的一条日志都没有。
+// 原来只有前两种（第一种覆盖后两种），因为列表总在筛选之下；现在「全量最新」
+// 是默认视角，一进来就空着的情况必须说清是「还没有调用」，否则看起来像坏了。
+//
+// 断线那一支是 2026-10-11 补的：连不上实时推送时，说「发起一次调用后这里会
+// 实时出现记录」是把用户往错方向引 —— 他会去查渠道和上游，而问题在连接上。
+const emptyText = computed(() => {
+  if (props.traceId || props.statusClass) {
+    return '当前排障条件下没有日志：点上方的条件标签即可回到全部最新请求'
+  }
+  if (!liveConnected.value) {
+    return '实时连接已断开，暂时看不到新记录；连接恢复后会自动继续'
+  }
+  return '还没有请求日志；发起一次调用后，这里会实时出现记录'
+})
 
 // 详情直接用列表行数据：列表接口返回的字段已经完整，
 // 报文相关展示移除后，也不必再为它请求 /logs/:id。
+//
+// 唯一的例外是深链（?log=123，2026-10-11）：那一条不一定在当前这一页上
+// （第 7 页的、或早就被新的请求挤出第 1 页的），所以只有此时才去请求
+// /logs/:id —— 那个接口一直都在（backend/internal/api/admin.go 的 logDetail），
+// 只是界面上的唯一入口是「从列表点开」，于是从没被前端用过。
 function openDetail(row: RequestLog) {
   current.value = row
   detailOpen.value = true
+  // URL 跟着走：抽屉里显示的那一条就是「当前视角」的一部分，复制地址给别人
+  // 就能打开同一条。用 emit 交给看板写（query 由看板持有）。
+  emit('update:logId', row.id)
 }
+
+/** 关抽屉时把 ?log= 一起清掉（否则刷新页面抽屉又弹回来，像是关不掉） */
+function closeDetail() {
+  detailOpen.value = false
+  if (props.logId != null) emit('update:logId', null)
+}
+
+// 深链打开：?log=123 进来时直接展开那一条。
+//
+// 三级降级：先在本页行里找（绝大多数情况，零请求）→ 找不到就按 id 拉一次
+// → 拉不到（不存在 / 已被保留期清理）就说清楚并清掉 URL 参数。
+// 不静默失败：用户是点了别人给的链接来的，什么都不发生会让人以为链接坏了。
+watch(
+  () => props.logId,
+  async (id) => {
+    if (id == null) return
+    if (current.value?.id === id && detailOpen.value) return
+    const local = rows.value.find((r) => r.id === id)
+    if (local) {
+      current.value = local
+      detailOpen.value = true
+      return
+    }
+    try {
+      const res = await api.get<{ log: RequestLog }>('/logs/' + id)
+      if (res?.log) {
+        current.value = res.log
+        detailOpen.value = true
+      } else {
+        throw new Error('empty')
+      }
+    } catch {
+      emit('update:logId', null)
+      // 措辞按「两种可能」写：用户拿到链接时不知道是哪种，也不该去猜
+      message.warning('这条日志不存在或已过保留期，无法打开')
+    }
+  },
+  { immediate: true }
+)
+
+// ---- 行的键盘可达性（2026-10-11）----
+//
+// 原来唯一的入口是「操作」列那枚图标按钮，而一页有 20/50/100 行 ——
+// 想打开第 40 行的详情，纯键盘用户要按 40 次 Tab（每行还有别的可聚焦控件时更多）。
+//
+// 做法是 roving tabindex：整张表在 Tab 序里只占**一个**停靠点（当前行 tabindex=0，
+// 其余 -1），进入后用 ↑ / ↓ 在行间移动，回车打开详情。这是网格/列表类控件的
+// 标准键盘模型，也是「一屏可聚焦控件数量」不随数据量增长的关键。
+//
+// 行上的 aria-label 给的是「这一行是什么 + 回车能做什么」的摘要：
+// 焦点落在行上时读屏会念这一句，而不是让用户自己用表格导航键逐格读
+// （那是给「细读某一行」用的另一套操作，两种都还在）。
+const activeRowIndex = ref(0)
+
+/**
+ * Tab 序里那一行的下标。
+ *
+ * 为什么要有这一层夹取而不是直接用 activeRowIndex：列表会整体换掉
+ * （翻页、排序、深链切换、静默重取），换完之后原来的下标可能越界 ——
+ * 那时没有任何一行是 tabindex=0，整张表就从 Tab 序里消失了
+ * （键盘用户再也进不去）。夹回第 0 行最省事，也符合「刚换了一批数据，
+ * 从第一条开始」的直觉。
+ */
+const tabRowIndex = computed(() =>
+  activeRowIndex.value < rows.value.length ? activeRowIndex.value : 0
+)
+
+/** 把焦点送到第 index 行的 <tr> 上（roving tabindex 的移动端） */
+async function focusRowAt(index: number) {
+  if (index < 0 || index >= rows.value.length) return
+  activeRowIndex.value = index
+  await nextTick()
+  const key = rows.value[index]?.id
+  if (key === undefined) return
+  tableWrap.value
+    ?.querySelector<HTMLElement>(`tr[data-row-key="${key}"]`)
+    ?.focus()
+}
+
+function rowSummary(record: RequestLog): string {
+  return (
+    '请求 ' + fmtTimeCompact(record.created_at) +
+    '，模型 ' + (record.model_requested || '未知') +
+    '，状态 ' + record.status_code +
+    '。按回车查看调用详情'
+  )
+}
+
+/**
+ * a-table 的 custom-row：给每一行加上 roving tabindex、焦点跟踪与按键处理。
+ *
+ * 注意 index 用的是**渲染顺序**（antd 传进来的那个），而 rows 就是渲染顺序 ——
+ * 两者一致，所以 ↑ / ↓ 的位移与视觉顺序相同（列表恒定「最新在前」或按排序取值，
+ * 无论哪种，rows 的顺序就是屏幕上看到的顺序）。
+ */
+function rowProps(record: RequestLog, index: number) {
+  return {
+    tabindex: index === tabRowIndex.value ? 0 : -1,
+    'aria-label': rowSummary(record),
+    onFocus: () => {
+      activeRowIndex.value = index
+    },
+    onKeydown: (e: KeyboardEvent) => {
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        openDetail(record)
+        return
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        void focusRowAt(index + 1)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        void focusRowAt(index - 1)
+      }
+    }
+  }
+}
+
+// ---- 详情抽屉里在相邻记录之间移动（2026-10-11）----
+//
+// 排障的常态是「连着看几条」：原来打开一条之后只能关掉、回列表、再找下一行 ——
+// 每看一条都要重新定位一次。现在抽屉里给上一条/下一条按钮，并支持 ↑ / ↓。
+//
+// 用 document 上的监听而不是绑在抽屉内容上：焦点进入抽屉时落在抽屉容器上
+// （antd 自己的焦点管理），内容里的元素不是它的祖先，绑在内容上收不到事件。
+// 只在抽屉开着时生效，且让开输入框 —— 将来抽屉里若加了搜索框，
+// 方向键该归它。
+const detailIndex = computed(() =>
+  current.value ? rows.value.findIndex((r) => r.id === current.value?.id) : -1
+)
+
+function goDetail(dir: -1 | 1) {
+  const i = detailIndex.value
+  if (i < 0) return
+  const next = rows.value[i + dir]
+  if (!next) return
+  current.value = next
+  // URL 跟着换（而不是留着上一条的 id）：否则刷新页面会打开**另一条**，
+  // 而用户以为自己看到的就是地址里那一条
+  emit('update:logId', next.id)
+}
+
+function onDetailKeydown(e: KeyboardEvent) {
+  if (!detailOpen.value) return
+  const t = e.target as HTMLElement | null
+  if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return
+  if (e.key === 'ArrowUp') {
+    e.preventDefault()
+    goDetail(-1)
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    goDetail(1)
+  }
+}
+
+// 抽屉标题带上这一条的身份：固定的「调用详情」在多开/截图讨论时说不清是哪一条
+const detailTitle = computed(() =>
+  current.value
+    ? fmtTime(current.value.created_at) + ' · ' + (current.value.model_requested || '未知模型')
+    : '调用详情'
+)
 
 // 耗时分级与悬停说明在 components/latency.ts（档位阈值被契约检查锚定）。
 
@@ -1087,22 +1473,55 @@ const pagination = computed(() => ({
     pageSize.value = ps
     // 选了新的每页条数就记住，下次打开页面直接用它
     writeStoredChoice(PAGE_SIZE_KEY, String(ps))
+    // 回到第 1 页：攒下的「N 条新日志」提示已经完成使命（第 1 页的新行直接进列表）
+    if (p === 1) pendingNew.value = 0
+    // 翻页后回到列表顶部（2026-10-11）。滚动条原来停在原处，而第 2 页第 30 行
+    // 与第 1 页第 30 行是两个完全不同的位置 —— 用户点「下一页」时看到的是
+    // 表格中段，会以为列表没换（尤其是行数相同、只有数字变了的时候）。
+    // 换每页条数同理，而且换条数后原来那个 scrollTop 常常越界，浏览器会把它
+    // 夹到新底部，落点更随机。
+    scrollBodyTop()
     load()
   }
 }))
 
+/**
+ * 把表体滚回顶部。
+ *
+ * 滚的是 antd 的 `.ant-table-body` 而不是窗口：这张表有自己的纵向滚动
+ * （面板锁高、表体吃剩余高度，见上面 scroll.y 的说明），窗口根本没滚动过。
+ * 找不到表体时静默返回 —— 首屏还没渲染出来就翻页是可能的（快速连点）。
+ */
+function scrollBodyTop() {
+  const body = tableBodyEl()
+  if (body) body.scrollTop = 0
+  // 表体的滚动会让「右边还有没有内容」的提示重新判断（横向未变、纵向位置变了，
+  // 阴影只需要在边界上重算），交给现成的节流入口
+  syncScrollHintsRaf()
+}
+
+/** 提示条上的「回第 1 页」：清掉计数并取第 1 页 —— 与点分页器是同一件事 */
+function goFirstPage() {
+  page.value = 1
+  pendingNew.value = 0
+  load()
+}
+
 // 实时插入：服务端每秒查一次新日志（id 增量），有就推过来。
 //
-// 分三种情况：
-// 1. 没有深链条件且在第一页 —— 直接插到第一行（保留滚动动画，不重绘整页）。
+// 分三种情况（判据 2026-10-11 抽到 components/logLive.ts，有单测）：
+// 1. 没有深链条件、没有排序、在第一页 —— 直接插到第一行（保留滚动动画，不重绘整页）。
 //    列表不带筛选之后这是常态路径：推到什么就插什么，连「符不符合条件」都不用问；
-// 2. 带 trace / 仅失败深链且在第一页 —— 立刻（受 1 秒节流）安静地重取一次当前查询。
-//    新日志符不符合条件只有服务端知道，客户端不重复实现一遍筛选语义
-//    （以后加一个条件就会漏一处，而且错得很安静）。
+// 2. 带 trace / 仅失败深链，**或者有排序** —— 立刻（受 1 秒节流）安静地重取一次
+//    当前查询。深链那一支：新日志符不符合条件只有服务端知道，客户端不重复实现
+//    一遍筛选语义（以后加一个条件就会漏一处，而且错得很安静）。排序那一支是
+//    2026-10-11 补的：unshift 会把新行插到最前面，用户刚点的「耗时降序」当场失效，
+//    而且排序偏好是持久化的，刷新页面后错序还在 —— 看起来就像排序功能坏了。
 //    原来这里也是 setTimeout(1500)：与看板卡片那份同款的人为延迟，重取回来
 //    新增行才做入场动画 —— 数字/行的变动因此落在动画结束之后（2026-09-18
 //    站主二次反馈的同一根因，见 useLive.createThrottledLiveReloader 的说明）；
-// 3. 翻了页 —— 什么都不做：重取会让用户正在看的第二页变成另外一批行。
+// 3. 翻了页 —— 只累计「有 N 条新日志」并给一个回第 1 页的入口：重取会让用户
+//    正在看的第二页变成另外一批行，而完全不提示又会让人以为「翻页之后就没有新请求了」。
 const liveReloader = createThrottledLiveReloader(() => load({ silent: true }))
 
 // ---- 日志队列丢弃告警（服务端 health 推送）----
@@ -1135,6 +1554,8 @@ onUnmounted(() => {
   // 摘的就是挂上去的那两个引用；挂起的 rAF 帧与待测量的帧一并取消
   window.removeEventListener('scroll', syncScrollHintsRaf, true)
   window.removeEventListener('resize', onResizeRaf)
+  document.removeEventListener('keydown', onDetailKeydown)
+  document.removeEventListener('visibilitychange', onVisibleForMeasure)
   syncScrollHintsRaf.cancel()
   onResizeRaf.cancel()
   remeasureRaf.cancel()
@@ -1142,10 +1563,23 @@ onUnmounted(() => {
 
 onLive('logs', (items: RequestLog[]) => {
   if (!Array.isArray(items) || !items.length) return
-  if (page.value !== 1) return
-  const filtered = !!props.traceId || !!props.statusClass
-  if (filtered) {
+  // 处置判据抽在 components/logLive.ts（有单测）：'insert' 直接插 / 'reload' 按当前
+  // 视角静默重取 / 'count' 只计数。**排序生效时不能再插** —— 这是原来漏掉的一条，
+  // unshift 会静默破坏用户刚点的「耗时降序」（且排序是持久化的，刷新后错序还在）。
+  const action = decideLiveInsert({
+    page: page.value,
+    sort: sort.value,
+    traceId: props.traceId,
+    statusClass: props.statusClass
+  })
+  if (action === 'reload') {
     liveReloader.request()
+    return
+  }
+  if (action === 'count') {
+    // 去重：同一批推送可能被重连后的补发再送一次（服务端按 id 增量推，这里再兜一层）
+    const known = new Set(rows.value.map((r) => r.id))
+    pendingNew.value += items.filter((it) => !known.has(it.id)).length
     return
   }
   // 列表不带时间范围，新日志必然属于「全部最新」，直接插即可
@@ -1199,7 +1633,50 @@ function insertFresh(fresh: RequestLog[]) {
   total.value += fresh.length
   markFresh(fresh.map((r) => r.id))
 
+  // 列宽只量刚插进来的这几行，不再整页量（见下面的说明与 measuredW）。
+  // 放在 nextTick 之后：这一拍 DOM 里才有那些 <tr>。
+  nextTick(() => remeasureInserted(fresh.map((r) => r.id)))
+
   if (body && anchor) restoreAnchor(body, anchor)
+}
+
+/** 后台标签页里攒下的「回来要全量量一次」请求（见 remeasureInserted） */
+let pendingFullMeasure = false
+
+/**
+ * 实时插行的增量列宽重测：只量新插入的行。
+ *
+ * 为什么值得单独开一条路（2026-10-11 性能收口）：整页量一次是
+ * 「行数 × 列数」次 getBoundingClientRect —— 50 行 × 10 列 = 500 次强制布局，
+ * 而直播高峰每秒都能推进来一批，一秒 500 次强制布局在低配设备上是肉眼可见的卡。
+ * 增量路径只读新行（通常 1–2 行 × 10 列 = 10–20 次），差两个数量级。
+ *
+ * 宽度不会被「量窄」：measuredW 里留着这一页已量到的内容宽，增量结果与它取大者
+ * （见 remeasureColumns）。所以列宽仍然只增不减，直到下一次全量测量重置累计。
+ *
+ * 标签页在后台时不量：此时不做布局，量出来的几何没有意义（Chrome 还会把
+ * 后台页的布局推迟），而且用户看不见。改为记一个标记，回到前台时全量量一次 ——
+ * 否则后台期间插进来的行永远不参与列宽，回来看到的是一张按旧数据定宽的表格。
+ */
+function remeasureInserted(ids: number[]) {
+  if (document.hidden) {
+    pendingFullMeasure = true
+    return
+  }
+  const wrap = tableWrap.value
+  if (!wrap) return
+  const els = ids
+    .map((id) => wrap.querySelector<HTMLElement>(`tr[data-row-key="${id}"]`))
+    .filter((el): el is HTMLElement => !!el)
+  if (!els.length) return
+  remeasureColumns(els)
+}
+
+// 回到前台补一次全量：见 remeasureInserted 里的说明
+function onVisibleForMeasure() {
+  if (document.hidden || !pendingFullMeasure) return
+  pendingFullMeasure = false
+  remeasureRaf()
 }
 
 type RowAnchor = { key: string; top: number }
@@ -1303,6 +1780,11 @@ onMounted(() => {
   // 删掉。
   window.addEventListener('scroll', syncScrollHintsRaf, true)
   window.addEventListener('resize', onResizeRaf)
+  // 详情抽屉里的 ↑ / ↓ 换记录（见 onDetailKeydown 的说明：必须挂在 document 上，
+  // 因为焦点进抽屉时落在 antd 的容器上，内容里的元素不是它的祖先）
+  document.addEventListener('keydown', onDetailKeydown)
+  // 后台标签页里攒下的增量列宽测量，回到前台补一次全量（见 remeasureInserted）
+  document.addEventListener('visibilitychange', onVisibleForMeasure)
   nextTick(syncScrollHints)
 })
 </script>
@@ -1312,19 +1794,69 @@ onMounted(() => {
        但不传 title、也不传 extra：标题栏会说一遍表头已经说清的事，还占 40px；
        去掉之后表体刚好能多放一整行。 -->
   <PanelCard>
-    <!-- 面板顶部不再有任何工具条（2026-09-26 应站主要求移除）：实时状态行与
-         「仅失败」开关都删了 —— 排障条件只剩两个深链 ?trace_id= / ?status_class=，
-         激活时看板工具栏会显示可关闭的小标签，入口在那里。 -->
+    <!-- 面板顶部不再有常驻工具条（2026-09-26 应站主要求移除）：实时状态行与
+          「仅失败」开关都删了。这一行只在「有需要说的话」时出现 ——
+          排序口径、生效中的排障条件、第 1 页之外攒下的新日志，
+          三者共用一条窄提示行，没有内容时整行不渲染（不留空白）。 -->
+    <div v-if="costSortHint || traceId || statusClass || pendingText" class="panel-hints">
+      <!-- 排序生效时的口径说明（P1-9）。只对「费用」这一列出现：
+           站里不做汇率换算，后端会先按币种分组再排金额，不说清的话
+           用户看到 ¥ 排在 $ 后面会以为坏了。role=status 让读屏也听得到。 -->
+      <span v-if="costSortHint" class="sort-hint" role="status">{{ costSortHint }}</span>
+      <!-- 生效中的排障条件（2026-10-11 从看板工具栏搬回来一份）：
+           带 ?status_class=error 打开时，面板里原来完全看不出「只看失败」，
+           用户会以为全站都在报错；而唯一的清除入口在屏幕另一端的工具栏上。
 
-    <!-- 排序生效时的口径说明（P1-9）。只对「费用」这一列出现：
-         站里不做汇率换算，后端会先按币种分组再排金额，不说清的话
-         用户看到 ¥ 排在 $ 后面会以为坏了。role=status 让读屏也听得到。 -->
-    <div v-if="costSortHint" class="sort-hint" role="status">{{ costSortHint }}</div>
+           用自绘胶囊 + 真正的 <button>，**不用** a-tag closable：antd 那个关闭图标是
+           `<span role="img" tabindex="-1">`（实测），键盘 Tab 不到、回车也触发不了 ——
+           而列表非空时空表上的「清除排障条件」按钮不渲染，键盘用户就完全没有
+           清除入口了（这一条也是代码审查实测出来的）。 -->
+      <span v-if="traceId" class="hint-chip">
+        <span class="hint-chip-text" :title="traceId">链路 {{ traceId.slice(0, 8) }}…</span>
+        <button
+          type="button"
+          class="hint-chip-close"
+          :aria-label="'清除链路条件 ' + traceId"
+          @click="emit('update:traceId', '')"
+        >
+          <CloseOutlined aria-hidden="true" />
+        </button>
+      </span>
+      <span v-if="statusClass" class="hint-chip">
+        <span class="hint-chip-text">{{ statusClass === 'error' ? '仅失败' : '仅成功' }}</span>
+        <button
+          type="button"
+          class="hint-chip-close"
+          :aria-label="'清除状态条件，显示全部状态'"
+          @click="emit('update:statusClass', '')"
+        >
+          <CloseOutlined aria-hidden="true" />
+        </button>
+      </span>
+      <!-- 第 1 页之外攒下的新日志。做成按钮而不是纯文字：它是可点的下一步
+           （回第 1 页看新记录），触屏与键盘都能用。 -->
+      <button v-if="pendingText" type="button" class="pending-new" @click="goFirstPage">
+        <ArrowUpOutlined aria-hidden="true" />
+        {{ pendingText }}
+      </button>
+    </div>
 
+    <!-- 排障条件变化的读屏播报（见 script 里的说明） -->
+    <p class="sr-only" aria-live="polite">{{ conditionAnnounce }}</p>
+
+    <!-- 首屏不再把整张表换成一个居中的转圈面板（2026-10-11 改）。
+         原来 DataState 的 loading 档会在首屏把表格整个换成 spinner，等数据到了
+         才渲染表头与表体 —— 那一刻表格从「一个转圈」变成「39px 表头 + N 行」，
+         高度突变，看板下方的内容整体下移，而且列宽要等首帧渲染完才能量。
+         现在：表格从第一帧就在（表头立刻可见、列宽有量测对象），空的表体由
+         antd 自己的 loading 转圈表达；DataState 只留「失败」与「空态」两档
+         —— 它的首屏 loading 档在这个面板里由 `#emptyText` 的分支接管（见下）。
+         代价要说清：`:loading="false"` 是**有意**传的，不是漏传 —— DataState
+         的 loading 档在这个面板里被替代了，剩下的 `:has-data` 判据仍然成立。 -->
     <DataState
       :error="loadError"
       :has-data="rows.length > 0"
-      :loading="loading"
+      :loading="false"
       title="请求日志加载失败"
       @retry="load()"
     >
@@ -1365,6 +1897,8 @@ onMounted(() => {
       <div
         ref="tableWrap"
         class="log-table"
+        tabindex="-1"
+        :class="{ 'is-compact': logDensity === 'compact' }"
         :data-fx="logFx.fx"
         :data-hint-l="canScrollLeft ? '1' : '0'"
         :data-hint-r="canScrollRight ? '1' : '0'"
@@ -1375,19 +1909,33 @@ onMounted(() => {
           :loading="loading"
           :pagination="pagination"
           :row-class-name="rowClassName"
+          :custom-row="rowProps"
           row-key="id"
           size="small"
           :scroll="{ x: columnsTotal, y: TABLE_BODY_Y }"
           @change="onTableChange"
         >
         <template #emptyText>
-          <a-empty :description="emptyText" />
+          <!-- 首屏加载中不显示空态文案（2026-10-11）：此刻还没有数据，但
+               「还没有请求日志」是一个**结论**，而结论要等取数回来才能下。
+               原来这条结论由 DataState 的 loading 档挡着（整张表被换成转圈），
+               现在表格从第一帧就在，挡住它的责任落到这里：空的表体上方
+               只有 antd 自己的 loading 转圈。 -->
+          <span v-if="loading" class="loading-quiet" aria-hidden="true"></span>
+          <!-- 被排障条件滤空时给一个就地出口：文案说「点上方的条件标签」，
+               但标签在屏幕另一端的看板工具栏上 —— 空表这一块自己给按钮更直接
+               （EmptyState 的 #action 插槽 2026-10-10 起就支持了，这里补上） -->
+          <EmptyState v-else :text="emptyText" size="sm">
+            <template v-if="traceId || statusClass" #action>
+              <a-button size="small" @click="clearConditions">清除排障条件</a-button>
+            </template>
+          </EmptyState>
         </template>
         <!-- 请求时间：这一列昨天还占 155px（「2026-09-24 11:01:22」19 个字符），
              是横向滚动的最大单一贡献者，而「今天」这一档下 50 行的日期部分
              逐行完全相同。现在按 fmtTimeCompact 分档显示（今天 = 时分秒），
              完整时间挂在 title 上。省下来的 ~60px 直接来自这一列。 -->
-        <a-table-column title="请求时间" :width="colW.time" fixed="left">
+        <a-table-column v-if="colShown.time" title="请求时间" :width="colW.time" fixed="left">
           <template #default="{ record }">
             <span :title="fmtTime(record.created_at)">{{ fmtTimeCompact(record.created_at) }}</span>
           </template>
@@ -1395,7 +1943,7 @@ onMounted(() => {
         <!-- 模型名带 ellipsis：不加的话长模型名会在这里折成两三行，
              把整行从 40px 顶到 98px（50 行就是 5000px 的页面）；
              完整名字悬停可见，详情里也有 -->
-        <a-table-column title="模型" :width="colW.model" ellipsis>
+        <a-table-column v-if="colShown.model" title="模型" :width="colW.model" ellipsis>
           <template #default="{ record }">
             <!-- 模型、密钥两处用的是同一个组件与同一个颜色：
                  它们描述的是「这次请求属于哪个分组」，颜色因此必须一致。
@@ -1412,6 +1960,7 @@ onMounted(() => {
                 v-if="record.thinking_level"
                 class="think-pill"
                 :style="{ '--pill-color': thinkingColor(record.thinking_level) }"
+                :title="thinkingTitle(record.thinking_level)"
               >{{ record.thinking_level }}</span>
               <!-- 兜底胶囊：这条请求的模型名没命中白名单，是渠道的默认模型映射
                    接下的（真正发给上游的是 model_upstream）。
@@ -1433,7 +1982,7 @@ onMounted(() => {
              排障时正是要看这个，而且一屏里的渠道名往往只差几个字。
              名称前带渠道图标（与渠道页那张表同一个组件、同一套规则）。
              失败请求没走到渠道（channel_id=0）、渠道事后被删都会是空值，显示 — -->
-        <a-table-column title="渠道" :width="colW.channel" ellipsis>
+        <a-table-column v-if="colShown.channel" title="渠道" :width="colW.channel" ellipsis>
           <template #default="{ record }">
             <span v-if="record.channel_name" class="chan-cell">
               <ChannelIcon :name="record.channel_name" :icon="channelIconOf(record.channel_id)" :size="18" />
@@ -1464,7 +2013,7 @@ onMounted(() => {
              颜色沿用 theme.css 那套语义色（输入陶土 / 输出紫 / 缓存绿），
              命中率与缓存同色 —— 它就是缓存那个数的比值。
              悬停给出一行汇总：图标只表达「这是哪一类词元」，具体数字看悬停。 -->
-        <a-table-column title="词元" :width="colW.tokens">
+        <a-table-column v-if="colShown.tokens" title="词元" :width="colW.tokens">
           <template #default="{ record }">
             <div class="token-cell" :title="tokenTitle(record)">
               <div class="tk-line">
@@ -1511,7 +2060,7 @@ onMounted(() => {
              而是回调 onTableChange 让我们带着 sort= 重新取数。
              注意不能用 :sort-order 之外的受控方式：箭头状态由
              sortOrderOf 给出，与 URL 参数是同一个来源。 -->
-        <a-table-column
+        <a-table-column v-if="colShown.elapsed"
           title="任务耗时"
           :width="colW.elapsed"
           key="elapsed"
@@ -1546,7 +2095,7 @@ onMounted(() => {
             </div>
           </template>
         </a-table-column>
-        <a-table-column
+        <a-table-column v-if="colShown.cost"
           title="费用"
           :width="colW.cost"
           key="cost"
@@ -1569,7 +2118,7 @@ onMounted(() => {
              总耗时口径含排队与首字等待，与生成速度不是一回事。
              流式且量得到的行在数值前带「流」胶囊（同一行）—— 输出速度要结合输出
              方式才读得懂。失败请求通常没有输出词元，显示 — -->
-        <a-table-column title="速度" :width="colW.speed">
+        <a-table-column v-if="colShown.speed" title="速度" :width="colW.speed">
           <template #default="{ record }">
             <span v-if="tokPerSec(record)" class="spd-cell" :title="speedTitle(record)">
               <span v-if="record.stream" class="stream-pill">流</span>
@@ -1580,7 +2129,7 @@ onMounted(() => {
         </a-table-column>
         <!-- 状态列移到费用之后（站主 2026-09-20 要求）：数字区（词元/耗时/费用）
              读完后，「成没成」与「哪把密钥」两个结果性信息收尾 -->
-        <a-table-column
+        <a-table-column v-if="colShown.status"
           title="状态"
           :width="colW.status"
           key="status"
@@ -1603,7 +2152,7 @@ onMounted(() => {
           </template>
         </a-table-column>
         <!-- 密钥跟着状态收尾：它们本来就是一问一答（哪把密钥、结果如何） -->
-        <a-table-column title="密钥" :width="colW.key" ellipsis>
+        <a-table-column v-if="colShown.key" title="密钥" :width="colW.key" ellipsis>
           <template #default="{ record }">
             <GroupTag
               v-if="record.api_key_name"
@@ -1634,14 +2183,21 @@ onMounted(() => {
              这一列只有一个「详情」，原来是一行文字链接，占 72px 里的大半；
              换成图标后列收到 64px，表格总宽跟着从 1036 降到 1028。
              图标按钮没有可见文字，tooltip 与 aria-label 是它的动作名 ——
-             少了这两样，读屏用户只会听到一个没有名字的按钮。 -->
-        <a-table-column title="操作" :width="colW.action" fixed="right">
+             少了这两样，读屏用户只会听到一个没有名字的按钮。
+             tabindex="-1"（2026-10-11）：行本身已经是这张表的键盘入口
+             （roving tabindex + 回车开详情，见 rowProps）。按钮若仍留在 Tab 序里，
+             一页 100 行就是 100 个额外停靠点，「整张表只占一个停靠点」当场作废
+             —— 这一点是代码审查实测出来的（当时表内实测 24 个停靠点）。
+             设成 -1 之后按钮仍可点击、仍能被读屏的虚拟光标读到（aria-label 还在），
+             只是不再参与 Tab 走查：键盘路径由行负责。 -->
+        <a-table-column v-if="colShown.action" title="操作" :width="colW.action" fixed="right">
           <template #default="{ record }">
             <a-tooltip title="调用详情：报文、错误原文与链路">
               <a-button
                 class="table-icon-btn"
                 type="text"
                 size="small"
+                tabindex="-1"
                 aria-label="查看这次调用的详情"
                 @click="openDetail(record)"
               >
@@ -1658,7 +2214,32 @@ onMounted(() => {
            只是界面上不再有常驻水位。 -->
     </DataState>
 
-    <a-drawer v-model:open="detailOpen" title="调用详情" :width="'min(720px, 94vw)'">
+    <!-- :open + @close 而不是 v-model:open：关抽屉要顺手把 URL 里的 ?log= 清掉
+           （见 closeDetail），双向绑定没法插这一步 -->
+    <a-drawer :open="detailOpen" :title="detailTitle" :width="modalWidth(720)" @close="closeDetail">
+      <!-- 上一条 / 下一条：排障的常态是连着看几条，而原来只能关掉、回列表、
+           再找下一行 —— 每看一条都要重新定位一次。按钮与 ↑ / ↓ 是同一件事，
+           键盘用户不必先 Tab 到按钮上（见 onDetailKeydown）。 -->
+      <template #extra>
+        <a-space>
+          <a-button
+            size="small"
+            :disabled="detailIndex <= 0"
+            aria-label="上一条记录"
+            @click="goDetail(-1)"
+          >
+            上一条
+          </a-button>
+          <a-button
+            size="small"
+            :disabled="detailIndex < 0 || detailIndex >= rows.length - 1"
+            aria-label="下一条记录"
+            @click="goDetail(1)"
+          >
+            下一条
+          </a-button>
+        </a-space>
+      </template>
       <a-descriptions v-if="current" :column="1" bordered size="small">
         <a-descriptions-item label="Trace ID">
           {{ current.trace_id }}
@@ -1677,6 +2258,19 @@ onMounted(() => {
         <a-descriptions-item label="上游模型">
           <GroupTag v-if="current.model_upstream" :name="current.model_upstream" v-bind="tagColorOf(current.group_id)" />
           <template v-else>-</template>
+          <!-- 上游模型也要复制：它是要贴进上游控制台、用量页面或工单的那个名字，
+               与「请求模型」常常不是同一个（兜底映射时差得更远） -->
+          <a-button
+            v-if="current.model_upstream"
+            type="text"
+            size="small"
+            class="table-icon-btn desc-copy"
+            :aria-label="'复制上游模型名 ' + current.model_upstream"
+            @click="copyField(current.model_upstream, 'upstream')"
+          >
+            <CheckOutlined v-if="copiedWhat === 'field:upstream'" class="trace-copy-ok" />
+            <CopyOutlined v-else />
+          </a-button>
           <!-- 两个模型名不一样时必须解释「为什么」，否则看着像串了数据。
                兜底是其中最常见的原因：客户端请求的模型名没命中白名单，
                渠道用它的默认模型接单（见渠道管理的「默认模型映射」）。
@@ -1697,9 +2291,6 @@ onMounted(() => {
         <a-descriptions-item label="入站 → 出站协议">
           {{ current.inbound_protocol }} → {{ current.upstream_protocol || '-' }}
         </a-descriptions-item>
-        <a-descriptions-item label="渠道">{{ current.channel_name || '-' }}</a-descriptions-item>
-        <a-descriptions-item label="密钥">{{ current.api_key_name }}</a-descriptions-item>
-        <a-descriptions-item label="客户端 IP">{{ current.client_ip }}</a-descriptions-item>
         <a-descriptions-item label="流式">{{ current.stream ? '是' : '否' }}</a-descriptions-item>
         <a-descriptions-item label="词元明细">
           输入 {{ fmtTokens(current.prompt_tokens) }} · 输出 {{ fmtTokens(current.completion_tokens) }} ·
@@ -1765,6 +2356,49 @@ onMounted(() => {
         </a-descriptions-item>
         <a-descriptions-item v-if="multiplierSourceText(current)" label="计价">
           {{ multiplierSourceText(current) }}
+        </a-descriptions-item>
+        <!-- 四个「拿去别处查」的字段各配一个图标复制按钮（2026-10-11）：
+             渠道名 → 渠道页、密钥名 → 密钥页、上游模型 → 上游控制台/工单、
+             客户端 IP → 访问日志/防火墙。图标按钮与列表操作列同款，
+             不占宽度；aria-label 是它唯一的可访问名（读屏用户听不到「按钮」）。 -->
+        <a-descriptions-item v-if="current.channel_name" label="渠道">
+          {{ current.channel_name }}
+          <a-button
+            type="text"
+            size="small"
+            class="table-icon-btn desc-copy"
+            :aria-label="'复制渠道名 ' + current.channel_name"
+            @click="copyField(current.channel_name, 'channel')"
+          >
+            <CheckOutlined v-if="copiedWhat === 'field:channel'" class="trace-copy-ok" />
+            <CopyOutlined v-else />
+          </a-button>
+        </a-descriptions-item>
+        <a-descriptions-item v-if="current.api_key_name" label="密钥">
+          {{ current.api_key_name }}
+          <a-button
+            type="text"
+            size="small"
+            class="table-icon-btn desc-copy"
+            :aria-label="'复制密钥名 ' + current.api_key_name"
+            @click="copyField(current.api_key_name, 'key')"
+          >
+            <CheckOutlined v-if="copiedWhat === 'field:key'" class="trace-copy-ok" />
+            <CopyOutlined v-else />
+          </a-button>
+        </a-descriptions-item>
+        <a-descriptions-item v-if="current.client_ip" label="客户端 IP">
+          {{ current.client_ip }}
+          <a-button
+            type="text"
+            size="small"
+            class="table-icon-btn desc-copy"
+            :aria-label="'复制客户端 IP ' + current.client_ip"
+            @click="copyField(current.client_ip, 'ip')"
+          >
+            <CheckOutlined v-if="copiedWhat === 'field:ip'" class="trace-copy-ok" />
+            <CopyOutlined v-else />
+          </a-button>
         </a-descriptions-item>
         <a-descriptions-item v-if="current.error" label="错误">
           <div class="err-head">
@@ -1834,7 +2468,7 @@ onMounted(() => {
   margin: -4px 0;
   margin-inline: auto;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   line-height: 15px;
   font-variant-numeric: tabular-nums;
 }
@@ -1869,7 +2503,7 @@ onMounted(() => {
 }
 /* 详情里的「只看这条链路」：贴着 trace_id 放，弱化成次要操作，
    别让人以为它是个必须点的按钮 */
-.trace-link { margin-left: 8px; font-size: 12px; }
+.trace-link { margin-left: 8px; font-size: var(--font-size-sm); }
 /* 复制成功时按钮内图标变形为绿色对勾（与密钥页同一套观感，见 useCopyFeedback；
    copy-pop 的 keyframes 在 theme.css 全局层，与密钥页共用同一个） */
 .trace-copy-ok {
@@ -1893,7 +2527,7 @@ onMounted(() => {
   grid-template-columns: 64px minmax(0, 1fr) 72px;
   gap: 8px;
   align-items: center;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   line-height: 16px;
 }
 .wf-label {
@@ -1935,7 +2569,7 @@ onMounted(() => {
   margin-bottom: 4px;
 }
 .err-head-text {
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
 }
 
@@ -1997,7 +2631,7 @@ onMounted(() => {
   column-gap: 6px;
   align-items: center;
   margin: -4px 0;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   line-height: 15px;
   font-variant-numeric: tabular-nums;
 }
@@ -2097,7 +2731,7 @@ onMounted(() => {
   border: 1px solid color-mix(in oklab, var(--tp) 32%, transparent);
   background: color-mix(in oklab, var(--tp) 13%, transparent);
   color: color-mix(in oklab, var(--tp) var(--pill-ink-mix-amount), var(--pill-ink-mix-color));
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   font-weight: 500;
   line-height: 20px;
   white-space: nowrap;
@@ -2124,7 +2758,7 @@ onMounted(() => {
   border: 1px solid color-mix(in oklab, var(--sp) 32%, transparent);
   background: color-mix(in oklab, var(--sp) 13%, transparent);
   color: color-mix(in oklab, var(--sp) var(--pill-ink-mix-amount), var(--pill-ink-mix-color));
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   font-weight: 500;
   line-height: 20px;
   white-space: nowrap;
@@ -2177,7 +2811,7 @@ onMounted(() => {
   border: 1px solid color-mix(in oklab, var(--tp) 32%, transparent);
   background: color-mix(in oklab, var(--tp) 13%, transparent);
   color: color-mix(in oklab, var(--tp) var(--pill-ink-mix-amount), var(--pill-ink-mix-color));
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   font-weight: 500;
   line-height: 20px;
   white-space: nowrap;
@@ -2203,7 +2837,7 @@ onMounted(() => {
    不是告警（请求本身成功了），抢眼会让人以为出了问题 */
 .fallback-note {
   margin-top: 4px;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   line-height: 1.6;
   color: var(--color-text-secondary);
 }
@@ -2214,7 +2848,7 @@ onMounted(() => {
   max-height: 160px;
   overflow: auto;
   padding: 8px;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;
@@ -2237,7 +2871,7 @@ onMounted(() => {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   line-height: 20px;
   min-width: 0;
 }
@@ -2271,9 +2905,12 @@ onMounted(() => {
 
 /* 换渠道前的等待。用橙色而不是次要色：它出现就说明这次请求打在了
    与上一次相同的上游上 —— 值得看一眼，而不是被当作常规信息划过。
-   橙色与同文件里「用量为估算值」等提示标签同一套语义色 */
+   橙色与同文件里「用量为估算值」等提示标签同一套语义色。
+
+   文字色用 --text-amber 而不是 --color-orange：后者是填充/图表档，
+   #f59e0b 压卡片只有 2.15:1，达不到 AA 正文的 4.5:1。 */
 .trail-wait {
-  color: var(--color-orange);
+  color: var(--text-amber);
   flex: 0 0 auto;
   font-variant-numeric: tabular-nums;
 }
@@ -2323,6 +2960,43 @@ onMounted(() => {
   overflow-anchor: auto;
 }
 
+/* ---- 行的键盘焦点环（2026-10-11）----
+   行现在带 roving tabindex（见 rowProps）：整张表在 Tab 序里只占一个停靠点，
+   进入后用 ↑ / ↓ 换行、回车开详情。
+   全站那条 :focus-visible 把环画在元素**外面**（outline-offset 取正值）——
+   对按钮是对的，但对表格行会压住上下相邻的行，看起来像两行都被选中了。
+   这里改成画在行内。!important 是必需的：全站那条也带 !important，
+   不加压不过它（同因的还有 theme.css 里表头对齐、图标按钮那几条）。
+   环色仍走 --focus-ring 令牌，12 套主题各自成立。 */
+.log-table :deep(tr[data-row-key]:focus-visible) {
+  outline: var(--focus-ring) !important;
+  outline-offset: -2px !important;
+}
+
+/* 抽屉里的字段复制按钮：与列表操作列同一枚 .table-icon-btn，只把左边距收紧
+   （描述列表里默认 inline 间距会让图标离值很远，看起来不属于这一行）。 */
+.desc-copy {
+  margin-left: 4px;
+}
+
+/* 紧凑密度（2026-10-11）：只收上下内边距 —— 行高的下限由内容决定
+   （词元那一格两排共用一个网格，.token-cell 实测 30px），压到 0 也只能再省 6px。
+   实测 44px → 39px、可视行数 13.4 → 15.2（`.shots/verify-ux-2026-10-11.mjs`
+   的 A7 组量的是真实行高，不是「类名加上了」）。
+   !important 是必需的：antd 用 CSS-in-JS 在运行时给 size="small" 插
+   `padding: 8px`，那条与本条同级权重、但更晚进 head。 */
+.log-table.is-compact :deep(.ant-table-tbody > tr > td) {
+  padding-top: 3px !important;
+  padding-bottom: 3px !important;
+}
+
+/* 首屏加载中占位：只留高度，不留文字（空的表体由 antd 的 loading 转圈表达）。
+   24px 与 EmptyState 的小号高度接近，避免加载完成时空表体高度跳一下。 */
+.loading-quiet {
+  display: block;
+  height: 24px;
+}
+
 /* ---- 把面板剩下的高度一路传到表体 ----
    看板整页锁高，面板是那块吃掉剩余高度的元素，而 antd 的表格从外层到表体之间
    隔着五六层 div —— 每一层都要把弹性传下去，断在哪一层，高度就停在哪一层：
@@ -2361,14 +3035,91 @@ onMounted(() => {
 /* 日志队列水位条与列表小工具条（实时状态 +「仅失败」开关）2026-09-26 应站主要求
    移除，下面的样式随之删除；分页此前为给水位条让位加的 margin-bottom 一并撤掉。 */
 
-/* ---- 排序口径说明（P1-9）----
-   只在「费用」排序生效时出现的一行小字。12px 次要色（--color-text-secondary
-   是 0.70 alpha，白卡 5.10:1）—— 它是解释不是警示，但也要读得清。 */
-.sort-hint {
+/* ---- 面板提示行（2026-10-11 收拢）----
+   排序口径说明 / 生效中的排障条件 / 第 1 页之外攒下的新日志，三者共用这一行。
+   没有内容时整行不渲染（v-if 在模板上），所以它不会在常态下占任何高度 ——
+   面板顶部的 40px 标题栏 2026-09-26 被特意删掉过，这里不能又长出一条常驻条。
+   flex-wrap：窄屏上三样东西并排会溢出，换行比横向滚动好。 */
+.panel-hints {
   flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
   margin-bottom: 6px;
-  font-size: 12px;
+}
+
+/* 排序口径说明（P1-9）。12px 次要色（--color-text-secondary 是 0.70 alpha，
+   白卡 5.10:1）—— 它是解释不是警示，但也要读得清。 */
+.sort-hint {
+  font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
+}
+
+/* 条件胶囊与看板工具栏上那两枚说的是同一件事，所以观感对齐 antd tag：
+   小字号、圆角、1px 描边、浅底。自绘而不是用 a-tag closable 的原因见模板注释
+   （它的关闭图标 tabindex="-1"，键盘到不了）。
+   关闭按钮是**真正的 button**：Tab 能到、回车能触发，且 28px 的命中区
+   （WCAG 2.2 的 2.5.8 下限 24px）在触屏上也点得中。 */
+.hint-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 2px 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-bg);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 20px;
+}
+
+.hint-chip-text {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hint-chip-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control);
+  background: none;
+  color: inherit;
+  font-size: var(--font-size-2xs);
+  cursor: var(--cursor-hand);
+}
+
+.hint-chip-close:hover {
+  background: var(--color-icon-hover-bg);
+  color: var(--text-primary-ink);
+}
+
+/* 「有 N 条新日志，回第 1 页查看」。做成按钮：它是可点的下一步。
+   配色走主色文字令牌（--text-primary-ink，浅深底都达 AA）—— 用 --color-primary
+   在白底上只有 3.32:1，读不清。 */
+.pending-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border: 1px solid var(--color-primary-a20);
+  border-radius: var(--radius-pill);
+  background: var(--color-primary-a20);
+  color: var(--text-primary-ink);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  cursor: var(--cursor-hand);
+}
+
+.pending-new:hover {
+  border-color: var(--color-primary);
 }
 
 </style>

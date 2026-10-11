@@ -69,6 +69,45 @@ describe('allocateWidths 余量分摊', () => {
     const out = allocateWidths(declared, baseW)
     expect(out).toEqual(baseW)
   })
+
+  // ---- 列显隐（2026-10-10）：keys 子集上的三条不变量 ----
+  //
+  // 关掉几列之后，被关掉的列不渲染也不该分余量；分摊必须在**可见子集**上
+  // 重新成立（Σ份额 = 容器宽 − 可见列声明合计）。这三条如果坏掉，
+  // 表现是「关掉两列后表格右边多出一条空白」或「可见列反而变窄」。
+  describe('只对可见列分摊（keys 子集）', () => {
+    const shown: ColKey[] = ['time', 'model', 'channel', 'status', 'action']
+    const shownDeclared = shown.reduce((s, k) => s + baseW[k], 0)
+
+    it('可见列之和 ≈ 容器可用宽（Σ份额 = leftover）', () => {
+      const avail = 1400
+      const out = allocateWidths(avail, baseW, shown)
+      const sum = shown.reduce((s, k) => s + out[k], 0)
+      expect(sum).toBeCloseTo(avail, 6)
+    })
+
+    it('隐藏列不拿份额，宽度保持声明宽', () => {
+      const out = allocateWidths(1400, baseW, shown)
+      for (const k of COL_KEYS) {
+        if (!shown.includes(k)) expect(out[k]).toBe(baseW[k])
+      }
+    })
+
+    it('只剩权重 0 的列时不做除法（无 NaN），原样返回声明宽', () => {
+      // status / action 的权重都是 0：weightSum = 0，若不判零就是 0/0 = NaN，
+      // 列宽会变成 NaN 并被写进 :width（表格直接崩掉）
+      const only: ColKey[] = ['status', 'action']
+      const out = allocateWidths(2000, baseW, only)
+      expect(out.status).toBe(baseW.status)
+      expect(out.action).toBe(baseW.action)
+      expect(Number.isNaN(out.status)).toBe(false)
+    })
+
+    it('可见子集比容器宽时同样不摊（横向滚动区）', () => {
+      const out = allocateWidths(shownDeclared - 50, baseW, shown)
+      for (const k of shown) expect(out[k]).toBe(baseW[k])
+    })
+  })
 })
 
 describe('权重表与列键的一致性', () => {

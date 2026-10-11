@@ -14,6 +14,25 @@ export const COL_KEYS = [
 ] as const
 export type ColKey = (typeof COL_KEYS)[number]
 
+/** 列名（2026-10-10 列显隐功能用）：勾选面板里的文案与表头必须同源，
+ *  否则改了表头忘了改面板，用户会看到两个名字指同一列。 */
+export const COL_LABELS: Record<ColKey, string> = {
+  time: '请求时间',
+  model: '模型',
+  channel: '渠道',
+  tokens: '词元',
+  elapsed: '任务耗时',
+  cost: '费用',
+  speed: '速度',
+  status: '状态',
+  key: '密钥',
+  action: '操作'
+}
+
+/** 不允许隐藏的列：请求时间是行的身份，操作是打开详情的唯一入口。
+ *  两者都能关掉的话，用户会得到一张「看不出这行是什么、也点不开」的表。 */
+export const COL_LOCKED: readonly ColKey[] = ['time', 'action']
+
 /** 单元格左右内边距（antd 小表格 8+8）与右侧呼吸余量（给省略号与边框）。
  *  内容宽要加这一组才是「列需要的宽」；下限的加法必须与测量同一套
  * （COL_BOUNDS 里 channel 一栏的注释有完整的踩坑记录）。 */
@@ -44,9 +63,12 @@ export const DISTRIBUTE_WEIGHT: Record<ColKey, number> = {
   action: 0
 }
 
-/** Σw（权重合计，11 = 3×2 + 5×1 + 2×0）：allocateWidths 的单位份额 =
- *  leftover / Σw。第一版注释把合计写成 13（多算了两个 ×0 列），是
- *  logColumns.spec.ts 的断言第一次运行就抓出来的。 */
+/** 全表的 Σw（11 = 3×2 + 5×1 + 2×0）。
+ *
+ *  注意它不再直接参与分摊：allocateWidths 现在按**传入的列子集**现算 Σw
+ *  （列显隐会关掉几列，分母必须跟着变）。这条常量留下是为了让
+ *  logColumns.spec.ts 能钉住权重表本身 —— 第一版注释把合计写成 13
+ *  （多算了两个 ×0 列），正是那条断言第一次运行就抓出来的。 */
 export const WEIGHT_SUM = COL_KEYS.reduce((s, k) => s + DISTRIBUTE_WEIGHT[k], 0)
 
 /**
@@ -61,19 +83,27 @@ export const WEIGHT_SUM = COL_KEYS.reduce((s, k) => s + DISTRIBUTE_WEIGHT[k], 0)
  *
  * 容器比声明合计还窄（leftover ≤ 0）时不摊：那是横向滚动区，
  * 列按声明宽渲染，滚动边界与声明一致。
+ *
+ * `keys`（2026-10-10 加，默认全部列）是「本次参与分摊的列」——
+ * 列显隐功能关掉几列后，被关掉的列不渲染也不该分余量，
+ * 三条不变量在**可见列这个子集**上仍然成立（Σ份额 = leftover）。
+ * 返回的仍是完整记录（隐藏列拿 0 份额），这样 colW 的读写不用到处判空。
  */
 export function allocateWidths(
   avail: number,
-  baseW: Readonly<Record<ColKey, number>>
+  baseW: Readonly<Record<ColKey, number>>,
+  keys: readonly ColKey[] = COL_KEYS
 ): Record<ColKey, number> {
-  const declared = COL_KEYS.reduce((sum, k) => sum + baseW[k], 0)
+  const declared = keys.reduce((sum, k) => sum + baseW[k], 0)
+  const weightSum = keys.reduce((s, k) => s + DISTRIBUTE_WEIGHT[k], 0)
   const leftover = avail - declared
   // 单位份额 = leftover / Σw，各列拿「单位份额 × 自己的权重」，
   // Σ(份额) = leftover × Σw / Σw = leftover，合计仍恰好等于容器可用宽
-  const unit = leftover > 0 ? leftover / WEIGHT_SUM : 0
+  const unit = leftover > 0 && weightSum > 0 ? leftover / weightSum : 0
   const out = {} as Record<ColKey, number>
   for (const key of COL_KEYS) {
-    out[key] = baseW[key] + unit * DISTRIBUTE_WEIGHT[key]
+    const share = keys.includes(key) ? unit * DISTRIBUTE_WEIGHT[key] : 0
+    out[key] = baseW[key] + share
   }
   return out
 }

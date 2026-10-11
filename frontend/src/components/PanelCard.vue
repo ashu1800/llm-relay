@@ -34,7 +34,7 @@ defineProps<{
 .section-title {
   flex: 1;
   margin: 0;
-  font-size: 16px;
+  font-size: var(--font-size-base);
   font-weight: 700;
 }
 

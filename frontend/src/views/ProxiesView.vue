@@ -1,11 +1,20 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
-import { message, Modal } from 'ant-design-vue'
-import { PlusOutlined, ReloadOutlined, ThunderboltOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons-vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { message, modal } from '@/utils/feedback'
+import { modalWidth } from '@/utils/modalWidth'
+import { PlusOutlined, ReloadOutlined, ThunderboltOutlined, EditOutlined, DeleteOutlined, SearchOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import { useFormValidate } from '@/composables/useFormValidate'
+import { useDirtyClose } from '@/composables/useDirtyClose'
+// 本地搜索 + 客户端分页（四张管理表共用，判据在 components/tableTools.ts 有单测）
+import { useTableTools } from '@/composables/useTableTools'
 import DataState from '@/components/DataState.vue'
+// 搜索无结果时的空态（组件是逐文件引入的、没有全局注册，
+// 漏 import 只有控制台一条警告 —— 契约脚本「模板组件的引入完整性」管着这一类）
+import EmptyState from '@/components/EmptyState.vue'
 import { fmtTime } from '@/utils/fmtTime'
+// 行级操作（删除）之后把焦点还给同一行的同一个按钮（见 utils/focusRow）
+import { focusRowAction } from '@/utils/focusRow'
 import type { Proxy, ProxyTestResult } from '@/api/types'
 
 // 表单校验（2026-09-24 UI 审评补）：名称与地址必填，但原来**连星号都没有**，
@@ -15,6 +24,21 @@ import type { FormInstance, Rule } from 'ant-design-vue/es/form'
 const loading = ref(false)
 const rows = ref<Proxy[]>([])
 const loadError = ref('')
+// 表格容器的 ref：删掉一行之后焦点往哪儿去的落点（见 utils/focusRow）
+const tableWrap = ref<HTMLElement | null>(null)
+
+// 本地搜索 + 客户端分页（2026-10-11）：接口一次返回全量代理。
+// 地址拆开成 host 与 port 分别搜，用户从报错里抄来的可能是「1.2.3.4」
+// 也可能是「1.2.3.4:8080」，两种都该搜得到
+const {
+  q,
+  rows: pagedRows,
+  pagination,
+  total
+} = useTableTools(rows, {
+  storageKey: 'proxies-page-size',
+  searchText: (p) => [p.name, p.protocol, p.host, String(p.port)].join(' ')
+})
 
 const modalOpen = ref(false)
 const saving = ref(false)
@@ -95,8 +119,8 @@ async function load() {
   }
 }
 
-function openCreate() {
-  editing.value = null
+// 空白表单：新建、以及放弃改动后复位时共用同一份定义
+function blankForm() {
   form.name = ''
   form.protocol = 'socks5'
   form.host = ''
@@ -105,7 +129,23 @@ function openCreate() {
   form.password = ''
   form.enabled = true
   form.forUpdate = false
+}
+
+// 防误关：遮罩不再能关掉弹窗，有改动时按 X / Esc 要先确认（见 composable 顶部）
+const dirty = useDirtyClose({
+  open: modalOpen,
+  snapshot: () => JSON.stringify(form),
+  onDiscard: () => {
+    editing.value = null
+    blankForm()
+  }
+})
+
+function openCreate() {
+  editing.value = null
+  blankForm()
   modalOpen.value = true
+  dirty.markClean()
 }
 
 function openEdit(row: Proxy) {
@@ -119,6 +159,7 @@ function openEdit(row: Proxy) {
   form.enabled = row.enabled
   form.forUpdate = row.for_update
   modalOpen.value = true
+  dirty.markClean()
 }
 
 async function save() {
@@ -154,7 +195,7 @@ async function save() {
 }
 
 function remove(row: Proxy) {
-  Modal.confirm({
+  modal.confirm({
     centered: true,
     title: '删除代理「' + row.name + '」？',
     content: '已经有渠道在用它时删不掉 —— 要先让那些渠道改用别的代理或直连。',
@@ -166,6 +207,9 @@ function remove(row: Proxy) {
         await api.del('/proxies/' + row.id)
         message.success('已删除')
         await load()
+        // 行已不在列表里：焦点交给表格容器，而不是掉回 body
+        await nextTick()
+        focusRowAction(tableWrap.value, row.id, '删除代理 ')
       } catch (e: any) {
         message.error(e.message)
       }
@@ -217,7 +261,7 @@ function reportTest(res: ProxyTestResult, who: string) {
   } else {
     // 失败原因用 Modal 而不是 message：错误信息往往有几十个字，
     // 一闪而过的提示根本读不完，用户还得再点一次才能看到
-    Modal.error({
+    modal.error({
       title: who + ' 连通失败',
       content: res.error || '未知错误（耗时 ' + res.latency_ms + ' ms）'
     })
@@ -255,13 +299,28 @@ onMounted(load)
       <div class="manage-toolbar">
         <div class="toolbar-left">
           <!-- 图标化与看板/渠道/分组三页的工具栏统一：位置固定后图标即可辨认 -->
-          <a-button :loading="loading" title="刷新" aria-label="刷新" @click="load">
+          <a-button :loading="loading" title="刷新（快捷键 R）" aria-label="刷新" aria-keyshortcuts="r" @click="load">
             <ReloadOutlined />
           </a-button>
           <a-button type="primary" @click="openCreate"><PlusOutlined /> 新建代理</a-button>
         </div>
         <div class="toolbar-spacer" />
-        <span class="toolbar-hint">共 {{ rows.length }} 个代理，启用 {{ activeCount }} 个</span>
+        <!-- 本地搜索（2026-10-11）：按名字或地址找一台代理。
+             地址（host:port）是最常用的搜法 —— 从别处的报错里抄一段 host 过来找 -->
+        <a-input
+          v-model:value="q"
+          class="toolbar-search"
+          placeholder="搜索名称 / 地址"
+          allow-clear
+          aria-label="搜索代理"
+          aria-keyshortcuts="/"
+        >
+          <template #prefix><SearchOutlined aria-hidden="true" /></template>
+        </a-input>
+        <span class="toolbar-hint">
+          <template v-if="q.trim()">找到 {{ total }} 个 / 共 {{ rows.length }} 个</template>
+          <template v-else>共 {{ rows.length }} 个代理，启用 {{ activeCount }} 个</template>
+        </span>
       </div>
 
       <!-- DataState 的契约是 error / hasData / loading / title / hint / empty / emptyText。
@@ -282,13 +341,30 @@ onMounted(load)
              偏大则 antd 会把多出来的宽度摊到各列上，量出来的数与声明对不上。
              操作 190 -> 104 是图标按钮那一次（见下方操作列的注释）。
              核对脚本：scripts/check-table-widths.mjs -->
+        <!-- tabindex="-1"：删掉一行之后焦点交给这个容器（否则掉回 body，
+             键盘用户要从页面顶部重新 Tab）—— 见 utils/focusRow。不进 Tab 序。 -->
+        <div ref="tableWrap" tabindex="-1">
         <a-table
-          :data-source="rows"
+          :data-source="pagedRows"
           row-key="id"
           size="small"
-          :pagination="false"
+          :pagination="pagination"
           :scroll="{ x: 794 }"
         >
+          <!-- 空态（2026-10-11 补）：这一页原来是四张管理表里唯一没有 #emptyText 的，
+               搜不到时 antd 会渲染自己的「暂无数据」，用户分不清是「搜不到」
+               还是「一条代理都没有」，也没有清空搜索的出口 ——
+               而 DataState 的 :empty 只在 rows.length === 0 时参与，
+               pagedRows 因为搜索变空根本不会走到它。
+               **只写搜索这一支**：真的一条都没有的情况由外层 DataState 的空态面板
+               负责（`empty-text="还没有配置代理"`），这里再写一遍就是不可达的死代码。 -->
+          <template #emptyText>
+            <EmptyState v-if="q.trim()" size="sm" text="没有匹配的代理">
+              <template #action>
+                <a-button size="small" @click="q = ''">清空搜索</a-button>
+              </template>
+            </EmptyState>
+          </template>
           <a-table-column title="名称" :width="130">
             <template #default="{ record }">
               <span class="proxy-name">{{ record.name }}</span>
@@ -378,6 +454,7 @@ onMounted(load)
             </template>
           </a-table-column>
         </a-table>
+        </div>
       </DataState>
     </section>
 
@@ -385,9 +462,11 @@ onMounted(load)
       v-model:open="modalOpen"
       :title="editing ? '编辑代理' : '新建代理'"
       :confirm-loading="saving"
-      :width="'min(560px, 94vw)'"
+      :width="modalWidth(560)"
       centered
+      :mask-closable="false"
       @ok="save"
+      @cancel="dirty.guardCancel"
     >
       <a-form ref="formRef" :model="form" :rules="proxyRules" layout="vertical">
         <a-form-item label="名称" name="name">
@@ -440,7 +519,11 @@ onMounted(load)
             <ThunderboltOutlined /> 测试连通性
           </a-button>
           <span class="footer-right">
-            <a-button @click="modalOpen = false">取消</a-button>
+            <!-- 「取消」必须和 X / Esc 走同一条守卫（2026-10-11）：原来它直接
+                 modalOpen = false，于是同一个弹窗「X 会问、取消不问」——
+                 刚改好的代理地址与密码无提示消失。useDirtyClose 顶部那段注释
+                 要消灭的正是这类事故，只是漏了这条路径。 -->
+            <a-button @click="dirty.guardCancel">取消</a-button>
             <a-button type="primary" :loading="saving" @click="save">保存</a-button>
           </span>
         </div>
@@ -463,13 +546,13 @@ onMounted(load)
 }
 .toolbar-left { display: flex; gap: var(--gap); }
 .toolbar-spacer { flex: 1; }
-.toolbar-hint { color: var(--color-text-secondary); font-size: 13px; }
+.toolbar-hint { color: var(--color-text-secondary); font-size: var(--font-size-md); }
 .proxy-name { font-weight: 500; }
-.proxy-addr { font-family: var(--font-family-mono); font-size: 12px; }
+.proxy-addr { font-family: var(--font-family-mono); font-size: var(--font-size-sm); }
 /* 变量名按 styles/theme.css 里真实存在的写：
    那里没有 --color-danger / --color-text-tertiary 这两个名字，
    写了不会报错，只是颜色悄悄失效、退回默认色 */
-.sub-text { color: var(--color-text-secondary); font-size: 12px; margin-top: 2px; }
+.sub-text { color: var(--color-text-secondary); font-size: var(--font-size-sm); margin-top: 2px; }
 .fail-text {
   color: var(--text-red);
   /* 上游错误动辄几 KB，不截断会把整行撑得很高；完整内容放 title 悬停可见 */
@@ -479,7 +562,7 @@ onMounted(load)
   overflow: hidden;
 }
 .disabled { color: var(--color-text-secondary); cursor: not-allowed; }
-.field-hint { color: var(--color-text-secondary); font-size: 12px; margin-top: 4px; }
+.field-hint { color: var(--color-text-secondary); font-size: var(--font-size-sm); margin-top: 4px; }
 .field-hint.inline { margin-left: 8px; }
 .update-mark { color: var(--text-red); }
 .two-col { display: grid; grid-template-columns: 1fr 140px; gap: 12px; }

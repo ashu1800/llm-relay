@@ -21,6 +21,8 @@ import {
   parseThemes
 } from './lib/theme-css.mjs'
 import { renderAll } from './gen-theme-cursors.mjs'
+// 颜色解析与 WCAG 计算与 check-theme-contrast.mjs 共用一份实现（lib/color.mjs）
+import { contrast, parseColor } from './lib/color.mjs'
 
 // 用 fileURLToPath 而不是 url.pathname：后者会保留百分号编码，
 // 而本仓库路径里含中文（「不忘初心」），拼出来的路径必然是 ENOENT
@@ -43,12 +45,17 @@ function check(name, cond, detail) {
  * 说明恰恰会写在旁边的注释里，把那段写法当反例抄一遍。对整份文件做正则时，
  * 注释里的反例就会被判成违规（实测踩过：注解自己把断言坑了）。
  * 所以凡是否定式断言，都先过这一道。
+ *
+ * keepLines = true 时**保留换行**（注释内容换成等量空格），给「按行报错」的
+ * 断言用：整段删掉的话，报出来的行号指向的是剥离后的源码，拿它去原文件里找
+ * 会差好几行（实测差 5~8 行，找到的是另一条规则）。判定逻辑两者一致。
  */
-function stripComments(src) {
+function stripComments(src, keepLines = false) {
+  const drop = (m) => (keepLines ? m.replace(/[^\n]/g, ' ') : '')
   return src
-    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, drop)
     .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
-    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<!--[\s\S]*?-->/g, drop)
 }
 
 // 同时收集 .vue 与 .ts：CSS 变量的定义有一部分在 utils/*Style.ts 里
@@ -1038,6 +1045,371 @@ console.log('=== 请求日志列宽：测量锚点与模板必须对得上 ===')
     }
     console.log(`  下限与硬下界之差（表头+内边距+图标）：${report.join(' / ')}`)
   }
+}
+
+// ============================================================================
+// 文字色令牌契约（2026-10-10）
+// ============================================================================
+//
+// 为什么需要：theme.css 顶部立了一条约定 —— `--color-*` 只用于**填充、边框、
+// 图标**（非文本，WCAG 1.4.11 要求 3:1），凡是读的字一律用 `--text-*`
+// （正文要求 4.5:1）。这条约定靠人记是靠不住的：2026-10-10 审计出 8 处把
+// 填充色当正文色用，最低的只有 2.15:1 —— 12px 的「N 个未定价」用
+// --color-orange（#f59e0b 压白卡），而它恰恰是「这条渠道在漏钱」的唯一提示。
+//
+// 为什么 check-theme-contrast.mjs 抓不到：那个脚本算的是**令牌之间**的比值
+// （--color-orange 对 --color-bg，作为非文本是达标的），而错在「组件挑了哪个
+// 令牌」—— 令牌本身完全合法，只是不该出现在 `color:` 上。
+//
+// 判据：组件里 `color:` / `-webkit-text-fill-color:` 的值里出现
+// `var(--color-<语义色>)` 即失败；报错时把各主题的实测对比度一并算出来，
+// 省掉「为什么不行」的追问。允许的例外只有一类：行尾写
+// `/* text-token-exempt: <理由> */` 的显式豁免（豁免会出现在输出里，看得见）。
+console.log('')
+console.log('=== 文字色令牌契约（--color-* 不许当正文色）===')
+const FORBIDDEN_TEXT_TOKENS = [
+  '--color-primary',
+  '--color-red',
+  '--color-orange',
+  '--color-green',
+  '--color-blue',
+  '--color-purple',
+  '--color-gray'
+]
+const TEXT_MIN = 4.5
+const textThemes = parseThemes()
+// 前置字符类要包含引号与括号：内联样式（style="color: …"）与 h() 里的
+// 对象字面量都靠它们命中。`-` 刻意不在类里 —— 那正是把
+// `background-color` / `border-color` 排除在外的方式。
+const RE_TEXT_COLOR = /(?:^|[;{\s"'(,])color\s*:\s*([^;]+)/g
+
+/** 该令牌在所有主题、两种底色上最差的那个比值（报错信息用） */
+function worstTextContrast(token) {
+  let worst = null
+  for (const [id, theme] of textThemes) {
+    const fg = parseColor(theme.vars.get(token))
+    if (!fg) continue
+    for (const bgName of ['--color-fg', '--color-bg']) {
+      const bg = parseColor(theme.vars.get(bgName))
+      if (!bg) continue
+      const ratio = contrast(fg, bg)
+      if (!worst || ratio < worst.ratio) worst = { ratio, id, bgName }
+    }
+  }
+  if (!worst) return '（算不出对比度：theme.css 里找不到这个令牌）'
+  return (
+    `实测最低 ${worst.ratio.toFixed(2)}:1（${worst.id} 主题，压 ${worst.bgName}）` +
+    ` —— 正文要 ${TEXT_MIN}:1，请改用同色相的 --text-* 档`
+  )
+}
+
+let textViolations = 0
+let textColorDecls = 0
+for (const file of walk(SRC)) {
+  const raw = readFileSync(file, 'utf8')
+  // 用「保留行数」的剥离版本：stripComments 会把多行注释整段删掉，
+  // 于是报出来的行号指向的是**剥离后**的源码 —— 而人要按行号去原文件里
+  // 找（实测差 5~8 行，找到的是另一条规则）。
+  const src = stripComments(raw, true)
+  const rel = file.slice(SRC.length + 1).replace(/\\/g, '/')
+  const lines = src.split('\n')
+  const rawLines = raw.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    for (const m of lines[i].matchAll(RE_TEXT_COLOR)) {
+      textColorDecls++
+      const value = m[1]
+      const hit = FORBIDDEN_TEXT_TOKENS.find((t) =>
+        new RegExp(`var\\(${t}(?![\\w-])`).test(value)
+      )
+      if (!hit) continue
+      // 豁免写在**原始行**上（注释已被剥离，所以判据用 rawLines）
+      if (/text-token-exempt/.test(rawLines[i] || '')) continue
+      textViolations++
+      check(`${rel}:${i + 1} 文字色不用 ${hit}`, false, worstTextContrast(hit))
+    }
+  }
+}
+// 非空断言：正则结构一变（比如 color: 的写法改成别处解析），下面那条
+// 「没有违规」会永远绿 —— 全绿但什么都没扫，比红更危险。
+check(
+  `扫到足够多的 color: 声明（${textColorDecls} 条）`,
+  textColorDecls >= 40,
+  '只扫到极少声明 —— 是解析器坏了，不是代码干净'
+)
+if (textViolations === 0) {
+  check('组件里没有把填充/图形色当正文色的地方', true)
+}
+
+// ============================================================================
+// 弹窗宽度契约（2026-10-10）
+// ============================================================================
+//
+// 十二个弹窗/抽屉此前各写一遍 `'min(560px, 94vw)'`，于是出现两种漂移：
+// ChannelsView 的「测试连通性」是裸数字 440（没有任何窄屏保护，窄窗口两侧被裁），
+// DailyReport 的「昨日战报」是 92vw（与其余十一处的 94vw 不一致）。
+// 现在值只有一个出口：utils/modalWidth.ts 的 modalWidth(N)。
+// 判据：每个 a-modal / a-drawer 的 :width 必须来自它，且模板里不许再出现字面 vw。
+console.log('')
+console.log('=== 弹窗宽度契约 ===')
+
+/**
+ * 取一个标签的属性串：从 start 往后扫到**不在引号内**的第一个 `>`。
+ * 不能用 `/<a-modal\b([\s\S]*?)>/` —— 属性里的箭头函数（`@update:open="v => …"`）
+ * 含 `>`，懒匹配会停在那个箭头上，属性串被腰斩（实测：ModelPricingEditor 的
+ * :width 恰好排在箭头之前才侥幸命中）。
+ */
+function tagBody(src, start) {
+  let quote = null
+  for (let i = start; i < src.length; i++) {
+    const c = src[i]
+    if (quote) {
+      if (c === quote) quote = null
+      continue
+    }
+    if (c === '"' || c === "'") {
+      quote = c
+      continue
+    }
+    if (c === '>') return src.slice(start, i)
+  }
+  return src.slice(start)
+}
+
+let widthChecked = 0
+for (const file of walk(SRC)) {
+  if (!file.endsWith('.vue')) continue
+  const src = stripComments(readFileSync(file, 'utf8'))
+  const rel = file.slice(SRC.length + 1).replace(/\\/g, '/')
+  for (const m of src.matchAll(/<(a-modal|a-drawer)\b/g)) {
+    widthChecked++
+    const body = tagBody(src, m.index + m[0].length)
+    const ok = /:width="modalWidth\(\d+\)"/.test(body)
+    check(
+      `${rel} 第 ${widthChecked} 处 ${m[1]} 的宽度来自 modalWidth()`,
+      ok,
+      ok ? '' : '缺 :width="modalWidth(NNN)"，或写了字面量（窄窗口会被顶出视口）'
+    )
+  }
+  const literal = src.match(/:width="'min\([^']*vw'\)"/)
+  check(
+    `${rel} 没有字面 vw 宽度`,
+    !literal,
+    literal ? `模板里仍有 ${literal[0]}，请改用 modalWidth()` : ''
+  )
+}
+
+// ============================================================================
+// 响应式断点契约（2026-10-10）
+// ============================================================================
+//
+// 刻度写在 theme.css 的注释里（CSS 自定义属性不能用在 @media 条件里），
+// 于是它是**文档**而不是代码 —— 而文档会漂：2026-10-10 之前 SettingsView 与
+// ThemePicker 的 @media 用的是 900 / 600，其中 900 只属于「侧栏自动折叠」
+// 那一个功能断点（MainLayout 的 JS 常量，不是 @media）。这里把两件事钉住：
+//   1. theme.css 注释里列出的刻度与脚本里这份清单逐项相等；
+//   2. 所有 .vue 里 @media (max-width|min-width: N) 的 N 都在刻度上。
+console.log('')
+console.log('=== 响应式断点契约 ===')
+const BREAKPOINT_SCALE = [640, 768, 1024, 1200, 1536]
+
+const themeSrc = readFileSync(join(SRC, 'styles', 'theme.css'), 'utf8')
+const scaleBlock = themeSrc.match(/响应式断点基准[\s\S]*?\*\//)
+const docScale = scaleBlock
+  ? [...scaleBlock[0].matchAll(/^\s{7}(\d+)px\s/gm)].map((m) => Number(m[1]))
+  : []
+check(
+  'theme.css 的断点刻度与脚本清单一致',
+  docScale.length === BREAKPOINT_SCALE.length &&
+    docScale.every((v, i) => v === BREAKPOINT_SCALE[i]),
+  `文档里是 ${docScale.join('/') || '(没解析到)'}，脚本里是 ${BREAKPOINT_SCALE.join('/')}`
+)
+
+for (const file of walk(SRC)) {
+  if (!file.endsWith('.vue')) continue
+  const src = stripComments(readFileSync(file, 'utf8'))
+  const rel = file.slice(SRC.length + 1).replace(/\\/g, '/')
+  for (const m of src.matchAll(/@media\s*\((max|min)-width:\s*(\d+)px\)/g)) {
+    check(
+      `${rel} @media ${m[1]}-width: ${m[2]}px 在刻度上`,
+      BREAKPOINT_SCALE.includes(Number(m[2])),
+      `刻度：${BREAKPOINT_SCALE.join(' / ')}px；900 是侧栏折叠的功能断点，只以 JS 常量形式存在于 MainLayout，不写成 @media`
+    )
+  }
+}
+
+// ============================================================================
+// 字号刻度契约（2026-10-10）
+// ============================================================================
+//
+// 收口前组件里散着 117 处字面字号（10~26px，其中 12px 一档 63 处）：
+// 问题不是值难看，而是**没有刻度** —— 下一个人只能再挑一个数字，
+// 13.5px / 18px 迟早出现，而「哪些地方该一样大」从此说不清。
+// 刻度定义在 theme.css 的 :root（那段注释解释了 lg/xl 为什么夹在正文之间）。
+// 判据两条：令牌清单必须写全；组件里不许再出现字面 font-size。
+console.log('')
+console.log('=== 字号刻度契约 ===')
+const FONT_SIZE_TOKENS = [
+  '--font-size-2xs',
+  '--font-size-xs',
+  '--font-size-sm',
+  '--font-size-md',
+  '--font-size-panel',
+  '--font-size-lg',
+  '--font-size-base',
+  '--font-size-xl',
+  '--font-size-display-sm',
+  '--font-size-display',
+  '--font-size-menu'
+]
+{
+  const rootVars = textThemes.get('light')?.vars ?? new Map()
+  const missing = FONT_SIZE_TOKENS.filter((t) => !rootVars.has(t))
+  check('theme.css 的 :root 写全了字号刻度', missing.length === 0, missing.join(', '))
+}
+
+let fontSizeLiterals = 0
+let fontSizeDecls = 0
+for (const file of walk(SRC)) {
+  if (!file.endsWith('.vue')) continue
+  const raw = readFileSync(file, 'utf8')
+  const src = stripComments(raw, true)
+  const rel = file.slice(SRC.length + 1).replace(/\\/g, '/')
+  const lines = src.split('\n')
+  const rawLines = raw.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    if (!/font-size\s*:/.test(lines[i])) continue
+    fontSizeDecls++
+    const m = lines[i].match(/font-size\s*:\s*([^;]+)/)
+    if (!m) continue
+    const value = m[1].trim()
+    // 正确写法是干净的一个令牌引用。注意**不能**用「值里有没有数字」判断：
+    // --font-size-2xs 这个名字本身就带数字（实测踩过，4 处正确写法被判红）
+    if (/^var\(--font-size-[\w-]+\)$/.test(value)) continue
+    if (!/\d/.test(value)) continue
+    if (/font-size-token-exempt/.test(rawLines[i] || '')) continue
+    fontSizeLiterals++
+    check(`${rel}:${i + 1} 字号走令牌`, false, `写了「${value}」，请用 var(--font-size-*)`)
+  }
+}
+check(
+  `扫到足够多的 font-size 声明（${fontSizeDecls} 条）`,
+  fontSizeDecls >= 60,
+  '只扫到极少声明 —— 是解析器坏了，不是代码干净'
+)
+if (fontSizeLiterals === 0) {
+  check('组件里没有字面字号（全部走 --font-size-* 刻度）', true)
+}
+
+// ============================================================================
+// 标题层级契约（2026-10-10）
+// ============================================================================
+//
+// 页面标题此前只有一个 <h1>（登录页），各管理页的面板标题是 <h2> 起步，
+// 而系统设置那八个面板标题干脆是 <div> —— 读屏用户按标题跳转时，
+// 既没有「当前在哪一页」，也拿不到「这一页有哪几块」。
+// 收口后的结构：h1（MainLayout 的 .sr-only 页面名）→ h2（面板）→ h3（子块）。
+console.log('')
+console.log('=== 标题层级契约 ===')
+{
+  const layoutSrc = stripComments(readFileSync(join(SRC, 'components/MainLayout.vue'), 'utf8'))
+  const h1Count = (layoutSrc.match(/<h1\b/g) || []).length
+  check('MainLayout 有且仅有一个 <h1>', h1Count === 1, `实测 ${h1Count} 个`)
+  check(
+    'MainLayout 的 <h1> 是视觉隐藏的（.sr-only）',
+    /<h1 class="sr-only"/.test(layoutSrc),
+    '页面名在视觉上已由侧栏与各页标题表达，h1 只承担文档结构'
+  )
+
+  const loginSrc = stripComments(readFileSync(join(SRC, 'views/LoginView.vue'), 'utf8'))
+  check('登录页有且仅有一个 <h1>（它不在 MainLayout 里）', (loginSrc.match(/<h1\b/g) || []).length === 1)
+
+  // 两条规则各出一条断言（而不是每个文件一条）：三十来个 .vue 会刷出六十行
+  // PASS，真正失败的那一行反而找不着 —— 违规文件列在 detail 里更清楚
+  const ownH1 = []
+  const fakeTitle = []
+  for (const file of walk(SRC)) {
+    if (!file.endsWith('.vue')) continue
+    const rel = file.slice(SRC.length + 1).replace(/\\/g, '/')
+    const src = stripComments(readFileSync(file, 'utf8'))
+    // 视图里不该再有 h1：MainLayout 已经提供，重复会让「当前在哪一页」出现两份
+    if (rel.startsWith('views/') && rel !== 'views/LoginView.vue' && /<h1\b/.test(src)) {
+      ownH1.push(rel)
+    }
+    // 标题语义不能用 <div> 冒充：这是 2026-10-10 修掉的那一类
+    if (/<div[^>]*class="[^"]*\bpanel-title\b/.test(src)) fakeTitle.push(rel)
+  }
+  check('各视图没有自己的 <h1>（由 MainLayout 统一提供）', ownH1.length === 0, ownH1.join(', '))
+  check('没有 <div class="panel-title"> 这类假标题', fakeTitle.length === 0, fakeTitle.join(', '))
+}
+
+// ============================================================
+// 模板里用到的组件必须真的被引入（2026-10-11 加）
+//
+// 为什么需要这条：组件在这个仓库里是**逐文件 import** 的（只有 main.ts 里
+// 那 20 来个 antd 组件是全局注册的），而 `vue-tsc` **不检查模板里的未知标签** ——
+// 漏一个 import 的表现是「控制台一条 Failed to resolve component 警告 +
+// 那一块渲染不出来（或只剩文字）」，而 type-check、契约检查、列宽守卫
+// 全都照过。这一批里就真的漏了两处（ChannelsView 的两枚批量图标、
+// ProxiesView 的 EmptyState），是代码审查抓出来的 —— 那就该有一条脚本管着。
+{
+  console.log('\n=== 模板组件的引入完整性 ===')
+  // main.ts 里 app.use(...) 注册过的组件（模板里写成 a-button 这类 kebab）。
+  // 用「大写开头的标签」做检查，所以这里列的是它们的 PascalCase 形式。
+  const globallyRegistered = new Set(
+    (readFileSync(join(SRC, 'main.ts'), 'utf8').match(/\bcomponents = \[([\s\S]*?)\]/)?.[1] || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  )
+  // Vue 内置 / 编译器关键字：它们不需要 import
+  const BUILTIN = new Set([
+    'Component', 'Transition', 'TransitionGroup', 'KeepAlive', 'Teleport',
+    'Suspense', 'Fragment', 'Slot', 'Template'
+  ])
+
+  const missing = []
+  for (const file of walk(SRC)) {
+    if (!file.endsWith('.vue')) continue
+    const rel = file.slice(SRC.length + 1).replace(/\\/g, '/')
+    const raw = readFileSync(file, 'utf8')
+    // 只在 <template> 段里找：<script> 里会有 h(Component) 这类调用
+    const tpl = raw.match(/<template>([\s\S]*)<\/template>/)?.[1]
+    if (!tpl) continue
+    // 注释里的示例代码不算（stripComments 会去掉 <!-- -->）
+    const clean = stripComments(tpl)
+    // script setup 里 import 进来的所有绑定名。
+    // 先 stripComments：import 列表里允许写注释（本仓库的惯例就是在那一行
+    // 说明「这枚图标是干什么的」），而朴素解析会把注释文字也当成标识符 ——
+    // 第一版就是这么错的：ChannelsView 明明 import 了 PlayCircleOutlined，
+    // 报出来却是「没引入」，一屏全是假阳性。
+    const script = stripComments(raw.match(/<script setup[^>]*>([\s\S]*?)<\/script>/)?.[1] || '')
+    const imported = new Set()
+    // 先抓 `import <clause> from '...'`：clause 可能是默认导入、命名导入、
+    // 或两者混写（`import X, { a } from`），所以整段交给下面再拆
+    for (const m of script.matchAll(/\bimport\s+([^'"]+?)\s+from\s*['"]/g)) {
+      const clause = m[1]
+      const dflt = clause.match(/^\s*([A-Za-z_$][\w$]*)/)
+      if (dflt) imported.add(dflt[1])
+      const named = clause.match(/\{([\s\S]*)\}/)
+      if (named) {
+        for (const part of named[1].split(',')) {
+          const name = part.trim().split(/\s+as\s+/).pop()?.trim()
+          if (name) imported.add(name)
+        }
+      }
+    }
+    // 模板里所有大写开头的标签
+    for (const m of clean.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g)) {
+      const tag = m[1]
+      if (imported.has(tag) || globallyRegistered.has(tag) || BUILTIN.has(tag)) continue
+      missing.push(rel + ' → <' + tag + '>')
+    }
+  }
+  check(
+    '模板里的大写标签都在本文件 import 过（或在 main.ts 全局注册）',
+    missing.length === 0,
+    [...new Set(missing)].join('；')
+  )
 }
 
 console.log('')

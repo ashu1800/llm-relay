@@ -2,7 +2,7 @@
 import { computed, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { LockOutlined } from '@ant-design/icons-vue'
-import { message } from 'ant-design-vue'
+import { message } from '@/utils/feedback'
 import { ApiError } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 
@@ -99,6 +99,7 @@ async function submit() {
           size="large"
           autocomplete="current-password"
           autofocus
+          aria-label="管理密钥"
           @pressEnter="submit"
         >
           <template #prefix>
@@ -130,13 +131,19 @@ async function submit() {
   width: 380px;
   max-width: 100%;
   background: var(--color-fg);
-  border-radius: 12px;
+  /* 与全站面板同一套几何：--radius-panel（8px）+ 1px 边框 + 投影。
+     原来是 12px 圆角、无边框 —— 登录页是首屏第一眼，它和进去之后的卡片
+     不是同一个圆角、同一套描边，观感上像两个站。2026-10-10 对齐。 */
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
   box-shadow: var(--color-fg-shadow);
   padding: 32px 28px 24px;
 }
 
-/* 品牌区与侧栏同款（见 MainLayout 的 .brand-mark）：
-   底色/文字色走 --brand-mark-* 令牌，深浅主题各自成对 */
+/* 品牌区与侧栏同款（见 MainLayout 的 .brand-mark / .brand-text）：
+   底色/文字色走 --brand-mark-* 令牌，圆角与字号字重也逐项对齐 ——
+   同一个「LR」标记在登录页与侧栏里必须是同一个形状，
+   原来这里是 8px 圆角方块、侧栏是胶囊（--radius-pill）。 */
 .login-brand {
   display: flex;
   align-items: center;
@@ -151,29 +158,30 @@ async function submit() {
   width: 32px;
   height: 32px;
   flex: 0 0 32px;
-  border-radius: 8px;
+  border-radius: var(--radius-pill);
   background: var(--brand-mark-bg);
   color: var(--brand-mark-fg);
-  font-size: 14px;
+  font-size: var(--font-size-md);
   font-weight: 700;
 }
 
 .brand-text {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--color-text);
+  font-family: var(--font-family-display);
+  font-size: var(--font-size-xl);
+  font-weight: 600;
+  color: var(--text-primary-ink);
 }
 
 .login-title {
   margin: 0 0 6px;
-  font-size: 20px;
+  font-size: var(--font-size-display-sm);
   font-weight: 700;
   color: var(--color-text);
 }
 
 .login-hint {
   margin: 0 0 var(--gap);
-  font-size: 13px;
+  font-size: var(--font-size-md);
   line-height: 1.6;
   color: var(--color-text-secondary);
 }
@@ -190,7 +198,7 @@ async function submit() {
 
 .login-foot {
   margin: 16px 0 0;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   line-height: 1.6;
   color: var(--color-text-secondary);
 }

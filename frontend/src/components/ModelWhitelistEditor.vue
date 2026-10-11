@@ -16,9 +16,11 @@ export interface WhitelistRow extends Partial<PriceConfig> {
 </script>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { message } from 'ant-design-vue'
-import { PlusOutlined, DeleteOutlined, SnippetsOutlined, DollarOutlined } from '@ant-design/icons-vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
+import { message } from '@/utils/feedback'
+import { PlusOutlined, DeleteOutlined, SnippetsOutlined, DollarOutlined, UndoOutlined } from '@ant-design/icons-vue'
+import { modalWidth } from '@/utils/modalWidth'
+import { useDirtyClose } from '@/composables/useDirtyClose'
 import ModelPricingEditor, { emptyPrice, hasPrice, priceSummary } from './ModelPricingEditor.vue'
 
 // 这是纯展示型编辑器：数据的保存方式由父组件决定 ——
@@ -64,11 +66,58 @@ function addRow() {
   update([...props.items, { public_name: '', upstream_name: '', enabled: true, ...emptyPrice() }])
 }
 
+/**
+ * 删掉一行 + 3 秒内可撤销（2026-10-11）。
+ *
+ * 为什么加撤销而不是加确认框：这一行的内容可能包含刚手工录入的一整组单价
+ * （输入/输出/缓存读/缓存写四个数字，还能带按时段倍率），删掉之后**没有任何
+ * 地方能找回** —— 只能凭记忆重填。而一个「确认删除」弹窗在这种连续录入的
+ * 场景里很快就变成无脑回车（用户会条件反射地按下确定），既不防错也打断节奏。
+ * 3 秒撤销的窗口足够覆盖「手滑点错」，又不会让错误一直挂在那里。
+ *
+ * 撤销恢复的是**整行快照**（含单价、时段倍率、代理），并且按原下标插回 ——
+ * 白名单的顺序就是列表顺序，用户按那个顺序读它。
+ */
 function removeRow(index: number) {
+  const removed = props.items[index]
+  if (!removed) return
   const next = [...props.items]
   next.splice(index, 1)
   update(next)
+  // 同一时刻只留一个撤销入口：连删两行时，第一行的撤销很快就会被第二行顶掉，
+  // 这是有意的 —— 保留一摞撤销栈会让「撤销」这个按钮的语义变得不确定
+  undoRow.value = { index, row: removed }
+  if (undoTimer) window.clearTimeout(undoTimer)
+  undoTimer = window.setTimeout(() => {
+    undoRow.value = null
+    undoTimer = 0
+  }, UNDO_MS)
 }
+
+/** 撤销入口的显示状态；null = 当前没有可撤销的删除 */
+const undoRow = ref<{ index: number; row: WhitelistRow } | null>(null)
+let undoTimer = 0
+const UNDO_MS = 3000
+
+function undoRemove() {
+  const u = undoRow.value
+  if (!u) return
+  const next = [...props.items]
+  // 原下标可能已经越界（期间又删了几行），夹回合法范围而不是丢弃
+  next.splice(Math.min(u.index, next.length), 0, u.row)
+  update(next)
+  undoRow.value = null
+  if (undoTimer) {
+    window.clearTimeout(undoTimer)
+    undoTimer = 0
+  }
+}
+
+// 组件卸载时清掉定时器：它回调里会写 undoRow，卸载后写一个已经没人看的 ref
+// 不会报错，但留着定时器没有意义
+onBeforeUnmount(() => {
+  if (undoTimer) window.clearTimeout(undoTimer)
+})
 
 function setField(index: number, field: 'public_name' | 'upstream_name', value: string) {
   const next = props.items.map((row, i) => (i === index ? { ...row, [field]: value } : row))
@@ -101,6 +150,21 @@ function toggleRow(index: number, value: boolean) {
 // 批量粘贴：一行一个模型，支持「对外名」或「对外名=上游名」，
 // 也接受逗号分隔。重复的对外名直接跳过并告知条数 ——
 // 中转站抄上游模型清单时动辄几十行，逐条录入不现实。
+// 防误关：批量粘贴框里可能已经贴了几十行模型清单，误触遮罩丢掉同样心疼
+const bulkDirty = useDirtyClose({
+  open: bulkOpen,
+  snapshot: () => bulkText.value,
+  onDiscard: () => {
+    bulkText.value = ''
+  }
+})
+
+function openBulk() {
+  bulkText.value = ''
+  bulkOpen.value = true
+  bulkDirty.markClean()
+}
+
 function applyBulk() {
   const lines = bulkText.value
     .split(/[\n,，;；]/)
@@ -216,10 +280,17 @@ function applyBulk() {
     </div>
     <div class="wl-actions">
       <a-button size="small" @click="addRow"><PlusOutlined /> 添加一行</a-button>
-      <a-button size="small" @click="bulkOpen = true"><SnippetsOutlined /> 批量粘贴</a-button>
+      <a-button size="small" @click="openBulk"><SnippetsOutlined /> 批量粘贴</a-button>
       <!-- 条数常驻显示：批量粘贴会一次加几十条，只靠一闪而过的提示
            没法确认到底进来了几条 -->
       <span v-if="items.length" class="wl-count">共 {{ items.length }} 条</span>
+      <!-- 撤销入口（2026-10-11）：3 秒窗口，就地出现在动作按钮旁边 ——
+           删除按钮在表格行的最右侧，撤销入口跟在同一块区域，
+           手不需要在屏幕上跳。role=status 让读屏也听得到「刚删了一条」 -->
+      <button v-if="undoRow" type="button" class="wl-undo" @click="undoRemove">
+        <UndoOutlined aria-hidden="true" />
+        已删除「{{ undoRow.row.public_name || '未命名' }}」，撤销
+      </button>
     </div>
 
     <ModelPricingEditor
@@ -230,7 +301,7 @@ function applyBulk() {
       @save="savePrice"
     />
 
-    <a-modal v-model:open="bulkOpen" title="批量粘贴模型清单" :width="'min(560px, 94vw)'" centered @ok="applyBulk">
+    <a-modal v-model:open="bulkOpen" title="批量粘贴模型清单" :width="modalWidth(560)" centered :mask-closable="false" @cancel="bulkDirty.guardCancel" @ok="applyBulk">
       <div class="field-hint" style="margin-bottom: 8px">
         一行一个模型。只写模型名表示「上游同名」；用 <code>对外名=上游名</code> 可以做映射。
         重复的对外名会自动跳过。
@@ -276,10 +347,31 @@ function applyBulk() {
   padding-right: 4px;
 }
 
-.wl-head {
-  padding-bottom: 6px;
+/* 撤销入口：与「添加一行」那一排同高，但走警示色（--text-amber）——
+   它是一个**限时的**动作，颜色让人在它还亮着的时候多看一眼。
+   border-bottom 下划线而不是整块底色：这一条不该抢走表格的注意力。 */
+.wl-undo {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 2px 6px;
+  border: none;
+  border-bottom: 1px dashed var(--text-amber);
+  background: none;
+  color: var(--text-amber);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  cursor: var(--cursor-hand);
+}
+
+.wl-undo:hover {
+  opacity: 0.8;
+}
+
+.wl-head {  padding-bottom: 6px;
   border-bottom: 1px solid var(--color-border);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
 }
 
@@ -322,7 +414,7 @@ function applyBulk() {
   /* 13% 主色底上主色文字只有 2.89:1；ink 版 5.17:1 */
   color: var(--text-primary-ink);
   font-family: var(--font-family-mono);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   cursor: var(--cursor-hand);
 }
 .price-pill:hover { background: color-mix(in oklab, var(--color-primary) 22%, transparent); }
@@ -363,11 +455,11 @@ function applyBulk() {
   border: 1px dashed var(--color-border);
   border-radius: var(--radius-control);
   color: var(--color-text-secondary);
-  font-size: 13px;
+  font-size: var(--font-size-md);
   line-height: 1.6;
 }
 .wl-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
 /* 条数靠右：操作按钮在左、计数在右，视线不用来回跳 */
-.wl-count { margin-left: auto; font-size: 12px; color: var(--color-text-secondary); }
-.field-hint { font-size: 12px; color: var(--color-text-secondary); }
+.wl-count { margin-left: auto; font-size: var(--font-size-sm); color: var(--color-text-secondary); }
+.field-hint { font-size: var(--font-size-sm); color: var(--color-text-secondary); }
 </style>

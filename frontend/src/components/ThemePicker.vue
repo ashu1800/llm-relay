@@ -108,7 +108,7 @@ function onPick(t: ThemeDef, e: MouseEvent) {
 /* 分组标题：浅色 / 深色。它只是视觉分组，读屏靠每张卡的 radio 名字，
    所以标记 aria-hidden，免得读屏把「浅色」当成一个可选项念出来。 */
 .theme-group-label {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   font-weight: 600;
   letter-spacing: 0.08em;
   color: var(--color-text-secondary);
@@ -122,12 +122,16 @@ function onPick(t: ThemeDef, e: MouseEvent) {
 .theme-picker:not(.is-dense) .theme-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
-@media (max-width: 900px) {
+/* 退列断点走 theme.css 的刻度（640 / 768），原为 900 / 600 ——
+   900 在刻度里只属于「侧栏自动折叠」那一个功能断点（MainLayout 的 JS 常量），
+   面板内的栅格不该跟着它走。2026-10-10 收口，由 check-contracts.mjs 的
+   「响应式断点契约」钉住（@media 的 max-width 必须是刻度上的值）。 */
+@media (max-width: 768px) {
   .theme-picker:not(.is-dense) .theme-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
-@media (max-width: 600px) {
+@media (max-width: 640px) {
   .theme-grid,
   .theme-picker:not(.is-dense) .theme-grid {
     grid-template-columns: 1fr;
@@ -210,7 +214,7 @@ function onPick(t: ThemeDef, e: MouseEvent) {
   display: flex;
   align-items: center;
   gap: 5px;
-  font-size: 13px;
+  font-size: var(--font-size-md);
   font-weight: 600;
   color: var(--color-text);
 }
@@ -223,7 +227,7 @@ function onPick(t: ThemeDef, e: MouseEvent) {
    本来就挨得近，两者互压必然不够。不填底色时它落在 --color-bg 上（4.89:1 起），
    而那对组合已经在对比度脚本的断言表里。 */
 .theme-badge {
-  font-size: 10px;
+  font-size: var(--font-size-2xs);
   font-weight: 500;
   line-height: 1;
   padding: 2px 5px;
@@ -236,12 +240,12 @@ function onPick(t: ThemeDef, e: MouseEvent) {
   color: var(--text-primary-ink);
 }
 .theme-upstream {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   line-height: 1.4;
   color: var(--color-text-secondary);
 }
 .theme-desc {
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   line-height: 1.6;
   color: var(--color-text-secondary);
 }
@@ -249,7 +253,7 @@ function onPick(t: ThemeDef, e: MouseEvent) {
   margin-top: 10px;
   padding-top: 8px;
   border-top: 1px solid var(--color-border);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
 }
 .theme-current {

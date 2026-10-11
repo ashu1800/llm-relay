@@ -17,63 +17,11 @@
 //
 // 用法：node scripts/check-theme-contrast.mjs [--verbose]
 import { FAMILY_TOKENS, parseRegistry, parseThemes } from './lib/theme-css.mjs'
+// 颜色解析与 WCAG 计算与 check-contracts.mjs 共用一份实现（lib/color.mjs）：
+// 两处各写一份的后果不是报错，而是 alpha 合成之类的细节慢慢分叉
+import { contrast, over, parseColor } from './lib/color.mjs'
 
 const VERBOSE = process.argv.includes('--verbose')
-
-// ---- 颜色解析与 WCAG 计算 ----
-
-/** 解析 #rgb / #rrggbb / #rrggbbaa / rgb() / rgba()；解析不了返回 null。 */
-function parseColor(input) {
-  if (!input) return null
-  const s = input.trim()
-  const hex = s.match(/^#([0-9a-fA-F]{3,8})$/)
-  if (hex) {
-    let h = hex[1]
-    if (h.length === 3) h = h.split('').map((c) => c + c).join('')
-    if (h.length !== 6 && h.length !== 8) return null
-    return {
-      r: parseInt(h.slice(0, 2), 16),
-      g: parseInt(h.slice(2, 4), 16),
-      b: parseInt(h.slice(4, 6), 16),
-      a: h.length === 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1
-    }
-  }
-  const fn = s.match(/^rgba?\(([^)]+)\)$/)
-  if (fn) {
-    const parts = fn[1].split(/[,\s/]+/).filter(Boolean).map(Number)
-    if (parts.length < 3 || parts.some((n) => Number.isNaN(n))) return null
-    return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 }
-  }
-  return null
-}
-
-/** WCAG 相对亮度 */
-function luminance({ r, g, b }) {
-  const f = (v) => {
-    const c = v / 255
-    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
-  }
-  return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
-}
-
-/** 合成：alpha 前景压在实色底上 */
-function over(fg, bg) {
-  const a = fg.a
-  return {
-    r: Math.round(fg.r * a + bg.r * (1 - a)),
-    g: Math.round(fg.g * a + bg.g * (1 - a)),
-    b: Math.round(fg.b * a + bg.b * (1 - a)),
-    a: 1
-  }
-}
-
-function contrast(fg, bg) {
-  const l1 = luminance(fg)
-  const l2 = luminance(bg)
-  const hi = Math.max(l1, l2)
-  const lo = Math.min(l1, l2)
-  return (hi + 0.05) / (lo + 0.05)
-}
 
 /** 主色 20% 透明压在页面底上 —— 侧栏菜单选中态的背景（见 --color-primary-a20） */
 function primaryA20(primary, bg) {

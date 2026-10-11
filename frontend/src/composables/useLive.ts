@@ -23,6 +23,106 @@ const STALE_MS = 45000
 /** 连接状态：界面上用它显示「实时/已断开」，断线时数字不再跳动是正常现象 */
 export const liveConnected = ref(false)
 
+/**
+ * 最后一次收到**任何一帧**的时刻（含心跳），0 = 本次会话还没收到过。
+ *
+ * 它只用来回答「这条连接还活着吗」，**不要**拿它当「数据有多新」：
+ * 服务端 25 秒发一次空心跳（见 docs/development.md 的「实时推送」一节），
+ * 所以闲时这个值也会每 25 秒推进一次 —— 把它的年龄显示成「N 秒前更新」
+ * 会让用户以为数据刚刚刷新过，而实际上一帧数据都没变。
+ */
+export const liveLastMessageAt = ref(0)
+
+/**
+ * 连接状态的判定：'live'（正常）/ 'stale'（连着但很久没有数据）/ 'offline'（断了）。
+ *
+ * 抽成纯函数是为了能测 —— 阈值是这里唯一容易写错的东西：
+ *   · 必须 > 25s（服务端心跳间隔）。取 20s 会让一条**完全健康**的连接在两次
+ *     心跳之间反复闪成「无数据」—— 闲时每次心跳前后都闪一次，比不显示更糟；
+ *   · 必须 < 45s（STALE_MS，看门狗判死的时刻）。取更大就永远看不到这一档 ——
+ *     看门狗先把它变成 offline 了。
+ * 取 35s：健康连接永远到不了，而真的收不到数据时，用户会在被判死之前
+ * 先看到 10 秒的「无数据」预警。
+ */
+export const STALE_HINT_MS = 35000
+
+export type LiveState = 'live' | 'stale' | 'offline'
+
+export function liveStateOf(connected: boolean, lastMessageAt: number, now: number): LiveState {
+  if (!connected) return 'offline'
+  // 刚连上、还没收到任何一帧：正常状态（心跳最多 25 秒后到），不当作异常。
+  // 真的一帧都收不到时，45 秒的看门狗会把它变成 offline，这一档不会长期停留。
+  if (lastMessageAt === 0) return 'live'
+  return now - lastMessageAt > STALE_HINT_MS ? 'stale' : 'live'
+}
+
+/**
+ * 手动重连（界面上的「重试」按钮）。
+ *
+ * 为什么需要它：断线重连走指数退避（1s→15s，见 scheduleReconnect），
+ * 最坏要等 15 秒；而用户点「重试」的意思就是「现在，别等」。
+ *
+ * 已经连着时不重建连接 —— 一次误点掐掉一条健康连接会白丢一帧推送。
+ * 唯一的例外是「看着开着、其实早已收不到数据」的半开连接：这时 close 掉、
+ * 让 onclose 里的重连逻辑接手（休眠唤醒、NAT 超时都会留下这种连接）。
+ */
+export function reconnect(): void {
+  if (reconnectTimer !== null) {
+    window.clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  retry = 0
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    const stale =
+      liveLastMessageAt.value !== 0 && Date.now() - liveLastMessageAt.value > STALE_MS
+    if (!stale) return
+    socket.close()
+    return
+  }
+  connect()
+}
+
+/**
+ * 回到前台 / 网络恢复时立刻抢救连接。
+ *
+ * 为什么光有看门狗不够：后台标签页里浏览器的定时器会被节流（实测可到分钟级），
+ * 45 秒的看门狗因此不按时跑 —— 用户切回来时，界面可能还停在「已连接」上，
+ * 而那条连接其实早就死了。visibilitychange / online 是浏览器一定会派发的，
+ * 用它把「回前台」这件事直接变成一次重连判断。
+ *
+ * 监听只在第一次建连时挂一次（模块级共享一条连接，挂多了会重复触发）。
+ */
+let recoveryBound = false
+
+function ensureRecoveryListeners() {
+  if (recoveryBound || typeof window === 'undefined') return
+  recoveryBound = true
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') recoverNow()
+  })
+  window.addEventListener('online', () => recoverNow())
+}
+
+function recoverNow() {
+  // 没人订阅时不建连接：与 onclose 里的判断同一口径
+  if (handlers.size === 0) return
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    // 连接自称开着，但可能已经被节流的看门狗漏判了 —— 用「多久没收到帧」直接判
+    if (liveLastMessageAt.value !== 0 && Date.now() - liveLastMessageAt.value > STALE_MS) {
+      socket.close()
+    }
+    return
+  }
+  if (socket && socket.readyState === WebSocket.CONNECTING) return
+  // 有排着的重连就不必再等退避：用户刚把页面拉回前台，立刻试
+  if (reconnectTimer !== null) {
+    window.clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  retry = 0
+  connect()
+}
+
 function socketURL() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
   return proto + '//' + location.host + '/api/admin/live'
@@ -77,6 +177,8 @@ function connect() {
   ) {
     return
   }
+  // 第一次建连时挂上「回前台 / 网络恢复」的抢救监听（只挂一次）
+  ensureRecoveryListeners()
   let ws: WebSocket
   try {
     ws = new WebSocket(socketURL())
@@ -92,7 +194,11 @@ function connect() {
   }
   ws.onmessage = (ev) => {
     // 收到任何一帧都说明链路还活着
-    if (socket === ws) armWatchdog()
+    if (socket === ws) {
+      armWatchdog()
+      // 连接状态胶囊靠它判断「多久没收到帧了」
+      liveLastMessageAt.value = Date.now()
+    }
     try {
       dispatch(JSON.parse(ev.data))
     } catch {

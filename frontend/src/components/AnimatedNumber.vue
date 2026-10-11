@@ -82,9 +82,20 @@ function compactText(v: number) {
 
 watch(
   () => props.value,
-  (to) => {
+  (to, prev) => {
     if (to === null || to === undefined) {
       cancelAnimationFrame(raf)
+      return
+    }
+    // 上一帧还是空值（首屏加载完成、或后端短暂缺字段）：**直接落值，不补间**。
+    //
+    // 2026-10-11 加。原来这里无条件从 shown 补间，而 shown 的初值是 0 ——
+    // 于是金额卡在首屏会从 ¥0.0000 滚到真值。那不是「数值变化」，是「数据刚到」；
+    // 滚一遍会让人以为钱是从 0 开始涨的（而且它是全站幅度最大的动效之一）。
+    // 只有「已经显示过真实数值、又变了」才值得滚动。
+    if (prev === null || prev === undefined) {
+      cancelAnimationFrame(raf)
+      shown.value = to
       return
     }
     const from = shown.value

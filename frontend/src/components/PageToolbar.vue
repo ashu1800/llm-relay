@@ -44,7 +44,7 @@ defineProps<{ label?: string }>()
 }
 
 .toolbar-label {
-  font-size: 13px;
+  font-size: var(--font-size-md);
   color: var(--color-text-secondary);
 }
 

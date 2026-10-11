@@ -11,7 +11,9 @@ import { computed, onMounted, ref } from 'vue'
 import { api } from '@/api/client'
 import AnimatedNumber from '@/components/AnimatedNumber.vue'
 import { currencyKeys, moneyText } from '@/utils/money'
+import { modalWidth } from '@/utils/modalWidth'
 import { burstConfetti } from '@/utils/celebrate'
+import { message } from '@/utils/feedback'
 
 type Report = {
   day: string
@@ -61,9 +63,9 @@ function checkMilestone(lifetime: number) {
   }
   burstConfetti()
   setTimeout(() => {
-    import('ant-design-vue').then(({ message }) => {
-      message.success(`累计请求突破 ${reached.toLocaleString()} 次！🎉`)
-    })
+    // 走 utils/feedback 的主题实例（原来这里动态 import antd 的静态 message，
+    // 深色主题下是一条白色气泡 —— 见 feedback.ts 的说明）
+    message.success(`累计请求突破 ${reached.toLocaleString()} 次！🎉`)
   }, 600)
 }
 
@@ -74,7 +76,16 @@ onMounted(async () => {
     // 存储不可用就每次都弹：多看一眼战报不是坏事
   }
   try {
-    report.value = await api.get<Report>('/stats/daily-report')
+    const res = await api.get<Partial<Report>>('/stats/daily-report')
+    // 形状不对就当「拉不到」：战报是彩蛋，它没有资格让看板整页变成错误面板。
+    // 后端版本不匹配、代理返回半截 JSON、将来字段改名都会走到这里 ——
+    // 而模板里有 report.summary.requests 这种直接取值，缺字段就是渲染期抛异常。
+    //
+    // 2026-10-11 补：这一条是错误边界落地时暴露出来的。在此之前这种情况会
+    // 静默地把整棵组件树卸载掉（页面全白），比「不弹战报」严重得多；
+    // 而这个组件自己的契约恰恰是「拉不到就完全安静」（见文件头）。
+    if (!res || !res.summary || typeof res.summary.requests !== 'number') return
+    report.value = res as Report
     open.value = true
     if ((report.value.lifetime_requests ?? 0) > 0) {
       checkMilestone(report.value.lifetime_requests!)
@@ -96,8 +107,11 @@ const dayLabel = computed(() => {
   return d.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' })
 })
 
+// costs 也走可选链：形状守卫只保证 summary.requests 是数字，不保证 costs 在场
+// （老版本后端 / 半截响应）。currencyKeys 本身接受 undefined，这里只是别在
+// 取 summary 时先炸掉。
 const currencies = computed(() =>
-  report.value ? currencyKeys(report.value.summary.costs) : []
+  report.value ? currencyKeys(report.value.summary?.costs) : []
 )
 
 const rate = computed(() =>
@@ -129,7 +143,7 @@ const priciestLines = computed(() => {
 <template>
   <a-modal
     v-model:open="open"
-    :width="'min(420px, 92vw)'"
+    :width="modalWidth(420)"
     centered
     :footer="null"
     class="report-modal"
@@ -187,13 +201,13 @@ const priciestLines = computed(() => {
   padding: 6px 4px 2px;
 }
 .report-eyebrow {
-  font-size: 13px;
+  font-size: var(--font-size-md);
   letter-spacing: 0.35em;
   text-indent: 0.35em; /* 让字距在视觉上居中 */
   color: var(--text-primary-ink);
 }
 .report-day {
-  font-size: 22px;
+  font-size: var(--font-size-display);
   font-weight: 700;
   margin: 6px 0 18px;
 }
@@ -204,19 +218,19 @@ const priciestLines = computed(() => {
   margin-bottom: 16px;
 }
 .report-num {
-  font-size: 26px;
+  font-size: var(--font-size-display);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   color: var(--text-primary-ink);
 }
 .report-cap {
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
   margin-top: 2px;
 }
 .report-line {
   text-align: left;
-  font-size: 14px;
+  font-size: var(--font-size-panel);
   color: var(--color-text-secondary);
   padding: 7px 2px;
   border-top: 1px solid var(--color-border);
@@ -243,7 +257,7 @@ const priciestLines = computed(() => {
   border-radius: var(--radius-control);
   background: var(--solid-primary-bg);
   color: var(--solid-primary-fg);
-  font-size: 14px;
+  font-size: var(--font-size-panel);
   font-weight: 600;
   cursor: pointer;
 }

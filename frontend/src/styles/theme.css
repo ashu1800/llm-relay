@@ -208,19 +208,24 @@
   --radius-control: 6px;
   --radius-pill: 999px;
 
-  /* ---- 响应式断点基准（2026-09-27 收口）----
+  /* ---- 响应式断点基准（2026-09-27 收口，2026-10-10 补齐）----
      CSS 自定义属性不能用在 @media 条件里，断点无法做成变量，
      这里以文档形式钉一份刻度，各组件的 media query 向它对齐：
 
        640px   手机（紧凑边距、44px 图标侧栏 …… MainLayout）
-       768px   平板竖屏（概览卡退一列 …… DashboardView）
+       768px   平板竖屏（概览卡退一列 …… DashboardView；系统设置的两处栅格、
+               主题选择器 2026-10-10 从 900 收到这一档）
        1024px  预留（当前无使用方）
        1200px  小笔记本（概览卡退两列 …… DashboardView）
        1536px  预留（当前无使用方）
 
      一个刻意的例外：侧栏自动折叠在 900px（MainLayout 的 NARROW 常量），
-     不在刻度上 —— 那是功能断点：内容区的表格在 900 以下连两列都摆不下，
-     提前折叠换来的空间比刻度整齐更重要。改断点时先读这条再动手。 */
+     不在刻度上 —— 那是**功能**断点：内容区的表格在 900 以下连两列都摆不下，
+     提前折叠换来的空间比刻度整齐更重要。它是 JS 常量、不是 @media，
+     所以刻度管不到它，也不该被它带偏（2026-10-10 之前 SettingsView 与
+     ThemePicker 的 @media 就是跟着这个 900 走的，现已收回刻度）。
+     改断点时先读这条再动手；check-contracts.mjs 的「响应式断点契约」会断言
+     所有 @media (max-width: N) 的 N 都在这张表里。 */
 
   /* ---- 字体 ---- */
   /* 界面正文：现代无衬线中文。
@@ -277,8 +282,34 @@
   --font-family-list: 'Harding', Cambria, 'Book Antiqua', 'Palatino Linotype', Georgia,
     'Times New Roman', var(--font-family-base);
 
-  --font-size-base: 16px;
+  /* ---- 字号刻度（2026-10-10 收口）----
+     收口前：组件里散着 117 处字面量（10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 /
+     20 / 22 / 24 / 26px），其中 12px 一档就有 63 处。问题不是「值难看」，
+     而是**没有刻度**：下一个要写字号的人只能再挑一个数字，13.5px、18px
+     迟早会出现，而「哪些地方该一样大」从此说不清。
+
+     刻度本身按实际用途分三组，命名说的是**用途**不是绝对值：
+
+       说明与角标  2xs 10 / xs 11 / sm 12 / md 13
+       正文档      panel 14 / base 16（body 与面板正文）
+       展示档      lg 15 / xl 17 / display-sm 20 / display 24
+
+     lg(15) 与 xl(17) 夹在正文之间是有意的：15 用于空态标题与图标字形
+     （图标靠 font-size 定尺寸），17 是侧栏品牌名 —— 这两个值各有实测依据
+     （见字体段与 MainLayout），不该为了「刻度好看」把它们并进 14/16。
+     两处 22px / 26px（昨日战报的大数字）已并入 display(24)：差 2px 肉眼
+     分不出，而多两个只服务一个组件的令牌只会让刻度变糊。
+     组件里**不许**再写字面字号：check-contracts.mjs 的「字号刻度契约」会拦。 */
+  --font-size-2xs: 10px;
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-md: 13px;
   --font-size-panel: 14px;
+  --font-size-lg: 15px;
+  --font-size-base: 16px;
+  --font-size-xl: 17px;
+  --font-size-display-sm: 20px;
+  --font-size-display: 24px;
   --font-size-menu: 14.4px;
   --line-height-panel: 16.1px;
 
@@ -1206,7 +1237,7 @@ body {
 
 /* ---- 区块标题 ---- */
 .section-title {
-  font-size: 16px;
+  font-size: var(--font-size-base);
   font-weight: 700;
   /* 用 --text-primary-ink 而不是 --color-primary：
      后者在白底上只有 3.32:1、深色底上 3.66:1，都不满足 AA 的 4.5:1。
@@ -1225,6 +1256,19 @@ body {
   display: flex;
   align-items: center;
   gap: var(--gap);
+}
+
+/* ---- 管理表工具栏里的搜索框（2026-10-11）----
+   放在全局而不是各页的 scoped 样式里：四张管理表（渠道 / 密钥 / 分组 / 代理）
+   各有一份 .manage-toolbar，而搜索框的宽度必须**四处一致** ——
+   它是同一类控件，宽度不同会让人以为它们的行为也不同。
+   200px 是按最长的高频查询（「渠道甲 1.2.3.4」这类跨词搜索）定的：
+   再窄会把输入内容截断，再宽则会把右侧的「共 N 个」挤出工具栏
+   （那一条在窄窗口下先换行，工具栏因此变高、表格被推下去）。
+   max-width 兜住 641–900px 的图标栏形态：那里可视宽度只剩 400 出头。 */
+.toolbar-search {
+  width: 200px;
+  max-width: 40vw;
 }
 
 ::-webkit-scrollbar { width: var(--scrollbar-width); height: var(--scrollbar-width); }
@@ -1293,7 +1337,9 @@ a:hover { opacity: 0.85; }
   height: 28px !important;
   padding: 0 !important;
   color: var(--color-text-secondary);
-  font-size: 15px;
+  /* 图标字形靠 font-size 定尺寸（这里 15px 对应 15px 的字形），
+     与空态标题共用 lg 档 —— 见字号刻度那段说明 */
+  font-size: var(--font-size-lg);
 }
 .table-icon-btn.ant-btn:hover {
   color: var(--text-primary-ink) !important;
@@ -1490,6 +1536,38 @@ a:hover { opacity: 0.85; }
   outline: var(--focus-ring) !important;
   outline-offset: var(--focus-ring-offset) !important;
   box-shadow: var(--focus-ring-halo-shadow) !important;
+}
+
+/* ---- 视觉隐藏但保留在无障碍树上（.sr-only）----
+   2026-10-10 随读屏播报（看板的 aria-live 摘要）一起立。
+   与上面那条相反：这是给**只有读屏需要**的内容用的（实时更新的数值摘要）。
+
+   三个属性缺一不可，各自对应一个踩过的坑：
+     position:absolute + 1px 盒子 —— 不占布局，不影响任何几何（看板是
+       meta.fill 弹性链，任何多出来的高度都会挤到日志面板）；
+     clip-path:inset(50%) —— 比 clip:rect 更现代、不产生废弃警告；
+     white-space:nowrap —— 否则这段文字会在 1px 宽里逐字换行，
+       某些读屏会把它念成一串单字。 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 跳过导航的落点：整块内容区被程序化聚焦时不画焦点环。
+   环会绕着一整屏内容的边缘画一圈，看起来像页面出错了 —— 而用户
+   此刻需要的反馈是「视野已经跳到内容区」，不是「这里有个可交互元素」。
+   !important 是必需的：上面那条全站 :focus-visible 规则用的是 !important。 */
+#main-content:focus,
+#main-content:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
 }
 
 /* ---- 焦点在「零尺寸 / 透明」控件上时，环要画到它的可见容器上 ----

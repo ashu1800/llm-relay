@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { message, Modal } from 'ant-design-vue'
+import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { message, modal } from '@/utils/feedback'
 import Sortable from 'sortablejs'
 import {
   PlusOutlined,
@@ -12,14 +12,24 @@ import {
   CloudDownloadOutlined,
   HolderOutlined,
   WarningOutlined,
-  InfoCircleOutlined
+  InfoCircleOutlined,
+  SearchOutlined,
+  LockOutlined,
+  // 批量启停那两枚（2026-10-11）：图标是逐文件引入的，没有全局注册 ——
+  // 漏了 import 的表现是「控制台一条 Failed to resolve component 警告 +
+  // 按钮上只剩文字」，而 vue-tsc 与几个守卫脚本都抓不到它
+  PlayCircleOutlined,
+  StopOutlined
 } from '@ant-design/icons-vue'
 // FormInstance 用于「提交前先校验、失败时聚焦并滚动到第一个出错字段」
 import type { FormInstance, Rule } from 'ant-design-vue/es/form'
 import { api } from '@/api/client'
 import { onLive } from '@/composables/useLive'
 import { useFormValidate } from '@/composables/useFormValidate'
+import { useDirtyClose } from '@/composables/useDirtyClose'
+import { modalWidth } from '@/utils/modalWidth'
 import DataState from '@/components/DataState.vue'
+import EmptyState from '@/components/EmptyState.vue'
 import ModelWhitelistEditor, { type WhitelistRow } from '@/components/ModelWhitelistEditor.vue'
 // Proxy 只用于代理下拉的选项类型
 import type { Proxy } from '@/api/types'
@@ -31,6 +41,13 @@ import { symbolOf } from '@/utils/money'
 import { fmtTime, pad2 } from '@/utils/fmtTime'
 import { emptyPrice, pickPrice } from '@/components/ModelPricingEditor.vue'
 import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
+// 本地搜索 + 客户端分页（四张管理表共用，判据在 components/tableTools.ts 有单测）
+import { useTableTools } from '@/composables/useTableTools'
+// 批量启停（与密钥页共用：顺序执行、失败不中断、汇报失败名单）
+import { useBatchToggle } from '@/composables/useBatchToggle'
+// 行级操作（删除 / 启停）之后把焦点还给同一行的同一个按钮：整表重拉会销毁
+// 触发按钮，焦点否则掉回 body（见 utils/focusRow 的说明）
+import { focusRowAction } from '@/utils/focusRow'
 
 // 记账币种：新增渠道默认人民币 —— 现在接的上游都按人民币开账单。
 // 数据列的默认值是美元（加列之前的历史行本就是美元口径），两者不一致是刻意的：
@@ -102,6 +119,98 @@ const visibleRows = computed(() => {
       (a.weight ?? 0) - (b.weight ?? 0) ||
       a.id - b.id
   )
+})
+
+// 本地搜索 + 客户端分页（2026-10-11）：接口一次返回全量渠道，几十上百个之后
+// 「按名字找那条链」只能靠眼睛扫。搜索叠在分组筛选**之后**（见下面的 filteredRows），
+// 两个条件同时生效。
+//
+// searchText 覆盖这一页能看到的全部文本：名称、模型（白名单里的模型名 ——
+// 「哪个渠道能用 glm」是最常问的）、分组名（按 id 查回来）、代理名。
+// 分组/代理名是查出来的，所以这里调那几个现成的查表函数，不留第二份状态。
+const {
+  q,
+  rows: pagedRows,
+  pagination,
+  total: matchCount,
+  filtered: filteredRows,
+  isSplit: viewSplit
+} = useTableTools(visibleRows, {
+  storageKey: 'channels-page-size',
+  searchText: (r) =>
+    [r.name, (r.models || []).join(' '), groupOf(r.group_id)?.name || '', proxyName(r.proxy_id)]
+      .filter(Boolean)
+      .join(' ')
+})
+
+// 搜索或分页把视图切开了 → 不许拖拽/键盘调序（理由见模板里那一列上方的注释）。
+// 用 isSplit 而不是自己拼「有搜索词 || 有多页」：这条判断关系到数据完整性，
+// 只能有一个出处。
+const dragDisabled = computed(() => viewSplit.value)
+
+// 批量启停（2026-10-11）：作用在**当前筛选结果**上，而不是勾选框 ——
+// 理由（尤其是宽度那一条）见 composables/useBatchToggle.ts 的文件头。
+//
+// `filtered` 而不是 `pagedRows`：作用范围是「当前筛选下的全部」，不是「这一页」。
+// 分页只是显示的切分，用户说「停掉这批」指的是搜出来的这一批。
+const batch = useBatchToggle<ChannelRow>({
+  noun: '渠道',
+  label: (r) => r.name,
+  setEnabled: async (r, enabled) => {
+    // 单条接口原样复用：批量不是一条新的写路径，只是把同一件事做很多次
+    await api.put('/channels/' + r.id, { enabled })
+  },
+  reload: load
+})
+
+/** 当前筛选结果的文字描述：批量确认框里要重复一遍，避免「以为在改一批、其实在改全部」 */
+const batchScopeText = computed(() => {
+  const parts: string[] = []
+  if (q.value.trim()) parts.push('搜索「' + q.value.trim() + '」')
+  if (groupFilter.value !== ALL_GROUPS) {
+    parts.push('分组「' + (groups.value.find((g) => String(g.id) === groupFilter.value)?.name ?? groupFilter.value) + '」')
+  }
+  return parts.length ? parts.join(' + ') : '全部分组、无搜索条件'
+})
+
+/** 停用是不可逆的高影响动作（正在用的客户端会立刻失败），所以先确认一次 */
+function confirmBatchDisable() {
+  const n = filteredRows.value.length
+  if (!n) return
+  // 确认框里报的是**真正会改动的条数**，不是筛选结果的总数：
+  // 结果里混着已停用的行是常态，报错了用户会以为提示在骗他（见 useBatchToggle.needChange）
+  const willChange = batch.needChange(filteredRows.value, false).length
+  const already = n - willChange
+  if (willChange === 0) {
+    message.info('这 ' + n + ' 个渠道已经是停用状态，无需改动')
+    return
+  }
+  modal.confirm({
+    centered: true,
+    title: '批量停用 ' + willChange + ' 个渠道？',
+    content:
+      '作用范围：' + batchScopeText.value + '。' +
+      (already > 0 ? '其中 ' + already + ' 个本来就是停用状态，会被跳过。' : '') +
+      '停用后这些渠道立即不再承接请求，正在使用它们的客户端会改用同分组的下一条渠道。',
+    okText: '停用这 ' + willChange + ' 个',
+    cancelText: '取消',
+    okType: 'danger',
+    onOk: () => batch.run(filteredRows.value, false)
+  })
+}
+
+/**
+ * API Key 那一格的行内标签（2026-10-11）。
+ *
+ * 「有没有配过密钥」由列表下发的 api_key_hint 回答（见模板里的说明，
+ * 后端只在真的保存过密钥时才写它）。已配过就把掩码写进标签 ——
+ * 用户因此能确认上次填的是哪一把，而不是只看到一句「留空表示不修改」。
+ */
+const apiKeyLabel = computed(() => {
+  if (!editing.value) return 'API Key'
+  const hint = editing.value.api_key_hint
+  // 掩码是 MaskKey 的产物；极端短的密钥它会返回 "****"，那时不加括注
+  return hint && hint !== '****' ? 'API Key（已保存 ' + hint + '，留空表示不修改）' : 'API Key（留空表示不修改）'
 })
 
 const modalOpen = ref(false)
@@ -243,6 +352,14 @@ function openCreate() {
   // 数据填上就变成「顶着新渠道的名字、用着旧渠道的白名单」去建渠道
   openSeq++
   editing.value = null
+  blankForm()
+  modalOpen.value = true
+  dirty.markClean()
+}
+
+// 空白表单：新建、以及放弃改动后复位时共用同一份定义。
+// 注意它**不**碰 openSeq —— 作废在途回填是调用方的事（见两处 openSeq++）
+function blankForm() {
   Object.assign(form, {
     name: '',
     protocol: 'openai-chat',
@@ -258,8 +375,33 @@ function openCreate() {
     default_model: '',
     models: [{ public_name: '', upstream_name: '', enabled: true, ...emptyPrice() }]
   })
-  modalOpen.value = true
 }
+
+// 防误关：遮罩不再能关掉弹窗，有改动时按 X / Esc 要先确认（见 composable 顶部）。
+// 这个表单有十来段字段，误触遮罩的代价最大，所以它是本次防误关的重点对象。
+const dirty = useDirtyClose({
+  open: modalOpen,
+  snapshot: () => JSON.stringify(form),
+  onDiscard: () => {
+    // 顺手作废在途的回填：弹窗已经关了，晚到的响应不该再往这张表上写
+    // （否则下次打开前的这段时间里，表单里躺着一份「看不见但存在」的数据）
+    openSeq++
+    editing.value = null
+    blankForm()
+    modelsStale.value = false
+  }
+})
+
+// 白名单抽屉的防误关。抽屉里是一张可编辑的表（六个格子 × N 行），
+// 改动量同样不小，待遇与弹窗一致
+const bindDirty = useDirtyClose({
+  open: bindOpen,
+  snapshot: () => JSON.stringify(bindItems.value),
+  onDiscard: () => {
+    bindChannel.value = null
+    bindItems.value = []
+  }
+})
 
 // bindingRows 把接口返回的白名单行转成表单行。
 // 价格必须一起带上：编辑一次渠道再保存，提交的就是这张表，
@@ -343,6 +485,9 @@ async function openEdit(row: ChannelRow) {
     }
     form.models = bindingRows(modelsRes.items || [])
     modelsStale.value = false
+    // 基线在**异步回填之后**才记：回填本身会写 form.models，若在打开弹窗时
+    // 就记基线，这段回填会被判成「用户改过」，一按 X 就冒出确认框
+    dirty.markClean()
   } catch (e: any) {
     // 过期请求的失败也一并咽掉：为一次早已作废的读取弹报错、还把 stale 标记
     // 打到当前这张表上，会把用户从正在编辑的渠道里带偏
@@ -352,6 +497,8 @@ async function openEdit(row: ChannelRow) {
     // 置 stale 标记，由 save() 在保存前重拉一次 —— 文案说的重试是真的会做
     modelsStale.value = true
     message.error('读取渠道最新配置失败：' + e.message + '（保存时会自动重试一次）')
+    // 回填失败也要记基线：此刻表里是一张空白名单，用户接下来看到什么就是什么
+    dirty.markClean()
   }
 }
 
@@ -508,7 +655,7 @@ async function save() {
 }
 
 function confirmDelete(row: Channel) {
-  Modal.confirm({
+  modal.confirm({
     centered: true,
     title: '确认删除渠道',
     content: '将同时解除该渠道下的所有模型绑定，此操作不可撤销。',
@@ -518,6 +665,10 @@ function confirmDelete(row: Channel) {
         await api.del('/channels/' + row.id)
         message.success('已删除')
         await load()
+        // 行已经不在列表里了，焦点交给表格容器（tabindex="-1"）——
+        // 不然它会掉回 body，键盘用户要从页面顶部重新 Tab 一遍（见 utils/focusRow）
+        await nextTick()
+        focusRowAction(tableWrap.value, row.id, '删除渠道 ')
       } catch (e: any) {
         message.error(e.message)
       }
@@ -550,7 +701,7 @@ async function fetchIcon() {
       form.icon = res.icon
       message.success('已获取图标，保存后生效')
     } else {
-      Modal.warning({ title: '没能从上游取到图标', content: res.error || '未知原因', width: 520 })
+      modal.warning({ title: '没能从上游取到图标', content: res.error || '未知原因', width: 520 })
     }
   } catch (e: any) {
     message.error(e.message)
@@ -634,7 +785,7 @@ async function runTest() {
     // 但必须说清楚这次成功不等于已经生效，否则会以为改完就能用了
     const disabledHint = row.enabled ? null : '这条渠道当前是停用状态，测通也不会参与路由；要让它生效请点「启用」'
     if (res.ok) {
-      Modal.success({
+      modal.success({
         title: row.name + ' 连通正常（' + res.latency_ms + ' ms）',
         content: h('div', [
           h('div', '模型：' + (res.model || '-') + (res.upstream_model && res.upstream_model !== res.model ? ' → ' + res.upstream_model : '')),
@@ -650,7 +801,7 @@ async function runTest() {
         ])
       })
     } else {
-      Modal.error({
+      modal.error({
         title: row.name + ' 连通失败' + (res.status_code ? '（HTTP ' + res.status_code + '）' : ''),
         content: res.error || '未知错误',
         width: 560
@@ -770,6 +921,9 @@ async function toggleChannel(row: ChannelRow, next: boolean) {
     message.success(next ? '已启用' : '已禁用，不再路由到这条渠道')
     // 后端会顺带更新 health_status 等字段，拉一次保持两边一致
     await load()
+    // 整表重拉会把开关连行一起换掉，焦点因此掉回 body —— 找回同一行的同一个开关
+    await nextTick()
+    focusRowAction(tableWrap.value, row.id, '渠道 ' + row.name + ' 启用开关')
   } catch (e: any) {
     row.enabled = !next
     message.error(e.message)
@@ -782,6 +936,8 @@ async function openBindings(row: ChannelRow) {
   bindChannel.value = row
   bindOpen.value = true
   await loadBindings()
+  // 基线在拉取回来之后才记（同 openEdit：回填不该被算成用户改动）
+  bindDirty.markClean()
 }
 
 async function loadBindings() {
@@ -821,6 +977,11 @@ async function saveBindings() {
     await api.put('/channels/' + bindChannel.value.id + '/models', { items })
     message.success('白名单已保存')
     await loadBindings()
+    // 保存成功后把基线复位（2026-10-11）：否则「保存 → 顺手按 Esc」会弹
+    // 「放弃未保存的改动？」—— 刚刚明明保存成功了，用户会怀疑自己没存上，
+    // 或者以为系统在骗他。基线的语义是「相对上次落库有没有改动」，
+    // 落库了就该重记一次。
+    bindDirty.markClean()
     await load()
   } catch (e: any) {
     message.error(e.message)
@@ -920,11 +1081,77 @@ async function submitOrder(groupID: number, orderedIds: number[]) {
   }
 }
 
+// ---- 键盘调整优先级（2026-10-11）----
+//
+// 拖拽只对鼠标可用，而这一列的顺序就是故障转移顺序 —— 纯键盘与读屏用户
+// 原来完全没有调整入口（WCAG 2.1.1）。这里给手柄按钮接上 ↑ / ↓，
+// 提交走与拖拽**完全相同**的 submitOrder 链路，后端零改动。
+//
+// 组内顺序按 (weight, id) 排 —— 与 visibleRows 的排序键逐字一致
+// （少了 id 那一档时，两条 weight 相同的渠道会得到不确定的次序，
+//  上移/下移于是可能"移不动"或跳两格）。
+const movingId = ref(0)
+
+function groupSiblings(row: ChannelRow): ChannelRow[] {
+  return rows.value
+    .filter((r) => r.group_id === row.group_id)
+    .slice()
+    .sort((a, b) => (a.weight ?? 0) - (b.weight ?? 0) || a.id - b.id)
+}
+
+/**
+ * 把一行在**它所属分组内**上移/下移一格。
+ *
+ * 为什么只在组内移动：跨组的相对位置没有意义（weight 是组内编号），
+ * 后端也按整组提交 —— 拖拽路径同样拒绝跨组（见 onDragEnd 的 isContiguousBlock）。
+ * 组内的第一条再上移、最后一条再下移都是 no-op，不报错（用户按到边界了）。
+ */
+async function moveChannel(row: ChannelRow, dir: -1 | 1) {
+  if (movingId.value) return
+  // 键盘路径本身是安全的（它从 rows 取整组），但手柄在切开的视图里不渲染，
+  // 真到了这里说明有别的触发路径 —— 与 onDragEnd 同一道闸，保持一致
+  if (dragDisabled.value) return
+  const sibs = groupSiblings(row)
+  const i = sibs.findIndex((r) => r.id === row.id)
+  const j = i + dir
+  if (i < 0 || j < 0 || j >= sibs.length) return
+
+  const next = sibs.slice()
+  const [moved] = next.splice(i, 1)
+  next.splice(j, 0, moved)
+  const orderedIds = next.map((r) => r.id)
+
+  // 乐观更新本地序号：界面立刻反映新顺序（与拖拽同一套做法），
+  // submitOrder 结束时会再拉一次校准
+  orderedIds.forEach((id, k) => {
+    const r = rows.value.find((x) => x.id === id)
+    if (r) r.weight = k + 1
+  })
+
+  movingId.value = row.id
+  try {
+    await submitOrder(row.group_id, orderedIds)
+  } finally {
+    movingId.value = 0
+    // 重排之后那一行换了位置，焦点要跟过去（否则掉回 body，用户得重新找）
+    await nextTick()
+    focusRowAction(tableWrap.value, row.id, '调整 ' + row.name + ' 的优先级')
+  }
+}
+
 function onDragEnd(evt: { item?: HTMLElement }) {
   const movedId = Number(evt.item?.getAttribute('data-row-key'))
   if (!movedId) return
   const moved = rows.value.find((r) => r.id === movedId)
   if (!moved) return
+
+  // 第二道闸（第一道是「手柄压根不渲染」）：搜索或分页生效时，
+  // domOrderedIds() 拿到的是**子集**顺序，提交上去会把没显示的行留在旧序号上，
+  // 整组顺序被静默改坏。真到了这里说明有别的路径触发了拖拽，一律回弹。
+  if (dragDisabled.value) {
+    restoreDomOrder()
+    return
+  }
 
   const order = domOrderedIds()
   if (order.length < 2) return
@@ -1029,27 +1256,76 @@ onBeforeUnmount(() => {
           />
           <a-button type="primary" @click="openCreate"><PlusOutlined /> 新建渠道</a-button>
           <!-- 图标化与看板/分组/代理三页的工具栏统一：位置固定后图标即可辨认 -->
-          <a-button :loading="loading" title="刷新" aria-label="刷新" @click="load">
+          <a-button :loading="loading" title="刷新（快捷键 R）" aria-label="刷新" aria-keyshortcuts="r" @click="load">
             <ReloadOutlined />
           </a-button>
         </div>
         <div class="toolbar-spacer" />
+        <!-- 批量启停（2026-10-11）：只有 ≥2 行时才出现（一行的「批量」没有意义），
+             作用范围是**当前筛选结果**，所以按钮上写着数量、
+             确认框里重复一遍筛选条件（见 batchScopeText）。
+             停用走确认、启用不用 —— 启用的后果是「这批重新接活」，
+             真弄错了再停一次即可，而停用会让正在用的客户端当场报错。 -->
+        <template v-if="filteredRows.length >= 2">
+          <a-button
+            size="small"
+            :loading="batch.running.value"
+            @click="batch.run(filteredRows, true)"
+          >
+            <PlayCircleOutlined /> 批量启用{{ filteredRows.length }} 个
+          </a-button>
+          <a-button
+            size="small"
+            danger
+            :loading="batch.running.value"
+            @click="confirmBatchDisable"
+          >
+            <StopOutlined /> 批量停用{{ filteredRows.length }} 个
+          </a-button>
+          <span v-if="batch.running.value" class="batch-progress" role="status">
+            正在处理 {{ batch.progress.value.done }}/{{ batch.progress.value.total }}
+          </span>
+        </template>
+        <!-- 本地搜索（2026-10-11）：渠道是最容易变多的一张表，
+             而「哪个渠道能用 glm」「哪条链里有 1.2.3.4」都靠它。
+             搜索与分组筛选、与拖拽排序叠在一起时的行为见 script 里的说明 -->
+        <a-input
+          v-model:value="q"
+          class="toolbar-search"
+          placeholder="搜索渠道名 / 模型 / 分组 / 代理"
+          allow-clear
+          aria-label="搜索渠道"
+          aria-keyshortcuts="/"
+        >
+          <template #prefix><SearchOutlined aria-hidden="true" /></template>
+        </a-input>
         <span class="toolbar-hint">
-          共 {{ rows.length }} 个渠道<template v-if="groupFilter !== ALL_GROUPS">
-            ，当前显示 {{ visibleRows.length }} 个</template>
+          <template v-if="q.trim()">找到 {{ matchCount }} 个 / 共 {{ rows.length }} 个</template>
+          <template v-else>
+            共 {{ rows.length }} 个渠道<template v-if="groupFilter !== ALL_GROUPS">
+              ，当前显示 {{ visibleRows.length }} 个</template>
+          </template>
         </span>
       </div>
 
+      <!-- has-data 用**未筛选**的 rows.length（2026-10-11 修）：原来传的是
+           visibleRows.length，于是「筛到一个空分组」会被 DataState 当成
+           「一条数据都没有」—— 它会给一块「还没有渠道」的空态面板，
+           而不是表格自带的（更准确的）「这个分组下还没有渠道，可以切换分组筛选看看」。
+           筛选是**视图**，不是数据有没有来；这两件事必须分开。 -->
       <DataState
         :error="loadError"
-        :has-data="visibleRows.length > 0"
+        :has-data="rows.length > 0"
         :loading="loading"
         title="渠道列表加载失败"
         @retry="load"
       >
       <!-- 表格外层：sortablejs 需要拿到 tbody 元素（见 onMounted），
-           而 a-table 自身不提供这个 ref -->
-      <div ref="tableWrap">
+           而 a-table 自身不提供这个 ref。
+           tabindex="-1" 是给焦点兜底用的：删掉一行之后那一行的按钮没了，
+           焦点交给这个容器（否则会掉回 body，用户要从页面顶部重新 Tab）——
+           见 utils/focusRow。它不进 Tab 序，只是可被程序化聚焦。 -->
+      <div ref="tableWrap" tabindex="-1">
       <!-- scroll.x 必须不小于各列宽度之和：声明偏小时，固定在右侧的
            「操作」列会盖住左边最后一列，表现为表头被截断、内容被压住。
            反过来偏大也不行 —— antd 会把多出来的宽度摊到各列上，
@@ -1069,28 +1345,62 @@ onBeforeUnmount(() => {
            表格总宽 1177 也回到 1440 视口下的容器宽度（1182）以内，横向滚动消失。
            改完实测（scripts/measure-tables.mjs，1440 视口） -->
       <a-table
-        :data-source="visibleRows"
+        :data-source="pagedRows"
         :loading="loading"
-        :pagination="false"
+        :pagination="pagination"
         row-key="id"
         size="small"
         :scroll="{ x: 1177 }"
       >
         <template #emptyText>
-          <a-empty
-            :description="groupFilter === ALL_GROUPS
-              ? '还没有渠道，点「新建渠道」添加第一个'
-              : '这个分组下还没有渠道，可以切换分组筛选看看'"
-          />
+          <!-- 搜索无结果优先于分组筛空的文案（2026-10-11）：两个条件叠在一起时，
+               说「这个分组下还没有渠道」是错的 —— 分组里可能有，只是不匹配搜索词 -->
+          <EmptyState v-if="q.trim()" size="sm" text="没有匹配的渠道">
+            <template #action>
+              <a-button size="small" @click="q = ''">清空搜索</a-button>
+            </template>
+          </EmptyState>
+          <!-- 筛了分组时不给「新建」按钮：那会把「这个分组下没有」误导成
+               「一条渠道都没有」，而此刻的下一步是切回全部分组 -->
+          <EmptyState v-else-if="groupFilter === ALL_GROUPS" size="sm" text="还没有渠道">
+            <template #action>
+              <a-button type="primary" @click="openCreate"><PlusOutlined /> 新建渠道</a-button>
+            </template>
+          </EmptyState>
+          <EmptyState v-else size="sm" text="这个分组下还没有渠道，可以切换分组筛选看看" />
         </template>
         <!-- 拖拽手柄列。这一列没有数字：顺序本身就是优先级，
              也就是故障转移时第几个被尝试 —— 数字是多余的，
-             而且要让人工维护的序号和显示的数字始终一致，本身就容易出错 -->
+             而且要让人工维护的序号和显示的数字始终一致，本身就容易出错。
+
+             手柄是 <button> 而不是 <span>（2026-10-11）：拖拽只对鼠标可用，
+             而列表顺序就是故障转移顺序 —— 纯键盘与读屏用户原来完全没有调整
+             入口（WCAG 2.1.1 键盘可达性）。现在 Tab 能聚焦、聚焦后按 ↑ / ↓
+             即可调序，提交走与拖拽**完全相同**的 submitOrder 链路，后端零改动。
+             SortableJS 认的是 .drag-handle 这个类名，换成 button 不影响拖拽。 -->
         <a-table-column title="顺序" :width="44">
-          <template #default>
-            <span class="drag-handle" title="拖动调整优先级（越靠上越优先）">
-              <HolderOutlined />
-            </span>
+          <template #default="{ record }">
+            <!-- 搜索或分页生效时**不出手柄**（2026-10-11）：
+                 这一列的顺序是提交给后端的**整组顺序**，而拖拽路径是从 DOM
+                 读出来的（见 onDragEnd 的 domOrderedIds）。屏幕上只有一部分行时
+                 提交上去的就是一个子集 —— 后端把这几条重排成 1..N，没显示的那些
+                 还留着旧序号，整组顺序乱掉且**没有任何报错**。这是数据损坏。
+                 键盘路径本身安全（它从 rows 取整组），但它就挂在这个手柄上，
+                 所以两者一起关掉，并在原位说明原因。 -->
+            <a-tooltip v-if="dragDisabled" title="搜索或分页生效时不能调整顺序：提交的整组顺序会漏掉没显示的行。清空搜索、或把每页条数调到装得下全部渠道即可恢复">
+              <span class="drag-locked"><LockOutlined aria-hidden="true" /><span class="sr-only">顺序已锁定：搜索或分页生效</span></span>
+            </a-tooltip>
+            <button
+              v-else
+              type="button"
+              class="drag-handle"
+              :title="'拖动调整优先级（越靠上越优先）；键盘：聚焦后按 ↑ / ↓'"
+              :aria-label="'调整 ' + record.name + ' 的优先级，按方向键上或下'"
+              @keydown.up.prevent="moveChannel(record, -1)"
+              @keydown.down.prevent="moveChannel(record, 1)"
+            >
+              <HolderOutlined aria-hidden="true" />
+            </button>
           </template>
         </a-table-column>
         <a-table-column title="名称" :width="210">
@@ -1212,11 +1522,20 @@ onBeforeUnmount(() => {
                 <div v-for="(line, i) in enableTip(record)" :key="i">{{ line }}</div>
               </template>
               <span class="enable-cell">
+                <!-- aria-label 不能省（2026-10-11）：antd 的 Switch 渲染成
+                     <button role="switch">，没有可访问名时读屏只会念「开关，已开启」——
+                     哪条渠道的开关、开着意味着什么，全都读不到。
+                     名字**不随状态变**（不写成「启用/停用 X」）：开关的语义是
+                     role=switch + aria-checked，名字描述的是「这个控件管什么」，
+                     状态由 checked 表达。名字随状态变会让读屏在切换后念出一个
+                     不同的控件名，用户以为是另一个开关。
+                     它同时是焦点归还（utils/focusRow）用来认「同一行的同一个动作」的锚。 -->
                 <a-switch
                   size="small"
                   :checked="record.enabled"
                   :loading="togglingId === record.id"
                   :disabled="togglingId !== 0 && togglingId !== record.id"
+                  :aria-label="'渠道 ' + record.name + ' 启用开关'"
                   @change="(v: any) => toggleChannel(record, !!v)"
                 />
                 <!-- 异常才额外给一个图标：开关本身只有「开/关」两态，
@@ -1309,10 +1628,12 @@ onBeforeUnmount(() => {
       v-model:open="modalOpen"
       :title="title"
       :confirm-loading="saving"
-      :width="'min(760px, 94vw)'"
+      :width="modalWidth(760)"
       centered
       ok-text="保存"
+      :mask-closable="false"
       @ok="save"
+      @cancel="dirty.guardCancel"
     >
       <!-- 表单排布：短字段两列并排、长字段整行，说明文字移到标签旁的 ⓘ 里。
            纵向一列排下来时每个字段要占掉「标签 + 控件 + 两三行说明」，
@@ -1367,8 +1688,36 @@ onBeforeUnmount(() => {
             </a-form-item>
           </a-col>
           <a-col :span="14">
-            <a-form-item :label="editing ? 'API Key（留空表示不修改）' : 'API Key'">
-              <a-input-password v-model:value="form.api_key" placeholder="sk-..." />
+            <!-- 2026-10-11：D5 原计划是「后端加一个 has_api_key 字段」，动手前
+                 先读了一遍接口 —— **不需要加**：列表接口本来就下发
+                 `api_key_hint`（后端 secure.MaskKey 的产物，形如 sk-abc...wxyz），
+                 而且它只在真正保存过密钥时才被写入
+                 （backend/internal/api/admin.go:743-751，密钥留空表示不修改）。
+                 所以「这条渠道有没有配密钥」用 `!!api_key_hint` 就能得到，
+                 加一个字段等于把同一个事实存两遍 —— 而两份事实迟早会不一致。
+
+                 提示语把掩码一起给出来：用户看到「已保存 sk-abc...wxyz」才能确认
+                 自己上次填的是哪一把（他说不定手上换过好几个上游账号）。
+
+                 autocomplete="new-password"：这是一个 type=password 的输入框，
+                 浏览器与密码管理器会把它当成「登录密码」并主动提供自动填充 ——
+                 在这台机器上存过管理台登录凭据的用户，打开这个表单会被填进一段
+                 无关的密码，而他很可能不会逐字符核对就保存了。
+                 new-password 是浏览器唯一可靠地「不自动填充历史值」的取值
+                 （password 字段上的 autocomplete="off" 会被 Chrome 忽略）。
+                 name 也起一个不像登录表单的名字，进一步避免被当成凭据表单。
+
+                 占位符不再写 "sk-..."：那句是从 OpenAI 的文档里抄来的，
+                 而这里要填的是**任意上游**的密钥 —— Anthropic 的 sk-ant-、
+                 Gemini 的 AIza、国内厂商的各种前缀，写 sk- 会让第一次配
+                 Anthropic 的人怀疑自己贴错了地方。 -->
+            <a-form-item :label="apiKeyLabel">
+              <a-input-password
+                v-model:value="form.api_key"
+                name="relay-channel-upstream-key"
+                autocomplete="new-password"
+                :placeholder="editing ? '留空则保留当前已保存的密钥' : '粘贴上游控制台里的密钥'"
+              />
             </a-form-item>
           </a-col>
         </a-row>
@@ -1511,7 +1860,9 @@ onBeforeUnmount(() => {
     <a-drawer
       v-model:open="bindOpen"
       :title="'模型白名单 · ' + (bindChannel?.name ?? '')"
-      :width="'min(760px, 94vw)'"
+      :width="modalWidth(760)"
+      :mask-closable="false"
+      @close="bindDirty.guardCancel"
     >
       <!-- 这里原来套了一层 a-card + 「这条渠道能跑哪些模型」的标题：
           抽屉标题已经说了这是哪条渠道的白名单，卡片只是多一层边框和一句重复的话 -->
@@ -1526,7 +1877,8 @@ onBeforeUnmount(() => {
       <template #footer>
         <div class="bind-footer">
           <span class="bind-hint">改动要点「保存白名单」才会写回渠道</span>
-          <a-button @click="bindOpen = false">取消</a-button>
+          <!-- 取消按钮也必须过防误关：它是程序化关闭，不会触发抽屉的 close 事件 -->
+          <a-button @click="bindDirty.guardCancel">取消</a-button>
           <a-button type="primary" :loading="bindSaving" @click="saveBindings">保存白名单</a-button>
         </div>
       </template>
@@ -1534,14 +1886,24 @@ onBeforeUnmount(() => {
 
     <!-- 测试连通性：先选模型。下拉只列启用中的白名单条目 —— 停用的条目
          测了也不作数；提示词可选，留空用后端默认的 "hi"。没有启用模型时
-         禁用开始按钮并给出指引（与后端 pickTestBinding 的报错同一句话）。 -->
+         禁用开始按钮并给出指引（与后端 pickTestBinding 的报错同一句话）。
+
+         mask-closable="false" 与另外两个弹窗一致（2026-10-11）：这个弹窗里
+         用户已经选好了模型、可能还敲了一段提示词，点到遮罩上就整个丢掉 ——
+         而遮罩是屏幕上一大片区域，误触概率不低。
+         keyboard（Esc）只在**测试进行中**关掉：这时确定按钮正在转圈，
+         关掉弹窗会让「正在测」的进度消失，而请求还在跑，
+         几秒后突然弹出一个结果框，用户已经不记得自己点过什么了。
+         测试结束后 Esc 恢复 —— 「测试中不许退出」不等于「这个弹窗关不掉」。 -->
     <a-modal
       v-model:open="testModal.open"
       :title="'测试连通性 · ' + (testModal.row?.name || '')"
-      :width="440"
+      :width="modalWidth(440)"
       :ok-text="'开始测试'"
       :ok-button-props="{ disabled: !testModal.model }"
       :confirm-loading="testingId !== 0"
+      :mask-closable="false"
+      :keyboard="testingId === 0"
       @ok="runTest"
     >
       <a-form layout="vertical" style="margin-top: 12px">
@@ -1582,8 +1944,8 @@ onBeforeUnmount(() => {
 }
 .toolbar-left { display: flex; gap: var(--gap); }
 .toolbar-spacer { flex: 1; }
-.toolbar-hint { color: var(--color-text-secondary); font-size: 13px; }
-.field-hint { margin-top: 4px; font-size: 12px; color: var(--color-text-secondary); }
+.toolbar-hint { color: var(--color-text-secondary); font-size: var(--font-size-md); }
+.field-hint { margin-top: 4px; font-size: var(--font-size-sm); color: var(--color-text-secondary); }
 /* ---- 渠道表单（弹窗里那一段）----
    antd 纵向表单每个字段下方留 24px，字段一多整页就散。
    收到 12px 后再把标签与控件贴紧一点，一屏能多放两三段。 */
@@ -1594,20 +1956,20 @@ onBeforeUnmount(() => {
    用小一号的次要色，别让它跟标签抢注意力 */
 .label-hint {
   margin-left: 4px;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
   cursor: help;
 }
 /* 整行说明（不挂在某个输入框下面，所以左边距按表单项对齐） */
 .form-note {
   margin: -4px 0 12px;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   line-height: 1.6;
   color: var(--color-text-secondary);
 }
 /* 开关与它的说明同一行：开关只有 16px 高，下面再单起一行说明太浪费 */
 .switch-row { display: flex; align-items: center; gap: 8px; height: 32px; }
-.switch-hint { font-size: 12px; color: var(--color-text-secondary); }
+.switch-hint { font-size: var(--font-size-sm); color: var(--color-text-secondary); }
 /* 默认模型映射的模型选择行：下拉占一行，说明文字换到下一行。
    说明里那句「费用按所选模型的单价计算」点出了这个设置的第二层影响，
    挤在开关同一行会被省略号截掉（与白名单抽屉里的说明同一个处理） */
@@ -1622,14 +1984,14 @@ onBeforeUnmount(() => {
   border-left: 3px solid color-mix(in oklab, var(--color-primary) 60%, transparent);
   border-radius: 0 var(--radius-control) var(--radius-control) 0;
   background: color-mix(in oklab, var(--color-primary) 7%, transparent);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   line-height: 1.8;
 }
 /* 加粗的说明文字是正文，用 ink 版（主色在白底上只有 3.32:1） */
 .bind-intro b { color: var(--text-primary-ink); font-weight: 600; }
 /* 抽屉底部：提示靠左、按钮靠右 */
 .bind-footer { display: flex; align-items: center; gap: 8px; }
-.bind-hint { margin-right: auto; font-size: 12px; color: var(--color-text-secondary); }
+.bind-hint { margin-right: auto; font-size: var(--font-size-sm); color: var(--color-text-secondary); }
 .unassigned { color: var(--color-text-secondary); }
 /* 名称那一格：图标 + 名字 + 可选的「代理」胶囊。
    margin-bottom 跟着「经 xxx 代理」那行一起去掉：现在只有一行了 */
@@ -1646,7 +2008,7 @@ onBeforeUnmount(() => {
   border: 1px solid var(--color-border);
   background: color-mix(in oklab, var(--color-text-secondary) 10%, transparent);
   color: var(--color-text-secondary);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   font-weight: 500;
   line-height: 20px;
   white-space: nowrap;
@@ -1685,14 +2047,21 @@ onBeforeUnmount(() => {
 }
 /* 「无记录」比正常时间弱一档：它是个空状态，不该和真时间抢同样的分量 */
 .last-used.none { color: var(--color-text-secondary); }
-/* 未定价提示：橙色而不是灰色 —— 它是一个待办，不是一句说明 */
+/* 未定价提示：橙色而不是灰色 —— 它是一个待办，不是一句说明。
+   文字色走 --text-amber 而不是 --color-orange：后者是「填充/图表」档，
+   #f59e0b 压白底只有 2.15:1，12px 正文远达不到 AA 的 4.5:1
+   （--text-amber 是同色相压深到 4.92:1 的那一档，见 theme.css 的语义色注释）。
+   flex/nowrap 与 .fallback-hint 对齐：它是 flex 子项，不写就会被列宽压扁、
+   把「2 个未定价」折成两行（2026-10-10 修，旧截图里能看到「2 个未 / 定价」）。 */
 .unpriced-hint {
+  flex: none;
   margin-left: 4px;
   padding: 0 5px;
   border-radius: var(--radius-control);
   background: color-mix(in oklab, var(--color-orange) 15%, transparent);
-  color: var(--color-orange);
-  font-size: 12px;
+  color: var(--text-amber);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
 }
 /* 兜底映射用主色而不是橙色：橙色是「这里缺东西」（未定价、探测失败），
    而兜底是用户主动配好的一项能力，不是待办。
@@ -1704,7 +2073,7 @@ onBeforeUnmount(() => {
   border-radius: var(--radius-control);
   background: color-mix(in oklab, var(--color-primary) 13%, transparent);
   color: var(--text-primary-ink);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   white-space: nowrap;
 }
 .muted { color: var(--color-text-secondary); }
@@ -1712,7 +2081,7 @@ onBeforeUnmount(() => {
 /* 开关与异常图标同一行：图标紧跟在开关右侧，间距小一点才像「附属提示」 */
 .enable-cell { display: inline-flex; align-items: center; gap: 6px; }
 /* 异常提示用橙色，与「未定价」那类待办同色系；只在探测失败时出现 */
-.health-warn { color: var(--color-orange); font-size: 13px; }
+.health-warn { color: var(--text-amber); font-size: var(--font-size-md); }
 /* 「顺序」表头在 44px 的列里折成了上下两行，把整行表头从 39px 顶到 61px：
    antd 在每侧留 8px 内边距，44px 的列只剩 28px 给文字，而这两个字正好是
    28px 宽，卡在折行的边界上。这里只收窄这一列的内边距，**不加列宽** ——
@@ -1727,13 +2096,19 @@ onBeforeUnmount(() => {
   padding-right: 4px;
 }
 /* 拖拽手柄：平时低调，悬停才明显 —— 它是个辅助操作，
-   不该和「测试/编辑」那些动作抢注意力。grab 光标是唯一的可拖拽提示 */
+   不该和「测试/编辑」那些动作抢注意力。grab 光标是唯一的可拖拽提示。
+   它是 <button>（键盘可达，见模板注释），所以浏览器默认的边框/底色/内边距
+   与字体要显式清掉，否则会出现一块灰色小方框，与原来那个 span 长得不一样。 */
 .drag-handle {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
   color: var(--color-text-secondary);
+  font: inherit;
   cursor: grab;
 }
 /* 拖拽把手是图标（非文本，阈值 3:1），但 --color-primary 在浅色下
@@ -1741,8 +2116,29 @@ onBeforeUnmount(() => {
    --text-primary-ink 是主色的可读版，两套主题下都很清楚。 */
 .drag-handle:hover { color: var(--text-primary-ink); }
 .drag-handle:active { cursor: grabbing; }
+/* 批量处理进度：与提示条同高的小字，走 --color-text-secondary ——
+   它是一个过程状态，不该抢走表格的注意力（role=status 让读屏也听得到） */
+.batch-progress {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
 /* 拖动中的行：半透明让下面的落点看得见（sortablejs 的 ghostClass） */
 .row-ghost { opacity: 0.4; background: color-mix(in oklab, var(--color-primary) 10%, transparent); }
 .row-chosen .drag-handle { color: var(--text-primary-ink); }
+
+/* 锁定态的顺序列（搜索/分页生效时不给出拖动入口，见模板里的说明）。
+   占位高度与手柄一致，行高不变；颜色比手柄更淡 —— 它不是一个控件，
+   只是「这里本来有个手柄，现在为什么没有」。explanation 在 tooltip 里。 */
+.drag-locked {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  color: var(--color-text-secondary);
+  opacity: 0.45;
+  font-size: var(--font-size-sm);
+  cursor: help;
+}
 </style>
 

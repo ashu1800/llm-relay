@@ -857,3 +857,296 @@ main-layout            flex, bg #f8f5ee, 全屏
       本机 `.shots/` 下两个不入库的旧回归（`verify-sidebar-theme-btn.mjs` 的灯泡
       命中区、`verify-delight.mjs` 的主题扩散）指向的按钮语义已变，按新交互改指后
       各跑一次即可。
+
+21. **第三轮 UI 打磨（2026-10-10）**：主题化静态弹窗/轻提示、空态插画、
+    11 处文字对比度、弹窗宽度与断点收口、表单防误关、无障碍细节。
+    起因是站主要求「对前端 UI 做细腻打磨（布局排版 / 配色 / 样式 / 交互 / 观感）」，
+    于是先做了一轮证据驱动的审计，再按「一眼可见的缺陷 → 一致性收口 → 交互与无障碍」
+    三档实施。**每条都先量、后改、再回归**，量到的数字记在下面。
+
+    - **(a) 静态 `Modal.confirm` / `message` 从来没吃到主题**（本轮最大的一个）。
+      antd 的静态方法拿不到 `<a-config-provider>` 的上下文 —— 官方文档原话是
+      *"ConfigProvider will not take effect on static methods such as message.xxx,
+      Modal.xxx, notification.xxx"*（`site/src/vueDocs/customize-theme.en-US.md`），
+      机制上也对得上：静态路径各自 `createVNode` 到 body 下的游离容器，只读模块级
+      的 `globalConfigForApi`（`es/modal/confirm.js` 的 Wrapper、
+      `es/vc-notification/Notification.js:236`）。后果是 **8 套深色主题下，
+      删除渠道/密钥/分组/代理的确认弹窗是 antd 的浅色默认皮肤 + 默认蓝主按钮**，
+      `message.success` 是白底气泡 —— 12 套主题的努力在这两处全部落空。
+      全站共 12 处静态 Modal 调用（confirm/info/warning/success/error）与
+      104 处 `message.*`。
+      做法：`App.vue` 里 `message.useMessage()` + `Modal.useModal()` 取带上下文的
+      实例（holder 渲染在 `<a-config-provider>` 内部），经 `installFeedback` 注入
+      `src/utils/feedback.ts`；该模块对外暴露与 antd 同形的 `message` / `modal`，
+      调用点只换了 import 来源，**104 处调用一个字没改**。未注入时回落 antd 静态
+      方法（单测与 App 之外渲染的组件行为与改造前逐字一致）。
+      实测（`.shots/verify-ui-polish.mjs`，mocha 主题）：确认弹窗主按钮
+      `rgb(176,144,213)`、与站内工具栏主按钮**同色**、不是默认蓝
+      `rgb(22,119,255)`；弹窗底色 `rgb(54,54,83)`（antd 深色算法的 elevated
+      表面）、轻提示同色 —— 改造前这两处都是 `rgb(255,255,255)`。
+    - **(b) 空态插画在 8 套深色主题下是一块亮色**：antd 的 `a-empty` 默认插画是
+      写死 `#f5f5f5/#e6e6e6` 的 SVG，不吃暗色算法（实拍：
+      `.shots/theme-mocha.png` / `theme-nord.png`）。新增
+      `components/EmptyState.vue` 自绘线稿（描边 `color-mix` 从 `--color-text` 派生、
+      箭头用 `--color-primary`），6 处 `a-empty` 全部替换；`DataState` 增加
+      `#action` 插槽，密钥 / 分组 / 渠道三个列表页的空态里直接放「新建 X」主按钮
+      （原来只有一句「点『新建密钥』创建第一个」，把用户丢在原地找按钮）。
+      高度刻意比 antd 矮一档（art 72px vs 100px）：看板是 `meta.fill` 弹性链，
+      空态变高才会顶到几何 —— 实测 1440×900 下左侧栏底边与内容区底边仍对齐
+      （差 0px，ui-spec 第 12 条的不变量）。
+    - **(c) 11 处把「填充/图形色」当正文色用**，全部低于 WCAG AA：
+      `.unpriced-hint` / `.health-warn` / `.trail-wait` 用 `--color-orange`
+      （**2.15:1**，12-13px，而「N 个未定价」是「这条渠道在漏钱」的唯一提示）、
+      `.vb-ok` 用 `--color-green`（2.70:1）、`.vb-btn.is-primary` 用
+      `--color-primary` + `#fff`（3.32:1，且它是「一键更新」按钮）、
+      `.vb-meta` 用 secondary + `opacity:.75`（合成后 ≈2.3:1）、
+      `.budget-cell.is-over` 与 `.group-ref-missing` 用 `--color-red`（3.90:1），
+      外加 `.es-accent` / `.fx-check` / `.baseurl-copy` 三处图标。前八处改
+      `--text-amber` / `--text-green` / `--text-red` / `--solid-primary-bg`+`-fg`，
+      图标三处改 `stroke` 或 `--text-primary-ink`（`--color-primary` 在
+      solarized-light 上恰好 3.00:1，贴线没有余量）。
+      **根因是 `check-theme-contrast.mjs` 算的是令牌之间的比值**（那些填充色作为
+      非文本是达标的），而错在组件挑了哪个令牌 —— 于是新增一条静态守卫
+      「文字色令牌契约」：组件里 `color:` 的值出现那 7 个语义色令牌即失败，
+      报错时直接算出各主题的实测对比度。守卫自己也有一条非空断言
+      （扫到 190 条 `color:` 声明才算过），避免解析器坏了却永远绿。
+    - **(d) 弹窗宽度两处漂移**：`ChannelsView` 的「测试连通性」是裸数字 440
+      （全站唯一没有窄屏保护的），`DailyReport` 的「昨日战报」是 92vw（其余十一处
+      94vw）。新增 `utils/modalWidth.ts` 的 `modalWidth(N)` 作为唯一出口，
+      12 个弹窗/抽屉全部改用它；守卫断言「每个 a-modal / a-drawer 的 :width 都来自
+      它」且模板里不许再出现字面 vw。实测 900×700 视口下弹窗不出视口、页面无横向溢出。
+    - **(e) 断点刻度收回刻度表**：`theme.css` 声明刻度 640/768/1024/1200/1536，
+      并注明 900 只是「侧栏折叠」这一个**功能**断点（MainLayout 的 JS 常量）。
+      但 `SettingsView`（两处栅格）与 `ThemePicker` 的 `@media` 用的是 900/600 ——
+      跟着那个 900 走了。全部改成 768/640，刻度注释同步更新；
+      新增守卫：文档里的刻度与脚本清单逐项相等 + 每个 `@media` 的宽度都在刻度上。
+    - **(f) 登录页与设计系统漂移**：品牌标圆角 8px（侧栏是 `--radius-pill`）、
+      卡片 12px 圆角且无边框（全站面板是 8px + 1px 描边）、品牌字 16px/700
+      且不是 display 字体。三处对齐；密钥输入框补 `aria-label`（此前只有
+      placeholder，读屏念的是「密码 编辑框」，没有可访问名称）。
+    - **(g) 表单弹窗手滑即丢数据**：全站没有任何 `mask-closable`（antd 默认
+      `true`），也没有脏数据提醒 —— 渠道表单十来段字段，点到遮罩直接关掉、
+      一个字节不留。新增 `composables/useDirtyClose.ts`：遮罩不再关闭，
+      有改动时按 X / Esc 先确认（先 `open = true` 按住再弹确认 —— 这两次写在同一
+      个同步执行里，渲染副作用只看得到最终值，实测无闪烁）。接入 7 个弹窗/抽屉
+      （渠道表单、渠道白名单抽屉、密钥、分组、代理、定价规则、批量粘贴）。
+      基线在**数据回填之后**才记，否则异步回填会被判成「用户改过」。
+    - **(h) 无障碍三件套**：侧栏当前项补 `aria-current="page"`（全仓此前 0 处）；
+      新增「跳到主内容」跳过导航（视觉隐藏用 `translateY(-200%)` 而不是
+      `display:none`，后者不可聚焦）并把内容区从 `<section>` 改成
+      `<main id="main-content" tabindex="-1">`；看板加一个 `.sr-only` 的
+      `aria-live="polite"` 摘要（首帧立即播一次，之后最多 30 秒一次 ——
+      aria-live 每次变化都念，持续流量下比不播更烦）。
+    - **(i) `.unpriced-hint` 缺 `flex: none; white-space: nowrap`**（兄弟
+      `.fallback-hint` 有），列一窄就把「2 个未定价」折成两行（旧截图
+      `.shots/ui-toolbar-channels.png` 里的「2 个未 / 定价」）。补上。
+    - 回归：`npm run check`（新增三条契约：文字色令牌 / 弹窗宽度 / 响应式断点，
+      三条都做过变异测试确认会红）、`npm run test`（90 例）、
+      `.shots/verify-ui-polish.mjs`（26 项，真浏览器 + 注入接口桩，
+      覆盖空态与主题跟随、主题化弹窗与轻提示、防误关四步、无障碍、
+      窄视口弹窗宽度、看板底边对齐与读屏节点）、`.shots/shot-ui-polish.mjs`
+      （视觉留档：空态浅/深、确认弹窗浅/深、登录页）。
+      浏览器回归为什么不打 8888：本机 8888 上跑的是 9-26 前后的旧构建
+      （`/` 返回的 index.html 里主题 id 清单只有 `dark`/`light`），看不到本轮改动；
+      而本地部署要登录、管理密钥在 WSL 里是 root 600 读不到。桩只拦
+      `/api/admin/*` 并让 `/auth/status` 回 `enabled:false`（这正是「未开启鉴权」的
+      合法部署形态，守卫直接放行），跑的是真实代码而不是另写的演示页。
+
+22. **第二轮打磨（2026-10-10 同日）：字号刻度、标题层级、表格列显隐、窄屏形态**。
+    第一轮做完之后站主把原来「明确不做」的四项一并提了上来。四项的性质不同：
+    前两项是**一致性收口**（零视觉变化，靠静态守卫钉住），后两项是**新功能**
+    （有行为，靠浏览器回归钉住）。
+
+    - **(a) 字号刻度**。收口前组件里散着 **117 处**字面字号
+      （10/11/12/13/14/15/16/17/20/22/24/26px，其中 12px 一档 **63 处**）。
+      问题不是「值难看」，而是**没有刻度**：下一个要写字号的人只能再挑一个数字，
+      13.5px / 18px 迟早会出现，而「哪些地方该一样大」从此说不清。
+      做法：`theme.css` 的 `:root` 定义 11 个 `--font-size-*`（命名说的是用途不是
+      绝对值：2xs 10 / xs 11 / sm 12 / md 13 / panel 14 / lg 15 / base 16 / xl 17 /
+      display-sm 20 / display 24 + 既有的 menu 14.4），117 处全部换成令牌。
+      `lg(15)` 与 `xl(17)` 夹在正文之间是有意的：15 用于空态标题与**图标字形**
+      （图标靠 font-size 定尺寸）、17 是侧栏品牌名，各有实测依据，不该为了刻度
+      好看把它们并进 14/16；而两处 22px / 26px（昨日战报的大数字）并入了
+      display(24) —— 差 2px 肉眼分不出，多两个只服务一个组件的令牌只会让刻度变糊。
+      新增守卫「字号刻度契约」：令牌清单必须写全 + 组件里不许再出现字面字号
+      （判据是「值必须是一个干净的 `var(--font-size-*)`」，**不能**用「值里有没有
+      数字」—— `--font-size-2xs` 这名字本身就带数字，第一版就是这么误判了 4 处）。
+    - **(b) 标题层级**。此前全站只有登录页有 `<h1>`，各管理页从 `<h2>`（面板标题）
+      起步，而系统设置那八个面板标题干脆是 `<div class="panel-title">` ——
+      读屏用户按标题跳转时既没有「当前在哪一页」，也拿不到「这一页有哪几块」。
+      做法：`<h1 class="sr-only">{{ route.meta.title }}</h1>` 放在 MainLayout 的
+      内容区首行（一处维护、新增页面自动有、文案与 `document.title` 同源），
+      视觉上页面名已由侧栏选中项表达，所以**不**再画一遍（看板是 `meta.fill`，
+      多一行可见标题就要吃掉 30px 的表格高度）；系统设置的八个 `.panel-title`
+      `<div>` 改成 `<h2>` 并显式写回字号与 margin（h2 的浏览器默认样式是 1.5em +
+      上下 margin，不覆盖会从 16px 跳到 24px 并把面板撑高）。
+      新增守卫「标题层级契约」：MainLayout 有且仅有一个 h1 且是 `.sr-only`；
+      各视图不得再自带 h1；不得出现 `<div class="panel-title">` 这类假标题。
+    - **(c) 表格列显隐**。日志表 11 列，宽窗口刚好铺满，窄窗口必须横向滚；
+      而「看日志」本身是有取向的 —— 排障的人盯状态/耗时/渠道，看成本的人只关心
+      费用与词元，让人把自己不看的那几列关掉比每次横向拖更实际。
+      做法：`composables/useColumnVisibility.ts`（持久化 + 白名单容错 +
+      锁定列 + 「最后一列不许关」）+ `components/ColumnSettings.vue`（勾选面板，
+      原生 checkbox：空格切换、读屏报已勾选都是浏览器给的）+ 日志表接入。
+      存的是**被隐藏的列**而不是「显示的列」：以后加一列时老用户的本地记录里没有它
+      → 默认可见，不会出现「升级后新列莫名不见了」。
+      日志表这一处有三条连锁改动，缺一条就会出可见的错：① 模板里各列加
+      `v-if`（antd 的 `convertChildrenToColumns` 会 filterEmpty，注释 vnode 被跳过，
+      已核源码）；② `columnsTotal`（= `scroll.x`）只累加可见列；
+      ③ `allocateWidths` 增加 `keys` 参数，余量只在**可见子集**上分摊 ——
+      否则关掉两列后表格右边会多出一条空白。三条不变量在子集上重新成立，
+      由 `logColumns.spec.ts` 新增的 4 条用例钉住（含「只剩权重 0 的列时
+      0/0 不得变成 NaN」，那会把 NaN 写进 `:width` 让表格直接崩）。
+      实测：10 列 → 关掉「费用」→ 9 列、刷新后保持、恢复默认回来、
+      1440 下两种状态都无横向溢出（`.shots/verify-ui-polish.mjs`）。
+      按钮放在**看板工具栏**（主题与刷新之间）而不是表格面板里：那张面板
+      2026-09-26 特意删掉了 40px 标题栏（表体刚好能多放一整行），为一个设置按钮
+      把它加回来等于把那次优化退回去。状态因此做成单例（`logColumnVisibility.ts`），
+      按钮与表格共用一份。
+    - **(d) 排序偏好持久化**。三列服务端排序（耗时/费用/状态）此前刷新即回默认，
+      而「按耗时倒序」是排障时的常态视角。走 `persistedChoice` 的白名单读写
+      （旧值/脏数据回落默认，否则会带着一个后端不认的 `sort=` 去取数）。
+    - **(e) 窄屏与移动端**。先量后改：`.shots/probe-mobile.mjs` 在 360/414/768
+      逐页量「文档级横向溢出」与「比视口宽的元素」—— **改造前就已经是 0**：
+      900px 那条断点会把侧栏收成 56px 图标栏，四张管理表的工具栏会自己换行
+      （360 下 96px 两行），表格在自己的容器里横向滚。所以真正要改的只有一件事：
+      56px 在 360 的屏幕上占 15% 的可视宽度，而图标栏没有文字，第一次用的人只能
+      靠猜哪个图标是哪个页面。
+      做法：**≤640 侧栏改成抽屉** —— 固定定位、默认 `translateX(-100%)` +
+      `visibility: hidden` + `inert`（关闭时移出无障碍树与 Tab 序），
+      点汉堡滑出、带完整文字菜单（项高 44px 的触摸目标）、遮罩/`Esc`/点菜单项
+      三种方式关闭，打开后焦点送进抽屉、关闭后还给汉堡按钮。
+      内容区顶部多一条 44px 移动栏，因此 fill 页面的高度链从 `height: 100%`
+      换成 `flex: 1`（否则 44px + 100% 会溢出视口）。
+      与 900px 那条断点的关系用 `railMode = collapsed && !isMobile` 表达：
+      **768 的平板仍是 56px 图标栏**（正合适），只有手机换成抽屉；
+      模板里所有「收起态不显示文字」的判断都改用 `railMode`，桌面形态零改动。
+      实测（`.shots/verify-ui-polish.mjs` 移动段 10 项 + `probe-mobile.mjs`）：
+      360 下抽屉默认收起且 inert、打开后 7 个文字菜单项、点菜单项导航并自动收起、
+      Esc 关闭且焦点回到汉堡；768 仍是 56px 图标栏；1440 侧栏 192px 带 8 个文字标签；
+      360/414/768 × 7 个页面文档级横向溢出全为 0。
+    - 回归：`npm run check`（新增「字号刻度」「标题层级」两条契约）、
+      `npm run test`（94 例，新增 4 条列显隐子集用例）、
+      `.shots/verify-ui-polish.mjs`（**50 项**）、`.shots/probe-mobile.mjs`（窄屏体检）、
+      `.shots/shot-ui-polish.mjs`（视觉留档，含 360 的抽屉与看板）。
+
+23. **交互可信度与键盘闭环批次（2026-10-11）**。这一批不是视觉打磨，改的是
+    「界面说了什么话」和「键盘到不到得了」。逐项规格与理由见
+    `docs/development.md` 的「实时连接状态与静默失败」起连续几节，这里只记
+    界面侧的规格与实测。
+
+    - **(a) 实时连接状态胶囊**（`.live-status`，看板脉搏条右侧同一行）。
+      三档配色走语义正文色令牌：`live` → `--text-green`、`stale` → `--text-amber`、
+      `offline` → `--text-red`；胶囊边框在非正常态跟着文字色走，正常态用
+      `--color-border`。字号 `--font-size-sm`，内边距 `1px 8px`，圆角 `--radius-pill`。
+      文案三档：「实时」/「实时连接已 35 秒无数据」/「实时连接已断开」，
+      非正常态右侧多一个下划线「重试」。**不显示数据新鲜度**（心跳 25 秒一次，
+      显示「N 秒前更新」是在说假话）。`role=status` + `aria-live=polite`。
+      同行的脉搏条在 `offline` 时底轨换 45° 斜纹（`--color-border` 与透明交替，
+      3px 周期），`title` 从「暂无流量」改为「实时连接已断开」。
+    - **(b) 首屏骨架卡**。`.summary-grid` 在 `loading` 时渲染四张
+      `StatCard loading`：图标位照常渲染（保住色调），数值位是
+      `96×22px` 的 `--color-border` 圆角条，副标位 `64×11px`，
+      1.4s 透明度脉动（`prefers-reduced-motion` 下由全站规则压成静态）。
+      **实测加载态与加载完成态网格高度都是 83px**（1440 视口），
+      日志表不发生位移。没数据时副标显示「—」而不是「失败 0 次」。
+    - **(c) 日志面板提示行**（`.panel-hints`，一行 flex + `flex-wrap`，
+      `gap: 6px`、`margin-bottom: 6px`）。三样东西共用它，没有内容时整行不渲染
+      （面板顶部 2026-09-26 特意删过 40px 标题栏，不能又长出一条常驻条）：
+      排序口径说明（`--font-size-sm` + `--color-text-secondary`）、
+      生效中的排障条件胶囊（`.hint-chip`：1px `--color-border` 描边 +
+      `--color-bg` 底，与看板工具栏那两枚同观感）、
+      「有 N 条新日志，回第 1 页查看」按钮（`--color-primary-a20` 底 +
+      `--text-primary-ink` 字，胶囊形）。空表在带条件时给「清除排障条件」按钮。
+      条件胶囊**自绘而不是用 `a-tag closable`**：antd 那个关闭图标是
+      `<span role="img" tabindex="-1">`（实测），键盘 Tab 不到、回车也触发不了，
+      而列表非空时空表上那个「清除排障条件」不渲染 —— 键盘用户会完全没有
+      清除入口。自绘版里关闭按钮是真正的 `<button>`（20×20 命中区，
+      `aria-label` 形如「清除状态条件，显示全部状态」）。
+    - **(c2) 日志表的 Tab 停靠点口径**。整张表体在 Tab 序里**只有一个**停靠点
+      （`tabindex=0` 的那一行）；行内那枚「详情」按钮带 `tabindex="-1"`，
+      不再参与 Tab 走查（键盘路径由行的回车负责，它仍保留 `aria-label`
+      供读屏虚拟光标读取）。验收断言必须统计**整张表体**里所有
+      `tabIndex >= 0` 的元素，只数 `tr[tabindex="0"]` 测不出这个漏 ——
+      第一版就是这么漏的（实测当时表内 24 个停靠点）。
+    - **(d) 行的键盘焦点环画在行内**（`.log-table tr[data-row-key]:focus-visible`
+      用 `outline-offset: -2px`）。全站那条 `:focus-visible` 用正 offset，
+      对按钮是对的，对表格行会压住上下相邻的行。带 `!important`（全站那条也是）。
+    - **(e) 窄屏页名**。641–900px（图标栏形态）在内容区顶部渲染
+      `.rail-page-title`（`--font-size-md` + `--color-text-secondary`，
+      下外边距 `--gap`）；≤640px 的移动端顶栏把品牌名换成
+      `.mobile-page-title`（`--font-size-xl` / 600 / `--text-primary-ink`，
+      `min-width: 0` + ellipsis）。两处都取 `route.meta.title`。
+    - **(f) 可点元素的标签修正**。密钥胶囊（`.key-pill`）与 BaseURL 胶囊
+      （`.baseurl-pill`）由 `<span @click>` 改成 `<button type="button">`
+      （浏览器默认边框/底色/字体逐项写回，观感与改造前一致）；
+      渠道拖拽手柄（`.drag-handle`）同理；侧栏品牌区（`.brand`）由
+      `<div @click>` 改成 `<button>` 并补 `width: 100%` / `text-align: left`。
+      分组色板 `<button>` 补 `type="button"`（它在 `<a-form>` 里，
+      缺 type 会被当成提交按钮，点色块就跑整表校验）。
+    - **(g) 触屏下的复制图标常显**。`.key-copy` 平时 `opacity: 0`（悬停才显示），
+      触屏没有 hover —— `@media (pointer: coarse)` 下提到 `0.75`。
+    - 回归：`npm run check`（全部契约通过，新增文件被「字号刻度」契约抓过一次
+      —— `10px` 改成 `var(--font-size-2xs)`）、`npm run test`（**117 例**，
+      新增 `logLive.spec.ts` 10 例 / `useLive.spec.ts` 6 例 / `focusRow.spec.ts` 7 例）、
+      `node scripts/check-table-widths.mjs`（四张表列宽合计与 `scroll.x` 仍相等）、
+      **`.shots/verify-ux-2026-10-11.mjs`（54 项，自带静态服务 + 桩接口 +
+      手写 WebSocket，不需要后端与管理密钥）**。
+
+24. **第二轮交互批次（2026-10-11 同日）：错误边界、深链、搜索分页、批量与快捷键**。
+    完整规格与理由在 `docs/development.md`（「渲染异常不再是一张空白页」起
+    连续十几节），这里只记界面侧的规格与实测。
+
+    - **(a) 错误面板**（`.err-boundary`）。与「加载失败」的 DataState 面板同一
+      观感（1px `--color-border` + `--radius-panel` + `--color-fg-shadow`，
+      最大宽 640px、居中、上外边距 48px）：图标 `--text-red` + 24px 标题 +
+      13px 说明 + 等宽错误原文块（可聚焦、`white-space: pre-wrap`）+
+      「重新加载页面 / 复制错误信息 / 回到数据看板」三个动作。`role="alert"`。
+      **两层**：App 一层、MainLayout 的 router-view 外一层 —— 页面坏了侧栏还在，
+      用户可以点别的菜单走开。
+    - **(b) 管理表工具栏的搜索框**（`.toolbar-search`，全局类，写在 theme.css）。
+      宽 200px、`max-width: 40vw`，带前缀放大镜与 `allow-clear`；
+      `aria-keyshortcuts="/"`。提示文案在搜索时改说「找到 N 个 / 共 M 个」。
+      四张表（渠道 / 密钥 / 分组 / 代理）共用同一个宽度 —— 宽度不同会让人
+      以为它们的行为也不同。
+    - **(c) 客户端分页**。默认每页 20，可选 10/20/50/100（各表分别持久化）。
+      **只有一页时整条不渲染**。四张表的 `scroll.x` 与列宽之和**没有变化**
+      （1177 / 1162 / 1164 / 794），因为批量操作刻意没有用勾选列
+      （勾选列要 32px，会让渠道表在 1440 下重新出现横向滚动条，
+      而列宽守卫脚本查不出这件事 —— 它只比对「声明宽之和 ≤ scroll.x」）。
+    - **(d) 分页或搜索生效时的顺序列**（`.drag-locked`）：手柄不渲染，
+      换成 45% 不透明度的锁图标（`cursor: help`），说明在 tooltip 里。
+      理由见开发文档「分页或搜索生效时锁住渠道拖拽排序」—— 这是数据完整性问题，
+      不是显示问题。
+    - **(e) 批量启停**。≥2 行时出现在工具栏右侧：「批量启用 N 个」/
+      「批量停用 N 个」（danger），运行中显示「正在处理 7/20」（`role="status"`）。
+      停用走确认框，文案里重复一遍当前筛选范围（「作用范围：搜索「glm」」）。
+    - **(f) 详情深链**。URL 形如 `/console/dashboard?log=104`；抽屉按 ↑/↓
+      换记录时 `log` 跟着变、关闭时清掉。写 URL 用 `replace` 而不是 `push`。
+    - **(g) 导出与分享**。看板工具栏右侧多两枚图标按钮：复制视角链接（成功后
+      原位变对勾）、导出 CSV（`/api/admin/logs/export`，参数与列表同一份）。
+    - **(h) 侧栏形态**。收起状态持久化（窄屏一律收起、宽屏用记下来的偏好）；
+      图标栏形态下底部多一枚 icon-only 的 `VersionBadge`（与另外两枚图标
+      同一条中轴线）。
+    - **(i) 窄屏日志列预设**。≤900px 且用户从未调整过列显隐时，默认收起
+      「速度 / 费用 / 密钥」三列。
+    - **(j) 白名单删除撤销**（`.wl-undo`）：`--text-amber` + 虚线下划线，
+      `margin-left: auto` 靠右，3 秒后消失。
+    - **(k) 密钥明文**：缓存 60 秒 TTL；页面不可见即全部丢弃；显示明文的 tooltip
+      加 `destroy-tooltip-on-hide`（否则明文留在 DOM 里，屏幕上却什么都没有）；
+      外挂 `beforeunload` 守卫（六处 `useDirtyClose` 一起获益）。
+    - **(l) 全站快捷键**：`/` 聚焦搜索框、`r` 刷新、`g` 序列导航（1.5 秒内）。
+      可发现性靠 `aria-keyshortcuts` 与 `title="刷新（快捷键 R）"`。
+    - **(m) 日志行密度**。开关在列设置弹层底部（`.cs-density`，上边框分隔），
+      两枚分段按钮「宽松 / 紧凑」（`.cs-density-btn`，选中态
+      `--color-primary-a20` 底 + `--text-primary-ink` 字 + `--color-primary` 边框，
+      未选中透明），`aria-pressed` 表达档位。
+      **实测行高 44px → 39px、可视行数 13.4 → 15.2**（1440 视口）。
+      持久化在 `llm-relay-log-density`。
+    - 回归：`npm run test`（**134 例**，新增 `tableTools.spec.ts` 17 例）、
+      `npm run check`（全部契约通过）、`scripts/check-table-widths.mjs`
+      （四张表列宽合计与 `scroll.x` 仍相等）、
+      **`.shots/verify-ux-2026-10-11.mjs`（100 项）**。
+    - **有意延后**：日志列宽手动拖拽 —— 它与「列宽按内容自适应」这条已确立的
+      规则冲突（手拖的宽度会被下一次测量覆盖），且「少看一列」已由列显隐覆盖、
+      「多看几行」已由行密度覆盖。完整理由写在开发文档「有意没做的一件」。

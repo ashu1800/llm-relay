@@ -34,7 +34,7 @@ const vars = computed(() => modelVars(style.value))
   border: 1px solid oklch(var(--mt-l) var(--mt-c) var(--mt-h) / 0.32);
   background: oklch(var(--mt-l) var(--mt-c) var(--mt-h) / 0.13);
   color: oklch(var(--mt-l) var(--mt-c) var(--mt-h));
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   font-weight: 500;
   line-height: 20px;
   overflow: hidden;
