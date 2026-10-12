@@ -456,23 +456,7 @@ func responsesToOpenAIID(id string) string {
 
 // ResponsesUpstreamErrorMessage 从 Responses 的错误体里取出可读信息。
 func ResponsesUpstreamErrorMessage(body []byte) string {
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return string(body)
-	}
-	if e := asMap(payload["error"]); e != nil {
-		msg := asString(e["message"])
-		if msg != "" {
-			if t := asString(e["type"]); t != "" {
-				return t + ": " + msg
-			}
-			return msg
-		}
-	}
-	if msg := asString(payload["message"]); msg != "" {
-		return msg
-	}
-	return string(body)
+	return upstreamErrorMessage(body, "type")
 }
 
 // asAnyList 安全地把任意值转成数组。

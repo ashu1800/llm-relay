@@ -231,7 +231,11 @@ func NormalizeUsage(raw map[string]any) Usage {
 	// 上游总量更大时采用上游值：Gemini 原生的 thoughtsTokenCount 是**独立于**
 	// candidatesTokenCount 的（不同于 OpenAI 的 reasoning_tokens 已含在
 	// completion_tokens 里），此时总量确实大于四项之和，上游值才是对的。
-	sum := u.PromptTokens + u.CompletionTokens + u.CachedTokens + u.CacheCreationTokens
+	// 四项之和一律走 UsageTotal —— 它是「总 token」的唯一公式（见函数注释）。
+	// 这里原先又手写了一遍加法，于是同一个公式有了第二个定义点：将来新增
+	// 任何一类 token（reasoning 之类）都要记得同时改两处，漏掉一处就会出现
+	// 「总量卡与日志列对不上」。
+	sum := UsageTotal(u.PromptTokens, u.CompletionTokens, u.CachedTokens, u.CacheCreationTokens)
 	if upstreamTotal > sum {
 		u.TotalTokens = upstreamTotal
 	} else {

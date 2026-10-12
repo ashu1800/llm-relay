@@ -27,39 +27,16 @@ func usageToAnthropic(usage map[string]any) map[string]any {
 	if usage == nil {
 		return map[string]any{"input_tokens": 0, "output_tokens": 0}
 	}
-	prompt := asInt(usage["prompt_tokens"])
-	if prompt == 0 {
-		prompt = asInt(usage["input_tokens"])
-	}
-	completion := asInt(usage["completion_tokens"])
-	if completion == 0 {
-		completion = asInt(usage["output_tokens"])
-	}
-	cached := 0
-	if d := asMap(usage["prompt_tokens_details"]); d != nil {
-		cached = asInt(d["cached_tokens"])
-	}
-	// 中转站可能把 OpenAI 方言（子集）与 Anthropic 方言（并列 cache_read）
-	// 同时给出，且描述的是**同一个**命中数（智谱 GLM 实测会双方言同发，
-	// 见 relay.NormalizeUsage 的同款处理）—— 两者相加会把命中数翻倍。
-	// 子集字段缺位时才认并列字段；都非零时以子集为准，它与 prompt_tokens
-	// 自洽，下面的 prompt - cached 拆分才站得住。
-	if parallel := asInt(usage["cache_read_input_tokens"]); parallel > 0 && cached == 0 {
-		cached = parallel
-	}
+	prompt, completion, cached, creation := usageCounts(usage)
 
-	nonCached := prompt
-	if cached > 0 && cached <= prompt {
-		nonCached = prompt - cached
-	}
 	out := map[string]any{
-		"input_tokens":  nonCached,
+		"input_tokens":  usageNonCachedInput(prompt, cached),
 		"output_tokens": completion,
 	}
 	if cached > 0 {
 		out["cache_read_input_tokens"] = cached
 	}
-	if creation := asInt(usage["cache_creation_input_tokens"]); creation > 0 {
+	if creation > 0 {
 		out["cache_creation_input_tokens"] = creation
 	}
 	return out
@@ -233,7 +210,7 @@ func (t *AnthropicStreamTranslator) Write(p []byte) (int, error) {
 		if werr != nil {
 			return
 		}
-		if payload := dataPayload(line); payload != nil {
+		if payload := DataPayload(line); payload != nil {
 			werr = t.handleChunk(payload)
 		}
 	})
@@ -462,7 +439,7 @@ func (t *AnthropicStreamTranslator) Close() error {
 		if flushErr != nil {
 			return
 		}
-		if payload := dataPayload(line); payload != nil {
+		if payload := DataPayload(line); payload != nil {
 			flushErr = t.handleChunk(payload)
 		}
 	})

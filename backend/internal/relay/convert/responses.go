@@ -378,18 +378,7 @@ func OpenAIChatToResponsesResponse(body []byte, fallbackModel string) ([]byte, e
 // usageToResponses 把 Chat 的用量换算成 Responses 口径。
 // 两者的 input_tokens 都包含缓存命中，语义一致，直接映射即可。
 func usageToResponses(usage map[string]any) map[string]any {
-	in := asInt(usage["prompt_tokens"])
-	if in == 0 {
-		in = asInt(usage["input_tokens"])
-	}
-	outTokens := asInt(usage["completion_tokens"])
-	if outTokens == 0 {
-		outTokens = asInt(usage["output_tokens"])
-	}
-	cached := 0
-	if d := asMap(usage["prompt_tokens_details"]); d != nil {
-		cached = asInt(d["cached_tokens"])
-	}
+	in, outTokens, cached, _ := usageCounts(usage)
 	reasoning := 0
 	if d := asMap(usage["completion_tokens_details"]); d != nil {
 		reasoning = asInt(d["reasoning_tokens"])

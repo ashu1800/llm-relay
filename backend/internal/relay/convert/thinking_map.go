@@ -56,12 +56,16 @@ const (
 	ThinkingBudgetMax     = 32768
 )
 
-// normalizeEffort 归一档位：小写、去空白。
+// NormalizeEffort 归一档位：小写、去空白。
 //
 // "none" 归到 "off"：OpenAI 的 reasoning_effort:"none" 与 Anthropic 的
 // thinking.disabled 是同一件事（明确关闭），通用语里只留一个取值。
-// 这与 relay/thinking.go 的 normalizeEffort 同口径。
-func normalizeEffort(s string) string {
+//
+// 这是全项目唯一的档位规范化实现。relay/thinking.go（读：观测这次请求要多强
+// 的思考）与这里（写：转发给上游要多强的思考）共用它 —— 两边各留一份时，
+// 读侧认得的词写侧未必认，会出现「列表显示某档、上游其实没收到任何思考参数」，
+// 且没有任何编译期信号。词表和预算刻度也都在本文件，读写共用一把尺子。
+func NormalizeEffort(s string) string {
 	v := strings.ToLower(strings.TrimSpace(s))
 	if v == "none" {
 		return effortOff
@@ -125,7 +129,7 @@ func anthropicThinkingEffort(src map[string]any) string {
 	}
 	// effort 比 type 更精确，先看它；空串不算一个档位
 	if oc := asMap(src["output_config"]); oc != nil {
-		if v := normalizeEffort(asString(oc["effort"])); v != "" {
+		if v := NormalizeEffort(asString(oc["effort"])); v != "" {
 			return v
 		}
 	}
@@ -159,7 +163,7 @@ func geminiThinkingEffort(src map[string]any) string {
 		return ""
 	}
 	if lv := asString(tc["thinkingLevel"]); lv != "" {
-		return normalizeEffort(lv)
+		return NormalizeEffort(lv)
 	}
 	raw, ok := tc["thinkingBudget"]
 	if !ok {
@@ -213,7 +217,7 @@ func applyEffortToAnthropicRequest(out, src map[string]any, extra map[string]any
 			return
 		}
 	}
-	switch effort := normalizeEffort(asString(src[reasoningEffortField])); effort {
+	switch effort := NormalizeEffort(asString(src[reasoningEffortField])); effort {
 	case "":
 		return
 	case effortOff:
@@ -237,7 +241,7 @@ func applyEffortToAnthropicRequest(out, src map[string]any, extra map[string]any
 // 用 thinkingBudget（数值）而不是 thinkingLevel（枚举）：数值是老中青三代
 // 都认的形状，而 thinkingLevel 只有 Gemini 3 认。数值刻度见文件顶部的常量表。
 func geminiThinkingConfig(effortRaw string) map[string]any {
-	switch effort := normalizeEffort(effortRaw); effort {
+	switch effort := NormalizeEffort(effortRaw); effort {
 	case "":
 		return nil
 	case effortOff:

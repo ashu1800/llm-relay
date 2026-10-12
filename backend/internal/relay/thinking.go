@@ -61,7 +61,7 @@ func ExtractThinkingLevel(proto string, raw []byte) string {
 			return ""
 		}
 		if p.ReasoningEffort != "" {
-			return normalizeEffort(p.ReasoningEffort)
+			return convert.NormalizeEffort(p.ReasoningEffort)
 		}
 		if p.Thinking != nil {
 			return normalizeSwitch(p.Thinking.Type)
@@ -77,7 +77,7 @@ func ExtractThinkingLevel(proto string, raw []byte) string {
 		if json.Unmarshal(raw, &p) != nil || p.Reasoning == nil {
 			return ""
 		}
-		return normalizeEffort(p.Reasoning.Effort)
+		return convert.NormalizeEffort(p.Reasoning.Effort)
 	case protoAnthropic:
 		// Anthropic 有两种「开思考」的表达，按代际分的：
 		//
@@ -113,7 +113,7 @@ func ExtractThinkingLevel(proto string, raw []byte) string {
 		// "max" 原样透传 —— 前端 THINKING_COLORS 里有这一档
 		// （注释记着「线上观测到的客户端自定义最高档」就是它）。
 		if p.OutputConfig != nil && p.OutputConfig.Effort != nil {
-			if v := normalizeEffort(*p.OutputConfig.Effort); v != "" {
+			if v := convert.NormalizeEffort(*p.OutputConfig.Effort); v != "" {
 				return v
 			}
 		}
@@ -147,7 +147,7 @@ func ExtractThinkingLevel(proto string, raw []byte) string {
 		}
 		tc := p.GenerationConfig.ThinkingConfig
 		if tc.ThinkingLevel != "" {
-			return normalizeEffort(tc.ThinkingLevel)
+			return convert.NormalizeEffort(tc.ThinkingLevel)
 		}
 		if tc.ThinkingBudget == nil {
 			return ""
@@ -180,16 +180,6 @@ func budgetBand(n, mediumFrom, highFrom int, fallback string) string {
 	default:
 		return "high"
 	}
-}
-
-// normalizeEffort 归一 effort 风格的等级词：小写；"none" 是「明确关闭」。
-// 认不得的词原样小写透传 —— 上游自定义的档位诚实展示，优于猜测。
-func normalizeEffort(s string) string {
-	v := strings.ToLower(strings.TrimSpace(s))
-	if v == "none" {
-		return "off"
-	}
-	return v
 }
 
 // normalizeSwitch 归一「开/关」风格的思考开关（GLM thinking.type）。

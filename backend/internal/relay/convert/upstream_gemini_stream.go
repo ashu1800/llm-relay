@@ -100,15 +100,13 @@ func (s *geminiUpstreamStream) feed(p []byte) {
 	if s.writeErr != nil {
 		return
 	}
-	splitter := &sseSplitter{buf: s.buf}
-	splitter.feed(p, func(line []byte) {
-		payload := dataPayload(line)
+	feedSSE(&s.buf, p, func(line []byte) {
+		payload := DataPayload(line)
 		if payload == nil {
 			return
 		}
 		s.handleChunk(payload)
 	})
-	s.buf = splitter.buf
 }
 
 func (s *geminiUpstreamStream) handleChunk(payload []byte) {

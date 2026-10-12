@@ -261,17 +261,42 @@ func UpstreamErrorMessage(protocol string, body []byte) string {
 	case model.ProtocolOpenAIResponses:
 		return ResponsesUpstreamErrorMessage(body)
 	default:
-		// OpenAI 形状的上游同样把原因放在 error.message 里
-		var payload map[string]any
-		if err := json.Unmarshal(body, &payload); err == nil {
-			if e := asMap(payload["error"]); e != nil {
-				if msg := asString(e["message"]); msg != "" {
-					return msg
-				}
-			}
-		}
+		// OpenAI 形状的上游同样把原因放在 error.message 里，但没有种类字段
+		return upstreamErrorMessage(body, "")
+	}
+}
+
+// upstreamErrorMessage 从上游错误体里取出可读可回传的信息。
+//
+// 四种上游的错误体形状其实只有两个变量：
+//   - prefixKey：错误对象里「错误种类」的字段名。Anthropic 与 Responses 用
+//     type，Gemini 用 status，OpenAI 形状的上游没有这一层（传空串）。
+//   - 顶层 message 兜底：有些上游不套 error 对象，直接把 message 放在顶层。
+//
+// 这四份实现原先各写一遍，Gemini 那份就漏掉了顶层兜底 —— 于是同一个上游
+// 报错，走 Gemini 协议回给用户的是整段原始 JSON，走 Anthropic 协议却是
+// 一句人话。直接返回整个 JSON 的话一层套一层很难看懂，所以能提炼就提炼。
+//
+// 解析不出来时原样返回 body：让上层看到原始报文，好过给一个空串。
+func upstreamErrorMessage(body []byte, prefixKey string) string {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
 		return string(body)
 	}
+	if e := asMap(payload["error"]); e != nil {
+		if msg := asString(e["message"]); msg != "" {
+			if prefixKey != "" {
+				if t := asString(e[prefixKey]); t != "" {
+					return t + ": " + msg
+				}
+			}
+			return msg
+		}
+	}
+	if msg := asString(payload["message"]); msg != "" {
+		return msg
+	}
+	return string(body)
 }
 
 // isChatPath 判断这次请求是不是「对话」类。

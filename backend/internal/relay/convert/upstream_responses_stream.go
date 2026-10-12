@@ -111,8 +111,7 @@ func (s *responsesUpstreamStream) Close() error { return s.src.Close() }
 
 // feed 逐行解析上游 SSE。
 func (s *responsesUpstreamStream) feed(p []byte) {
-	splitter := &sseSplitter{buf: s.buf}
-	splitter.feed(p, func(line []byte) {
+	feedSSE(&s.buf, p, func(line []byte) {
 		if s.writeErr != nil {
 			return
 		}
@@ -120,7 +119,6 @@ func (s *responsesUpstreamStream) feed(p []byte) {
 			s.writeErr = err
 		}
 	})
-	s.buf = splitter.buf
 }
 
 func (s *responsesUpstreamStream) handleLine(line []byte) error {

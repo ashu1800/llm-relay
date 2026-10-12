@@ -520,20 +520,7 @@ func geminiUsageToOpenAI(meta map[string]any) map[string]any {
 }
 
 // GeminiErrorMessage 从 Gemini 的错误体里取出可读信息。
+// Gemini 用 status（如 INVALID_ARGUMENT）而不是 type 表示错误种类。
 func GeminiErrorMessage(body []byte) string {
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return string(body)
-	}
-	if e := asMap(payload["error"]); e != nil {
-		msg := asString(e["message"])
-		status := asString(e["status"])
-		switch {
-		case msg != "" && status != "":
-			return status + ": " + msg
-		case msg != "":
-			return msg
-		}
-	}
-	return string(body)
+	return upstreamErrorMessage(body, "status")
 }

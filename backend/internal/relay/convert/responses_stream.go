@@ -69,7 +69,7 @@ func (t *ResponsesStreamTranslator) Write(p []byte) (int, error) {
 		if werr != nil {
 			return
 		}
-		if payload := dataPayload(line); payload != nil {
+		if payload := DataPayload(line); payload != nil {
 			werr = t.handleChunk(payload)
 		}
 	})
@@ -382,7 +382,7 @@ func (t *ResponsesStreamTranslator) Close() error {
 		if flushErr != nil {
 			return
 		}
-		if payload := dataPayload(line); payload != nil {
+		if payload := DataPayload(line); payload != nil {
 			flushErr = t.handleChunk(payload)
 		}
 	})

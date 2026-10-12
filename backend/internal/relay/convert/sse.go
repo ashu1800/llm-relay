@@ -135,9 +135,26 @@ func (s *sseSplitter) flush(onLine func([]byte)) {
 	}
 }
 
-// dataPayload 从 SSE 行里取出 data 字段的 JSON 内容。
+// feedSSE 把一个分片喂给行切分器，逐行回调，并把剩余不完整行写回 buf。
+//
+// 三个上游流包装器（Anthropic / Gemini / Responses）的 feed 骨架完全相同：
+// 构造 splitter → 逐行回调 → 回写剩余缓冲。差别只在 handleLine 与错误落点，
+// 所以骨架收在这里。回写这一步是最容易漏的 —— 漏了不会报错，只是每个分片
+// 都从零重新解析，跨分片的半行被静默丢弃。
+func feedSSE(buf *[]byte, p []byte, onLine func([]byte)) {
+	sp := &sseSplitter{buf: *buf}
+	sp.feed(p, onLine)
+	*buf = sp.buf
+}
+
+// DataPayload 从 SSE 行里取出 data 字段的 JSON 内容。
 // 非 data 行（event:/id:/注释/空行）返回 nil。
-func dataPayload(line []byte) []byte {
+//
+// 导出供包外复用：api 包的上游探测同样要「剥 data: 前缀、只认 { 开头的负载」，
+// 让它调用这里，而不是在包外再写一份略有出入的判帧规则。
+// 注意它只认带 "data:" 前缀的行 —— 个别中转会把整块 JSON 直接按 chunked 传输
+// （无前缀），那种帧由调用方自行兜底（见 api.readReplyFromStream）。
+func DataPayload(line []byte) []byte {
 	if !bytes.HasPrefix(line, []byte("data:")) {
 		return nil
 	}

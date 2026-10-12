@@ -662,20 +662,5 @@ func openAIID(id string) string {
 // AnthropicErrorMessage 从 Anthropic 的错误体里取出可读信息。
 // 直接把整个 JSON 当 message 回给客户端的话，一层套一层很难看懂。
 func AnthropicErrorMessage(body []byte) string {
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return string(body)
-	}
-	if e := asMap(payload["error"]); e != nil {
-		if msg := asString(e["message"]); msg != "" {
-			if t := asString(e["type"]); t != "" {
-				return t + ": " + msg
-			}
-			return msg
-		}
-	}
-	if msg := asString(payload["message"]); msg != "" {
-		return msg
-	}
-	return string(body)
+	return upstreamErrorMessage(body, "type")
 }

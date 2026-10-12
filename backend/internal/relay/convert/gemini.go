@@ -317,18 +317,7 @@ func OpenAIChatToGeminiResponse(body []byte, fallbackModel string) ([]byte, erro
 
 // usageToGemini 把 Chat 用量换算成 Gemini 口径。
 func usageToGemini(usage map[string]any) map[string]any {
-	in := asInt(usage["prompt_tokens"])
-	if in == 0 {
-		in = asInt(usage["input_tokens"])
-	}
-	outTokens := asInt(usage["completion_tokens"])
-	if outTokens == 0 {
-		outTokens = asInt(usage["output_tokens"])
-	}
-	cached := 0
-	if d := asMap(usage["prompt_tokens_details"]); d != nil {
-		cached = asInt(d["cached_tokens"])
-	}
+	in, outTokens, cached, _ := usageCounts(usage)
 	meta := map[string]any{
 		"promptTokenCount":     in,
 		"candidatesTokenCount": outTokens,
@@ -467,7 +456,7 @@ func (t *GeminiStreamTranslator) Write(p []byte) (int, error) {
 		if werr != nil {
 			return
 		}
-		if payload := dataPayload(line); payload != nil {
+		if payload := DataPayload(line); payload != nil {
 			werr = t.handleChunk(payload)
 		}
 	})
@@ -632,7 +621,7 @@ func (t *GeminiStreamTranslator) Close() error {
 		if flushErr != nil {
 			return
 		}
-		if payload := dataPayload(line); payload != nil {
+		if payload := DataPayload(line); payload != nil {
 			flushErr = t.handleChunk(payload)
 		}
 	})
