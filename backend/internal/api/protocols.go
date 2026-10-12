@@ -79,14 +79,6 @@ func (p *inboundProfile) translator(w io.Writer, model string, stream bool) conv
 	return p.NewTranslator(w, model, stream)
 }
 
-// errorBody 生成错误响应体，默认用 OpenAI 结构。
-func (p *inboundProfile) errorBody(status int, message string) []byte {
-	if p.ErrorBody != nil {
-		return p.ErrorBody(status, message)
-	}
-	return defaultErrorBody(status, message)
-}
-
 // writeError 按入站协议的错误结构返回。
 func (p *inboundProfile) writeError(c *gin.Context, status int, message, errType string) {
 	if status <= 0 {

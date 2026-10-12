@@ -324,6 +324,26 @@ func normalizeWhitelist(items []whitelistItem) ([]model.ChannelModel, error) {
 	return out, nil
 }
 
+// bindWhitelist 是「规整 + 校验代理引用」的唯一入口。
+//
+// 这两步此前在四处（建渠道 / 改渠道 / 整表 PUT / 单条绑定）各抄了一遍，
+// 连同两条一模一样的 400 错误串。合并成一处的意义不在省行数：白名单的
+// 校验规则以后要是再加一条（比如「同一个上游名只能绑一次」），漏改一处
+// 就是一个能存进库的坏数据，而且没有任何信号。写失败时它自己回 400 并
+// 返回 false，调用方只写 `if !ok { return }`。
+func (s *Server) bindWhitelist(c *gin.Context, items []whitelistItem) ([]model.ChannelModel, bool) {
+	rows, err := normalizeWhitelist(items)
+	if err != nil {
+		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return nil, false
+	}
+	if verr := s.validateWhitelistProxies(rows); verr != nil {
+		writeUpstreamError(c, http.StatusBadRequest, verr.Error(), "invalid_request_error")
+		return nil, false
+	}
+	return rows, true
+}
+
 // invalidatePricing 让计价引擎丢掉缓存。
 //
 // 价格随渠道模型一起改，所以任何动到白名单的接口都必须喊一声：
@@ -605,13 +625,8 @@ func (s *Server) createChannel(c *gin.Context) {
 	// 白名单在这里就校验：等到写完渠道再报错，用户得重填一遍表单
 	var whitelist []model.ChannelModel
 	if p.Models != nil {
-		items, err := normalizeWhitelist(*p.Models)
-		if err != nil {
-			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
-			return
-		}
-		if verr := s.validateWhitelistProxies(items); verr != nil {
-			writeUpstreamError(c, http.StatusBadRequest, verr.Error(), "invalid_request_error")
+		items, ok := s.bindWhitelist(c, *p.Models)
+		if !ok {
 			return
 		}
 		whitelist = items
@@ -756,13 +771,8 @@ func (s *Server) updateChannel(c *gin.Context) {
 	}
 	var whitelist []model.ChannelModel
 	if p.Models != nil {
-		items, err := normalizeWhitelist(*p.Models)
-		if err != nil {
-			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
-			return
-		}
-		if verr := s.validateWhitelistProxies(items); verr != nil {
-			writeUpstreamError(c, http.StatusBadRequest, verr.Error(), "invalid_request_error")
+		items, ok := s.bindWhitelist(c, *p.Models)
+		if !ok {
 			return
 		}
 		whitelist = items
@@ -1113,13 +1123,8 @@ func (s *Server) replaceChannelModelsAPI(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
 		return
 	}
-	items, err := normalizeWhitelist(p.Items)
-	if err != nil {
-		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
-		return
-	}
-	if verr := s.validateWhitelistProxies(items); verr != nil {
-		writeUpstreamError(c, http.StatusBadRequest, verr.Error(), "invalid_request_error")
+	items, ok := s.bindWhitelist(c, p.Items)
+	if !ok {
 		return
 	}
 	db := s.deps.Store.DB()
@@ -1161,13 +1166,8 @@ func (s *Server) bindChannelModel(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
 		return
 	}
-	items, err := normalizeWhitelist([]whitelistItem{p.whitelistItem()})
-	if err != nil {
-		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
-		return
-	}
-	if verr := s.validateWhitelistProxies(items); verr != nil {
-		writeUpstreamError(c, http.StatusBadRequest, verr.Error(), "invalid_request_error")
+	items, ok := s.bindWhitelist(c, []whitelistItem{p.whitelistItem()})
+	if !ok {
 		return
 	}
 	item := items[0]
@@ -1199,7 +1199,7 @@ func (s *Server) bindChannelModel(c *gin.Context) {
 	// enabled=false 会被当成「没传」而跳过，于是「把某条白名单停用」静默失效。
 	// 显式分「新建」与「改已有」两条路，两个字段都写死在 map 里，不依赖零值语义。
 	binding := model.ChannelModel{ChannelID: id, PublicName: item.PublicName}
-	err = db.Where("channel_id = ? AND public_name = ?", id, item.PublicName).First(&binding).Error
+	err := db.Where("channel_id = ? AND public_name = ?", id, item.PublicName).First(&binding).Error
 	switch {
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		// 价格与代理都从 item 整块拷过来：item 已经过 normalizeWhitelist

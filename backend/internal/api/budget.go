@@ -80,16 +80,6 @@ func (s *budgetAlertState) shouldAlert(groupID uint, currency, level string, tod
 	return true
 }
 
-// budgetStatus 是一次预算检查在某一币种上的结论。
-type budgetStatus struct {
-	Currency string  `json:"currency"`
-	Limit    float64 `json:"limit"`
-	Spent    float64 `json:"spent"`
-	Ratio    float64 `json:"ratio"`
-	// Level："80" 预警 / "100" 超支。空 = 未达任何档位
-	Level string `json:"level"`
-}
-
 // groupSpentToday 聚合某分组今日各币种的花费。
 // 口径与看板一致：estimated_cost 按 cost_currency 分组求和，
 // 时间范围与 /stats/summary 的 today 完全同一份 resolveRange。

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -150,10 +149,6 @@ func fsReadFile(fsys fs.FS, name string) ([]byte, error) {
 	return fs.ReadFile(fsys, name)
 }
 
-func trimLeadingSlash(p string) string {
-	return strings.TrimPrefix(p, "/")
-}
-
 // isAPIPath 判断路径是否属于接口命名空间，用于避免 SPA 回退吞掉 404。
 func isAPIPath(p string) bool {
 	for _, prefix := range []string{"/api/", "/v1/", "/v1beta/", "/healthz", "/readyz"} {
@@ -162,14 +157,6 @@ func isAPIPath(p string) bool {
 		}
 	}
 	return false
-}
-
-// defaultErrorBody 生成 OpenAI 结构的错误响应体。
-func defaultErrorBody(status int, message string) []byte {
-	raw, _ := json.Marshal(map[string]any{
-		"error": map[string]any{"message": message, "type": "upstream_error", "code": status},
-	})
-	return raw
 }
 
 // writeUpstreamError 以 OpenAI 兼容的错误结构返回。

@@ -1,7 +1,7 @@
 package api
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +16,7 @@ import (
 
 	"llm-relay/internal/model"
 	"llm-relay/internal/relay"
+	"llm-relay/internal/relay/convert"
 )
 
 // 连通性测试的超时。比首字节超时宽松一些：这个请求会等完整响应，
@@ -161,8 +162,6 @@ func (s *Server) testChannel(c *gin.Context) {
 // 开头就尝试解析，delta（流式块）与 message（整块响应）两种形状都认，
 // 正文优先、思维链兜底。读完即弃。8KB 截到足够界面展示。
 func readReplyFromStream(r io.Reader) (string, string) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 512*1024)
 	var content, reasoning, extra strings.Builder
 	finish := ""
 	type segShape struct {
@@ -170,14 +169,21 @@ func readReplyFromStream(r io.Reader) (string, string) {
 		ReasoningContent string `json:"reasoning_content"`
 		Reasoning        string `json:"reasoning"`
 	}
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		payload := line
-		if strings.HasPrefix(line, "data:") {
-			payload = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+	// 行切分交给 convert.LineSplitter：它同时是探针与 relay.UsageTee 的切分器。
+	// 原先这里自带 bufio.Scanner，于是包外多了一份切分实现，而且 Scanner 的
+	// 缓冲上限（512KiB）比 convert.MaxSSELine（1MiB）更早触顶 —— 上游发一个
+	// 大帧就会静默停止喂行，探针显示「上游没有返回内容」而不是报错。
+	//
+	// 一次读全是安全的：探针读的是自己的响应体，且正文只留前 8KB。
+	onLine := func(line []byte) {
+		// 有 data: 前缀就剥掉；没有的（整块 JSON 直接按 chunked 传输）
+		// 就看这一行本身是不是 JSON 对象。
+		payload := convert.DataPayload(line)
+		if payload == nil {
+			payload = bytes.TrimSpace(line)
 		}
-		if payload == "" || payload == "[DONE]" || !strings.HasPrefix(payload, "{") {
-			continue
+		if len(payload) == 0 || payload[0] != '{' {
+			return
 		}
 		var chunk struct {
 			Choices []struct {
@@ -188,8 +194,8 @@ func readReplyFromStream(r io.Reader) (string, string) {
 				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
 		}
-		if json.Unmarshal([]byte(payload), &chunk) != nil {
-			continue
+		if json.Unmarshal(payload, &chunk) != nil {
+			return
 		}
 		for _, c := range chunk.Choices {
 			seg := c.Delta
@@ -210,10 +216,14 @@ func readReplyFromStream(r io.Reader) (string, string) {
 				finish = c.FinishReason
 			}
 		}
-		if content.Len() >= 8192 {
-			break
-		}
 	}
+	raw, _ := io.ReadAll(r)
+	splitter := &convert.LineSplitter{}
+	splitter.Feed(raw, onLine)
+	// 必须 Flush：上游「整块 JSON 直接按 chunked 传输、末尾不带换行」时，
+	// 那一行会留在缓冲里永不回调（bufio.Scanner 在 EOF 时会吐出尾段，
+	// LineSplitter 不会）。漏掉这一步，探针会把这类上游误报成「没有返回内容」。
+	splitter.Flush(onLine)
 	text := strings.TrimSpace(content.String())
 	if text == "" {
 		text = strings.TrimSpace(reasoning.String())
@@ -262,6 +272,11 @@ func summarizeUpstreamError(body []byte) string {
 	if raw == "" {
 		return "上游返回了空响应体"
 	}
+	// 这里刻意不复用 convert.UpstreamErrorMessage：那是给**真实转发**回客户端的
+	// 原话（"type: message" 形态，不做截断），而这是给探测面板一行的摘要 ——
+	// 形态是 "message (type)"、末尾必须截到 600 字、空响应体还要有一句专属文案。
+	// 两者的“认帧”字段集相同（error.message / error.type / 顶层 message），
+	// 但输出契约不同，硬合并会把 type 丢掉或把摘要撑爆。
 	var parsed struct {
 		Error struct {
 			Message string `json:"message"`

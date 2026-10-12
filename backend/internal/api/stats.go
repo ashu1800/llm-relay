@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -32,12 +31,6 @@ func totalTokensOf(prompt, completion, cached, cacheCreation int64) int64 {
 // cacheHitRateOf 同上，是 relay.CacheHitRateOf 的 int64 版本。
 func cacheHitRateOf(prompt, cached, cacheCreation int64) float64 {
 	return relay.CacheHitRateOf(int(prompt), int(cached), int(cacheCreation))
-}
-
-// round2 保留两位小数，用于毫秒等展示型数值。
-// 比例类字段一律返回原始浮点，格式化交给前端，避免各接口精度不一致。
-func round2(v float64) float64 {
-	return math.Round(v*100) / 100
 }
 
 // costsByCurrency 是「币种 -> 金额」的累加器。
@@ -147,6 +140,10 @@ var (
 	statsZoneExpr string
 	// statsZoneArg 是对应的参数值，SQL 里会出现两次
 	statsZoneArg any
+
+	localTZOnce sync.Once
+	// localTZName 缓存「时区名」，供响应体里的 timezone 字段使用
+	localTZName string
 )
 
 // statsZone 解析一次时区并缓存。返回值直接拼进 SQL 的 AT TIME ZONE 之后，
@@ -170,12 +167,20 @@ func statsZone() (string, any) {
 	return statsZoneExpr, statsZoneArg
 }
 
-// localTZ 保留给需要「时区名」而非 SQL 片段的调用方。
+// localTZ 保留给需要「时区名」而非 SQL 片段的调用方（如热力图响应里的 timezone）。
+//
+// 与 statsZone 一样记忆化：statsZoneName 会读 /etc/timezone 与 /etc/localtime
+// 符号链接，放在每个热力图请求上都重读一遍磁盘纯属浪费，而时区名在一次进程
+// 生命周期内不会变。
 func localTZ() string {
-	if name := statsZoneName(); name != "" {
-		return name
-	}
-	return "UTC"
+	localTZOnce.Do(func() {
+		if name := statsZoneName(); name != "" {
+			localTZName = name
+			return
+		}
+		localTZName = "UTC"
+	})
+	return localTZName
 }
 
 // statsFilter 是看板的筛选条件：按分组 / 按渠道 / 按模型，0 或空串表示不筛选。
