@@ -56,31 +56,20 @@ else
 fi
 echo
 
-# 这两个脚本没有 ALL_PASS 标志：test-regression.sh 以 DONE 收尾，
-# test-foreign-keys.sh 只打印计数。它们按各自的标志判定。
-for s in test-regression.sh test-foreign-keys.sh; do
-  echo "########## $s ##########"
-  out=$(bash "scripts/$s" 2>&1)
-  printf '%s\n' "$out" | tail -3
-  case "$s" in
-    test-regression.sh)
-      # 正常结束时最后一行是 DONE；四个入站协议的探测结果在它之前
-      printf '%s\n' "$out" | grep -q '^DONE$' || {
-        fail=1
-        echo "  !! $s 没有跑到结尾（缺少 DONE 标志）"
-      }
-      ;;
-    *)
-      # 计数行是唯一的结构化输出，缺失即说明中途挂了
-      printf '%s\n' "$out" | grep -qE '^通过 [0-9]+ 项，失败 [0-9]+ 项$' || {
-        fail=1
-        echo "  !! $s 没有输出计数行（可能中途失败）"
-      }
-      printf '%s\n' "$out" | grep -q '失败 0 项' || fail=1
-      ;;
-  esac
-  echo
-done
+# test-regression.sh 是本清单里唯一没有 ALL_PASS 标志的脚本：它以 DONE 收尾。
+# 原先这里还挂着一个 test-foreign-keys.sh，但它已随 Docker 部署路径退役
+# （fe2da29）被删除 —— 保留死引用会让计数行 grep 永远匹配不到、fail 恒为 1，
+# 于是本脚本无论结果如何都以「有验证未通过」结束，退出码彻底失去意义。
+s=test-regression.sh
+echo "########## $s ##########"
+out=$(bash "scripts/$s" 2>&1)
+printf '%s\n' "$out" | tail -3
+# 正常结束时最后一行是 DONE；四个入站协议的探测结果在它之前
+printf '%s\n' "$out" | grep -q '^DONE$' || {
+  fail=1
+  echo "  !! $s 没有跑到结尾（缺少 DONE 标志）"
+}
+echo
 
 echo "########## 启动慢速上游（必须在上面那些会重新部署的脚本之后）##########"
 # 以宿主 node 进程跑（ensure 脚本自己管 pidfile 与就绪探测）
@@ -119,12 +108,16 @@ done
 # bash 用例：同样以 ALL_PASS 为唯一通过标志。
 # 依赖 mock 上游的用例自己会拉起它（test-pricing-rules.sh → slow-upstream，
 # test-cost.sh → proto-upstream，test-retry-delay.py → flaky-upstream）。
-# test-default-group.sh 另建一个空库跑（要验的正是启动时的种子行为），
-# 不碰线上库。
+#
+# test-default-group.sh 曾在这份名单里，但它已随 Docker 部署路径退役
+# （fe2da29）被删除。pass_or_fail 拿到空输出即判失败，所以死引用会让
+# 这一轮同样以「有验证未通过」收尾；想验「启动时种子默认分组」请用
+# test-default-model.sh（它自带 9 组端到端断言，但以进程退出码收尾、
+# 不打印 ALL_PASS，直接由 `bash scripts/test-default-model.sh` 跑）。
 # test-legacy-column-add.sh 会删价格列并跑 install.sh 重新部署（几分钟不可用），放在最后跑
 # verify-update-config.sh 只读写更新设置（会临时存一个假 token 再清除），
 # 不碰数据、不重启服务，所以位置不敏感
-for s in test-default-group.sh test-model-whitelist.sh test-upstream-protocol.sh test-upstream-gemini.sh test-thinking-map.sh test-pricing.sh test-pricing-rules.sh test-pricing-backup.sh test-pricing-filter.sh \
+for s in test-model-whitelist.sh test-upstream-protocol.sh test-upstream-gemini.sh test-thinking-map.sh test-pricing.sh test-pricing-rules.sh test-pricing-backup.sh test-pricing-filter.sh \
          test-group-quota.sh test-proxies.sh test-egress-proxy.sh test-live.sh test-purge-scope.sh test-cost.sh test-legacy-column-add.sh \
          verify-update-config.sh; do
   echo "########## $s ##########"
