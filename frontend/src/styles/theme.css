@@ -1247,17 +1247,6 @@ body {
   line-height: 1.15;
 }
 
-/* ---- 栅格：gap 恒为 8px ---- */
-.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
-.grid-auto { display: grid; gap: var(--gap); }
-
-/* ---- 工具栏 ---- */
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: var(--gap);
-}
-
 /* ---- 管理表工具栏里的搜索框（2026-10-11）----
    放在全局而不是各页的 scoped 样式里：四张管理表（渠道 / 密钥 / 分组 / 代理）
    各有一份 .manage-toolbar，而搜索框的宽度必须**四处一致** ——
@@ -1446,7 +1435,6 @@ a:hover { opacity: 0.85; }
    和表格正文是同一种文字，不该有两种字体。 */
 .ant-table-thead > tr > th,
 .ant-table-tbody > tr > td,
-.ant-list,
 .ant-tag {
   font-family: var(--font-family-list);
 }
@@ -1472,7 +1460,6 @@ a:hover { opacity: 0.85; }
  * 会随实时推送跳变，不等宽就会左右抖），所以这里不重复声明。 */
 .ant-table-thead > tr > th,
 .ant-table-tbody > tr > td,
-.ant-list,
 .ant-tag {
   font-variant-numeric: tabular-nums;
 }

@@ -751,6 +751,21 @@ function sortOrderOf(key: string): 'ascend' | 'descend' | null {
   return null
 }
 
+// sortProps 把一个可排序列该带的四个属性一次给全（用法 v-bind="sortProps('cost')"）。
+//
+// 这四个属性少任何一个都不会报错，只是**静默失灵**：少了 sorter 就点不动；
+// 少了 sort-order 箭头永远不亮；少了 key/受控方式会让本地排序与服务端排序
+// 打架。三列各抄一遍时，漏写是靠肉眼发现的 —— 收成一处之后，列与列的
+// 一致性由这个函数保证，SORTABLE 是唯一需要维护的清单。
+function sortProps(key: (typeof SORTABLE)[number]) {
+  return {
+    key,
+    sorter: true,
+    'sort-order': sortOrderOf(key),
+    'show-sorter-tooltip': false
+  }
+}
+
 /**
  * a-table 的 change：分页、筛选、排序三者共用一个回调，只处理排序那一路。
  *
@@ -2058,15 +2073,11 @@ onMounted(() => {
              这些都是手写版要一项项补齐的。
              sorter: true 表示「服务端排序」——表格不本地比较数据，
              而是回调 onTableChange 让我们带着 sort= 重新取数。
-             注意不能用 :sort-order 之外的受控方式：箭头状态由
-             sortOrderOf 给出，与 URL 参数是同一个来源。 -->
+             四个属性由 sortProps() 一次给全（见其注释：少一个就是静默失灵）。 -->
         <a-table-column v-if="colShown.elapsed"
+          v-bind="sortProps('elapsed')"
           title="任务耗时"
           :width="colW.elapsed"
-          key="elapsed"
-          :sorter="true"
-          :sort-order="sortOrderOf('elapsed')"
-          :show-sorter-tooltip="false"
         >
           <template #default="{ record }">
             <div class="dur">
@@ -2096,12 +2107,9 @@ onMounted(() => {
           </template>
         </a-table-column>
         <a-table-column v-if="colShown.cost"
+          v-bind="sortProps('cost')"
           title="费用"
           :width="colW.cost"
-          key="cost"
-          :sorter="true"
-          :sort-order="sortOrderOf('cost')"
-          :show-sorter-tooltip="false"
         >
           <template #default="{ record }">
             <!-- 包一层 .txt-cell：它是这一列的测量锚点（见 CONTENT_MEASURE）。
@@ -2130,12 +2138,9 @@ onMounted(() => {
         <!-- 状态列移到费用之后（站主 2026-09-20 要求）：数字区（词元/耗时/费用）
              读完后，「成没成」与「哪把密钥」两个结果性信息收尾 -->
         <a-table-column v-if="colShown.status"
+          v-bind="sortProps('status')"
           title="状态"
           :width="colW.status"
-          key="status"
-          :sorter="true"
-          :sort-order="sortOrderOf('status')"
-          :show-sorter-tooltip="false"
         >
           <template #default="{ record }">
             <!-- 状态徽标（2026-09-27 感官升级）：带前置指示点的轻质药丸取代 a-tag ——

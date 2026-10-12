@@ -572,8 +572,10 @@ function fmt(t: string | null) {
 }
 
 onMounted(() => {
-  load()
-  loadGroups()
+  // 两个请求互不依赖（写 rows 与写 groups 各自独立、各有各的错误处理），
+  // 串行 await 会让密钥页首屏白白多等一个 RTT。ChannelsView 的 load()
+  // 对三个端点就是这么并发的，这里跟上同一口径。
+  void Promise.all([load(), loadGroups()])
   document.addEventListener('visibilitychange', onVisibilityDrop)
 })
 

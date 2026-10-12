@@ -52,7 +52,18 @@ function sync() {
     }, 250)
   }
 }
-watch(() => props.runtime, sync, { immediate: true, deep: true })
+// 只盯 cooldown_ms，而不是深监听整个 runtime 对象。
+//
+// 原来这里是 watch(() => props.runtime, sync, { deep: true })，而
+// ChannelsView 收到 channel_health 帧时是**就地改**那一行的 runtime
+// （recovered 帧会把 cooldown_ms 与 fail_streak 一起写 0）。deep 监听
+// 导致任意字段变动都重跑 sync：每来一帧，表格里**每一行**的定时器都被
+// clearInterval 后重建一遍，正在走的那轮冷却倒计时也跟着重新校准。
+// 上游故障时频道冷却会连续推帧，这个churn 会被放大。
+// sync 真正依赖的只有 cooldown_ms（remain/initial/deadline 都由它推出来），
+// fail_streak 只影响 state 这个 computed —— 它自己会跟着响应式更新，
+// 不需要经过 sync 重建定时器。
+watch(() => props.runtime?.cooldown_ms ?? 0, sync, { immediate: true })
 onUnmounted(() => {
   if (timer !== null) window.clearInterval(timer)
 })
