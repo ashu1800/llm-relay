@@ -13,6 +13,7 @@ package store
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -170,5 +171,109 @@ func TestHasColumnScopedToCurrentSchema(t *testing.T) {
 	}
 	if s.hasColumn("channels", "definitely_not_a_column_xyz") {
 		t.Fatal("不存在的列不应被探测到")
+	}
+}
+
+// TestForeignKeyConstraints 钉住迁移建立的两条外键真的在拦截。
+//
+// 这两条约束原先由 scripts/test-foreign-keys.sh 验证，但那是 Docker 时代的
+// 脚本，随部署形态改成「裸二进制 + systemd」一起退役（fe2da29）—— 验证没有
+// 跟着搬过来，于是 store.go 里的两条 FOREIGN KEY 一直处于「没有任何自动化
+// 证明它生效」的状态。迁移是 ALTER TABLE ... ADD CONSTRAINT，一旦哪次改动
+// 让它没跑到、或建表顺序变化导致它失败，约束会静默消失，而坏数据要等到
+// 用户删分组或导入备份时才暴露出来。
+//
+// 断言的是**具名约束 + 拦截行为**，不是「外键总数」：原先的脚本数
+// count(*) = 2，它自己的注释就写着「每删一个功能都要回来改这个数字，
+// 否则会以外键数量不对误报」。按名字断言没有这个维护尾巴，而且直接覆盖
+// ON DELETE 的两种语义（CASCADE 带走 / RESTRICT 拦住）—— 这两个才是
+// 应用层真正依赖的契约。
+func TestForeignKeyConstraints(t *testing.T) {
+	s := testStore(t)
+	if err := s.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	db := s.db
+
+	for _, name := range []string{"fk_channel_models_channel", "fk_channels_group"} {
+		var n int64
+		db.Raw("SELECT count(*) FROM pg_constraint WHERE conname = ? AND contype = 'f'", name).Scan(&n)
+		if n != 1 {
+			t.Fatalf("外键 %s 不存在：迁移里的 ADD CONSTRAINT 没有生效", name)
+		}
+	}
+
+	// 反向断言：channel_templates 已随功能下线 DROP，不该被迁移建回来。
+	// 它曾经让应用起不来 —— 迁移里有一句 UPDATE 指向这张已删的表。
+	if s.hasTable("channel_templates") {
+		t.Error("channel_templates 应已删除；建回它会让「删表」前的那句迁移 UPDATE 重新炸掉启动")
+	}
+
+	// ---- 造一套自己的数据：分组 → 渠道 → 白名单 ----
+	// 用能一眼认出的名字，绝不碰测试库里的既有行。
+	const gname = "__fk_probe_group__"
+	const cname = "__fk_probe_channel__"
+	cleanup := func() {
+		db.Exec("DELETE FROM channel_models WHERE channel_id IN (SELECT id FROM channels WHERE name = ?)", cname)
+		db.Exec("DELETE FROM channels WHERE name = ?", cname)
+		db.Exec("DELETE FROM channel_groups WHERE name = ?", gname)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	if err := db.Exec(`INSERT INTO channel_groups (name, strategy, enabled, created_at, updated_at)
+		VALUES (?, 'failover', true, now(), now())`, gname).Error; err != nil {
+		t.Skipf("造测试分组失败，跳过: %v", err)
+	}
+	var gid uint
+	db.Raw("SELECT id FROM channel_groups WHERE name = ?", gname).Scan(&gid)
+	if gid == 0 {
+		t.Skip("取分组 id 失败，跳过")
+	}
+	if err := db.Exec(`INSERT INTO channels (name, base_url, protocol, group_id, weight, enabled, created_at, updated_at)
+		VALUES (?, 'http://127.0.0.1:1', 'openai-chat', ?, 1, true, now(), now())`, cname, gid).Error; err != nil {
+		t.Fatalf("造测试渠道失败: %v", err)
+	}
+	var cid uint
+	db.Raw("SELECT id FROM channels WHERE name = ?", cname).Scan(&cid)
+	if cid == 0 {
+		t.Fatal("取渠道 id 失败")
+	}
+
+	// 1. 孤儿白名单行必须被拒（channel_models.channel_id → channels.id）
+	if err := db.Exec(`INSERT INTO channel_models (channel_id, public_name, upstream_name, enabled, created_at, updated_at)
+		VALUES (999999999, 'ghost', 'ghost', true, now(), now())`).Error; err == nil {
+		db.Exec("DELETE FROM channel_models WHERE channel_id = 999999999")
+		t.Error("指向不存在渠道的白名单行应被外键拒绝，实际插入成功（约束没生效）")
+	} else if !strings.Contains(err.Error(), "foreign key") {
+		// 区分「被外键拒绝」与「因别的约束失败」：只看 err != nil 的话，
+		// 万一撞的是 NOT NULL 或唯一索引，测试会假绿成「外键生效了」
+		t.Errorf("应因外键被拒，实际错误: %v", err)
+	}
+
+	// 2. 仍有渠道的分组删不掉（channels.group_id → channel_groups.id，RESTRICT）
+	if err := db.Exec("DELETE FROM channel_groups WHERE id = ?", gid).Error; err == nil {
+		t.Error("删除仍有渠道的分组应被外键拒绝，实际删成功（渠道会变成悬挂引用）")
+	} else if !strings.Contains(err.Error(), "foreign key") {
+		t.Errorf("应因外键被拒，实际错误: %v", err)
+	}
+
+	// 3. 渠道没了，它的白名单行跟着走（ON DELETE CASCADE）
+	if err := db.Exec(`INSERT INTO channel_models (channel_id, public_name, upstream_name, enabled, created_at, updated_at)
+		VALUES (?, '__fk_probe_model__', '__fk_probe_model__', true, now(), now())`, cid).Error; err != nil {
+		t.Fatalf("造测试白名单行失败: %v", err)
+	}
+	if err := db.Exec("DELETE FROM channels WHERE id = ?", cid).Error; err != nil {
+		t.Fatalf("删除渠道失败（CASCADE 下这一步应只删渠道本身）: %v", err)
+	}
+	var left int64
+	db.Raw("SELECT count(*) FROM channel_models WHERE channel_id = ?", cid).Scan(&left)
+	if left != 0 {
+		t.Errorf("渠道删除后其白名单行应被 CASCADE 带走，实际残留 %d 行", left)
+	}
+
+	// 4. 分组空了之后必须删得掉 —— 证明 RESTRICT 是「拦住」不是「锁死」
+	if err := db.Exec("DELETE FROM channel_groups WHERE id = ?", gid).Error; err != nil {
+		t.Errorf("渠道已全部删除，空分组应可删除，实际: %v", err)
 	}
 }

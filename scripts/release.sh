@@ -127,10 +127,30 @@ step "本地预检"
 if [ "$DRY_RUN" = "1" ]; then
   log "（dry-run 跳过测试）"
 else
+  # go.mod 的 go 指令（当前 1.25.13）是这套 Go 代码的最低工具链版本。本机
+  # Go 更低时 `go vet` 会去自动下载工具链，而**工具链模块不在 go.sum 里**，
+  # 必须查校验数据库 —— 这正是下面为什么不能再设 GOSUMDB=off 的原因：
+  #   曾用 GOSUMDB=off 规避国内网络，但它在「需要切换工具链」这条路径上
+  #   会直接报错退出（checksum database disabled by GOSUMDB=off），于是
+  #   发布卡在预检，而失败原因看起来跟代码毫无关系。
+  # 依赖本身由 go.sum 钉死哈希，不需要 sumdb；只有引入**新**模块（工具链
+  # 就是其中之一）才会查。goproxy.cn 代查 sumdb（/sumdb/... 返回 200），
+  # 所以去掉 off 之后国内既不变慢也不会失败。
+  GO_MOD_VER="$(awk '$1=="go"{print $2; exit}' backend/go.mod)"
+  GO_LOCAL_VER="$(go env GOVERSION | sed 's/^go//')"
+  log "Go 工具链：本机 $GO_LOCAL_VER，go.mod 要求 $GO_MOD_VER"
+  if [ "$(printf '%s\n%s\n' "$GO_MOD_VER" "$GO_LOCAL_VER" | sort -V | tail -1)" != "$GO_LOCAL_VER" ]; then
+    # 提前把切换动作跑一遍并给足时间：GOTOOLCHAIN 下载要几十秒，失败了也要
+    # 在这里说清楚，而不是等到 vet 报一句与代码无关的模块校验错误。
+    log "本机 Go 低于 go.mod 要求，正按 GOTOOLCHAIN=$(go env GOTOOLCHAIN) 切换（首次需下载，约几十秒）…"
+    ( cd backend && GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" GOTOOLCHAIN="${GOTOOLCHAIN:-auto}" go version ) \
+      || die "无法获取 go.mod 要求的 Go $GO_MOD_VER。检查网络/GOPROXY，或自行安装该版本"
+  fi
+
   log "后端 vet + test…"
-  ( cd backend && GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" GOSUMDB=off go vet ./... ) \
+  ( cd backend && GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" go vet ./... ) \
     || die "go vet 未通过"
-  ( cd backend && GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" GOSUMDB=off go test ./... ) \
+  ( cd backend && GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" go test ./... ) \
     || die "go test 未通过"
 
   log "前端 type-check + 契约检查 + 单元测试…"
