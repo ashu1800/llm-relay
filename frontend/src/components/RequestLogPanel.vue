@@ -30,6 +30,10 @@ import EmptyState from '@/components/EmptyState.vue'
 import PanelCard from '@/components/PanelCard.vue'
 import GroupTag from '@/components/GroupTag.vue'
 import ChannelIcon from '@/components/ChannelIcon.vue'
+import ClientIcon from '@/components/ClientIcon.vue'
+// 客户端 id → 显示名 + 图标的映射（与后端 relay.ExtractClient 的规则表
+// 配对，两份表的一致性由 scripts/check-contracts.mjs 静态比对）
+import { CLIENT_META } from '@/components/clientMeta'
 import { onLive, createThrottledLiveReloader, liveConnected } from '@/composables/useLive'
 import { useCopyFeedback } from '@/composables/useCopyFeedback'
 import NewLogEffect, { type FxTarget } from '@/components/NewLogEffect.vue'
@@ -183,6 +187,15 @@ const COL_BOUNDS: Record<ColKey, [number, number]> = {
   speed: [118, 150],
   status: [64, 64], // 三位状态码 + a-tag，宽度固定
   key: [100, 200],
+  // 客户端（2026-10-14 加）：图标 + 识别出的短名。下限 112 的构成与渠道列
+  // 同一套加法 —— 表头「客户端」三字 36px + 内边距 16 = 52px 是硬下界；
+  // 常见最长值 "Claude Code"（11 字符 ≈ 64px）+ 图标 18 + 间距 6 +
+  // 内边距 16 + 呼吸 6 ≈ 110px —— 常见的客户端名都放得下。
+  // 上限 220：已知最长显示名 "Anthropic TypeScript SDK" ≈ 150px + 图标与
+  // 内边距 ≈ 200px，留一点余量；客户端名是我们可枚举的短串、长度有上界，
+  // 不给模型列那一档（300）。识别不出的长 product token 超出部分交给
+  // ellipsis + 悬停 title（少数情况，且悬停即可看全）。
+  client: [112, 220],
   action: [64, 64] // 一个 28px 图标按钮，宽度固定
 }
 
@@ -201,6 +214,7 @@ const baseW: Record<ColKey, number> = {
   speed: 118,
   status: 64,
   key: 100,
+  client: 112,
   action: 64
 }
 
@@ -272,7 +286,13 @@ const CONTENT_MEASURE: Partial<Record<ColKey, { sel: string; pad: number }>> = {
   // 压扁（与 .chan-name 同一个坑：量到的是「当前列宽」，长密钥名撑不开列）。
   // pad 18 = 胶囊自己的左右内边距 16 + 边框 2（以前量整个胶囊、pad 记 0，
   // 那份加法随锚点一起搬进来）
-  key: { sel: '.key-tag .gt-text', pad: 18 }
+  key: { sel: '.key-tag .gt-text', pad: 18 },
+  // 客户端：量 .cli-text（普通 inline 盒，放不下就溢出、不被列宽压扁，
+  // 与 .chan-text 同一个理由）。pad 24 = 18 图标 + 6 间距，与 .cli-cell
+  // 的一套加法一致 —— 下限与测量必须用同一套加法，否则下限会稳定地比
+  // 所需少一个 pad（渠道列第一版算成 82 就漏了 6px 间距，这条坑记在
+  // channel 那一栏的注释里）。
+  client: { sel: '.cli-text', pad: 24 }
 }
 
 /** 各列宽之和。模板里每列的 :width 与表格 scroll.x 都取这里 ——
@@ -1385,6 +1405,32 @@ function speedTitle(row: RequestLog) {
   return speedMissTitle(row)
 }
 
+// 客户端列的显示名：两级来源，按优先级取。
+//   1. CLIENT_META 里认到 → 用**当前**的统一叫法。后端落的 client_name 是
+//      识别当时的快照（可能是个旧名），而同一行列表里不该出现两个名字
+//      （改名之后老行与新行都显示新名，这才是用户想要的）；
+//   2. 映射表没有但后端落了名 → 用后端识别当时认出的名字。这条覆盖
+//      「后端加了新规则、前端还没跟上」的窗口期。
+// 两级都取不到名字（没带 UA 的请求、加列之前的历史行）走不到这里 ——
+// 模板那一层已按 client_name 渲染 v-else 的 —；后端也不存在「有 id 没名」
+// 的行（ExtractClient 命中规则时 id 与 name 一起给出），无需 id 兜底。
+function clientLabel(r: RequestLog) {
+  if (r.client_id && CLIENT_META[r.client_id]) return CLIENT_META[r.client_id].name
+  return r.client_name
+}
+
+// 客户端列的悬停说明：显示名 + 原始 UA。
+//
+// 只给显示名是浪费一次悬停 —— 名字列里已经写着了；而 UA 是识别的依据，
+// 悬停就能核对「为什么它被判成这个客户端 / 为什么没判」，不必开详情。
+// 不做二次截断：title 是用户主动悬停才出现的，长度不构成负担，而截断
+// 会引入「截了多少」这个没人能记住的隐藏状态。
+function clientTitle(r: RequestLog) {
+  const label = clientLabel(r)
+  if (r.client_ua && r.client_ua !== label) return label + '：' + r.client_ua
+  return label
+}
+
 // 计价时刻：快照里存的是 RFC3339（如 2026-09-14T09:58:08+08:00），原样摆出来是给机器看的
 // —— T 分隔、带秒级以上的偏移量，和同一行里的其他文案不是一种语气。
 // 这里把它改成与日志列表列一致的 YYYY-MM-DD HH:mm:ss，但**不做时区换算**：
@@ -1662,9 +1708,9 @@ let pendingFullMeasure = false
  * 实时插行的增量列宽重测：只量新插入的行。
  *
  * 为什么值得单独开一条路（2026-10-11 性能收口）：整页量一次是
- * 「行数 × 列数」次 getBoundingClientRect —— 50 行 × 10 列 = 500 次强制布局，
- * 而直播高峰每秒都能推进来一批，一秒 500 次强制布局在低配设备上是肉眼可见的卡。
- * 增量路径只读新行（通常 1–2 行 × 10 列 = 10–20 次），差两个数量级。
+ * 「行数 × 列数」次 getBoundingClientRect —— 50 行 × 11 列 = 550 次强制布局，
+ * 而直播高峰每秒都能推进来一批，一秒 550 次强制布局在低配设备上是肉眼可见的卡。
+ * 增量路径只读新行（通常 1–2 行 × 11 列 = 11–22 次），差两个数量级。
  *
  * 宽度不会被「量窄」：measuredW 里留着这一页已量到的内容宽，增量结果与它取大者
  * （见 remeasureColumns）。所以列宽仍然只增不减，直到下一次全量测量重置累计。
@@ -2168,6 +2214,28 @@ onMounted(() => {
             <span v-else class="muted">—</span>
           </template>
         </a-table-column>
+        <!-- 客户端（2026-10-14 加）：这条请求是谁发来的。图标 + 识别出的短名
+             （识别规则见 relay.ExtractClient 的规则表；图标见 clientMeta.ts）。
+             空值有两种来源、显示同一种 —：请求根本没带 UA，或加列之前的历史行
+             （与 client_ip 同一种空值语义 —— 都是「当时没记」）。
+             内层 .cli-text 是列宽的测量锚点（见 CONTENT_MEASURE）：与渠道列
+             .chan-text 同构 —— 外层 .cli-name 是 flex 子项（min-width: 0）
+             会被列宽压扁，量它等于量「当前列宽」，长名字永远撑不开列；
+             inline 盒不被压缩，rect 恒等于文字真实宽度。 -->
+        <a-table-column v-if="colShown.client" title="客户端" :width="colW.client" ellipsis>
+          <template #default="{ record }">
+            <span v-if="record.client_name" class="cli-cell">
+              <ClientIcon :id="record.client_id" :size="18" />
+              <!-- 名字带 title：识别不出的长 product token 会被省略号截掉，
+                   截掉的部分要能悬停看到；title 顺带给出来源 UA，
+                   识别依据在列表里就能核对，不必开详情 -->
+              <span class="cli-name" :title="clientTitle(record)">
+                <span class="cli-text">{{ clientLabel(record) }}</span>
+              </span>
+            </span>
+            <span v-else class="muted">—</span>
+          </template>
+        </a-table-column>
         <!-- 弹性列（2026-09-26 加，**有意**不绑 width）。它经历两轮分工：
              上午：容器比十列的声明合计宽时，Chrome 的 fixed 表格布局会把余量
              按比例摊给所有绑了宽度的列（1920 实测 ×1.59），这列不绑宽度就能
@@ -2391,6 +2459,31 @@ onMounted(() => {
             <CheckOutlined v-if="copiedWhat === 'field:key'" class="trace-copy-ok" />
             <CopyOutlined v-else />
           </a-button>
+        </a-descriptions-item>
+        <!-- 客户端（2026-10-14）：识别出的名字 + 原始 UA 原文。
+             UA 只在详情里出现（列表列只放短名 —— 它长且噪声大），但它是
+             「规则为什么没认出这个客户端」的唯一证据：探出新客户端后
+             照着它补 relay/client.go 的规则表，这是识别能持续变准的闭环。
+             复制按钮给的是原始 UA（要贴进工单与规则表的是它，不是名字）。
+             与上面三项不同，这一项不套用 copyField 的 label 文案 ——
+             客户端的真相在 UA 里，复制它比复制显示名有用。 -->
+        <a-descriptions-item v-if="current.client_name || current.client_ua" label="客户端">
+          <span v-if="current.client_name">{{ clientLabel(current) }}</span>
+          <span v-else class="muted">未识别</span>
+          <a-button
+            v-if="current.client_ua"
+            type="text"
+            size="small"
+            class="table-icon-btn desc-copy"
+            :aria-label="'复制客户端 User-Agent ' + current.client_ua"
+            @click="copyField(current.client_ua, 'ua')"
+          >
+            <CheckOutlined v-if="copiedWhat === 'field:ua'" class="trace-copy-ok" />
+            <CopyOutlined v-else />
+          </a-button>
+          <!-- UA 原文用等宽小字单独一段：它经常很长（含括号与分号），
+               与名字挤在一行会把名字冲掉；强制断行避免把抽屉撑出横向滚动 -->
+          <div v-if="current.client_ua" class="ua-text">{{ current.client_ua }}</div>
         </a-descriptions-item>
         <a-descriptions-item v-if="current.client_ip" label="客户端 IP">
           {{ current.client_ip }}
@@ -2699,6 +2792,14 @@ onMounted(() => {
 .chan-cell { display: flex; justify-content: center; align-items: center; gap: 6px; min-width: 0; }
 .chan-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* 客户端格（2026-10-14 加）：与渠道格完全同构 —— inline-flex 居中排图标
+   与名字，外层负责截断（min-width: 0），内层 .cli-text 是普通 inline
+   测量锚点（不参与截断、不被压缩，见 CONTENT_MEASURE 的 client 一栏）。
+   图标本身是 mask 渲染的 span（见 ClientIcon.vue），align-items: center
+   让它与文字基线视觉对齐。 */
+.cli-cell { display: flex; justify-content: center; align-items: center; gap: 6px; min-width: 0; }
+.cli-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* 空值占位符（渠道 / 密钥没有值时显示 —）。
    其它四个视图都有这条，只有这里漏了 —— 漏掉的表现是占位符用了正文色，
    比旁边的真实值还显眼，而它本该是「这里什么都没有」 */
@@ -2982,6 +3083,19 @@ onMounted(() => {
    （描述列表里默认 inline 间距会让图标离值很远，看起来不属于这一行）。 */
 .desc-copy {
   margin-left: 4px;
+}
+
+/* 客户端 UA 原文（详情抽屉）：等宽小字 + 强制断行。
+   UA 是「给机器看」的那一份（含括号、分号、注释段），与上面那行显示名
+   是两种语气，所以用等宽体 + 次要色区分层级；它经常超过一行（完整 UA
+   可达 120+ 字符），break-all 是必需的 —— 不断行会把抽屉内容撑出横向
+   滚动条，而 UA 里没有可依赖的断词点（一长串标识符加斜杠）。 */
+.ua-text {
+  margin-top: 4px;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  word-break: break-all;
 }
 
 /* 紧凑密度（2026-10-11）：只收上下内边距 —— 行高的下限由内容决定

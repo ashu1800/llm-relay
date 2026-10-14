@@ -969,7 +969,7 @@ console.log('=== 请求日志列宽：测量锚点与模板必须对得上 ===')
   if (boundsBlock) {
     const keys = [...boundsBlock[0].matchAll(/^\s{2}(\w+):\s*\[/gm)].map((m) => m[1])
     const bound = [...panelSrc.matchAll(/:width="colW\.(\w+)"/g)].map((m) => m[1])
-    check('COL_BOUNDS 覆盖全部 10 列', keys.length === 10, `读到 ${keys.length} 个：${keys.join(', ')}`)
+    check('COL_BOUNDS 覆盖全部 11 列', keys.length === 11, `读到 ${keys.length} 个：${keys.join(', ')}`)
     check(
       '模板里每一列都绑了 colW（没有写死的 :width）',
       bound.length === keys.length && [...bound].sort().join(',') === [...keys].sort().join(','),
@@ -1025,7 +1025,7 @@ console.log('=== 请求日志列宽：测量锚点与模板必须对得上 ===')
     const headLabels = {
       time: '请求时间', model: '模型', channel: '渠道', tokens: '词元',
       elapsed: '任务耗时', cost: '费用', speed: '速度', status: '状态',
-      key: '密钥', action: '操作',
+      key: '密钥', client: '客户端', action: '操作',
     }
     const measurePads = {}
     for (const m of panelSrc.matchAll(/^\s{2}(\w+):\s*\{\s*sel:\s*'[^']+',\s*pad:\s*(\d+)/gm)) {
@@ -1410,6 +1410,89 @@ console.log('=== 标题层级契约 ===')
     missing.length === 0,
     [...new Set(missing)].join('；')
   )
+}
+
+// ============================================================================
+// 客户端图标契约（2026-10-14，随请求日志「客户端」列一起立）
+// ============================================================================
+//
+// 为什么需要：客户端图标这条链路上有三份靠字符串耦合的清单 ——
+//   · 后端识别规则表（relay/client.go 的 clientRules 的 id）；
+//   · 前端映射表（components/clientMeta.ts 的 CLIENT_META 的 id → name/file）；
+//   · 图标文件本身（public/client-icons/*.svg）。
+//
+// 三者任意一处漂移都不会报错，只会静默降级：映射表写了文件但没放 →
+// 图标是空白（<mask> 引不存在的 url 不报错）；后端有 id 前端没映射 →
+// 显示默认图标；两边名字不一致 → 同一客户端在列表与详情里两个叫法。
+// 这三类都是「看起来正常、直到有人截图」的形态，必须变成会红的断言。
+//
+// 与既有契约同一手法：从源码文本解析而不是在脚本里抄一份清单
+// （抄的那份会在源码改名后静默失效，本文件里 CONTENT_MEASURE 与
+// COL_LABELS 两处都为此踩过坑）。
+{
+  const metaSrc = readFileSync(join(SRC, 'components/clientMeta.ts'), 'utf8')
+  const iconsDir = join(SRC, '..', 'public', 'client-icons')
+
+  // 前端映射表：抓 `'id': { name: '...', file: '...' }` 与不带引号的
+  // 裸 id 两种形态（clientMeta.ts 里两种都在用）
+  const metaEntries = [
+    ...metaSrc.matchAll(/^\s{2}'?([a-z0-9-]+)'?:\s*\{\s*name:\s*'([^']+)',\s*file:\s*'([^']+)'\s*\},?\s*$/gm),
+  ].map((m) => ({ id: m[1], name: m[2], file: m[3] }))
+  check('能解析出 CLIENT_META 的条目', metaEntries.length >= 30, `读到 ${metaEntries.length} 条`)
+
+  // ① 映射表里引用的每个图标文件都要真实存在
+  let iconFiles = []
+  try {
+    iconFiles = readdirSync(iconsDir).filter((f) => f.endsWith('.svg'))
+  } catch {
+    /* 目录缺失下面单独报 */
+  }
+  const missingFiles = metaEntries.filter((e) => !iconFiles.includes(e.file))
+  check(
+    'CLIENT_META 引用的图标文件都存在于 public/client-icons/',
+    missingFiles.length === 0 && iconFiles.length > 0,
+    missingFiles.length
+      ? missingFiles.map((e) => `${e.id} → ${e.file}`).join('；')
+      : '目录不存在或没有任何 .svg'
+  )
+
+  // ② 默认图标必须存在：它是所有未知 id 的兜底，缺了整列图标全空
+  check('默认图标 default.svg 存在', iconFiles.includes('default.svg'))
+
+  // ③ 后端规则表的 id / 显示名与前端映射表一致（后端 ⊆ 前端）
+  //
+  // 反向不要求：前端可能保留后端已删规则的 id 用于历史行 ——
+  // 那些老行的 client_id 还在库里，映射删了它们会掉到默认图标。
+  // 解析的是 `{id: "x", name: "X", ...}` 这种结构体字面量；
+  // client.go 里规则表的写法变了这条要跟着改（failure 信息里会写清）。
+  const clientGo = join(SRC, '..', '..', 'backend', 'internal', 'relay', 'client.go')
+  let goRules = []
+  try {
+    const goSrc = readFileSync(clientGo, 'utf8')
+    goRules = [...goSrc.matchAll(/\{id:\s*"([a-z0-9-]+)",\s*name:\s*"([^"]+)"/g)].map((m) => ({
+      id: m[1],
+      name: m[2],
+    }))
+  } catch {
+    /* 后端源码不在（纯前端 checkout）：跳过，CI 里前后端一起 checkout 会真正跑到 */
+  }
+  if (goRules.length) {
+    const byId = new Map(metaEntries.map((e) => [e.id, e]))
+    const missingIds = [...new Set(goRules.map((r) => r.id))].filter((id) => !byId.has(id))
+    check(
+      '后端 clientRules 的 id 都在前端 CLIENT_META 里（漏了会显示默认图标）',
+      missingIds.length === 0,
+      `缺：${missingIds.join(', ')} —— 在 components/clientMeta.ts 里补上`
+    )
+    const nameMismatch = goRules.filter((r) => byId.has(r.id) && byId.get(r.id).name !== r.name)
+    check(
+      '后端 display name 与前端映射表一致（两处叫法不同会让同一行看到两个名字）',
+      nameMismatch.length === 0,
+      nameMismatch.map((r) => `${r.id}: 后端「${r.name}」vs 前端「${byId.get(r.id).name}」`).join('；')
+    )
+  } else {
+    console.log('  INFO  未读到后端 relay/client.go，跳过 id 集合比对（前端 CI 不 checkout 后端时属正常）')
+  }
 }
 
 console.log('')

@@ -25,6 +25,7 @@ const baseW: Record<ColKey, number> = {
   speed: 118,
   status: 64,
   key: 100,
+  client: 112,
   action: 64
 }
 const declared = COL_KEYS.reduce((s, k) => s + baseW[k], 0)
@@ -118,10 +119,28 @@ describe('权重表与列键的一致性', () => {
     expect(Object.keys(DISTRIBUTE_WEIGHT).sort()).toEqual([...COL_KEYS].sort())
   })
 
-  it('Σw = 11（三个 ×2 长文本列 + 五个 ×1 数值列 + 两个 ×0 固定列）', () => {
+  it('Σw = 12（三个 ×2 长文本列 + 六个 ×1 数值列 + 两个 ×0 固定列）', () => {
     // 这条断言立的第一天就抓出注释里的算术错误（原注释写 13）：
-    // 合计变了的唯一合法途径是有人动了权重表 —— 那必须是有意的
-    expect(WEIGHT_SUM).toBe(11)
+    // 合计变了的唯一合法途径是有人动了权重表 —— 那必须是有意的。
+    // 2026-10-14 客户端列加入：它不截断（显示名可枚举、长度有上界），
+    // 与数值列同档 ×1，合计从 11 变 12。
+    expect(WEIGHT_SUM).toBe(12)
+  })
+
+  it('客户端列权重为 1（它不会截断，不与长文本列同档）', () => {
+    // 单独钉一条：把 client 改成 2 会让余量往这一列多流，
+    // 而它的内容（"Claude Code" 这类短名）根本用不上那些宽度
+    expect(DISTRIBUTE_WEIGHT.client).toBe(1)
+  })
+})
+
+describe('列序契约', () => {
+  it('客户端列在密钥之后、操作之前（模板 / CSV / 列设置三处共用这一顺序）', () => {
+    // 列序是契约：模板里的渲染顺序、后端 CSV 的表头顺序、列设置面板的
+    // 勾选顺序都跟着 COL_KEYS 走。插错位置不会报错，只会让三处对不上
+    // —— 用户看到「设置里的顺序与表头不一致」这种没人能解释的现象。
+    expect(COL_KEYS.indexOf('client')).toBe(COL_KEYS.indexOf('key') + 1)
+    expect(COL_KEYS.indexOf('action')).toBe(COL_KEYS.indexOf('client') + 1)
   })
 })
 

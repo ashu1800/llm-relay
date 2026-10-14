@@ -120,12 +120,14 @@ def channel_outside(group_id):
     return int(out) if out.isdigit() else 0
 
 
-def chat(model, expect_fail=False):
+def chat(model, expect_fail=False, user_agent=None):
     payload = json.dumps({"model": model, "max_tokens": 8,
                           "messages": [{"role": "user", "content": "hi"}]}).encode()
     req = urllib.request.Request(BASE + "/v1/chat/completions", data=payload, method="POST")
     req.add_header("Content-Type", "application/json")
     req.add_header("Authorization", "Bearer " + tok)
+    if user_agent:
+        req.add_header("User-Agent", user_agent)
     try:
         with urllib.request.urlopen(req, timeout=90) as r:
             return r.status, json.loads(r.read().decode() or "{}")
@@ -140,6 +142,26 @@ for _ in range(3):
 st, _ = chat("no-such-model-filter")
 print("  失败调用 HTTP", st)
 time.sleep(2)
+
+print()
+print("=== 客户端识别（请求日志的「客户端」列）===")
+# 覆盖 handler → RelayRequest → BuildLog → DB → 列表接口这条完整链路。
+# 单测只能覆盖到 ExtractClient 与 BuildLog 两端，中间那三行赋值没有单测 ——
+# 它们漏了不会报错，只是整列都是空的，所以要在这里钉一次。
+chat(MODEL, user_agent="claude-cli/2.1.260 (external, cli)")
+time.sleep(2)
+# 不加筛选条件、只取最新一页：识别出的行按 id 倒序排在最前
+_, cli = call("GET", "/logs?page_size=50")
+cli_rows = cli.get("items", [])
+detected = [r for r in cli_rows if r.get("client_id") == "claude-code"]
+chk("带 claude-cli UA 的请求被识别成 claude-code",
+    len(detected) > 0, "共 %d 条日志，其中 %d 条识别为 claude-code" % (len(cli_rows), len(detected)))
+if detected:
+    chk("识别出的显示名是 Claude Code", detected[0].get("client_name") == "Claude Code",
+        str(detected[0].get("client_name")))
+    chk("UA 原文随日志落库（补规则表的依据）",
+        "claude-cli/2.1.260" in (detected[0].get("client_ua") or ""),
+        str(detected[0].get("client_ua"))[:80])
 
 print()
 print("=== 状态类别筛选 ===")
@@ -315,6 +337,11 @@ try:
     chk("是 CSV 类型", "text/csv" in ctype, ctype)
     chk("有 BOM（Excel 识别 UTF-8）", raw[:3] == b"\xef\xbb\xbf", raw[:3].hex())
     chk("表头含 trace_id 列", "trace_id" in reader[0], str(reader[0])[:90])
+    # 客户端列（2026-10-14）：表头文案与界面一致，且位置在「密钥」之后
+    # —— 后端 CSV 与前端列是两份独立代码，加列时最容易漏的就是这一处
+    chk("表头含客户端列且在密钥之后",
+        "客户端" in reader[0] and reader[0].index("客户端") == reader[0].index("密钥") + 1,
+        str(reader[0])[:120])
 except Exception as e:
     chk("导出接口可用", False, str(e)[:120])
 

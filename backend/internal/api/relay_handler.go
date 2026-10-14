@@ -174,6 +174,11 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 		allowedGroups = groupsFromContext(c)
 	}
 
+	// 客户端识别：从入站头认出「这次是谁在调」，随日志落一份快照。
+	// 与 ThinkingLevel 同一处采集 —— relay 包不能反向 import api，
+	// 而 handler 已经拿着 *gin.Context，是最便宜的采集点。
+	clientID, clientName, clientUA := relay.ExtractClient(c.Request.Header)
+
 	req := &relay.RelayRequest{
 		TraceID:       traceID,
 		InboundProto:  p.Name,
@@ -183,6 +188,9 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 		InboundBody:   rawBody,
 		Headers:       c.Request.Header,
 		ClientIP:      c.ClientIP(),
+		ClientID:      clientID,
+		ClientName:    clientName,
+		ClientUA:      clientUA,
 		Stream:        relay.ExtractStream(body),
 		ThinkingLevel: relay.ExtractThinkingLevel(p.Name, rawBody),
 		AllowedGroups: allowedGroups,

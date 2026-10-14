@@ -335,6 +335,9 @@ func BuildLog(req *RelayRequest, res *RelayResult, usage Usage, status int, errM
 		TotalMs:             tm.TotalMs,
 		BodyReads:           tm.BodyReads,
 		LastByteMs:          tm.LastByteMs,
+		ClientID:            req.ClientID,
+		ClientName:          req.ClientName,
+		ClientUA:            req.ClientUA,
 		ClientIP:            req.ClientIP,
 		CreatedAt:           time.Now().UTC(),
 	}

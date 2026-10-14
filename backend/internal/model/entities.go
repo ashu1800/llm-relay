@@ -320,9 +320,31 @@ type RequestLog struct {
 	BodyReads  int `json:"body_reads"`
 	LastByteMs int `json:"last_byte_ms"`
 
-	UpstreamMs int       `json:"upstream_ms"`
-	ClientIP   string    `gorm:"size:64" json:"client_ip"`
-	CreatedAt  time.Time `gorm:"index:idx_log_created,priority:1" json:"created_at"`
+	UpstreamMs int `json:"upstream_ms"`
+	// 发起这次调用的客户端：ClientID 是识别出的稳定标识（claude-code /
+	// cursor / curl / …，见 relay.ExtractClient 的规则表），ClientName 是
+	// 识别当时的显示名（"Claude Code"）。
+	//
+	// 两个都存，各司其职：ClientName 是识别规则在那一刻的快照 —— 规则表会
+	// 随新客户端出现而持续演进，将来前端把某个客户端改名/换图标，不该改写
+	// 历史行「当时它自称什么」这个事实（与 CostCurrency、PricingSnapshot 同一
+	// 个道理）；ClientID 则是给图标映射与将来的机器筛选用的稳定键 ——
+	// Cline 曾经叫 Claude Dev、Roo Code 曾经叫 Roo Cline，显示名漂过，id 没漂。
+	//
+	// 加列之前的历史行两列都是空串（AutoMigrate 加的可空列），前端按
+	// 「当时没记」显示 —，与 client_ip 同一种空值语义。
+	ClientID   string `gorm:"size:64" json:"client_id"`
+	ClientName string `gorm:"size:64" json:"client_name"`
+	// ClientUA 是入站 User-Agent 原文，**列表不展示、只在详情抽屉可见**：
+	// 它长且噪声大（含括号、分号、版本号），但它是「规则为什么没认出这个
+	// 客户端」的唯一证据 —— 探出一个新客户端后照着它补规则表。
+	//
+	// 1024 与 Error 列同尺寸，截断发生在**存**这一步（出口统一走
+	// relay.ExtractClient 的 TruncateRunes）—— 库里留完整原文：被砍掉的
+	// 恰恰可能是版本号或尾部括号里的工具名，那正是识别最需要的那段。
+	ClientUA  string    `gorm:"size:1024" json:"client_ua"`
+	ClientIP  string    `gorm:"size:64" json:"client_ip"`
+	CreatedAt time.Time `gorm:"index:idx_log_created,priority:1" json:"created_at"`
 	// RetryTrail 是故障转移链路的逐次尝试摘要（渠道/状态码/错误/用量），
 	// 与 PricingSnapshot 同理存快照。失败尝试的 token 上游可能照收
 	// （context-length-exceeded 的 400 就是典型），详情里看得见，

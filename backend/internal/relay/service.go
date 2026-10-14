@@ -153,7 +153,14 @@ type RelayRequest struct {
 	APIKeyID    uint
 	APIKeyName  string
 	ClientIP    string
-	Stream      bool
+	// ClientID / ClientName / ClientUA 是发起这次调用的客户端身份
+	// （见 ExtractClient 的规则表）。在 handler 层采集、随日志落快照 ——
+	// 与 ClientIP 同一族：列表的「客户端」列显示它，空 = 没认出来
+	// （极端情况是请求根本没带 UA）。
+	ClientID   string
+	ClientName string
+	ClientUA   string
+	Stream     bool
 	// ThinkingLevel 是入站请求体里的思考等级（归一档位，见 ExtractThinkingLevel）。
 	// 随日志落一份快照：列表的「思考」列显示它；空 = 请求没带思考参数。
 	ThinkingLevel string

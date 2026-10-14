@@ -8,9 +8,9 @@
 //
 // 约定：本模块不碰 DOM、不碰 Vue 响应式 —— 那是组件那一层的事。
 
-/** 日志表的 10 列（顺序即渲染顺序） */
+/** 日志表的 11 列（顺序即渲染顺序） */
 export const COL_KEYS = [
-  'time', 'model', 'channel', 'tokens', 'elapsed', 'cost', 'speed', 'status', 'key', 'action'
+  'time', 'model', 'channel', 'tokens', 'elapsed', 'cost', 'speed', 'status', 'key', 'client', 'action'
 ] as const
 export type ColKey = (typeof COL_KEYS)[number]
 
@@ -26,6 +26,7 @@ export const COL_LABELS: Record<ColKey, string> = {
   speed: '速度',
   status: '状态',
   key: '密钥',
+  client: '客户端',
   action: '操作'
 }
 
@@ -49,6 +50,11 @@ export const CELL_BREATH = 6
  *   · 固定窄列（status / action）份额为 0 —— 永远按声明宽渲染；
  *   · 三个会截断的长文本列（model / channel / key）权重 ×2；
  *   · 其余数值列权重 1。
+ *
+ * 客户端列（2026-10-14 加）取 1 而不是长文本列的 2：它**不会截断** ——
+ * 内容是显示名，我们自己定的、可枚举、长度有上界（最长 Anthropic
+ * TypeScript SDK ≈ 150px，下限 112 配合余量就放得下），与 model/channel/key
+ * 那三个「用户数据、想多长有多长」的列不是一类数据。
  */
 export const DISTRIBUTE_WEIGHT: Record<ColKey, number> = {
   time: 1,
@@ -60,10 +66,11 @@ export const DISTRIBUTE_WEIGHT: Record<ColKey, number> = {
   speed: 1,
   status: 0,
   key: 2,
+  client: 1,
   action: 0
 }
 
-/** 全表的 Σw（11 = 3×2 + 5×1 + 2×0）。
+/** 全表的 Σw（12 = 3×2 + 6×1 + 2×0）。
  *
  *  注意它不再直接参与分摊：allocateWidths 现在按**传入的列子集**现算 Σw
  *  （列显隐会关掉几列，分母必须跟着变）。这条常量留下是为了让

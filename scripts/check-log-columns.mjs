@@ -65,6 +65,7 @@ const COL_LABELS = {
   cost: '费用',
   speed: '速度',
   key: '密钥',
+  client: '客户端',
 }
 const CONTENT_MEASURES = [
   ...((panelSrcForKeys.match(/const CONTENT_MEASURE[\s\S]*?\n\}/) || [''])[0]).matchAll(
@@ -259,7 +260,23 @@ const PROBE = `(() => {
     if (!els.length) continue
     const probe = document.createElement('span')
     const cs = getComputedStyle(els[0])
-    probe.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;left:-9999px;font:' + cs.font
+    probe.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;left:-9999px'
+    // 字体必须**逐项复制**，不能用 'font:' + cs.font 简写。
+    //
+    // 2026-10-14 修：Chrome 对含自定义字体（本项目的 Harding）的 font 简写
+    // 返回**空字符串** —— 'font:' + '' 是个空声明，探针 span 于是保持
+    // **默认 16px 系统字体**。量出来的宽度比元素实际所用（12px Harding）
+    // 大 30%，于是出现「密钥 filter-probe-key 需 112px 只有 110px」这种
+    // 假失败：元素其实完整显示（scrollWidth == clientWidth、rect 85.73 与
+    // 同字体离屏量出的 85.73 逐位相等），只是判据拿错了字体。
+    //
+    // 这个 bug 原先被掩盖着：密钥列在旧布局里宽 142px，虚高的 need（112）
+    // 也塞得下。2026-10-14 加客户端列后布局挤到 126px，才让它现形。
+    // 逐项复制后 need 与元素实际宽度一致，判据恢复准确（still 敏感：
+    // 真截断时 scrollWidth > clientWidth，且逐项字体的宽度会超可用宽）。
+    for (const prop of ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'fontStretch', 'fontVariant', 'letterSpacing', 'wordSpacing']) {
+      probe.style[prop] = cs[prop]
+    }
     document.body.appendChild(probe)
     let worst = null
     for (const el of els) {
