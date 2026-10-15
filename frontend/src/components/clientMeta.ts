@@ -88,3 +88,48 @@ export const CLIENT_META: Record<string, ClientMeta> = {
 export function clientIconFile(id: string | null | undefined): string {
   return (id && CLIENT_META[id]?.file) || 'default.svg'
 }
+
+/**
+ * 内置图标库的完整文件清单（= public/client-icons/ 下全部 .svg）。
+ * 两类消费者：映射面板的图标下拉选项，与 clientDisplay 对自定义图标
+ * 「按文件名引用内置图标」的合法性判定。与目录的一致性由
+ * check-contracts.mjs 双向钉住（清单多了文件得放，文件多了清单得记），
+ * 所以这里的手工清单不会静默漂移。
+ */
+export const ICON_LIBRARY: string[] = [
+  'aiohttp.svg',
+  'anthropic-python.svg',
+  'anthropic-ts.svg',
+  'axios.svg',
+  'browser.svg',
+  'cherry-studio.svg',
+  'claude-code.svg',
+  'cline.svg',
+  'codex.svg',
+  'curl.svg',
+  'cursor.svg',
+  'default.svg',
+  'deepseek.svg',
+  'gemini-cli.svg',
+  'github-copilot.svg',
+  'go-http-client.svg',
+  'google-genai.svg',
+  'insomnia.svg',
+  'kilo-code.svg',
+  'langchain.svg',
+  'lm-studio.svg',
+  'lobechat.svg',
+  'open-webui.svg',
+  'openai-node.svg',
+  'openai-python.svg',
+  'opencode.svg',
+  'postman.svg',
+  'python-requests.svg',
+  'python-urllib.svg',
+  'qwen-code.svg',
+  'roo-code.svg',
+  'sillytavern.svg',
+  'trae.svg',
+  'vercel-ai-sdk.svg',
+  'windsurf.svg'
+]

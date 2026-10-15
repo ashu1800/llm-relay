@@ -193,6 +193,20 @@ var clientRules = []clientRule{
 	{id: "browser", name: "浏览器", ua: []string{"mozilla/"}},
 }
 
+// ClientKey 返回客户端显示映射（model.ClientAlias）的查找键：识别出的
+// id 非空取 id，否则取观测到的 name token —— 未识别的客户端（如
+// deepseek-harness）只有 token 这一个身份。
+//
+// 同一口径有三份实现、注释互指：这里（权威）、store.backfillClientAliases
+// 的 SQL 版、前端 clientDisplay.ts 的显示层版。改口径必须三处一起动，
+// 否则登记与解析会对不上键。
+func ClientKey(id, name string) string {
+	if id != "" {
+		return id
+	}
+	return name
+}
+
 // firstProductToken 取 UA 的第一个 product token（RFC 9110 的
 // product = token ["/" product-version]），例如：
 //

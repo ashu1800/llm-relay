@@ -17,6 +17,7 @@ import type {
   Channel as ChannelEntity,
   ChannelGroup as ChannelGroupEntity,
   ChannelModel as ChannelBindingEntity,
+  ClientAlias as ClientAliasEntity,
   Proxy as ProxyEntity,
   RequestLog as RequestLogEntity
 } from './generated/model'
@@ -163,6 +164,13 @@ export interface Paged<T> {
   page?: number
   page_size?: number
 }
+
+/**
+ * 客户端显示映射（对照表）。没有指针/jsonb 字段，生成类型即接口形状，
+ * 不做覆盖 —— 在这里留一个别名，调用方统一从 types.ts 拿类型，
+ * 不直接 import 生成文件（与其它实体同一约定）。
+ */
+export type ClientAlias = ClientAliasEntity
 
 // Pricing 已删除：价格改为挂在渠道模型的绑定上（见 ChannelBinding 的价格字段）。
 // 原来那张「模型名 → 单价」的独立表已经下线，全局一份价没法表达

@@ -31,9 +31,10 @@ import PanelCard from '@/components/PanelCard.vue'
 import GroupTag from '@/components/GroupTag.vue'
 import ChannelIcon from '@/components/ChannelIcon.vue'
 import ClientIcon from '@/components/ClientIcon.vue'
-// 客户端 id → 显示名 + 图标的映射（与后端 relay.ExtractClient 的规则表
-// 配对，两份表的一致性由 scripts/check-contracts.mjs 静态比对）
-import { CLIENT_META } from '@/components/clientMeta'
+// 显示解析层：用户映射（对照表）> 内置 CLIENT_META > 落库快照，
+// 优先级收口在 clientDisplay.ts（与设置页的映射面板共用一份状态）
+import { resolveClientIcon, resolveClientLabel, type ClientIconSpec } from '@/components/clientDisplay'
+import { useClientAliases } from '@/composables/useClientAliases'
 import { onLive, createThrottledLiveReloader, liveConnected } from '@/composables/useLive'
 import { useCopyFeedback } from '@/composables/useCopyFeedback'
 import NewLogEffect, { type FxTarget } from '@/components/NewLogEffect.vue'
@@ -1022,6 +1023,9 @@ async function load(opts: { silent?: boolean } = {}) {
   const seq = ++loadSeq
   if (!silent) loading.value = true
   if (!silent) loadError.value = ''
+  // 映射表随手动刷新一起重取（live 的静默路径不必 —— 映射不是行数据）；
+  // 失败在 composable 里已降级为内置/快照显示，不影响列表本身
+  if (!silent) loadClientAliases(true)
   // 用户主动重取会把整屏内容换掉：这时候还没飞完的亮带下面已经不是原来那一行了，
   // 得赶紧收掉（否则它会停在某个「碰巧在这个位置」的行上闪完剩下的时间）。
   // silent 那条路不能清：那正是要标出新行的路径。
@@ -1405,18 +1409,21 @@ function speedTitle(row: RequestLog) {
   return speedMissTitle(row)
 }
 
-// 客户端列的显示名：两级来源，按优先级取。
-//   1. CLIENT_META 里认到 → 用**当前**的统一叫法。后端落的 client_name 是
-//      识别当时的快照（可能是个旧名），而同一行列表里不该出现两个名字
-//      （改名之后老行与新行都显示新名，这才是用户想要的）；
-//   2. 映射表没有但后端落了名 → 用后端识别当时认出的名字。这条覆盖
-//      「后端加了新规则、前端还没跟上」的窗口期。
-// 两级都取不到名字（没带 UA 的请求、加列之前的历史行）走不到这里 ——
-// 模板那一层已按 client_name 渲染 v-else 的 —；后端也不存在「有 id 没名」
-// 的行（ExtractClient 命中规则时 id 与 name 一起给出），无需 id 兜底。
+// 客户端显示映射：模块级共享状态（设置页改完这里立刻生效）。
+// 随列表一起加载 —— 映射表只有几十到几百行，不值得单开加载态。
+const { byKey: clientAliasByKey, load: loadClientAliases } = useClientAliases()
+
+// 客户端列的显示名与图标：走统一解析层（components/clientDisplay.ts）。
+// 三级来源 —— 用户映射的当前叫法 > 内置 CLIENT_META 的统一叫法 >
+// 落库快照名 —— 的优先级矩阵由 clientDisplay.spec.ts 钉住。
+// 映射与快照的分工：client_name 落的是「识别当时它自称什么」（事实，
+// 不许改写），映射是「现在我想怎么叫它」（当前显示）。
 function clientLabel(r: RequestLog) {
-  if (r.client_id && CLIENT_META[r.client_id]) return CLIENT_META[r.client_id].name
-  return r.client_name
+  return resolveClientLabel(r.client_id, r.client_name, clientAliasByKey.value)
+}
+
+function clientIcon(r: RequestLog): ClientIconSpec {
+  return resolveClientIcon(r.client_id, r.client_name, clientAliasByKey.value)
 }
 
 // 客户端列的悬停说明：显示名 + 原始 UA。
@@ -2225,7 +2232,7 @@ onMounted(() => {
         <a-table-column v-if="colShown.client" title="客户端" :width="colW.client" ellipsis>
           <template #default="{ record }">
             <span v-if="record.client_name" class="cli-cell">
-              <ClientIcon :id="record.client_id" :size="18" />
+              <ClientIcon :spec="clientIcon(record)" :size="18" />
               <!-- 名字带 title：识别不出的长 product token 会被省略号截掉，
                    截掉的部分要能悬停看到；title 顺带给出来源 UA，
                    识别依据在列表里就能核对，不必开详情 -->

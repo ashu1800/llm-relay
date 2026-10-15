@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { message, modal } from '@/utils/feedback'
 import {
   ReloadOutlined, DeleteOutlined,
@@ -7,11 +7,16 @@ import {
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import { versionApi, type UpdateConfig } from '@/api/version'
+import { clientAliasApi } from '@/api/clientAliases'
 import { modalWidth } from '@/utils/modalWidth'
 import DataState from '@/components/DataState.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import LogFxPreview from '@/components/LogFxPreview.vue'
 import ThemePicker from '@/components/ThemePicker.vue'
+import ClientIcon from '@/components/ClientIcon.vue'
+import { CLIENT_META, ICON_LIBRARY, clientIconFile } from '@/components/clientMeta'
+import { aliasIconSpec, type ClientIconSpec } from '@/components/clientDisplay'
+import { useClientAliases } from '@/composables/useClientAliases'
 import { useLogFxStore } from '@/stores/logFx'
 import { useThemeStore } from '@/stores/theme'
 import { useVersionStore } from '@/stores/version'
@@ -109,11 +114,94 @@ async function clearUpdateToken() {
   }
 }
 
+// ---- 客户端显示映射（对照表）----
+//
+// 行由后端在日志观测时自动登记（含启动回填），这里只负责配名字与图标。
+// 与日志面板共用同一份共享状态（useClientAliases 是模块级单例），
+// 这里保存完，回看板的客户端列立刻按新叫法显示。
+const { aliases: aliasRows, load: loadAliases } = useClientAliases()
+
+// 每行的编辑草稿。保存后整体重取（服务端回读的行会带新的 updated_at），
+// watch 触发重建 —— 未保存的改动只活在草稿里，重取即丢（与渠道表单
+// 的脏检查不同：这里的行小而多，逐行「未保存提示」比直接覆盖更吵）。
+const aliasDrafts = ref<Record<number, { name: string; icon: string; saving: boolean }>>({})
+watch(aliasRows, (rows) => {
+  const next: typeof aliasDrafts.value = {}
+  for (const r of rows) next[r.id] = { name: r.name, icon: r.icon, saving: false }
+  aliasDrafts.value = next
+}, { immediate: true })
+
+// 行的三种状态：待设置（内置表也没有，列上显示的是原始 token —— 真正
+// 要人来的）、已映射（用户配过）、内置叫法（CLIENT_META 认识、没配映射，
+// 显示本来就好，配不配随意）。后端的排序只把「没配名字」的放前面，
+// 这里再按状态重排：真正可操作的（待设置）浮到最前，纯噪音（内置未配）
+// 沉底 —— 40 多个内置客户端都自动登记，不重排的话 deepseek-harness
+// 这种要配的行会埋在里面。
+function aliasStatus(row: { key: string; name: string }): 'pending' | 'mapped' | 'builtin' {
+  if (row.name) return 'mapped'
+  if (CLIENT_META[row.key]) return 'builtin'
+  return 'pending'
+}
+
+const sortedAliasRows = computed(() => {
+  const order = { pending: 0, mapped: 1, builtin: 2 } as const
+  return [...aliasRows.value].sort(
+    (a, b) =>
+      order[aliasStatus(a)] - order[aliasStatus(b)] ||
+      b.updated_at.localeCompare(a.updated_at)
+  )
+})
+const pendingAliasCount = computed(() => aliasRows.value.filter((r) => aliasStatus(r) === 'pending').length)
+
+// 面板里的图标预览：配了就按配置渲染，没配按「这一行现在实际显示的
+// 图标」渲染（内置品牌图标 / 默认图标）—— 预览必须与日志列同源，
+// 否则这里看到的效果和列上不一样。
+function aliasPreviewSpec(row: { key: string; icon: string }): ClientIconSpec {
+  return aliasIconSpec(row.icon) ?? { kind: 'builtin', file: clientIconFile(row.key) }
+}
+
+// 图标下拉的选项：文件名去掉 .svg 后缀更好读，value 保留全名（落库的
+// 就是它，与 clientDisplay 的识别口径一致）
+const iconOptions = ICON_LIBRARY.map((f) => ({ value: f, label: f.replace(/\.svg$/, '') }))
+
+async function saveAlias(row: { id: number; key: string }) {
+  const d = aliasDrafts.value[row.id]
+  if (!d) return
+  d.saving = true
+  try {
+    await clientAliasApi.update(row.id, { name: d.name.trim(), icon: d.icon.trim() })
+    await loadAliases(true)
+    message.success('已保存，日志列已按新叫法显示')
+  } catch (e: any) {
+    message.error(e?.message || '保存失败')
+  } finally {
+    d.saving = false
+  }
+}
+
+function removeAlias(row: { id: number; key: string }) {
+  modal.confirm({
+    centered: true,
+    title: '删除这条映射',
+    content:
+      '删除后「' + row.key + '」回落到内置叫法 / 原始名显示；它下次被观测到时会重新登记一行待设置。',
+    okType: 'danger',
+    async onOk() {
+      try {
+        await clientAliasApi.remove(row.id)
+        await loadAliases(true)
+        message.success('已删除')
+      } catch (e: any) {
+        message.error(e?.message || '删除失败')
+      }
+    }
+  })
+}
+
 const loading = ref(false)
 // 这一页加载的是「多项设置」而不是列表，没有 length 可数，
 // 于是用「是否成功加载过一次」来区分首次加载失败与刷新失败
-const loaded = ref(false)
-// 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
+const loaded = ref(false)// 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
 // 计数卡与运行参数会显示成 0 和空值，被读成「本来就没有数据」
 const loadError = ref('')
 const runtime = ref<Record<string, any>>({})
@@ -282,6 +370,8 @@ onMounted(() => {
   // 更新设置独立加载：更新服务可能整体不可用（源码部署等），
   // 那种情况下其余设置仍应正常显示
   void loadUpdateCfg()
+  // 显示映射独立加载并已降级（失败只回落内置显示），不挡这一页
+  void loadAliases(true)
 })
 </script>
 
@@ -379,6 +469,72 @@ onMounted(() => {
         这是浏览器本地偏好（存在这台机器的这个浏览器里，与上面的运行参数无关，
         也不进配置备份）；换机器或换浏览器需要重新选一次。
         当前档位：<span class="mono">{{ logFx.options.find((o) => o.id === logFx.fx)?.name }}</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">
+        客户端显示映射
+        <span v-if="pendingAliasCount > 0" class="alias-badge">{{ pendingAliasCount }} 个待设置</span>
+      </h2>
+      <div class="note">
+        请求日志「客户端」列的名字与图标按
+        <strong>这里的映射 &gt; 内置叫法 &gt; 识别原名</strong> 显示。
+        行由日志自动登记：新客户端第一次被观测到就会出现在这里；配好后历史行与新行
+        一起换新叫法（库里仍保留识别当时的原名作快照，CSV 导出同样按映射后的名字）。
+        图标可选内置库，或粘贴 data URI / 图片地址 / 单个字符。
+      </div>
+      <div v-if="sortedAliasRows.length === 0" class="span-line">
+        还没有观测到任何客户端 —— 有请求进来后会自动出现在这里。
+      </div>
+      <!-- 行编辑器（与渠道白名单编辑器同一形态）：一行 = 一个客户端，
+           直接行内保存。列头用普通 div 而不是 a-table：行内是多种控件
+           混排，表格的列语义（排序/对齐）在这里没有收益。 -->
+      <div v-else class="alias-wrap" role="table" aria-label="客户端显示映射">
+        <div class="alias-row alias-head" aria-hidden="true">
+          <span>客户端</span><span>显示名</span><span>内置图标</span><span>自定义图标</span>
+          <span class="alias-ops-head"></span>
+        </div>
+        <div v-for="(row, i) in sortedAliasRows" :key="row.id" class="alias-row">
+          <div class="alias-key">
+            <ClientIcon :spec="aliasPreviewSpec(row)" :size="18" />
+            <span class="mono alias-key-text" :title="row.key">{{ row.key }}</span>
+            <!-- 待设置 = 内置表也没有它，列上显示的是原始 token（要人来的行）；
+                 内置 = 没配映射但显示本来就好（可配可不配） -->
+            <span v-if="aliasStatus(row) === 'pending'" class="alias-pill is-pending">待设置</span>
+            <span v-else-if="aliasStatus(row) === 'builtin'" class="alias-pill is-builtin">内置</span>
+          </div>
+          <a-input
+            v-model:value="aliasDrafts[row.id].name"
+            :maxlength="64"
+            :aria-label="`第 ${i + 1} 行显示名`"
+            placeholder="如 DSH"
+            @press-enter="saveAlias(row)"
+          />
+          <a-select
+            :value="ICON_LIBRARY.includes(aliasDrafts[row.id].icon) ? aliasDrafts[row.id].icon : undefined"
+            :options="iconOptions"
+            :aria-label="`第 ${i + 1} 行内置图标`"
+            placeholder="默认图标"
+            allow-clear
+            @change="(v: any) => (aliasDrafts[row.id].icon = v ?? '')"
+          />
+          <a-input
+            :value="ICON_LIBRARY.includes(aliasDrafts[row.id].icon) ? '' : aliasDrafts[row.id].icon"
+            :aria-label="`第 ${i + 1} 行自定义图标`"
+            placeholder="data:… / https://… / 单字符"
+            @update:value="(v: string) => (aliasDrafts[row.id].icon = v)"
+          />
+          <span class="alias-ops">
+            <a-button
+              size="small"
+              :loading="aliasDrafts[row.id].saving"
+              :disabled="aliasDrafts[row.id].name === row.name && aliasDrafts[row.id].icon === row.icon"
+              @click="saveAlias(row)"
+            >保存</a-button>
+            <a-button size="small" danger @click="removeAlias(row)">删除</a-button>
+          </span>
+        </div>
       </div>
     </section>
 
@@ -697,4 +853,48 @@ onMounted(() => {
    不换行的话会紧贴在输入框右侧，与它的说明对象脱开 */
 .upd-hint { display: block; margin-top: 4px; line-height: 1.7; }
 .upd-actions { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
+
+/* ---- 客户端显示映射 ----
+   行编辑器（与渠道白名单编辑器同构）：CSS grid 定列，列宽随内容类别固定 ——
+   客户端标识最宽（token 可能长），其余输入控件统一档位。窄屏放不下时
+   整体横向滚动（与日志表同一策略），控件列不折行。 */
+.alias-badge {
+  margin-left: 10px; padding: 1px 8px; border-radius: 10px;
+  font-size: var(--font-size-sm); font-weight: 500;
+  background: color-mix(in oklab, var(--color-orange) 15%, transparent);
+  color: var(--text-amber);
+  vertical-align: middle;
+}
+.alias-wrap { margin-top: 8px; overflow-x: auto; }
+.alias-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.4fr) 150px 140px 190px auto;
+  gap: 8px; align-items: center; padding: 6px 0;
+  border-bottom: 1px solid var(--color-border, rgba(128, 128, 128, 0.18));
+  min-width: 760px;
+}
+.alias-head {
+  font-size: var(--font-size-sm); color: var(--color-text-secondary);
+  border-bottom-width: 1px; padding-top: 0;
+}
+.alias-ops { display: inline-flex; gap: 6px; }
+.alias-ops-head { width: 108px; }
+.alias-key { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.alias-key-text {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--font-size-sm);
+}
+/* 状态徽标：待设置是真正要人来的（内置表也没有它），内置是「显示本来
+   就好、配不配随意」—— 颜色上也区分主次，避免 40 多个内置行看起来
+   全都欠配置。配色沿用 StatCard tone-orange 的配方（15% 橙底 + amber
+   墨色，对比度落在主题已实测过的档位上）。 */
+.alias-pill {
+  flex: 0 0 auto; padding: 0 6px; border-radius: 8px;
+  font-size: var(--font-size-sm); line-height: 18px;
+}
+.alias-pill.is-pending {
+  background: color-mix(in oklab, var(--color-orange) 15%, transparent);
+  color: var(--text-amber);
+}
+.alias-pill.is-builtin { background: var(--color-bg); color: var(--color-text-secondary); }
 </style>

@@ -4,6 +4,11 @@
 `components/ClientIcon.vue`）。文件名即后端 `relay.ExtractClient` 规则表里的
 `client_id`（`<id>.svg`）；`default.svg` 是认不出客户端时的统一默认图标。
 
+这套目录同时是**客户端显示映射**（系统设置 → 客户端显示映射）的内置图标库：
+`components/clientMeta.ts` 的 `ICON_LIBRARY` 是本目录的完整清单（下拉选项、
+自定义图标按文件名引用的合法性判定都取它），与目录的一致性由
+`check-contracts.mjs` 双向钉住 —— 加图标要两处一起动。
+
 ## 渲染方式
 
 图标以 **CSS mask** 渲染（见 `ClientIcon.vue`）：SVG 只提供轮廓（alpha），
@@ -19,7 +24,7 @@
 | 文件 | 来源 | 说明 |
 |---|---|---|
 | AI 品牌图标（claude-code / codex / cursor / windsurf / cline / roo-code / kilo-code / opencode / gemini-cli / qwen-code / trae / cherry-studio / lobechat / sillytavern / open-webui / lm-studio / openai-* / anthropic-* / google-genai / langchain / vercel-ai-sdk / github-copilot） | [lobe-icons](https://github.com/lobehub/lobe-icons) `packages/static-svg/icons/`（MIT） | 每个品牌取官方单色轮廓（不带 `-text` / `-color` 后缀的那份） |
-| 通用工具图标（curl / go-http-client / python-urllib / python-requests / aiohttp / axios / postman / insomnia / browser） | [simple-icons](https://github.com/simple-icons/simple-icons) `icons/<slug>.svg`（CC0） | 无品牌方 UI 资产可用的库，取其官方 logo 轮廓（python-urllib 用 Python 官方 logo —— 标准库与语言同源） |
+| 通用工具图标（curl / go-http-client / python-urllib / python-requests / aiohttp / axios / postman / insomnia / browser / deepseek） | [simple-icons](https://github.com/simple-icons/simple-icons) `icons/<slug>.svg`（CC0） | 无品牌方 UI 资产可用的库，取其官方 logo 轮廓（python-urllib 用 Python 官方 logo —— 标准库与语言同源）；deepseek 是给「客户端显示映射」（系统设置 → 客户端显示映射）选图标用的 —— 自建工具（如 deepseek-harness）配映射时选它 |
 | default.svg | 本项目自绘 | 终端提示符「>_」：认不出的客户端绝大多数是 CLI/脚本；用问号会暗示「出错了」，而未知是完全正常的状态 |
 
 ## 暂用默认图标的客户端

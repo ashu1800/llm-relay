@@ -1493,6 +1493,27 @@ console.log('=== 标题层级契约 ===')
   } else {
     console.log('  INFO  未读到后端 relay/client.go，跳过 id 集合比对（前端 CI 不 checkout 后端时属正常）')
   }
+
+  // ④ ICON_LIBRARY 与目录实文件双向一致（2026-10-15，随客户端显示映射一起立）。
+  //    这份清单是映射面板图标下拉的选项来源、也是 clientDisplay 判定
+  //    「自定义图标按文件名引用内置图标」合法性的依据 ——
+  //    清单里多了（文件没放）：下拉选了渲染一枚空白 mask，不报错；
+  //    目录里多了（清单没记）：新图标放进去了却在下拉里选不到。
+  //    两个方向都是「加了图标忘了另一半」的形态，必须双向钉住。
+  const libMatch = metaSrc.match(/export const ICON_LIBRARY[\s\S]*?\n\]/)
+  check('能解析出 ICON_LIBRARY 清单', !!libMatch, 'components/clientMeta.ts 里找不到 export const ICON_LIBRARY')
+  if (libMatch) {
+    const libFiles = [...libMatch[0].matchAll(/'([a-z0-9-]+\.svg)'/g)].map((m) => m[1])
+    check('ICON_LIBRARY 非空且无重复', libFiles.length > 0 && new Set(libFiles).size === libFiles.length,
+      `读到 ${libFiles.length} 条`)
+    const dirSet = new Set(iconFiles)
+    const inLibNotDir = [...new Set(libFiles)].filter((f) => !dirSet.has(f))
+    check('ICON_LIBRARY 里的文件都存在于 client-icons/（缺了选了渲染空白）',
+      inLibNotDir.length === 0, `缺：${inLibNotDir.join('；')}`)
+    const inDirNotLib = iconFiles.filter((f) => !libFiles.includes(f))
+    check('client-icons/ 里的文件都记进了 ICON_LIBRARY（漏了下拉里选不到）',
+      inDirNotLib.length === 0, `未记录：${inDirNotLib.join('；')}`)
+  }
 }
 
 console.log('')

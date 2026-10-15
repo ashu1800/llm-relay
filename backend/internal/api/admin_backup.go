@@ -80,6 +80,9 @@ type backupBundle struct {
 	// 恢复出来的代理会变成「没有密码」，而界面上看不出任何异常。
 	Proxies []proxyExport  `json:"proxies"`
 	APIKeys []apiKeyExport `json:"api_keys"`
+	// ClientAliases 客户端显示映射：纯明文配置（名字 + 图标字符串），
+	// 不涉及密文与外键，直接随模型序列化即可
+	ClientAliases []model.ClientAlias `json:"client_aliases"`
 	// Pricings 是**只读**的旧字段：价格已改随渠道模型配置（见 model.ChannelModel），
 	// 新备份不再导出它。保留定义只为能把老备份里的价格捞出来应用到对应的渠道模型上，
 	// 否则「导入旧备份」会静默丢掉全部价格。
@@ -161,6 +164,7 @@ func (s *Server) exportConfig(c *gin.Context) {
 				return nil
 			},
 		},
+		{"客户端显示映射", func() error { return db.Order("id").Find(&b.ClientAliases).Error }},
 		// 「模型定价」这一步已取消：价格随渠道的模型白名单一起导出
 		// （见 channelExport.Models），单独再导一份只会出现两份真相。
 		// b.Pricings 保持为空数组，老版本的导入逻辑读到空值不会报错。
@@ -512,6 +516,34 @@ func (s *Server) importConfig(c *gin.Context) {
 			continue
 		}
 		report.Created["模型定价"]++
+	}
+
+	// 客户端显示映射：按 Key 合并。与分组/渠道「已存在即跳过」不同 ——
+	// 本机的行多半是启动回填/自动登记的**待设置**行（name 空），而备份里
+	// 同 key 的行是用户配好的；跳过会让恢复后的映射全部变回待设置。
+	// 所以规则是：备份里带名字的行覆盖本机（用户 curated 的正是它），
+	// 备份里也待设置的跳过（没有信息量）。
+	for i := range b.ClientAliases {
+		a := b.ClientAliases[i]
+		var exist model.ClientAlias
+		if err := db.Where("\"key\" = ?", a.Key).First(&exist).Error; err == nil {
+			if a.Name == "" || (exist.Name == a.Name && exist.Icon == a.Icon) {
+				report.Skipped["客户端显示映射"]++
+				continue
+			}
+			if err := db.Model(&exist).Updates(map[string]any{"name": a.Name, "icon": a.Icon}).Error; err != nil {
+				report.Warnings = append(report.Warnings, "客户端映射 "+a.Key+" 导入失败: "+err.Error())
+				continue
+			}
+			report.Created["客户端显示映射"]++
+			continue
+		}
+		a.ID = 0
+		if err := db.Create(&a).Error; err != nil {
+			report.Warnings = append(report.Warnings, "客户端映射 "+a.Key+" 导入失败: "+err.Error())
+			continue
+		}
+		report.Created["客户端显示映射"]++
 	}
 
 	if s.deps.Pricing != nil {

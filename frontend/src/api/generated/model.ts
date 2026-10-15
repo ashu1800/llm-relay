@@ -510,6 +510,37 @@ export interface Setting {
   value: JSONMap;
   updated_at: string;
 }
+/**
+ * ClientAlias 客户端显示映射（用户可管理的「对照表」）。
+ * 日志里的客户端显示名与图标按「用户映射 > 内置 CLIENT_META > 落库快照」
+ * 的优先级解析：这张表是最上层，让用户把自建工具（如 deepseek-harness）
+ * 映射成顺眼的名字（DSH）与图标，也能改写内置客户端的叫法。
+ * Key 的派生口径（relay.ClientKey 是唯一权威实现，回填 SQL 与前端
+ * clientDisplay.ts 各复刻一份并注释互指）：client_id 非空取 id，否则取
+ * 观测到的 client_name token —— 未识别的客户端只有 token 这一个身份。
+ * 行的来源有二：日志落库时自动登记（Name/Icon 空 = 待设置，等用户来配），
+ * 与启动时从 request_logs 回填的一次性 DISTINCT。Name 清空即回到待设置。
+ * 映射是「当前显示」：它改不了也不该改 client_name 快照（那是「当时它
+ * 自称什么」的事实），与 PricingSnapshot 的快照哲学同一条。
+ */
+export interface ClientAlias {
+  id: number /* uint */;
+  /**
+   * Key 是解析时的查找键（见上），全局唯一
+   */
+  key: string;
+  /**
+   * Name 映射后的显示名；空 = 待设置（显示层回落到内置/快照）
+   */
+  name: string;
+  /**
+   * Icon 与渠道图标同一套口径：data URI / http(s) 地址 / 一两个字符，
+   * 或内置图标文件名（前端 client-icons/ 目录下的 .svg）；空 = 待设置
+   */
+  icon: string;
+  created_at: string;
+  updated_at: string;
+}
 
 //////////
 // source: json.go

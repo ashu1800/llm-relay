@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"llm-relay/internal/model"
 )
@@ -48,6 +49,10 @@ type LogWriter struct {
 	// 与一次上游往返相比可以忽略，而它换来的是「关停期间绝不 panic」。
 	mu     sync.RWMutex
 	closed bool
+
+	// seenAlias 是「本进程已登记过」的客户端映射键缓存（见 ensureClientAlias）。
+	// 稳态下每条日志只花一次 map 查找，不为显示映射多付一次 DB 往返。
+	seenAlias sync.Map
 }
 
 // NewLogWriter 启动后台写入协程。
@@ -126,12 +131,39 @@ func (w *LogWriter) loop() {
 			// 日志没落库就没有 ID，报文关联不上，直接跳过而不是留孤儿行
 			continue
 		}
+		// 客户端首次观测到时登记进显示映射表（待设置行）。
+		// 放在日志落库成功之后：日志是主、映射是辅，登记失败只留 Warn。
+		w.ensureClientAlias(ClientKey(item.Log.ClientID, item.Log.ClientName))
 		if item.Payload == nil {
 			continue
 		}
 		item.Payload.LogID = item.Log.ID
 		if err := w.db.Create(item.Payload).Error; err != nil && w.logger != nil {
 			w.logger.Warn("写入报文留存失败", "trace_id", item.Log.TraceID, "err", err)
+		}
+	}
+}
+
+// ensureClientAlias 把首次观测到的客户端登记进显示映射表（待设置行，
+// 见 model.ClientAlias 的注释）。任何失败只 Warn 并把键从缓存里摘掉
+// （下一条日志会重试），绝不影响日志写路径 —— 映射是显示层的增强，
+// 没有它顶多少一个待设置行，日志本身一行都不能少。
+//
+// 缓存只挡「本进程见过」，DB 侧由 uniqueIndex + ON CONFLICT DO NOTHING
+// 兜底（重启后缓存为空、或表里已有回填/导入的行都不会重复报错）。
+func (w *LogWriter) ensureClientAlias(key string) {
+	if key == "" {
+		return
+	}
+	if _, loaded := w.seenAlias.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	err := w.db.Clauses(clause.OnConflict{DoNothing: true}).
+		Create(&model.ClientAlias{Key: key}).Error
+	if err != nil {
+		w.seenAlias.Delete(key)
+		if w.logger != nil {
+			w.logger.Warn("登记客户端显示映射失败", "key", key, "err", err)
 		}
 	}
 }

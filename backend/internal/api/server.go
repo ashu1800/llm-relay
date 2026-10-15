@@ -162,6 +162,7 @@ func (s *Server) registerAdminRoutes(r *gin.Engine) {
 		registerGroupRoutes(admin, s)
 		registerKeyRoutes(admin, s)
 		registerLogRoutes(admin, s)
+		registerClientAliasRoutes(admin, s)
 		registerBackupRoutes(admin, s)
 		registerSettingsRoutes(admin, s)
 

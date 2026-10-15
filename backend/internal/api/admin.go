@@ -2067,6 +2067,26 @@ func (s *Server) exportLogs(c *gin.Context) {
 		return
 	}
 
+	// 客户端显示映射（key→当前叫法）：CSV 的客户端列与界面同一优先级 ——
+	// 映射名 > 落库快照名。映射表只有几十到几百行、且此处一次性加载，
+	// 对一次最多两万行的导出不构成负担。加载失败不挡导出：顶多这一列
+	// 退回快照名，比整个导出 500 更符合「CSV 拿到手最重要」。
+	aliasNames := map[string]string{}
+	var aliases []model.ClientAlias
+	if err := s.deps.Store.DB().Find(&aliases).Error; err == nil {
+		for _, a := range aliases {
+			if a.Key != "" && a.Name != "" {
+				aliasNames[a.Key] = a.Name
+			}
+		}
+	}
+	clientCell := func(r *model.RequestLog) string {
+		if name, ok := aliasNames[relay.ClientKey(r.ClientID, r.ClientName)]; ok {
+			return name
+		}
+		return r.ClientName
+	}
+
 	c.Header("X-Total-Count", strconv.FormatInt(total, 10))
 	c.Header("X-Exported-Count", strconv.Itoa(len(items)))
 	c.Header("X-Exported-Truncated", strconv.FormatBool(total > int64(len(items))))
@@ -2083,18 +2103,15 @@ func (s *Server) exportLogs(c *gin.Context) {
 	// 所以把被合并掉的「耗时」二字补回列名，并带上单位（毫秒）。
 	// 费用拆成「金额 + 币种」两列：金额离开币种就没意义，
 	// 而现在同一份导出里可能同时有人民币和美元的账。
-	// 「客户端」导的是识别当时落的显示名快照（不是 id、更不是 UA 原文）：
-	// CSV 面向人，只放短名 —— UA 有逗号括号分号，塞进平铺的 CSV 会把
-	// 表格撑乱，它的查看点在详情抽屉里。注意它与界面列不是同一个来源：
-	// 界面优先用前端 CLIENT_META 的当前叫法（规则改名后，库里还是旧名的
-	// 行在界面上显示新名），CSV 看不到那份前端表、只能落库里的快照 ——
-	// 改名窗口期内同一行在两处名字不同，这是快照语义的一部分，不是 bug。
+	// 「客户端」导的是显示名（映射优先、快照兜底，见上面的 clientCell；
+	// 不是 id、更不是 UA 原文）：CSV 面向人，只放短名 —— UA 有逗号括号
+	// 分号，塞进平铺的 CSV 会把表格撑乱，它的查看点在详情抽屉里。
 	b.WriteString("请求时间,模型,思考,状态,密钥,客户端,渠道,输入Token,输出Token,缓存命中,缓存写入,推理Token,首字耗时(ms),总共耗时(ms),费用,币种,trace_id\n")
 	for i := range items {
 		r := &items[i]
 		row := []string{
 			r.CreatedAt.Format(time.RFC3339),
-			r.ModelRequested, r.ThinkingLevel, strconv.Itoa(r.StatusCode), r.APIKeyName, r.ClientName, r.ChannelName,
+			r.ModelRequested, r.ThinkingLevel, strconv.Itoa(r.StatusCode), r.APIKeyName, clientCell(r), r.ChannelName,
 			strconv.Itoa(r.PromptTokens), strconv.Itoa(r.CompletionTokens),
 			strconv.Itoa(r.CachedTokens), strconv.Itoa(r.CacheCreationTokens), strconv.Itoa(r.ReasoningTokens),
 			strconv.Itoa(r.FirstByteMs), strconv.Itoa(r.TotalMs), r.EstimatedCost.String(), r.CostCurrency, r.TraceID,

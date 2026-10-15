@@ -102,6 +102,7 @@ func (s *Store) Migrate() error {
 		&model.RequestPayload{},
 		&model.Proxy{},
 		&model.Setting{},
+		&model.ClientAlias{},
 	); err != nil {
 		return fmt.Errorf("数据库迁移失败: %w", err)
 	}
@@ -109,6 +110,12 @@ func (s *Store) Migrate() error {
 	// （keys 表得先存在），放在这里而不是 Seed 里，因为它是一次性的数据
 	// 修复，与种子数据无关
 	if err := s.normalizeKeyGroupRefs(); err != nil {
+		return err
+	}
+	// 客户端显示映射的启动回填：日志列上线早于映射表，历史行没经过
+	// 写路径的自动登记，这里按 DISTINCT 一次性补齐（同样必须在
+	// AutoMigrate 之后：两张表都得先存在）
+	if err := s.backfillClientAliases(); err != nil {
 		return err
 	}
 	slog.Info("数据库迁移完成")
@@ -408,6 +415,35 @@ func (s *Store) normalizeGroupStrategies() error {
 	}
 	if res.RowsAffected > 0 {
 		slog.Info("分组路由策略已从「加权随机」迁移为「顺序故障转移」", "分组数", res.RowsAffected)
+	}
+	return nil
+}
+
+// backfillClientAliases 把日志里已出现过的客户端一次性登记进显示映射表。
+//
+// 映射表的行为模型（见 model.ClientAlias 的注释）：客户端第一次被观测到
+// 就落一行「待设置」，等用户来配名字与图标。映射表晚于日志的客户端列
+// 上线，历史行不会经过写路径的自动登记（logwriter.ensureClientAlias），
+// 所以启动时按 DISTINCT 补一次 —— 幂等（ON CONFLICT DO NOTHING），
+// 之后每次启动都是空跑一遍，只付出一次索引扫。
+//
+// Key 的派生与 relay.ClientKey 同口径：id 非空取 id，否则取 name token。
+// 两边各写一份是因为 SQL 里复用不了 Go 函数；改口径必须两处一起动
+// （前端 clientDisplay.ts 还有第三份，三处注释互指）。
+func (s *Store) backfillClientAliases() error {
+	if !s.hasTable("request_logs") {
+		return nil
+	}
+	res := s.db.Exec(`INSERT INTO client_aliases ("key", created_at, updated_at)
+		SELECT DISTINCT COALESCE(NULLIF(client_id, ''), NULLIF(client_name, '')), now(), now()
+		FROM request_logs
+		WHERE COALESCE(NULLIF(client_id, ''), NULLIF(client_name, ''), '') <> ''
+		ON CONFLICT ("key") DO NOTHING`)
+	if res.Error != nil {
+		return fmt.Errorf("回填客户端显示映射失败: %w", res.Error)
+	}
+	if res.RowsAffected > 0 {
+		slog.Info("已把日志中出现过的客户端登记进显示映射表", "条数", res.RowsAffected)
 	}
 	return nil
 }

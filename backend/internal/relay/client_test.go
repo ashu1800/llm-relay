@@ -222,6 +222,25 @@ func TestExtractClient(t *testing.T) {
 	}
 }
 
+// ClientKey 是显示映射表的查找键派生（三处同口径的权威版）：
+// id 非空取 id，否则取观测到的 name token。这条口径错一个字符，
+// 登记与解析就对不上键 —— 映射永远不生效且不报错，必须钉住。
+func TestClientKey(t *testing.T) {
+	cases := []struct {
+		id, name, want string
+	}{
+		{"claude-code", "Claude Code", "claude-code"}, // 识别出的：id 优先
+		{"", "deepseek-harness", "deepseek-harness"},  // 未识别的：token 是唯一身份
+		{"curl", "", "curl"},                          // 有 id 无 name（防御形态）
+		{"", "", ""},                                  // 全空：不登记（调用方判空）
+	}
+	for _, c := range cases {
+		if got := ClientKey(c.id, c.name); got != c.want {
+			t.Fatalf("ClientKey(%q, %q) = %q, want %q", c.id, c.name, got, c.want)
+		}
+	}
+}
+
 // 超长 UA 与超长 product token 都要被截断，而且截完必须**放得进库里的列**：
 // client_ua 是 varchar(1024)、client_name 是 varchar(64)，Postgres 按字符数
 // 强校验 —— 多出一个字符，整条日志的 INSERT 就失败，那恰恰是排障最需要

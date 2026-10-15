@@ -182,6 +182,41 @@ for ua_probe, how in (("ZCode/3.15.3", "UA 前缀"), ("ai-sdk/openai-compatible"
                                          rows[0].get("client_name") if rows else None))
 
 print()
+print("=== 客户端显示映射（对照表）===")
+# 覆盖「观测 → 自动登记待设置 → 配置映射 → CSV 用映射名 → 删除回落」。
+# 前端显示优先级的单测在 clientDisplay.spec.ts；这里钉的是后端链路：
+# logwriter 的 ensureClientAlias、CRUD 接口、exportLogs 的映射名。
+chat(MODEL, user_agent="dsh-harness/0.3")
+time.sleep(2)
+_, al = call("GET", "/client-aliases")
+al_rows = al.get("items", [])
+pend = [r for r in al_rows if r.get("key") == "dsh-harness" and not r.get("name")]
+chk("未知客户端自动登记为待设置行（name 空）", len(pend) > 0,
+    "共 %d 行映射，其中 dsh-harness 待设置 %d 行" % (len(al_rows), len(pend)))
+alias_id = pend[0]["id"] if pend else 0
+if alias_id:
+    _, upd = call("PUT", "/client-aliases/%d" % alias_id, {"name": "DSH", "icon": "deepseek.svg"})
+    chk("PUT 配置映射名与图标",
+        (upd.get("item") or {}).get("name") == "DSH" and (upd.get("item") or {}).get("icon") == "deepseek.svg",
+        str(upd.get("item"))[:100])
+    # CSV 导出按映射名（与界面显示同一优先级，见 exportLogs 的 clientCell）
+    req = urllib.request.Request(ADMIN + "/logs/export")
+    with urllib.request.urlopen(req, timeout=60) as x:
+        eraw = x.read().decode("utf-8-sig")
+    erows = list(csv.reader(eraw.splitlines()))
+    ehdr = erows[0] if erows else []
+    eci = ehdr.index("客户端") if "客户端" in ehdr else -1
+    dsh_csv = [r for r in erows[1:] if len(r) > eci >= 0 and r[eci] == "DSH"]
+    chk("CSV 导出的客户端列用映射名（DSH）", len(dsh_csv) > 0,
+        "导出 %d 行，其中客户端列为 DSH 的 %d 行" % (len(erows) - 1, len(dsh_csv)))
+    _, delr = call("DELETE", "/client-aliases/%d" % alias_id)
+    chk("DELETE 删除映射", delr.get("deleted") is True, str(delr)[:60])
+    _, al2 = call("GET", "/client-aliases")
+    chk("删除后行从列表消失",
+        not [r for r in al2.get("items", []) if r.get("key") == "dsh-harness"],
+        "剩余 %d 行" % len(al2.get("items", [])))
+
+print()
 print("=== 状态类别筛选 ===")
 _, allx = call("GET", "/logs?limit=1&model=no-such-model-filter")
 _, errs = call("GET", "/logs?page_size=200&status_class=error&model=no-such-model-filter")
