@@ -535,7 +535,10 @@ export interface ClientAlias {
   name: string;
   /**
    * Icon 与渠道图标同一套口径：data URI / http(s) 地址 / 一两个字符，
-   * 或内置图标文件名（前端 client-icons/ 目录下的 .svg）；空 = 待设置
+   * 或内置图标文件名（前端 client-icons/ 目录下的 .svg）；空 = 待设置。
+   * http(s) 地址只在「抓取失败、按原样存下」时才会留在库里 ——
+   * 保存接口会先把它抓成 data URI（见 api.cacheClientIcon），
+   * 因为存地址等于每次打开日志页都要去请求一次那个外链。
    */
   icon: string;
   created_at: string;

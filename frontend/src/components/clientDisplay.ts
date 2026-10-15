@@ -57,11 +57,23 @@ export function resolveClientIcon(
  *  mask 引一个不存在的 url 不报错、只渲染一枚看不见的空白，
  *  静默空白比显式回落更糟。 */
 export function aliasIconSpec(icon: string): ClientIconSpec | null {
-  if (/^(data:|https?:\/\/)/.test(icon)) return { kind: 'img', src: icon }
+  if (icon.trim().startsWith('data:') || isRemoteIcon(icon)) {
+    return { kind: 'img', src: icon.trim() }
+  }
   // 一两个字符按文字/emoji 渲染（与渠道图标的单字符约定一致）
   const trimmed = icon.trim()
   if (trimmed !== '' && Array.from(trimmed).length <= 2) return { kind: 'text', ch: trimmed }
   // 其余按内置图标文件名引用；不在清单里的一律回落（不猜）
   if (ICON_LIBRARY.includes(icon)) return { kind: 'builtin', file: icon }
   return null
+}
+
+/** 是不是「图片外链」（http(s) 地址）。
+ *
+ *  这类图标保存时会被后端抓下来缓存成 data URI（口径同渠道图标，见
+ *  api.cacheClientIcon），因为存地址等于日志页每打开一次就去请求一次
+ *  那个外链。抓不到时按原样入库 —— 设置面板据此标出「还没缓存」的行，
+ *  并让「保存」保持可点（再点一次就是重试抓取）。 */
+export function isRemoteIcon(icon: string): boolean {
+  return /^https?:\/\//i.test(icon.trim())
 }

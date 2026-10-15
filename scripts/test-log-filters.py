@@ -209,6 +209,31 @@ if alias_id:
     dsh_csv = [r for r in erows[1:] if len(r) > eci >= 0 and r[eci] == "DSH"]
     chk("CSV 导出的客户端列用映射名（DSH）", len(dsh_csv) > 0,
         "导出 %d 行，其中客户端列为 DSH 的 %d 行" % (len(erows) - 1, len(dsh_csv)))
+
+    # 图片外链：保存时由后端抓一次、转成 data URI 入库（口径同渠道图标），
+    # 这样日志页每次打开都从本站渲染，不再去请求那个外链。
+    #
+    # 这里故意用回环地址来钉「抓不到时的降级」：netguard 会拒掉内网目标，
+    # 所以断言不依赖外网、结果也是确定的 —— 外链按原样存下 + 回执带原因，
+    # 而且保存本身不能被拦下（否则改个名字都会被网络问题连坐）。
+    ext = "http://127.0.0.1:9/logo.png"
+    _, ext_resp = call("PUT", "/client-aliases/%d" % alias_id, {"icon": ext})
+    ext_item = ext_resp.get("item") or {}
+    chk("外链图标抓不到时不拦保存：原样入库 + 回执带原因",
+        ext_item.get("icon") == ext
+        and not ext_resp.get("icon_cached")
+        and "内网" in (ext_resp.get("icon_error") or ""),
+        "icon=%s icon_error=%s" % (str(ext_item.get("icon"))[:40], ext_resp.get("icon_error")))
+
+    # 本地内容（data URI / 内置文件名 / 一两个字符）一律不触发抓取：
+    # 多出来的这道抓取不该碰原有三态，也不该让保存多等一次网络
+    local_icon = "data:image/png;base64,iVBORw0KGgo="
+    _, local_resp = call("PUT", "/client-aliases/%d" % alias_id, {"icon": local_icon})
+    chk("data URI 不触发抓取（无 icon_cached / icon_error）",
+        not local_resp.get("icon_cached") and not local_resp.get("icon_error")
+        and (local_resp.get("item") or {}).get("icon") == local_icon,
+        str(local_resp.get("item"))[:90])
+
     _, delr = call("DELETE", "/client-aliases/%d" % alias_id)
     chk("DELETE 删除映射", delr.get("deleted") is True, str(delr)[:60])
     _, al2 = call("GET", "/client-aliases")

@@ -2,28 +2,20 @@ package api
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"llm-relay/internal/model"
 	"llm-relay/internal/netguard"
-	"llm-relay/internal/proxy"
 )
 
-// 图标大小与超时。上游的 favicon 通常 1-5KB；
-// 给到 64KB 是留出 apple-touch-icon 这类大图的余量，
-// 再大就不是图标了，拉回来只会把备份撑肥。
-const maxIconBytes = 64 << 10
-const iconFetchTimeout = 8 * time.Second
-
+// 图标抓取的公共部分（客户端、超时、SSRF 防护、data URI 口径）在
+// icon_fetch.go —— 客户端图标（用户填的图片地址）复用同一套。
+//
 // 依次尝试的图标路径。顺序有讲究：先试站点自己的 /favicon.ico
 // （绝大多数站点都有），再试 BaseURL 下的 —— 有些中转站把图标放在
 // 自己的子路径里（例如 /v1/favicon.ico）。
@@ -85,8 +77,7 @@ func (s *Server) channelIcon(c *gin.Context) {
 
 // fetchUpstreamIcon 从渠道的上游地址抓一个图标回来，转成 data URI。
 //
-// 存 data URI 而不是图标地址：上游随时可能把 favicon 换掉或加上鉴权，
-// 那种时候界面上的图标会莫名其妙变成裂图；而且备份要能带着图标走。
+// 存 data URI 而不是图标地址的理由见 iconFetcher.fetch 的注释。
 func (s *Server) fetchUpstreamIcon(ctx context.Context, ch model.Channel) (string, error) {
 	base, err := url.Parse(strings.TrimSpace(ch.BaseURL))
 	if err != nil || base.Host == "" {
@@ -97,10 +88,7 @@ func (s *Server) fetchUpstreamIcon(ctx context.Context, ch model.Channel) (strin
 		return "", errors.New("只支持从 http/https 的上游地址抓图标")
 	}
 	// SSRF 防护：这个接口会用请求体里的 base_url 发真实请求，
-	// 而 base_url 是可以被调用者指定的。只校验 scheme 挡不住
-	// http://127.0.0.1:6379/ 这类探测 —— 本机端口扫描、内网服务发现、
-	// 读云元数据（169.254.169.254）都能做到，而且返回状态码与耗时会被回显，
-	// 等于给了一个内网探测器。
+	// 而 base_url 是可以被调用者指定的，见 icon_fetch.go 的说明
 	if _, err := netguard.CheckHost(base.Hostname()); err != nil {
 		return "", err
 	}
@@ -110,33 +98,12 @@ func (s *Server) fetchUpstreamIcon(ctx context.Context, ch model.Channel) (strin
 	ctx, cancel := context.WithTimeout(ctx, iconFetchTimeout*3)
 	defer cancel()
 
-	client := &http.Client{Timeout: iconFetchTimeout}
-	// 与转发链路一致：渠道配了代理就必须走代理。
-	// 直连抓图标会把本机真实 IP 暴露给上游 —— 用户配代理正是为了避免这件事，
-	// 而且「直连不通、必须走代理」的上游在这里会永远抓不到图标
-	if ch.ProxyID != 0 {
-		var p model.Proxy
-		if err := s.deps.Store.DB().First(&p, ch.ProxyID).Error; err != nil {
-			return "", fmt.Errorf("这条渠道配了出站代理 #%d，但它不存在", ch.ProxyID)
-		}
-		if !p.Enabled {
-			return "", fmt.Errorf("这条渠道的出站代理 %s 已停用", p.Name)
-		}
-		cfg, err := proxy.FromEntity(p, s.deps.Cipher)
-		if err != nil {
-			return "", err
-		}
-		tr, err := cfg.Transport(iconFetchTimeout)
-		if err != nil {
-			return "", err
-		}
-		defer tr.CloseIdleConnections()
-		client.Transport = tr
+	// 与转发链路一致：渠道配了代理就必须走代理（理由见 newIconFetcher）
+	fetcher, cleanup, err := s.newIconFetcher(ctx, ch.ProxyID)
+	if err != nil {
+		return "", err
 	}
-	// 补上禁跳转 + 建连校验。
-	// 禁跳转是必需的：目标通过 302 跳到内网时，如果跟随就等于绕过了上面的校验。
-	// DialContext 的校验兜住 DNS rebinding（校验时是公网 IP、建连时是内网 IP）。
-	client = netguard.GuardedClient(client)
+	defer cleanup()
 
 	// 候选地址：站点根目录下的常见图标，以及 BaseURL 自己那一层。
 	// 用 url.URL 拼而不是字符串拼接：BaseURL 带 query 时（如 /v1?k=1），
@@ -157,43 +124,12 @@ func (s *Server) fetchUpstreamIcon(ctx context.Context, ch model.Channel) (strin
 
 	var lastErr string
 	for _, u := range candidates {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-		if err != nil {
-			continue
-		}
-		resp, err := client.Do(req)
+		icon, err := fetcher.fetch(u)
 		if err != nil {
 			lastErr = err.Error()
 			continue
 		}
-		ct := resp.Header.Get("Content-Type")
-		if resp.StatusCode != http.StatusOK {
-			_ = resp.Body.Close()
-			lastErr = fmt.Sprintf("%s 返回 HTTP %d", u, resp.StatusCode)
-			continue
-		}
-		// 有些站点会把 404 页面配上 image/png 的 Content-Type 发出来，
-		// 所以还要看内容类型对不对得上
-		if !strings.HasPrefix(ct, "image/") {
-			_ = resp.Body.Close()
-			lastErr = fmt.Sprintf("%s 返回的不是图片（%s）", u, ct)
-			continue
-		}
-		data, err := io.ReadAll(io.LimitReader(resp.Body, maxIconBytes+1))
-		_ = resp.Body.Close()
-		if err != nil {
-			lastErr = err.Error()
-			continue
-		}
-		if len(data) == 0 {
-			lastErr = u + " 返回了空内容"
-			continue
-		}
-		if len(data) > maxIconBytes {
-			lastErr = fmt.Sprintf("%s 的图标超过 %dKB", u, maxIconBytes>>10)
-			continue
-		}
-		return "data:" + ct + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+		return icon, nil
 	}
 	if lastErr == "" {
 		lastErr = "没有找到可用的图标"

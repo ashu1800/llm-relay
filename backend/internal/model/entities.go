@@ -391,7 +391,11 @@ type ClientAlias struct {
 	// Name 映射后的显示名；空 = 待设置（显示层回落到内置/快照）
 	Name string `gorm:"size:64" json:"name"`
 	// Icon 与渠道图标同一套口径：data URI / http(s) 地址 / 一两个字符，
-	// 或内置图标文件名（前端 client-icons/ 目录下的 .svg）；空 = 待设置
+	// 或内置图标文件名（前端 client-icons/ 目录下的 .svg）；空 = 待设置。
+	//
+	// http(s) 地址只在「抓取失败、按原样存下」时才会留在库里 ——
+	// 保存接口会先把它抓成 data URI（见 api.cacheClientIcon），
+	// 因为存地址等于每次打开日志页都要去请求一次那个外链。
 	Icon      string    `gorm:"type:text" json:"icon"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

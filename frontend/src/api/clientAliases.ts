@@ -4,11 +4,19 @@
 import { api } from './client'
 import type { ClientAlias, Paged } from './types'
 
-/** PUT 的返回：回读的整行（保存后直接刷新本地列表用） */
+/** PUT 的返回：回读的整行（保存后直接刷新本地列表用）。
+ *
+ *  两个图标字段描述「这次保存对图片外链做了什么」，都不落库：
+ *  传 http(s) 图标地址时后端会先抓下来转成 data URI 再入库
+ *  （口径同渠道图标，见 api.cacheClientIcon），抓不到就按原样存。 */
 interface AliasUpdateResult {
   id: number
   updated: number
   item: ClientAlias
+  /** 外链已抓取并缓存：item.icon 就是缓存下来的 data URI */
+  icon_cached?: boolean
+  /** 外链没抓下来（原因）：图标按原样入库，日志页仍会去请求它 */
+  icon_error?: string
 }
 
 export const clientAliasApi = {

@@ -1,7 +1,7 @@
 // 显示解析层的优先级矩阵与 key 口径。这些坏掉的表现都是「列上显示错」
 // 而不是报错（映射不生效、图标空白、CSV 与界面两个名字），所以逐条钉住。
 import { describe, expect, it } from 'vitest'
-import { clientKey, resolveClientIcon, resolveClientLabel } from './clientDisplay'
+import { clientKey, isRemoteIcon, resolveClientIcon, resolveClientLabel } from './clientDisplay'
 import type { ClientAlias } from '@/api/types'
 
 function aliasMap(rows: Partial<ClientAlias>[]): Map<string, ClientAlias> {
@@ -76,5 +76,24 @@ describe('resolveClientIcon（图标形态识别）', () => {
     expect(resolveClientIcon('zcode', 'ZCode', m)).toEqual({ kind: 'builtin', file: 'default.svg' })
     expect(resolveClientIcon('codex', 'Codex CLI', m)).toEqual({ kind: 'builtin', file: 'codex.svg' })
     expect(resolveClientIcon('', '', m)).toEqual({ kind: 'builtin', file: 'default.svg' })
+  })
+})
+
+// 判「这条图标还是外链、没缓存」的唯一口径：设置面板的未缓存标记与
+// 「保存」是否保持可点（= 再点一次就是重试抓取）都读它，
+// 判宽了会把 data URI 也标成外链，判窄了则永远标不出来。
+describe('isRemoteIcon（图片外链判定）', () => {
+  it('http(s) 地址算外链，大小写与首尾空白不敏感', () => {
+    expect(isRemoteIcon('https://a.com/x.png')).toBe(true)
+    expect(isRemoteIcon('http://a.com/x.png')).toBe(true)
+    expect(isRemoteIcon('  HTTPS://a.com/x.png ')).toBe(true)
+  })
+
+  it('data URI / 内置文件名 / 字符 / 空串都不算', () => {
+    expect(isRemoteIcon('data:image/png;base64,xxx')).toBe(false)
+    expect(isRemoteIcon('deepseek.svg')).toBe(false)
+    expect(isRemoteIcon('🤖')).toBe(false)
+    expect(isRemoteIcon('')).toBe(false)
+    expect(isRemoteIcon('   ')).toBe(false)
   })
 })

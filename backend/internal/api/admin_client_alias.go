@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"sort"
 	"strings"
@@ -67,6 +68,10 @@ func (s *Server) updateClientAlias(c *gin.Context) {
 		return
 	}
 	updates := map[string]any{}
+	// 这次保存有没有把图片外链抓成内置内容 / 抓失败的原因。
+	// 两个字段只出现在本次回执里，不落库（库里只认 icon 的最终值）。
+	iconCached := false
+	iconErr := ""
 	if p.Name != nil {
 		// 显式传空串 = 回到「待设置」（显示层回落内置/快照），是合法操作
 		name := strings.TrimSpace(*p.Name)
@@ -83,6 +88,23 @@ func (s *Server) updateClientAlias(c *gin.Context) {
 		if len(icon) > 128<<10 {
 			writeUpstreamError(c, http.StatusBadRequest, "图标内容过长（上限 128KB）", "invalid_request_error")
 			return
+		}
+		// 图片外链就地抓下来缓存（见 cacheClientIcon）：存地址的话，
+		// 日志页每打开一次，浏览器就要去请求一次那个外链 —— 境内访问慢，
+		// 外链被换掉或加上鉴权还会变成裂图，备份也带不走图标。
+		// 这正是渠道图标那条路早就定下的口径，客户端这边只是对齐。
+		if isExternalIconURL(icon) {
+			cached, err := s.cacheClientIcon(c.Request.Context(), icon)
+			switch {
+			case err != nil:
+				// 抓不到不拦保存：地址可能指向内网、需要鉴权，或者只是
+				// 临时抽风，而用户此刻想做的可能是改名字。按原样入库，
+				// 但把原因回执给界面 —— 它会标出「这条还没缓存」。
+				iconErr = err.Error()
+			default:
+				icon = cached
+				iconCached = true
+			}
 		}
 		updates["icon"] = icon
 	}
@@ -101,7 +123,34 @@ func (s *Server) updateClientAlias(c *gin.Context) {
 		writeUpdateError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates), "item": row})
+	resp := gin.H{"id": id, "updated": len(updates), "item": row}
+	if iconCached {
+		resp["icon_cached"] = true
+	}
+	if iconErr != "" {
+		resp["icon_error"] = iconErr
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// cacheClientIcon 抓一次图片外链并转成 data URI。
+//
+// 与渠道图标同一条链路（icon_fetch.go 的 iconFetcher）：同样的 SSRF 防护、
+// 同样的 64KB 上限、同样的 8 秒超时、只认 image/* 的 Content-Type。
+// 差别只有一处：客户端映射上没有「出站代理」这一维，所以只吃环境变量里的
+// 系统代理（HTTP_PROXY 那套，见 netguard.EnvProxyAddrs）；渠道那种显式的
+// 出站代理不参与 —— 需要它才能出网的用户请改用内置图标，或把图片压成
+// data URI 粘贴。
+//
+// 抓回来的 data URI 最多约 87KB（64KB 的 base64 膨胀），仍在 icon 列
+// 128KB 的口径内，所以不额外卡上限。
+func (s *Server) cacheClientIcon(ctx context.Context, raw string) (string, error) {
+	fetcher, cleanup, err := s.newIconFetcher(ctx, 0)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	return fetcher.fetch(raw)
 }
 
 func (s *Server) deleteClientAlias(c *gin.Context) {

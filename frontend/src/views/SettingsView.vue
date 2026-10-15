@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { message, modal } from '@/utils/feedback'
 import {
   ReloadOutlined, DeleteOutlined,
-  DownloadOutlined, UploadOutlined
+  DownloadOutlined, UploadOutlined, WarningOutlined
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import { versionApi, type UpdateConfig } from '@/api/version'
@@ -15,7 +15,7 @@ import LogFxPreview from '@/components/LogFxPreview.vue'
 import ThemePicker from '@/components/ThemePicker.vue'
 import ClientIcon from '@/components/ClientIcon.vue'
 import { CLIENT_META, ICON_LIBRARY, clientIconFile } from '@/components/clientMeta'
-import { aliasIconSpec, type ClientIconSpec } from '@/components/clientDisplay'
+import { aliasIconSpec, isRemoteIcon, type ClientIconSpec } from '@/components/clientDisplay'
 import { useClientAliases } from '@/composables/useClientAliases'
 import { useLogFxStore } from '@/stores/logFx'
 import { useThemeStore } from '@/stores/theme'
@@ -170,9 +170,25 @@ async function saveAlias(row: { id: number; key: string }) {
   if (!d) return
   d.saving = true
   try {
-    await clientAliasApi.update(row.id, { name: d.name.trim(), icon: d.icon.trim() })
+    const res = await clientAliasApi.update(row.id, { name: d.name.trim(), icon: d.icon.trim() })
     await loadAliases(true)
-    message.success('已保存，日志列已按新叫法显示')
+    // 图片外链由后端抓一次、缓存成 data URI 入库（口径同渠道图标）。
+    // 三种回执：缓存成功 / 抓不到（仍按原样保存，界面标出「还没缓存」）
+    // / 与图标无关的普通保存 —— 第三种的提示保持原文案。
+    if (res.icon_error) {
+      modal.warning({
+        centered: true,
+        title: '图标外链没能缓存到本站',
+        content:
+          `${res.icon_error}。图标已按原样保存，但每次打开日志页都会去请求它 —— ` +
+          '可以改用内置图标，或把图片压小后转成 data URI 粘贴（与渠道图标同一个道理）。',
+        width: modalWidth(520)
+      })
+    } else if (res.icon_cached) {
+      message.success('图标已抓取并缓存到本站，日志页不再请求外链')
+    } else {
+      message.success('已保存，日志列已按新叫法显示')
+    }
   } catch (e: any) {
     message.error(e?.message || '保存失败')
   } finally {
@@ -513,6 +529,9 @@ onMounted(() => {
         行由日志自动登记：新客户端第一次被观测到就会出现在这里；配好后历史行与新行
         一起换新叫法（库里仍保留识别当时的原名作快照，CSV 导出同样按映射后的名字）。
         图标可选内置库，或粘贴 data URI / 图片地址 / 单个字符。
+        <strong>粘贴 http(s) 图片地址时，保存会先由后端抓一次、转成 data URI 存库</strong>
+        （与渠道图标同一套：抓不到就按原样存下，行上会标出来）——
+        之后日志列只从本站渲染，不再每次打开页面都去请求那个外链。
       </div>
       <div v-if="sortedAliasRows.length === 0" class="span-line">
         还没有观测到任何客户端 —— 有请求进来后会自动出现在这里。
@@ -554,12 +573,26 @@ onMounted(() => {
             :aria-label="`第 ${i + 1} 行自定义图标`"
             placeholder="data:… / https://… / 单字符"
             @update:value="(v: string) => (aliasDrafts[row.id].icon = v)"
-          />
+          >
+            <!-- 落库的图标还是外链 = 上次没抓下来（后端抓不到才原样存）。
+                 标记挂在输入框里而不是单开一列：它描述的正是这一格的内容 -->
+            <template v-if="isRemoteIcon(row.icon)" #suffix>
+              <a-tooltip
+                title="这条图标还是外链，没缓存到本站：每次打开日志页都会去请求它。点「保存」会再抓一次并缓存。"
+              >
+                <WarningOutlined class="alias-icon-warn" />
+              </a-tooltip>
+            </template>
+          </a-input>
           <span class="alias-ops">
             <a-button
               size="small"
               :loading="aliasDrafts[row.id].saving"
-              :disabled="aliasDrafts[row.id].name === row.name && aliasDrafts[row.id].icon === row.icon"
+              :disabled="
+                aliasDrafts[row.id].name === row.name &&
+                aliasDrafts[row.id].icon === row.icon &&
+                !isRemoteIcon(row.icon)
+              "
               @click="saveAlias(row)"
             >保存</a-button>
             <a-button size="small" danger @click="removeAlias(row)">删除</a-button>
@@ -926,4 +959,9 @@ onMounted(() => {
   color: var(--text-amber);
 }
 .alias-pill.is-builtin { background: var(--color-bg); color: var(--color-text-secondary); }
+/* 「图标还是外链、没缓存下来」的警告标记。颜色与上面「待设置」同一条
+   实测过的档位（--text-amber 在 12 套主题里都 ≥4.5:1），形状是警告三角：
+   这不是错误，只是「这条还没缓存」—— 中文提示放在 tooltip 里，
+   输入框本身只有 190px，塞不下文字。 */
+.alias-icon-warn { color: var(--text-amber); cursor: help; }
 </style>
