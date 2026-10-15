@@ -82,6 +82,11 @@ func TestExtractClient(t *testing.T) {
 			want: want{"opencode", "OpenCode"},
 		},
 		{
+			name: "ZCode 官方通道（实测形态 ZCode/<版本>，版本随发版走）",
+			ua:   "ZCode/3.15.3",
+			want: want{"zcode", "ZCode"},
+		},
+		{
 			name: "curl 大写",
 			ua:   "CURL/8.4.0",
 			want: want{"curl", "curl"},
@@ -137,6 +142,22 @@ func TestExtractClient(t *testing.T) {
 			name: "Cline 前身名 claude-dev 归到 Cline",
 			ua:   "claude-dev/3.2.0",
 			want: want{"cline", "Cline"},
+		},
+		{
+			// ZCode 自定义 provider 的真实形态：UA 是裸 Vercel AI SDK（ZCode
+			// 不改写），产品身份只在自报头里 —— zcode 规则必须排在 SDK 规则
+			// 之前，先被 ai-sdk/ 吞掉正是这一条要防的回归
+			name:    "ZCode 自定义 provider：UA 是裸 ai-sdk，靠 x-app 自报头认出",
+			ua:      "ai-sdk/openai-compatible/1.0.6 runtime/node.js/v22.14.0",
+			headers: map[string]string{"X-App": "zcode"},
+			want:    want{"zcode", "ZCode"},
+		},
+		{
+			// 对照组：没有自报头的裸 SDK UA 就该显示 SDK —— 那是线上仅有
+			// 的诚实信号，不许为了「多认一个」把它抢走
+			name: "裸 ai-sdk UA 无自报头仍归 Vercel AI SDK",
+			ua:   "ai-sdk/openai-compatible/1.0.6 runtime/node.js/v22.14.0",
+			want: want{"vercel-ai-sdk", "Vercel AI SDK"},
 		},
 
 		// ---- 4. fallback：认不出就展示客户端自报的第一个 product token ----

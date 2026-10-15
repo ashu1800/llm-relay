@@ -120,7 +120,7 @@ def channel_outside(group_id):
     return int(out) if out.isdigit() else 0
 
 
-def chat(model, expect_fail=False, user_agent=None):
+def chat(model, expect_fail=False, user_agent=None, extra_headers=None):
     payload = json.dumps({"model": model, "max_tokens": 8,
                           "messages": [{"role": "user", "content": "hi"}]}).encode()
     req = urllib.request.Request(BASE + "/v1/chat/completions", data=payload, method="POST")
@@ -128,6 +128,8 @@ def chat(model, expect_fail=False, user_agent=None):
     req.add_header("Authorization", "Bearer " + tok)
     if user_agent:
         req.add_header("User-Agent", user_agent)
+    for k, v in (extra_headers or {}).items():
+        req.add_header(k, v)
     try:
         with urllib.request.urlopen(req, timeout=90) as r:
             return r.status, json.loads(r.read().decode() or "{}")
@@ -162,6 +164,22 @@ if detected:
     chk("UA 原文随日志落库（补规则表的依据）",
         "claude-cli/2.1.260" in (detected[0].get("client_ua") or ""),
         str(detected[0].get("client_ua"))[:80])
+
+# ZCode 的两条信号各钉一次（规则来源见 relay/client.go 的 zcode 条目）：
+# 官方通道靠 UA 前缀 ZCode/；自定义 provider 的 UA 是裸 ai-sdk 形态，
+# 只能靠自报头 x-app —— 用户实际走的就是这条，必须全链路验证。
+chat(MODEL, user_agent="ZCode/3.15.3")
+chat(MODEL, user_agent="ai-sdk/openai-compatible/1.0.6 runtime/node.js/v22.14.0",
+     extra_headers={"x-app": "zcode"})
+time.sleep(2)
+_, cli = call("GET", "/logs?page_size=50")
+cli_rows = cli.get("items", [])
+for ua_probe, how in (("ZCode/3.15.3", "UA 前缀"), ("ai-sdk/openai-compatible", "x-app 自报头")):
+    rows = [r for r in cli_rows if (r.get("client_ua") or "").startswith(ua_probe)
+            and r.get("client_id") == "zcode"]
+    chk("ZCode（%s信号）被识别成 zcode/ZCode" % how, len(rows) > 0 and rows[0].get("client_name") == "ZCode",
+        "client_id=%s client_name=%s" % (rows[0].get("client_id") if rows else None,
+                                         rows[0].get("client_name") if rows else None))
 
 print()
 print("=== 状态类别筛选 ===")

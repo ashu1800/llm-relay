@@ -139,6 +139,16 @@ var clientRules = []clientRule{
 	{id: "gemini-cli", name: "Gemini CLI", ua: []string{"geminicli/", "gemini-cli/"}},
 	{id: "qwen-code", name: "Qwen Code", ua: []string{"qwencode/", "qwen-code/", "qwencli/"}},
 	{id: "trae", name: "Trae", ua: []string{"trae/"}},
+	// ZCode（Z.ai 的桌面编码客户端）。两条信号，都有实测依据（3.15.3 的
+	// model-io 请求日志 + 客户端 zcode.cjs 的源码形态）：
+	//   · 官方通道：UA 形如 ZCode/3.15.3 —— 版本随发版走，只锚定前缀；
+	//   · 自定义 provider（中转/自建端点走的就是这条）：UA 是裸 Vercel AI
+	//     SDK 形态（ai-sdk/openai-compatible/… 由 SDK 的 fetch 注入，ZCode
+	//     不改写、也不追加自己的名字），产品身份只能靠自报头 —— 在 ZCode
+	//     的模型服务配置里加一个自定义请求头 x-app: zcode 即可命中。
+	// 必须排在下面的 SDK 规则之前，否则先被 ai-sdk/ 吞掉（本条正是为
+	// 「ZCode 的请求被显示成 Vercel AI SDK」这个 case 补的）。
+	{id: "zcode", name: "ZCode", ua: []string{"zcode/"}, hdr: map[string]string{"x-app": "zcode"}},
 
 	// ---------- 桌面 / Web 聊天客户端 ----------
 	{id: "cherry-studio", name: "Cherry Studio", ua: []string{"cherrystudio/", "cherry-studio/"}},

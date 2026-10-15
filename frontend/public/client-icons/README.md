@@ -27,8 +27,8 @@
 以下客户端在两个图标库里都没有收录、官方也未公开 SVG 资产，暂时落到
 `default.svg`（识别与显示名都不受影响，只是图标是通用款）：
 
-- `continue`、`aider`、`chatbox`、`nextchat`
-  （四个客户端本身无公开向量资产）
+- `continue`、`aider`、`chatbox`、`nextchat`、`zcode`
+  （五个客户端本身无公开向量资产；ZCode 的应用图标只有 PNG，暂不转描）
 - `wget`、`httpx`、`node-fetch`、`undici`、`okhttp`
   （五个库没有品牌 logo —— 它们的设计目标就是「不带身份地发请求」）
 

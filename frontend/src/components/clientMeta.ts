@@ -44,6 +44,7 @@ export const CLIENT_META: Record<string, ClientMeta> = {
   'gemini-cli': { name: 'Gemini CLI', file: 'gemini-cli.svg' },
   'qwen-code': { name: 'Qwen Code', file: 'qwen-code.svg' },
   trae: { name: 'Trae', file: 'trae.svg' },
+  zcode: { name: 'ZCode', file: 'default.svg' },
 
   // ---- 桌面 / Web 聊天客户端 ----
   'cherry-studio': { name: 'Cherry Studio', file: 'cherry-studio.svg' },
