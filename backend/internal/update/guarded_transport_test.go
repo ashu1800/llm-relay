@@ -123,37 +123,6 @@ func TestGuardedTransportAllowsEnvProxy(t *testing.T) {
 	}
 }
 
-// envProxyAddrs 的归一化：没写端口时按 scheme 补默认端口，
-// 否则与 Go 实际拨号用的 "host:80"/"host:443" 对不上，豁免会静默失效；
-// 没写 scheme 的简写要与 Go 一致地按 http 处理。
-func TestEnvProxyAddrsNormalizesDefaultPorts(t *testing.T) {
-	clearProxyEnv(t)
-	t.Setenv("HTTPS_PROXY", "http://proxy.example:3128")
-	t.Setenv("HTTP_PROXY", "http://proxy.example")
-	t.Setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
-
-	got := envProxyAddrs()
-	want := map[string]bool{
-		"proxy.example:3128": true,
-		"proxy.example:80":   true,
-		"127.0.0.1:1080":     true,
-	}
-	if len(got) != len(want) {
-		t.Fatalf("应得到 %d 个地址，实际 %v", len(want), got)
-	}
-	for _, a := range got {
-		if !want[a] {
-			t.Errorf("出现了预期外的地址 %q（全部：%v）", a, got)
-		}
-	}
-}
-
-func TestEnvProxyAddrsAcceptsSchemalessShorthand(t *testing.T) {
-	clearProxyEnv(t)
-	t.Setenv("HTTPS_PROXY", "127.0.0.1:7890") // 常见简写：Clash 用户常这么写
-
-	got := envProxyAddrs()
-	if len(got) != 1 || got[0] != "127.0.0.1:7890" {
-		t.Fatalf("没写 scheme 的代理地址应当照样豁免，实际 %v", got)
-	}
-}
+// 环境变量代理地址的解析与归一化（envProxyAddrs）已随实现移到
+// netguard.EnvProxyAddrs —— 图标抓取与版本检测共用同一份，用例也在
+// netguard_test.go 里（原来两份实现，漂移一次豁免就会静默失效）。

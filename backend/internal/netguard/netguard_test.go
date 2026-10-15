@@ -186,3 +186,72 @@ func TestGuardedTransportExceptEmptyListBlocksAll(t *testing.T) {
 		t.Fatalf("空名单不该放行任何地址，实际 %v", err)
 	}
 }
+
+// clearProxyEnv 清掉环境变量里的代理。
+//
+// 这些用例验的是「直连」与「豁免名单」两条路径，而开发机上完全可能设着
+// HTTPS_PROXY=127.0.0.1:7890（本机跑 Clash 的常见形态）—— 那会让豁免名单
+// 多出一项，断言随之漂移。t.Setenv 顺带保证用例不并行。
+func clearProxyEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+		"http_proxy", "https_proxy", "all_proxy", "no_proxy",
+	} {
+		t.Setenv(k, "")
+	}
+}
+
+// GuardedClient 必须把豁免名单一路带到建连校验里（图标抓取用它放行本机代理），
+// 同时保留「禁跳转」这条 SSRF 防护。
+func TestGuardedClientExceptExemptsOnlyListedAddr(t *testing.T) {
+	c := GuardedClientExcept(&http.Client{}, []string{"127.0.0.1:7890"})
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport 类型不对: %T", c.Transport)
+	}
+	if _, err := tr.DialContext(t.Context(), "tcp", "127.0.0.1:7890"); errors.Is(err, ErrBlocked) {
+		t.Fatal("名单里的地址（可信代理）不该被当成内网目标拦下")
+	}
+	if _, err := tr.DialContext(t.Context(), "tcp", "127.0.0.1:7891"); !errors.Is(err, ErrBlocked) {
+		t.Fatalf("名单外的回环地址应被拦，实际 %v", err)
+	}
+	if c.CheckRedirect == nil || !errors.Is(c.CheckRedirect(nil, nil), http.ErrUseLastResponse) {
+		t.Fatal("禁跳转必须保留：跟随 302 会绕过 CheckHost")
+	}
+}
+
+// EnvProxyAddrs 的归一化：没写端口时按 scheme 补默认端口，
+// 否则与 Go 实际拨号用的 "host:80"/"host:443" 对不上，豁免会静默失效；
+// 没写 scheme 的简写要与 Go 一致地按 http 处理。
+func TestEnvProxyAddrsNormalizesDefaultPorts(t *testing.T) {
+	clearProxyEnv(t)
+	t.Setenv("HTTPS_PROXY", "http://proxy.example:3128")
+	t.Setenv("HTTP_PROXY", "http://proxy.example")
+	t.Setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
+
+	got := EnvProxyAddrs()
+	want := map[string]bool{
+		"proxy.example:3128": true,
+		"proxy.example:80":   true,
+		"127.0.0.1:1080":     true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("应得到 %d 个地址，实际 %v", len(want), got)
+	}
+	for _, a := range got {
+		if !want[a] {
+			t.Errorf("出现了预期外的地址 %q（全部：%v）", a, got)
+		}
+	}
+}
+
+func TestEnvProxyAddrsAcceptsSchemalessShorthand(t *testing.T) {
+	clearProxyEnv(t)
+	t.Setenv("HTTPS_PROXY", "127.0.0.1:7890") // 常见简写：Clash 用户常这么写
+
+	got := EnvProxyAddrs()
+	if len(got) != 1 || got[0] != "127.0.0.1:7890" {
+		t.Fatalf("没写 scheme 的代理地址应当照样豁免，实际 %v", got)
+	}
+}

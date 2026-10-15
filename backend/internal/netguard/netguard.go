@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"syscall"
 	"time"
@@ -205,17 +207,79 @@ func GuardedTransportExcept(base *http.Transport, except []string) *http.Transpo
 }
 
 // GuardedClient 返回带 SSRF 防护的 http.Client：禁跳转 + 建连校验。
+//
+// 显式配置了代理的调用方要用 GuardedClientExcept 把代理地址豁免掉（见那里的注释），
+// 否则代理自己跑在本机时会被当成 SSRF 目标拦下。
 func GuardedClient(base *http.Client) *http.Client {
+	return GuardedClientExcept(base, nil)
+}
+
+// GuardedClientExcept 与 GuardedClient 相同，但 except 里的地址（形如 host:port）
+// **不做内网校验**：它们是运维自己配置的可信出口（环境变量里的代理，或渠道上
+// 显式配的出站代理）。
+//
+// 与 GuardedTransportExcept 同一个取舍：只有走代理的那部分请求其建连目标是代理
+// 自己，而大量部署的代理恰恰跑在本机或内网（127.0.0.1:7890 那类系统级 Clash）。
+// NO_PROXY 会让一部分请求仍然直连，那些请求必须照旧校验 —— 所以豁免是
+// 「按地址」而不是「配了代理就整条放行」。
+func GuardedClientExcept(base *http.Client, except []string) *http.Client {
 	c := &http.Client{}
 	if base != nil {
 		*c = *base
 	}
-	c.Transport = GuardedTransport(transportOf(c.Transport))
+	c.Transport = GuardedTransportExcept(transportOf(c.Transport), except)
 	// 禁止跟随跳转：跟随会让「校验过的地址」与「最终请求的地址」不是同一个
 	c.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
 	return c
+}
+
+// EnvProxyAddrs 取出环境变量里配置的代理地址（host:port），交给上面的豁免参数。
+//
+// 读的是 http.ProxyFromEnvironment 同一组变量（大小写都认）。地址按 Transport
+// 实际拨号时的形式归一化：URL 里没写端口时补上该 scheme 的默认端口 ——
+// Go 的 canonicalAddr 就是这么做的，不补的话 "127.0.0.1:80" 与 "127.0.0.1" 对不上，
+// 豁免就会静默失效。没写 scheme 的写法（127.0.0.1:7890）Go 按 http:// 处理，
+// 这里跟它保持一致。
+//
+// 消费方：update 包的版本检测（走环境变量代理出网），以及 api 包的图标抓取
+// （见 api.newIconFetcher —— 代理是本机时，不豁免就等于抓不到图标）。
+func EnvProxyAddrs() []string {
+	var out []string
+	seen := make(map[string]struct{})
+	for _, key := range []string{
+		"HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+		"https_proxy", "http_proxy", "all_proxy",
+	} {
+		raw := strings.TrimSpace(os.Getenv(key))
+		if raw == "" {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			// 没写 scheme 的简写：Go 自己按 http:// 处理（见 httpproxy.parseProxy）
+			u, err = url.Parse("http://" + raw)
+		}
+		if err != nil || u.Host == "" {
+			continue
+		}
+		addr := u.Host
+		if u.Port() == "" {
+			switch u.Scheme {
+			case "http":
+				addr = net.JoinHostPort(u.Hostname(), "80")
+			case "https":
+				addr = net.JoinHostPort(u.Hostname(), "443")
+			}
+		}
+		if _, ok := seen[addr]; ok {
+			continue
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+	}
+	return out
 }
 
 // transportOf 取出 *http.Transport，非该类型时返回 nil（用默认 transport）。

@@ -41,7 +41,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -250,52 +249,9 @@ func guardedTransport(proxyURL string) (*http.Transport, error) {
 			ExpectContinueTimeout: 1 * time.Second,
 		}, nil
 	}
-	// 直连（可能仍由环境变量指定了代理）：目标是公网地址，代理是可信出口
-	return netguard.GuardedTransportExcept(nil, envProxyAddrs()), nil
-}
-
-// envProxyAddrs 取出环境变量里配置的代理地址（host:port），交给 netguard 豁免。
-//
-// 读的是 http.ProxyFromEnvironment 同一组变量（大小写都认）。地址按 Transport
-// 实际拨号时的形式归一化：URL 里没写端口时补上该 scheme 的默认端口 ——
-// Go 的 canonicalAddr 就是这么做的，不补的话 "127.0.0.1:80" 与 "127.0.0.1" 对不上，
-// 豁免就会静默失效。没写 scheme 的写法（127.0.0.1:7890）Go 按 http:// 处理，
-// 这里跟它保持一致。
-func envProxyAddrs() []string {
-	var out []string
-	seen := make(map[string]struct{})
-	for _, key := range []string{
-		"HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
-		"https_proxy", "http_proxy", "all_proxy",
-	} {
-		raw := strings.TrimSpace(os.Getenv(key))
-		if raw == "" {
-			continue
-		}
-		u, err := url.Parse(raw)
-		if err != nil || u.Host == "" {
-			// 没写 scheme 的简写：Go 自己按 http:// 处理（见 httpproxy.parseProxy）
-			u, err = url.Parse("http://" + raw)
-		}
-		if err != nil || u.Host == "" {
-			continue
-		}
-		addr := u.Host
-		if u.Port() == "" {
-			switch u.Scheme {
-			case "http":
-				addr = net.JoinHostPort(u.Hostname(), "80")
-			case "https":
-				addr = net.JoinHostPort(u.Hostname(), "443")
-			}
-		}
-		if _, ok := seen[addr]; ok {
-			continue
-		}
-		seen[addr] = struct{}{}
-		out = append(out, addr)
-	}
-	return out
+	// 直连（可能仍由环境变量指定了代理）：目标是公网地址，代理是可信出口。
+	// 环境变量代理的解析与豁免口径在 netguard.EnvProxyAddrs（图标抓取同样用它）
+	return netguard.GuardedTransportExcept(nil, netguard.EnvProxyAddrs()), nil
 }
 
 // FetchLatestRelease 取最新的正式版本（不含 draft 与 prerelease）。
