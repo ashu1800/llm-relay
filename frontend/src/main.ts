@@ -27,6 +27,7 @@ import {
   Space,
   Spin,
   Switch,
+  Tabs,
   Table,
   Tag,
   Tooltip
@@ -78,6 +79,7 @@ const components = [
   Space,
   Spin,
   Switch,
+  Tabs,
   Table,
   Tag,
   Tooltip

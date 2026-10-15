@@ -21,6 +21,7 @@ import { useLogFxStore } from '@/stores/logFx'
 import { useThemeStore } from '@/stores/theme'
 import { useVersionStore } from '@/stores/version'
 import { fmtTime } from '@/utils/fmtTime'
+import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
 
 // 请求日志的入场动效：这一个不是只读的运行参数，而是可以在这里改的浏览器本地偏好
 // （存 localStorage，与主题、每页条数同一口径）。档位表与持久化都在 utils/effects.ts，
@@ -199,6 +200,13 @@ function removeAlias(row: { id: number; key: string }) {
 }
 
 const loading = ref(false)
+// ---- 设置页标签（2026-10-15 加）----
+// 页面从一长条滚成四个标签：概览 / 外观 / 客户端 / 系统。
+// 停留在哪个标签是浏览器本地偏好（与列显隐同一持久化口径）：刚配完
+// 显示映射的人下次回来还落在「客户端」，而不是每次都从「概览」找起。
+const SETTINGS_TABS = ['overview', 'appearance', 'client', 'system']
+const activeTab = ref(readStoredChoice('settings-tab', SETTINGS_TABS, 'overview'))
+watch(activeTab, (k) => writeStoredChoice('settings-tab', k))
 // 这一页加载的是「多项设置」而不是列表，没有 length 可数，
 // 于是用「是否成功加载过一次」来区分首次加载失败与刷新失败
 const loaded = ref(false)// 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
@@ -398,6 +406,9 @@ onMounted(() => {
       hint="这一页的数据来自后端 /settings 接口，请确认后端服务是否正常，然后重试。"
       @retry="load"
     >
+    <a-tabs v-model:activeKey="activeTab" class="settings-tabs">
+      <a-tab-pane key="overview" tab="概览">
+        <div class="tab-panels">
     <section class="panel">
       <h2 class="panel-title">数据概览</h2>
       <div class="count-grid">
@@ -411,6 +422,22 @@ onMounted(() => {
       </div>
     </section>
 
+    <section class="panel note-panel">
+      <h2 class="panel-title">关于报文留存</h2>
+      <div class="note">
+        当前模式为 <span class="mono">{{ runtime.payload_storage_mode }}</span>。
+        留存的请求与响应原文会写入 <span class="mono">request_payloads</span> 表
+        （界面不再展示，需要直接查询数据库）；凭据类请求头（Authorization、各类 api-key）
+        一律以 <span class="mono">[已隐藏]</span> 落库，不会明文保存。
+        超过 <span class="mono">{{ runtime.payload_max_kb }}</span> KB 的报文会被截断并标注。
+        想保留全部调用可设为 <span class="mono">all</span>，只留出错调用设为
+        <span class="mono">errors</span>，完全不留存设为 <span class="mono">none</span>。
+      </div>
+    </section>
+        </div>
+      </a-tab-pane>
+      <a-tab-pane key="appearance" tab="外观">
+        <div class="tab-panels">
     <section class="panel">
       <h2 class="panel-title">界面主题</h2>
       <div class="note">
@@ -471,7 +498,10 @@ onMounted(() => {
         当前档位：<span class="mono">{{ logFx.options.find((o) => o.id === logFx.fx)?.name }}</span>
       </div>
     </section>
-
+        </div>
+      </a-tab-pane>
+      <a-tab-pane key="client" tab="客户端">
+        <div class="tab-panels">
     <section class="panel">
       <h2 class="panel-title">
         客户端显示映射
@@ -537,7 +567,10 @@ onMounted(() => {
         </div>
       </div>
     </section>
-
+        </div>
+      </a-tab-pane>
+      <a-tab-pane key="system" tab="系统">
+        <div class="tab-panels">
     <section class="panel">
       <h2 class="panel-title">运行参数</h2>
       <a-table
@@ -678,19 +711,9 @@ onMounted(() => {
         <input ref="fileInput" type="file" accept="application/json,.json" style="display: none" @change="onFilePicked" />
       </a-space>
     </section>
-
-    <section class="panel note-panel">
-      <h2 class="panel-title">关于报文留存</h2>
-      <div class="note">
-        当前模式为 <span class="mono">{{ runtime.payload_storage_mode }}</span>。
-        留存的请求与响应原文会写入 <span class="mono">request_payloads</span> 表
-        （界面不再展示，需要直接查询数据库）；凭据类请求头（Authorization、各类 api-key）
-        一律以 <span class="mono">[已隐藏]</span> 落库，不会明文保存。
-        超过 <span class="mono">{{ runtime.payload_max_kb }}</span> KB 的报文会被截断并标注。
-        想保留全部调用可设为 <span class="mono">all</span>，只留出错调用设为
-        <span class="mono">errors</span>，完全不留存设为 <span class="mono">none</span>。
-      </div>
-    </section>
+        </div>
+      </a-tab-pane>
+    </a-tabs>
     </DataState>
 
     <a-modal v-model:open="reportOpen" title="导入结果" :footer="null" :width="modalWidth(520)" centered>
@@ -727,6 +750,12 @@ onMounted(() => {
 <style scoped>
 .page { padding: var(--gap); display: flex; flex-direction: column; gap: var(--gap); }
 .panel { padding: 16px 18px; }
+/* ---- 标签页（2026-10-15 加）----
+   面板间距原本全靠 .page 的 flex gap；进了标签页的面板不再是 .page 的
+   直接子元素，间距改由 .tab-panels 自己给（同一个 var(--gap)，视觉不变）。
+   标签条默认自带 16px 下边距，与面板间距叠起来会双倍，收到同一档。 */
+.settings-tabs :deep(.ant-tabs-nav) { margin-bottom: var(--gap); }
+.tab-panels { display: flex; flex-direction: column; gap: var(--gap); }
 /* 面板标题是 <h2>（2026-10-10 标题层级收口）：文档结构变成
    h1（MainLayout 的 .sr-only 页面名）→ h2（本页八个面板）→ h3（子块）。
    字号与字重显式写出来 —— h2 的浏览器默认样式是 1.5em + 上下 margin，
