@@ -14,8 +14,14 @@ import EmptyState from '@/components/EmptyState.vue'
 import LogFxPreview from '@/components/LogFxPreview.vue'
 import ThemePicker from '@/components/ThemePicker.vue'
 import ClientIcon from '@/components/ClientIcon.vue'
-import { CLIENT_META, ICON_LIBRARY, clientIconFile } from '@/components/clientMeta'
-import { aliasIconSpec, isRemoteIcon, type ClientIconSpec } from '@/components/clientDisplay'
+import { ICON_LIBRARY, clientIconFile } from '@/components/clientMeta'
+import {
+  aliasIconSpec,
+  clientAliasStatus,
+  isRemoteIcon,
+  pendingAliasCount as pendingAliasCountOf,
+  type ClientIconSpec
+} from '@/components/clientDisplay'
 import { useClientAliases } from '@/composables/useClientAliases'
 import { useLogFxStore } from '@/stores/logFx'
 import { useThemeStore } from '@/stores/theme'
@@ -138,21 +144,19 @@ watch(aliasRows, (rows) => {
 // 这里再按状态重排：真正可操作的（待设置）浮到最前，纯噪音（内置未配）
 // 沉底 —— 40 多个内置客户端都自动登记，不重排的话 deepseek-harness
 // 这种要配的行会埋在里面。
-function aliasStatus(row: { key: string; name: string }): 'pending' | 'mapped' | 'builtin' {
-  if (row.name) return 'mapped'
-  if (CLIENT_META[row.key]) return 'builtin'
-  return 'pending'
-}
-
+// 行的三种状态与计数都来自 clientDisplay 的纯函数（判据只有一处，
+// 与 useClientAliases 曾经那份口径不同的实现合并 —— see clientAliasStatus）
 const sortedAliasRows = computed(() => {
   const order = { pending: 0, mapped: 1, builtin: 2 } as const
   return [...aliasRows.value].sort(
     (a, b) =>
-      order[aliasStatus(a)] - order[aliasStatus(b)] ||
-      b.updated_at.localeCompare(a.updated_at)
+      order[clientAliasStatus(a)] - order[clientAliasStatus(b)] ||
+      // updated_at 是 RFC3339 字符串，同一秒内的秒以下小数按字典序比会错位
+      // （".12Z" < ".5Z" 但 0.12s < 0.5s），所以按时间戳比
+      Date.parse(b.updated_at) - Date.parse(a.updated_at)
   )
 })
-const pendingAliasCount = computed(() => aliasRows.value.filter((r) => aliasStatus(r) === 'pending').length)
+const pendingAliasCount = computed(() => pendingAliasCountOf(aliasRows.value))
 
 // 面板里的图标预览：配了就按配置渲染，没配按「这一行现在实际显示的
 // 图标」渲染（内置品牌图标 / 默认图标）—— 预览必须与日志列同源，
@@ -550,8 +554,8 @@ onMounted(() => {
             <span class="mono alias-key-text" :title="row.key">{{ row.key }}</span>
             <!-- 待设置 = 内置表也没有它，列上显示的是原始 token（要人来的行）；
                  内置 = 没配映射但显示本来就好（可配可不配） -->
-            <span v-if="aliasStatus(row) === 'pending'" class="alias-pill is-pending">待设置</span>
-            <span v-else-if="aliasStatus(row) === 'builtin'" class="alias-pill is-builtin">内置</span>
+            <span v-if="clientAliasStatus(row) === 'pending'" class="alias-pill is-pending">待设置</span>
+            <span v-else-if="clientAliasStatus(row) === 'builtin'" class="alias-pill is-builtin">内置</span>
           </div>
           <a-input
             v-model:value="aliasDrafts[row.id].name"

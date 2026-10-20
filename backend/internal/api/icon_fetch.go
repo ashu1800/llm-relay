@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -41,10 +42,11 @@ type iconFetcher struct {
 // 客户端图标没有出站代理这一维（映射表上没这个东西），传 0 —— 但环境变量里的
 // 系统代理照旧生效（Go 的默认 transport 本来就读它）。
 //
-// 返回的 cleanup 由调用方 defer，负责关掉空闲连接。
+// 返回的 cleanup 由调用方 defer，负责关掉空闲连接（在**最终**的 client 上，
+// 见函数末尾的说明）。
 func (s *Server) newIconFetcher(ctx context.Context, proxyID uint) (*iconFetcher, func(), error) {
 	client := &http.Client{Timeout: iconFetchTimeout}
-	cleanup := func() {}
+	noop := func() {}
 	// 代理地址要交给 netguard 豁免：代理常常就跑在本机（127.0.0.1:7890
 	// 那类系统级 Clash），不豁免的话每个请求都撞在「目标地址指向内网或本机」
 	// 上 —— 表现是「图标怎么也抓不到」，而用户还以为是自己地址填错了。
@@ -53,28 +55,32 @@ func (s *Server) newIconFetcher(ctx context.Context, proxyID uint) (*iconFetcher
 	if proxyID != 0 {
 		var p model.Proxy
 		if err := s.deps.Store.DB().First(&p, proxyID).Error; err != nil {
-			return nil, cleanup, fmt.Errorf("这条渠道配了出站代理 #%d，但它不存在", proxyID)
+			return nil, noop, fmt.Errorf("这条渠道配了出站代理 #%d，但它不存在", proxyID)
 		}
 		if !p.Enabled {
-			return nil, cleanup, fmt.Errorf("这条渠道的出站代理 %s 已停用", p.Name)
+			return nil, noop, fmt.Errorf("这条渠道的出站代理 %s 已停用", p.Name)
 		}
 		cfg, err := proxy.FromEntity(p, s.deps.Cipher)
 		if err != nil {
-			return nil, cleanup, err
+			return nil, noop, err
 		}
 		tr, err := cfg.Transport(iconFetchTimeout)
 		if err != nil {
-			return nil, cleanup, err
+			return nil, noop, err
 		}
 		client.Transport = tr
-		cleanup = tr.CloseIdleConnections
 		exempt = append(exempt, cfg.Address())
 	}
 	// 补上禁跳转 + 建连校验（代理地址除外）。
 	// 禁跳转是必需的：目标通过 302 跳到内网时，如果跟随就等于绕过了下面的校验。
 	// DialContext 的校验兜住 DNS rebinding（校验时是公网 IP、建连时是内网 IP）。
 	client = netguard.GuardedClientExcept(client, exempt)
-	return &iconFetcher{ctx: ctx, client: client}, cleanup, nil
+	// cleanup 必须绑定**最终**的 client：GuardedClientExcept 内部会 Clone
+	// 传入的 transport（idle 池是新建的），上面那个 tr 根本不会被任何人使用。
+	// 绑在 tr 上的话 CloseIdleConnections 关的是一个空池，实际连接只能等
+	// IdleConnTimeout（90 秒）自己回收 —— 而这条路径每次「从上游获取图标」
+	// 都会新建一个 transport。
+	return &iconFetcher{ctx: ctx, client: client}, client.CloseIdleConnections, nil
 }
 
 // fetch 抓一个地址并转成 data URI。
@@ -143,7 +149,8 @@ func readIconResponse(resp *http.Response, src string) (string, error) {
 	ct := resp.Header.Get("Content-Type")
 	// 有些站点会把 404 页面配上 image/png 的 Content-Type 发出来，
 	// 所以还要看内容类型对不对得上
-	if !strings.HasPrefix(ct, "image/") {
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil || !strings.HasPrefix(mediaType, "image/") {
 		return "", fmt.Errorf("%s 返回的不是图片（%s）", src, ct)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxIconBytes+1))
@@ -156,7 +163,11 @@ func readIconResponse(resp *http.Response, src string) (string, error) {
 	if len(data) > maxIconBytes {
 		return "", fmt.Errorf("%s 的图标超过 %dKB", src, maxIconBytes>>10)
 	}
-	return "data:" + ct + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+	// 用 ParseMediaType 的结果而不是原始头：Content-Type 是上游可控的，
+	// 原样拼进 data URI 会把 `image/png; x=<任意长参数>` 整段带进库里
+	// （Go 允许约 10MB 的响应头），入库值因此可能远超文档承诺的约 87KB。
+	// 只保留 `image/<子类型>`，参数一律丢弃。
+	return "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
 }
 
 // isExternalIconURL 判断图标值是不是「要抓回来缓存的图片外链」。

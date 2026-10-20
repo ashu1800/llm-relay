@@ -52,19 +52,44 @@ export function resolveClientIcon(
   return { kind: 'builtin', file: (id && CLIENT_META[id]?.file) || 'default.svg' }
 }
 
+/** 映射行的三种状态（设置面板分组用；判据只有这一处）：
+ *   · mapped —— 用户配过名字；
+ *   · builtin —— 没配，但 CLIENT_META 认识它（显示本身就好，配不配随意）；
+ *   · pending —— 没配、内置表也不认识（列上显示的是原始 token，
+ *     真正等用户来配的那一档）。
+ *
+ *  为什么放在这里而不是视图里：三态判定同时被「待设置计数」与「排序」
+ *  消费，写两份必然漂移（2026-10-19 审查发现视图与 composable 各有一份
+ *  且口径不同）。纯函数 + 单测，与 logLive / tableTools 同一做法。 */
+export type ClientAliasStatus = 'mapped' | 'builtin' | 'pending'
+
+export function clientAliasStatus(row: { key: string; name: string }): ClientAliasStatus {
+  if (row.name) return 'mapped'
+  if (CLIENT_META[row.key]) return 'builtin'
+  return 'pending'
+}
+
+/** 待设置行数。口径与 clientAliasStatus 严格一致 ——
+ *  内置客户端会被自动登记成 name 空的行，但它们不需要人管。 */
+export function pendingAliasCount(rows: ReadonlyArray<{ key: string; name: string }>): number {
+  return rows.reduce((n, r) => (clientAliasStatus(r) === 'pending' ? n + 1 : n), 0)
+}
+
 /** 把映射里的 icon 字符串识别成渲染形态（映射面板的预览也用它）。
  *  认不出（拼错的文件名、空白）返回 null，调用方回落默认链路 ——
  *  mask 引一个不存在的 url 不报错、只渲染一枚看不见的空白，
  *  静默空白比显式回落更糟。 */
 export function aliasIconSpec(icon: string): ClientIconSpec | null {
-  if (icon.trim().startsWith('data:') || isRemoteIcon(icon)) {
-    return { kind: 'img', src: icon.trim() }
+  const trimmed = icon.trim()
+  if (trimmed.startsWith('data:') || isRemoteIcon(trimmed)) {
+    return { kind: 'img', src: trimmed }
   }
   // 一两个字符按文字/emoji 渲染（与渠道图标的单字符约定一致）
-  const trimmed = icon.trim()
   if (trimmed !== '' && Array.from(trimmed).length <= 2) return { kind: 'text', ch: trimmed }
-  // 其余按内置图标文件名引用；不在清单里的一律回落（不猜）
-  if (ICON_LIBRARY.includes(icon)) return { kind: 'builtin', file: icon }
+  // 其余按内置图标文件名引用；不在清单里的一律回落（不猜）。
+  // 比对用 trimmed：备份导入会按原样写 icon（见 admin_backup.go），
+  // 手改过的 JSON 里带首尾空白时，用原始值比对会静默落回默认图标。
+  if (ICON_LIBRARY.includes(trimmed)) return { kind: 'builtin', file: trimmed }
   return null
 }
 

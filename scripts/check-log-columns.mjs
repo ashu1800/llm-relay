@@ -120,7 +120,11 @@ const PROBE = `(() => {
   const wrap = document.querySelector('.log-table')
   if (!wrap) return JSON.stringify({ error: '页面上没有 .log-table（列表还没渲染？）' })
   const rows = wrap.querySelectorAll('.ant-table-tbody tr[data-row-key]').length
-  const anchors = ['.model-cell', '.chan-name', '.tk-line', '.dur-line', '.txt-cell', '.spd-cell', '.group-tag']
+  // 锚点必须与 RequestLogPanel 的 CONTENT_MEASURE 一一对应（同源解析见下）。
+  // .chan-name 在 2026-09-26 就换成了 .chan-text（flex 子项被压扁，量不到
+  // 真实内容宽），这里一直没跟着改；客户端列（2026-10-15 加）原来完全
+  // 不在名单里 —— 那条列被量窄、锚点失效或被截断时，这套守卫会静默全绿。
+  const anchors = ['.model-cell', '.chan-text', '.tk-line', '.dur-line', '.txt-cell', '.spd-cell', '.group-tag', '.cli-text']
   const overflow = []
   for (const sel of anchors) {
     for (const el of wrap.querySelectorAll('.ant-table-tbody ' + sel)) {
@@ -255,7 +259,9 @@ const PROBE = `(() => {
   //  .model-cell 内部还有子元素，文字宽不等于内容宽，不在此列）。
   const textEllipsis = []
   for (const m of ${JSON.stringify(CONTENT_MEASURES)}) {
-    if (!['渠道', '密钥', '速度', '费用'].includes(m.name)) continue
+    // 「客户端」与渠道列同一个坑：文字被 .cli-name 的 overflow:hidden 裁掉时
+    // scrollWidth ≤ clientWidth（省略号列的固有特性），只能靠离屏量文字宽。
+    if (!['渠道', '客户端', '密钥', '速度', '费用'].includes(m.name)) continue
     const els = [...wrap.querySelectorAll('.ant-table-tbody ' + m.sel)]
     if (!els.length) continue
     const probe = document.createElement('span')

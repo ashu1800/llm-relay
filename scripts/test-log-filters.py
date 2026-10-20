@@ -190,6 +190,15 @@ chat(MODEL, user_agent="dsh-harness/0.3")
 time.sleep(2)
 _, al = call("GET", "/client-aliases")
 al_rows = al.get("items", [])
+# 幂等：上一次跑完已经把这一行配成 DSH 了（端点没有 POST，不能手工造行）。
+# 先摘掉名字/图标让它回到「待设置」，否则重跑时下面那条断言必然失败、
+# 而后续的 CSV / 外链断言又全都包在 if alias_id 里被静默跳过 ——
+# 看起来像回归，实际覆盖已经消失（2026-10-19 审查发现）。
+existing = [r for r in al_rows if r.get("key") == "dsh-harness"]
+if existing:
+    call("PUT", "/client-aliases/%d" % existing[0]["id"], {"name": "", "icon": ""})
+    _, al = call("GET", "/client-aliases")
+    al_rows = al.get("items", [])
 pend = [r for r in al_rows if r.get("key") == "dsh-harness" and not r.get("name")]
 chk("未知客户端自动登记为待设置行（name 空）", len(pend) > 0,
     "共 %d 行映射，其中 dsh-harness 待设置 %d 行" % (len(al_rows), len(pend)))
@@ -240,6 +249,22 @@ if alias_id:
     chk("删除后行从列表消失",
         not [r for r in al2.get("items", []) if r.get("key") == "dsh-harness"],
         "剩余 %d 行" % len(al2.get("items", [])))
+
+    # 删除只是「不想要这条映射」：同一个客户端再发一次请求，应当重新登记
+    # 一行待设置。这条曾经是假的 —— logwriter 的 seenAlias 是进程级缓存，
+    # 删除接口没清它，于是本进程内永远不再登记（只有重启回填才回来，
+    # 连有意删除的也一起复活）。2026-10-19 审查发现，修在 deleteClientAlias。
+    chat(MODEL, user_agent="dsh-harness/0.3")
+    time.sleep(2)
+    _, al3 = call("GET", "/client-aliases")
+    chk("删除后再次被观测到会重新登记为待设置行",
+        any(r.get("key") == "dsh-harness" and not r.get("name") for r in al3.get("items", [])),
+        "dsh-harness 行数 %d" % len([r for r in al3.get("items", []) if r.get("key") == "dsh-harness"]))
+    # 收尾：把这条探针行删掉，不给下一次运行留「已是待设置」的既成状态。
+    # （就算没删也没关系：开头那段会先把它清回待设置。）
+    probe_rows = [r for r in al3.get("items", []) if r.get("key") == "dsh-harness"]
+    for r in probe_rows:
+        call("DELETE", "/client-aliases/%d" % r["id"])
 
 print()
 print("=== 状态类别筛选 ===")

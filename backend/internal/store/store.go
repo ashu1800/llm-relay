@@ -424,8 +424,18 @@ func (s *Store) normalizeGroupStrategies() error {
 // 映射表的行为模型（见 model.ClientAlias 的注释）：客户端第一次被观测到
 // 就落一行「待设置」，等用户来配名字与图标。映射表晚于日志的客户端列
 // 上线，历史行不会经过写路径的自动登记（logwriter.ensureClientAlias），
-// 所以启动时按 DISTINCT 补一次 —— 幂等（ON CONFLICT DO NOTHING），
-// 之后每次启动都是空跑一遍，只付出一次索引扫。
+// 所以启动时按 DISTINCT 补一次。
+//
+// **只在第一次跑，之后每次启动都直接返回**（2026-10-19 审查发现）：
+// 这条语句对 request_logs 做全表顺序扫描 + DISTINCT，而 client_id /
+// client_name 都没有索引，ON CONFLICT DO NOTHING 也不会让计划器跳过源行
+// （它只抑制插入）。默认保留 30 天、日 10 万行时，每次重启与自更新都要在
+// 监听端口之前扫数百万宽行 —— 而它的产出在第一次之后恒为空。
+// 这个回填本来就是一次性的数据修复：新客户端由写路径的 ensureClientAlias
+// 持续登记，不需要每次启动再扫一遍。
+//
+// 标记写进 settings 表而不是「判断表里有没有行」：后者在用户删光全部映射
+// 之后会误判成「还没回填过」，又把日志里的客户端全插回来。
 //
 // Key 的派生与 relay.ClientKey 同口径：id 非空取 id，否则取 name token。
 // 两边各写一份是因为 SQL 里复用不了 Go 函数；改口径必须两处一起动
@@ -434,6 +444,18 @@ func (s *Store) backfillClientAliases() error {
 	if !s.hasTable("request_logs") {
 		return nil
 	}
+	// 已跑过：幂等空返回，不查日志表。用 settings 里的一行标记，
+	// 而不是「client_aliases 非空」——用户删光映射是合法状态。
+	const markerKey = "client_alias_backfill_v1"
+	var marker model.Setting
+	err := s.db.Where("key = ?", markerKey).First(&marker).Error
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return fmt.Errorf("读取客户端映射回填标记失败: %w", err)
+	}
+
 	res := s.db.Exec(`INSERT INTO client_aliases ("key", created_at, updated_at)
 		SELECT DISTINCT COALESCE(NULLIF(client_id, ''), NULLIF(client_name, '')), now(), now()
 		FROM request_logs
@@ -441,6 +463,14 @@ func (s *Store) backfillClientAliases() error {
 		ON CONFLICT ("key") DO NOTHING`)
 	if res.Error != nil {
 		return fmt.Errorf("回填客户端显示映射失败: %w", res.Error)
+	}
+	// 成功之后才写标记：失败了下次启动还要重试（那时多半是库暂时不可用，
+	// 不该把「没做成」永久记成「做过了」）
+	if err := s.db.Create(&model.Setting{
+		Key:   markerKey,
+		Value: model.JSONMap{"value": true},
+	}).Error; err != nil {
+		return fmt.Errorf("写入客户端映射回填标记失败: %w", err)
 	}
 	if res.RowsAffected > 0 {
 		slog.Info("已把日志中出现过的客户端登记进显示映射表", "条数", res.RowsAffected)

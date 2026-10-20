@@ -11,8 +11,10 @@
 //     CostCurrency / PricingSnapshot 同一个道理，不允许被后来的改名改写；
 //   · 这份 name 是**当前**的统一叫法，让同一个客户端在一屏里不会出现
 //     两个名字（例如某个客户端改名之后，老行与今天的新行都显示新名）。
-// 渲染时的优先级见 RequestLogPanel 的 clientLabel：
-//   CLIENT_META[id].name → record.client_name → record.client_id → —
+// 渲染时的优先级（判据只有一处，见 clientDisplay.resolveClientLabel）：
+//   用户映射名 → 本表的 name → 落库的 client_name 快照
+// 注意反过来不成立：本表的 name **不能**被 client_name 覆盖 ——
+// 快照是「识别当时它自称什么」，当前统一叫法才是这里这份。
 //
 // file 允许指向同一个文件（openai-python / openai-node 共用 openai.svg）：
 // 它们是同一家 SDK 的两个语言版本，品牌图标本来就该是同一个。

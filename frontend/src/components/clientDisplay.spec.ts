@@ -1,7 +1,15 @@
 // 显示解析层的优先级矩阵与 key 口径。这些坏掉的表现都是「列上显示错」
 // 而不是报错（映射不生效、图标空白、CSV 与界面两个名字），所以逐条钉住。
 import { describe, expect, it } from 'vitest'
-import { clientKey, isRemoteIcon, resolveClientIcon, resolveClientLabel } from './clientDisplay'
+import {
+  aliasIconSpec,
+  clientAliasStatus,
+  clientKey,
+  isRemoteIcon,
+  pendingAliasCount,
+  resolveClientIcon,
+  resolveClientLabel
+} from './clientDisplay'
 import type { ClientAlias } from '@/api/types'
 
 function aliasMap(rows: Partial<ClientAlias>[]): Map<string, ClientAlias> {
@@ -95,5 +103,54 @@ describe('isRemoteIcon（图片外链判定）', () => {
     expect(isRemoteIcon('🤖')).toBe(false)
     expect(isRemoteIcon('')).toBe(false)
     expect(isRemoteIcon('   ')).toBe(false)
+  })
+})
+
+// 三态判定与待设置计数：设置面板的分组、徽标都读它。以前视图里有一份
+// （aliasStatus）、composable 里另有一份（数 !name），口径不同 ——
+// 内置客户端会被自动登记成 name 空的行，按后者算，40 多个内置客户端
+// 全都成了「待设置」。
+describe('clientAliasStatus（三态判定）', () => {
+  it('配过名字就是 mapped，优先级最高', () => {
+    expect(clientAliasStatus({ key: 'claude-code', name: 'Claude Code' })).toBe('mapped')
+    expect(clientAliasStatus({ key: 'my-tool', name: 'DSH' })).toBe('mapped')
+  })
+
+  it('没配名字但内置表认识 = builtin（不需要人管）', () => {
+    expect(clientAliasStatus({ key: 'claude-code', name: '' })).toBe('builtin')
+    expect(clientAliasStatus({ key: 'zcode', name: '' })).toBe('builtin')
+  })
+
+  it('没配名字、内置表也不认识 = pending（真正等用户来配的）', () => {
+    expect(clientAliasStatus({ key: 'dsh-harness', name: '' })).toBe('pending')
+    expect(clientAliasStatus({ key: '', name: '' })).toBe('pending')
+  })
+})
+
+describe('pendingAliasCount（与三态同口径）', () => {
+  it('只数 pending，内置未配的不算', () => {
+    const rows = [
+      { key: 'claude-code', name: '' }, // builtin
+      { key: 'cursor', name: '' }, // builtin
+      { key: 'dsh-harness', name: '' }, // pending
+      { key: 'my-tool', name: 'DSH' }, // mapped
+      { key: 'other-tool', name: '' } // pending
+    ]
+    expect(pendingAliasCount(rows)).toBe(2)
+  })
+
+  it('空列表为 0', () => {
+    expect(pendingAliasCount([])).toBe(0)
+  })
+})
+
+describe('aliasIconSpec（图标值 → 渲染形态）', () => {
+  it('内置文件名两侧空白不影响识别（备份导入按原样写值）', () => {
+    expect(aliasIconSpec('  deepseek.svg  ')).toEqual({ kind: 'builtin', file: 'deepseek.svg' })
+  })
+
+  it('认不出的文件名回落 null（调用方再落默认链路）', () => {
+    expect(aliasIconSpec('not-a-real-icon.svg')).toBeNull()
+    expect(aliasIconSpec('   ')).toBeNull()
   })
 })

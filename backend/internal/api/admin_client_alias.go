@@ -158,9 +158,25 @@ func (s *Server) deleteClientAlias(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// 先记下 Key：删除之后就从库里取不到了，而缓存失效要用它。
+	// 只有真的删掉了（行存在）才清缓存 —— 404 时清一个不存在的键没有意义，
+	// 还会掩盖「删错了对象」这件事。
+	var row model.ClientAlias
+	if err := s.deps.Store.DB().Select("id", "key").First(&row, id).Error; err != nil {
+		writeUpdateError(c, err)
+		return
+	}
 	// 删除只是「不想要这条映射」：这个客户端下次再被观测到会重新登记
-	// 一行待设置（logwriter 的缓存只记本进程见过的键，不记得删过）。
-	// 想让它不再出现，把名字配成与原样一致即可 —— 那才是「映射成原样」
-	// 而不是「假装没见过」。
-	deleteByID(c, s.deps.Store.DB(), &model.ClientAlias{}, id, "映射不存在")
+	// 一行待设置。想让它不再出现，把名字配成与原样一致即可 —— 那才是
+	// 「映射成原样」而不是「假装没见过」。
+	//
+	// 注意「重新登记」不是自动发生的：logwriter 的 seenAlias 是**进程级**
+	// 缓存，不失效的话这个键在本进程内永远不会再走登记（2026-10-19 审查
+	// 发现注释承诺过、实现没做）。所以删成功后必须显式忘掉它。
+	if !deleteByID(c, s.deps.Store.DB(), &model.ClientAlias{}, id, "映射不存在") {
+		return
+	}
+	if s.deps.Logs != nil {
+		s.deps.Logs.ForgetClientAlias(row.Key)
+	}
 }

@@ -45,8 +45,8 @@ func TestIsExternalIconURL(t *testing.T) {
 		"",
 		"   ",
 		"data:image/png;base64,iVBORw0KGgo=",
-		"deepseek.svg",       // 内置图标文件名
-		"🤖",                 // 一两个字符
+		"deepseek.svg",        // 内置图标文件名
+		"🤖",                   // 一两个字符
 		"/client-icons/x.svg", // 站内路径本来就是本地资源
 		"//example.com/a.png", // 协议相对地址前端不认（会回落内置），后端也不必猜
 		"ftp://example.com/a.png",
@@ -216,6 +216,31 @@ func TestReadIconResponse(t *testing.T) {
 		}
 		if !strings.HasPrefix(got, "data:image/svg+xml;base64,") {
 			t.Errorf("Content-Type 应当原样进 data URI，实际 %q", got)
+		}
+	})
+
+	t.Run("Content-Type 的参数被丢弃（上游可控，不能原样拼进库）", func(t *testing.T) {
+		// 这条头是上游返回的，Go 允许约 10MB 的响应头：原样拼进 data URI
+		// 会让入库值远超「64KB 图片 ≈ 87KB base64」的口径，而界面上看不出
+		// 异常。只保留 `image/<子类型>`，参数一律丢。
+		junk := strings.Repeat("x", 200<<10)
+		got, err := readIconResponse(
+			respOf(200, "image/png; file="+junk, png), "https://a.com/a.png")
+		if err != nil {
+			t.Fatalf("带参数的正确图片应当通过，实际 %v", err)
+		}
+		if !strings.HasPrefix(got, "data:image/png;base64,") {
+			t.Errorf("data URI 前缀应只含 media type，实际 %q", got[:min(len(got), 80)])
+		}
+		if len(got) > maxIconBytes*2 {
+			t.Errorf("data URI 长度 %d 超出图片上限对应的编码长度 %d", len(got), maxIconBytes*2)
+		}
+	})
+
+	t.Run("Content-Type 本身畸形时按非图片拒", func(t *testing.T) {
+		_, err := readIconResponse(respOf(200, "image/png; =", png), "https://a.com/a.png")
+		if err == nil || !strings.Contains(err.Error(), "返回的不是图片") {
+			t.Errorf("畸形 Content-Type 应当被拒，实际 %v", err)
 		}
 	})
 

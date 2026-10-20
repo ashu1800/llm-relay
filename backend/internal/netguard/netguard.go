@@ -24,6 +24,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/net/idna"
 )
 
 // ErrBlocked 表示目标地址落在禁止访问的范围内。
@@ -237,11 +239,24 @@ func GuardedClientExcept(base *http.Client, except []string) *http.Client {
 
 // EnvProxyAddrs 取出环境变量里配置的代理地址（host:port），交给上面的豁免参数。
 //
-// 读的是 http.ProxyFromEnvironment 同一组变量（大小写都认）。地址按 Transport
-// 实际拨号时的形式归一化：URL 里没写端口时补上该 scheme 的默认端口 ——
-// Go 的 canonicalAddr 就是这么做的，不补的话 "127.0.0.1:80" 与 "127.0.0.1" 对不上，
-// 豁免就会静默失效。没写 scheme 的写法（127.0.0.1:7890）Go 按 http:// 处理，
-// 这里跟它保持一致。
+// 只读 **http.ProxyFromEnvironment 真正会读的那两组变量**（HTTP_PROXY /
+// HTTPS_PROXY 及其小写形式）。ALL_PROXY 不在此列：Go 的 httpproxy 不认它
+// （见 $(go env GOROOT)/src/vendor/golang.org/x/net/http/httpproxy/proxy.go 的
+// FromEnvironment），把它也豁免掉只会让一个**根本不会用到的地址**逃过校验 ——
+// 那正是豁免清单最不该有的东西：清单的语义是「Go 会去拨哪些地址」。
+//
+// 地址必须与 Transport 实际拨号的形式逐字节一致，否则 isExempt 的精确匹配
+// 静默失效，合法代理反而被当成 SSRF 目标拦下（2026-10-19 实测踩到）：
+//   - 端口：没写端口时按 scheme 补默认值。Go 的 schemePort 对 socks5/socks5h
+//     也给了 1080 —— 只处理 http/https 的话，`HTTPS_PROXY=socks5://127.0.0.1`
+//     这种免端口写法会豁免成 "127.0.0.1"，而实际拨号是 "127.0.0.1:1080"；
+//   - 主机名：canonicalAddr 会先做 IDNA ToASCII（Unicode 域名转 punycode）
+//     再拨号，这里不转同样对不上；
+//   - 大小写不归一：Go 两边都保留原样（实测 DialContext 收到的就是
+//     "Proxy.Example.COM:3128"），所以这里也保持原样，别自作主张小写。
+//   - userinfo 不参与：url.URL.Host 本来就不含它（`u.Hostname()` 更明确）。
+//
+// 没写 scheme 的写法（127.0.0.1:7890）Go 按 http:// 处理，这里跟它保持一致。
 //
 // 消费方：update 包的版本检测（走环境变量代理出网），以及 api 包的图标抓取
 // （见 api.newIconFetcher —— 代理是本机时，不豁免就等于抓不到图标）。
@@ -249,8 +264,8 @@ func EnvProxyAddrs() []string {
 	var out []string
 	seen := make(map[string]struct{})
 	for _, key := range []string{
-		"HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
-		"https_proxy", "http_proxy", "all_proxy",
+		"HTTPS_PROXY", "HTTP_PROXY",
+		"https_proxy", "http_proxy",
 	} {
 		raw := strings.TrimSpace(os.Getenv(key))
 		if raw == "" {
@@ -264,14 +279,9 @@ func EnvProxyAddrs() []string {
 		if err != nil || u.Host == "" {
 			continue
 		}
-		addr := u.Host
-		if u.Port() == "" {
-			switch u.Scheme {
-			case "http":
-				addr = net.JoinHostPort(u.Hostname(), "80")
-			case "https":
-				addr = net.JoinHostPort(u.Hostname(), "443")
-			}
+		addr := dialAddrOf(u)
+		if addr == "" {
+			continue
 		}
 		if _, ok := seen[addr]; ok {
 			continue
@@ -280,6 +290,46 @@ func EnvProxyAddrs() []string {
 		out = append(out, addr)
 	}
 	return out
+}
+
+// dialAddrOf 把一个代理 URL 归一成 Transport 拨号时使用的 host:port。
+//
+// 与 net/http 的 canonicalAddr 同一口径（schemePort 的默认端口表 + IDNA
+// ToASCII）；无法归一（没有主机名）时返回空串，调用方跳过。
+func dialAddrOf(u *url.URL) string {
+	host := u.Hostname()
+	if host == "" {
+		return ""
+	}
+	if ascii, err := idna.Lookup.ToASCII(host); err == nil {
+		host = ascii
+	}
+	// 无法识别的 scheme 保持「原样不补端口」：Go 的 canonicalAddr 对没有
+	// 默认端口的 scheme 也是这么处理的（补一个猜出来的端口更糟 —— 那会让
+	// 一个不会发生的拨号地址进入豁免清单）
+	if port := u.Port(); port != "" {
+		return net.JoinHostPort(host, port)
+	}
+	if def := defaultProxyPort(u.Scheme); def != "" {
+		return net.JoinHostPort(host, def)
+	}
+	return host
+}
+
+// defaultProxyPort 复刻 net/http 的 schemePort 中与代理相关的分支。
+func defaultProxyPort(scheme string) string {
+	switch strings.ToLower(scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	case "socks5", "socks5h":
+		// 与 net/http/transport.go 的 schemePort 保持一致：Go 对这两种
+		// 代理 scheme 的默认端口都是 1080。
+		return "1080"
+	default:
+		return ""
+	}
 }
 
 // transportOf 取出 *http.Transport，非该类型时返回 nil（用默认 transport）。

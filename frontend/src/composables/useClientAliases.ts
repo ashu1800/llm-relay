@@ -41,8 +41,5 @@ export function useClientAliases() {
   /** key → 行 的查找索引（解析层 clientDisplay 消费） */
   const byKey = computed(() => new Map(aliases.value.map((a) => [a.key, a])))
 
-  /** 待设置行数（面板头部的计数徽标） */
-  const pendingCount = computed(() => aliases.value.filter((a) => !a.name).length)
-
-  return { aliases, byKey, pendingCount, loading, load }
+  return { aliases, byKey, loading, load }
 }

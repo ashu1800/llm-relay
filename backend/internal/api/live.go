@@ -294,8 +294,21 @@ func (s *Server) liveLogsLoop(ctx context.Context, kick chan<- struct{}) {
 			_ = db.Model(&model.RequestLog{}).Select("COALESCE(MAX(id),0)").Scan(&last).Error
 			continue
 		}
+		// 只取列表要展示的列：client_ua 是 varchar(1024) 的原始 UA，列表
+		// 不展示它（只在详情抽屉可见，走 /logs/:id 单独取），每秒最多 50 行
+		// 全量推出去是纯粹的带宽浪费（2026-10-19 审查）。
+		// 详情抽屉需要的字段（retry_trail / pricing_snapshot / payload 等）
+		// 本来也不在里面。
 		var rows []model.RequestLog
-		if err := db.Where("id > ?", last).Order("id").Limit(50).Find(&rows).Error; err != nil {
+		if err := db.
+			Select("id, trace_id, api_key_id, api_key_name, channel_id, channel_name, group_id, " +
+				"inbound_protocol, upstream_protocol, model_requested, model_upstream, fallback_mapped, " +
+				"thinking_level, stream, status_code, error, retry_count, " +
+				"prompt_tokens, completion_tokens, total_tokens, cached_tokens, cache_creation_tokens, " +
+				"reasoning_tokens, usage_estimated, estimated_cost, cost_currency, " +
+				"first_byte_ms, total_ms, body_reads, last_byte_ms, upstream_ms, " +
+				"client_id, client_name, client_ip, created_at").
+			Where("id > ?", last).Order("id").Limit(50).Find(&rows).Error; err != nil {
 			continue
 		}
 		if len(rows) == 0 {

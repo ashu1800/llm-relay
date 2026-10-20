@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -521,13 +522,18 @@ func (s *Server) importConfig(c *gin.Context) {
 	// 客户端显示映射：按 Key 合并。与分组/渠道「已存在即跳过」不同 ——
 	// 本机的行多半是启动回填/自动登记的**待设置**行（name 空），而备份里
 	// 同 key 的行是用户配好的；跳过会让恢复后的映射全部变回待设置。
-	// 所以规则是：备份里带名字的行覆盖本机（用户 curated 的正是它），
-	// 备份里也待设置的跳过（没有信息量）。
+	// 所以规则是：备份里带名字或带图标的行覆盖本机（用户 curated 的正是它们），
+	// 备份里两样都空的行跳过（没有信息量）。
+	//
+	// 只配图标不配名字是合法状态（名字留空 = 沿用内置叫法），所以判空
+	// 必须同时看 name 与 icon —— 只看 name 会把这类行整条丢掉（2026-10-19 审查）。
 	for i := range b.ClientAliases {
 		a := b.ClientAliases[i]
 		var exist model.ClientAlias
-		if err := db.Where("\"key\" = ?", a.Key).First(&exist).Error; err == nil {
-			if a.Name == "" || (exist.Name == a.Name && exist.Icon == a.Icon) {
+		err := db.Where("\"key\" = ?", a.Key).First(&exist).Error
+		switch {
+		case err == nil:
+			if (a.Name == "" && a.Icon == "") || (exist.Name == a.Name && exist.Icon == a.Icon) {
 				report.Skipped["客户端显示映射"]++
 				continue
 			}
@@ -536,6 +542,13 @@ func (s *Server) importConfig(c *gin.Context) {
 				continue
 			}
 			report.Created["客户端显示映射"]++
+			continue
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			// 本机没有这一行：走下面的 Create
+		default:
+			// 读库失败（连接重置、语句超时）不等于「不存在」：继续 Create
+			// 会撞唯一键，报出来的却是一句与真实原因无关的 duplicate key。
+			report.Warnings = append(report.Warnings, "客户端映射 "+a.Key+" 读取失败: "+err.Error())
 			continue
 		}
 		a.ID = 0

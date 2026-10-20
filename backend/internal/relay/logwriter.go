@@ -52,7 +52,18 @@ type LogWriter struct {
 
 	// seenAlias 是「本进程已登记过」的客户端映射键缓存（见 ensureClientAlias）。
 	// 稳态下每条日志只花一次 map 查找，不为显示映射多付一次 DB 往返。
+	//
+	// 键来自请求方：未命中规则时取 UA 的第一个 product token（见 ExtractClient），
+	// 完全由调用方控制。不加限制的话，逐请求换随机 UA 的爬虫/压测会让这张表
+	// 与本 map 无界增长，而 client_aliases 不随日志保留期淘汰（2026-10-19 审查）。
+	// 上限取 2048：真实部署里不同的客户端以「几十」计，2048 已经宽松到不可能
+	// 误伤正常使用，同时把「被随机 UA 撑爆」变成有界。到顶之后**不再登记新键**
+	// （该客户端的日志照常落库，只是显示层回落到原始 token）。
 	seenAlias sync.Map
+	// aliasKeys 记录 seenAlias 的条目数（sync.Map 没有 Len）。
+	// 与 seenAlias 的写入在同一把锁下配对维护，只在「新键」时付一次原子加。
+	aliasMu   sync.Mutex
+	aliasKeys int
 }
 
 // NewLogWriter 启动后台写入协程。
@@ -155,17 +166,67 @@ func (w *LogWriter) ensureClientAlias(key string) {
 	if key == "" {
 		return
 	}
-	if _, loaded := w.seenAlias.LoadOrStore(key, struct{}{}); loaded {
+	if !w.rememberAliasKey(key) {
+		if w.logger != nil {
+			w.logger.Warn("客户端映射键数量已达上限，不再自动登记新客户端",
+				"key", key, "limit", maxTrackedClients)
+		}
 		return
 	}
 	err := w.db.Clauses(clause.OnConflict{DoNothing: true}).
 		Create(&model.ClientAlias{Key: key}).Error
 	if err != nil {
-		w.seenAlias.Delete(key)
+		w.forgetAliasKey(key)
 		if w.logger != nil {
 			w.logger.Warn("登记客户端显示映射失败", "key", key, "err", err)
 		}
 	}
+}
+
+// maxTrackedClients 是本进程最多记住多少个客户端键（见 seenAlias 的说明）。
+const maxTrackedClients = 2048
+
+// rememberAliasKey 把键记进缓存；已有或已达上限时返回 false。
+//
+// 上限计数与写入必须在同一把锁下完成：分成「先查 Len 再 Store」会让
+// 并发调用同时越过上限（虽然这里只有单个日志写入协程在调，但上限本身
+// 是安全边界，不该依赖调用方的数量）。
+func (w *LogWriter) rememberAliasKey(key string) bool {
+	w.aliasMu.Lock()
+	defer w.aliasMu.Unlock()
+	if _, loaded := w.seenAlias.Load(key); loaded {
+		return false
+	}
+	if w.aliasKeys >= maxTrackedClients {
+		return false
+	}
+	w.seenAlias.Store(key, struct{}{})
+	w.aliasKeys++
+	return true
+}
+
+// forgetAliasKey 摘掉键（登记失败后重试、或管理接口删除映射后用）。
+func (w *LogWriter) forgetAliasKey(key string) {
+	if key == "" {
+		return
+	}
+	w.aliasMu.Lock()
+	defer w.aliasMu.Unlock()
+	if _, loaded := w.seenAlias.LoadAndDelete(key); loaded {
+		w.aliasKeys--
+	}
+}
+
+// ForgetClientAlias 让某个键回到「本进程还没见过」的状态。
+//
+// 删除映射的管理接口在删掉 DB 行之后必须调用它，否则那条行的注释与界面
+// 文案承诺的「下次被观测到会重新登记一行待设置」永远不会发生：缓存是
+// 进程级的，而删除只动了库（2026-10-19 审查发现）。
+//
+// 语义上这与「登记失败时摘掉缓存、下一条日志重试」是同一条路径 ——
+// 都是让下一次观测重新走一遍 ensureClientAlias。
+func (w *LogWriter) ForgetClientAlias(key string) {
+	w.forgetAliasKey(key)
 }
 
 // Close 停止写入协程。它只关通道、不等队列写完 ——

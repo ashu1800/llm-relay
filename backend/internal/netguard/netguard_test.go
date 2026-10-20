@@ -224,6 +224,10 @@ func TestGuardedClientExceptExemptsOnlyListedAddr(t *testing.T) {
 // EnvProxyAddrs 的归一化：没写端口时按 scheme 补默认端口，
 // 否则与 Go 实际拨号用的 "host:80"/"host:443" 对不上，豁免会静默失效；
 // 没写 scheme 的简写要与 Go 一致地按 http 处理。
+//
+// ALL_PROXY 刻意**不**在读取清单里：Go 的 httpproxy 不认它（只读
+// HTTP_PROXY / HTTPS_PROXY / NO_PROXY），豁免一个不会被拨打的地址
+// 只会扩大安全面上的白名单。见 EnvProxyAddrs 的注释。
 func TestEnvProxyAddrsNormalizesDefaultPorts(t *testing.T) {
 	clearProxyEnv(t)
 	t.Setenv("HTTPS_PROXY", "http://proxy.example:3128")
@@ -234,7 +238,6 @@ func TestEnvProxyAddrsNormalizesDefaultPorts(t *testing.T) {
 	want := map[string]bool{
 		"proxy.example:3128": true,
 		"proxy.example:80":   true,
-		"127.0.0.1:1080":     true,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("应得到 %d 个地址，实际 %v", len(want), got)
@@ -243,6 +246,32 @@ func TestEnvProxyAddrsNormalizesDefaultPorts(t *testing.T) {
 		if !want[a] {
 			t.Errorf("出现了预期外的地址 %q（全部：%v）", a, got)
 		}
+	}
+}
+
+// socks5 的免端口写法是常见配置（Clash 的 socks 入口常写成
+// socks5://127.0.0.1）。Go 的 schemePort 对 socks5/socks5h 补 1080，
+// 这里不补就会豁免 "127.0.0.1" 而实际拨号 "127.0.0.1:1080" ——
+// 精确匹配失效，合法代理被当成 SSRF 目标拦下（2026-10-19 实测）。
+func TestEnvProxyAddrsSocks5DefaultPort(t *testing.T) {
+	clearProxyEnv(t)
+	t.Setenv("HTTPS_PROXY", "socks5://127.0.0.1")
+
+	got := EnvProxyAddrs()
+	if len(got) != 1 || got[0] != "127.0.0.1:1080" {
+		t.Fatalf("socks5 免端口应归一成 127.0.0.1:1080，实际 %v", got)
+	}
+}
+
+// Unicode 域名：Transport 在拨号前会做 IDNA ToASCII，豁免地址也必须转成
+// punycode，否则两者对不上。
+func TestEnvProxyAddrsIDN(t *testing.T) {
+	clearProxyEnv(t)
+	t.Setenv("HTTPS_PROXY", "http://bücher.example:3128")
+
+	got := EnvProxyAddrs()
+	if len(got) != 1 || got[0] != "xn--bcher-kva.example:3128" {
+		t.Fatalf("IDN 主机应转成 punycode，实际 %v", got)
 	}
 }
 
