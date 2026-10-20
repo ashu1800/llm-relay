@@ -16,6 +16,9 @@ let rejected = 0;
 let lastRequest = null;
 let lastPath = '';
 let lastModel = '';
+// 客户端声明的能力开关（anthropic-beta）。工具搜索只有它透传过去才生效，
+// 而「没透传」不会让请求失败 —— 没有这个记录就没有判据，只能靠人眼比对。
+let lastBeta = '';
 
 // 真实 Anthropic 对未知字段、缺失必填字段都是直接 400
 function validateAnthropic(p, rawKeys) {
@@ -46,11 +49,11 @@ function errorBody(type, message) {
 const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url.startsWith('/stats')) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ anthropic_hits: anthropicHits, openai_hits: openaiHits, gemini_hits: geminiHits, rejected, last_path: lastPath, last_request: lastRequest, last_model: lastModel }));
+    res.end(JSON.stringify({ anthropic_hits: anthropicHits, openai_hits: openaiHits, gemini_hits: geminiHits, rejected, last_path: lastPath, last_request: lastRequest, last_model: lastModel, last_beta: lastBeta }));
     return;
   }
   if (req.method === 'GET' && req.url.startsWith('/reset')) {
-    anthropicHits = 0; openaiHits = 0; geminiHits = 0; rejected = 0; lastRequest = null; lastPath = ''; lastModel = '';
+    anthropicHits = 0; openaiHits = 0; geminiHits = 0; rejected = 0; lastRequest = null; lastPath = ''; lastModel = ''; lastBeta = '';
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end('{"ok":true}');
     return;
@@ -60,6 +63,7 @@ const server = http.createServer((req, res) => {
   req.on('data', (c) => (body += c));
   req.on('end', () => {
     lastPath = req.url;
+    lastBeta = req.headers['anthropic-beta'] || '';
     let p = {};
     try { p = JSON.parse(body); } catch (e) { p = {}; }
     lastRequest = p;

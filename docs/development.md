@@ -727,6 +727,36 @@ unshift 到最前面、静默破坏排序，第 1 页之外则只计数并提示
   零间隔连打同一端点会被上游当成攻击，正是熔断的诱因；换到别的上游则不等，
   那不会给谁造成压力。
 
+### Tool Search（advanced-tool-use-2025-11-20）的兼容口径（2026-10-20）
+
+Claude Code 2.1.299 的「工具搜索」把 MCP 工具的 schema 从首轮请求里拿掉：
+`tools` 只剩内置工具加一个 `DeferredToolPlaceholder`（带 `defer_loading: true`），
+MCP 工具名以纯文本列在 system prompt 里。模型先调客户端侧的 `ToolSearch`，
+客户端本地检索后把完整 schema **仍带 `defer_loading: true`** 塞回 `tools`，
+并在 `tool_result.content` 里放 `{"type":"tool_reference","tool_name":"..."}`。
+
+搜索、匹配、schema 返回全在客户端完成，中继**不实现任何检索逻辑**，只负责
+「不破坏协议」。四条落点：
+
+- **beta 头不校验**（`relay/forward.go` 的透传段）：Anthropic 渠道整串原样转发，
+  非 Anthropic 渠道干脆不发。不做「已知 beta」白名单 —— 能用的 beta 随上游版本
+  滚动，白名单必然滞后，而拦下未知 beta 的代价是客户端 400 且**不会自动降级**
+  （实测 Claude Code 会原样重试一次，然后把错误抛给用户）。
+- **`defer_loading` 保留/丢弃**（`convert/anthropic.go` 的 `deferLoadingKey`）：
+  入站抄到通用语工具条目顶层暂存，出站还是 Anthropic 时写回（`openAIToolsToAnthropic`），
+  其它上游由 `stripCacheControl` 清掉。少了这条，Anthropic→Anthropic 链路上的
+  `defer_loading` 会在通用语里蒸发，占位工具与已解锁工具的行为一起漂移。
+- **`tool_reference`**（`flattenToolResult` + `anthropicToolResultKey`）：通用语里
+  降级成一行 `[Tool loaded: <tool_name>]`（给 OpenAI 兼容上游的提示）；同时在 tool
+  消息上暂存原始数组，出站 Anthropic 时原样还原 —— 结构化引用不该被改写成自然语言。
+  非 string 的 `tool_result.content` 本来就是正常输入（多模态数组早已支持），不拒绝。
+- **不去重**（需求方明确要求）：同名工具两条、其中一条带 `defer_loading` 时两条都保留，
+  `convert` 里没有提供任何按名字合并的逻辑。
+
+回归：`convert/tool_search_test.go`（7 条用例）、`relay/forward_headers_test.go`
+（beta 整串透传）、`scripts/test-upstream-protocol.sh` 第 7 节（真机链路，
+判据取自 mock 上游记录的 `last_request` 原文）。
+
 ### 密钥 → 分组的强一致引用
 
 密钥白名单里存**分组 ID**（与渠道的 `group_id` 同一待遇），保存时逐条校验

@@ -128,12 +128,18 @@ func stripCacheControlFromJSON(body []byte) []byte {
 
 // privateFieldKeys 是需要粗筛的私有字段名。
 //
-// cache_control 是块级断点，anthropic_blocks 是消息级私有块容器
-// （thinking / document 等），两者互不包含、都要筛。
+// cache_control 是块级断点，anthropic_params 是请求级特有参数暂存
+// （thinking / top_k / metadata / service_tier / output_config /
+// context_management），anthropic_blocks 是消息级私有块容器
+// （thinking / document 等），anthropic_tool_result 是 tool 消息上暂存的
+// 原始 tool_result 内容，defer_loading 是工具条目上的延迟加载标记
+// （见 anthropic.go 各自的常量注释）。它们互不包含、都要筛。
 //
-// 键名与子串 needle 同源（needle 在 init 里由它派生）：加第三个私有字段时
-// 只往这里加一个名字，粗筛与精确判断不会失配。
-var privateFieldKeys = []string{cacheControlKey, anthropicBlocksKey}
+// anthropic_params 曾经漏在这里：只有「恰好也带 cache_control」的请求才会
+// 被子串粗筛命中、连带清掉，单独开 thinking 的请求会把
+// {"anthropic_params":{...}} 原样发给 OpenAI 兼容上游（实测确认）。
+// 键名与 needle 同源（needle 由本列表派生），以后加私有字段只往这里加一个名字。
+var privateFieldKeys = []string{cacheControlKey, anthropicParamsKey, anthropicBlocksKey, anthropicToolResultKey, deferLoadingKey}
 
 // privateFieldNeedles 是粗筛用的子串，由 privateFieldKeys 派生。
 var privateFieldNeedles = func() [][]byte {

@@ -28,7 +28,10 @@ func TestForwarderHeadersByProtocol(t *testing.T) {
 	fwd := NewForwarder(5e9, 0)
 	inbound := http.Header{}
 	inbound.Set("Content-Type", "application/json")
-	inbound.Set("anthropic-beta", "prompt-caching-2024-07-31")
+	// Claude Code 的实际形状：多个 beta 逗号拼接，其中 advanced-tool-use-2025-11-20
+	// 是工具搜索。中继不认识任何 beta、也不做白名单 —— 原样透传是唯一不会
+	// 随版本过期的做法（见 convert/tool_search_test.go 的说明）。
+	inbound.Set("anthropic-beta", "prompt-caching-2024-07-31,advanced-tool-use-2025-11-20")
 	inbound.Set("anthropic-version", "2023-06-01")
 	inbound.Set("X-Secret", "不该透传")
 
@@ -44,8 +47,8 @@ func TestForwarderHeadersByProtocol(t *testing.T) {
 	if gotPath != "/v1/messages" {
 		t.Errorf("Anthropic 渠道应请求 /v1/messages，实际 %s", gotPath)
 	}
-	if v := got.Get("anthropic-beta"); v != "prompt-caching-2024-07-31" {
-		t.Errorf("能力声明头必须透传（否则提示缓存静默失效），实际 %q", v)
+	if v := got.Get("anthropic-beta"); v != "prompt-caching-2024-07-31,advanced-tool-use-2025-11-20" {
+		t.Errorf("能力声明头必须原样透传（未知 beta 也不能被拦或改写），实际 %q", v)
 	}
 	if v := got.Get("anthropic-version"); v != "2023-06-01" {
 		t.Errorf("客户端在用的 API 版本应透传，实际 %q", v)

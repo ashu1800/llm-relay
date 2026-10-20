@@ -140,6 +140,10 @@ func openAIStopList(v any) []string {
 
 // openAIToolsToAnthropic 把 tools 从 {type:function, function:{...}} 拆平成 Anthropic 的
 // {name, description, input_schema}。
+//
+// defer_loading 从通用语工具条目的顶层还原（见 anthropic.go 的 deferLoadingKey）：
+// Claude Code 的工具搜索靠它标记「延迟加载」的工具，丢了以后上游会把占位工具
+// 当普通工具、把已解锁工具当首轮就在的工具 —— 语义漂移且没有任何报错。
 func openAIToolsToAnthropic(v any) []any {
 	list, _ := v.([]any)
 	out := make([]any, 0, len(list))
@@ -162,6 +166,9 @@ func openAIToolsToAnthropic(v any) []any {
 				} else {
 					block["input_schema"] = map[string]any{"type": "object", "properties": map[string]any{}}
 				}
+				if dl, ok := t[deferLoadingKey]; ok {
+					block[deferLoadingKey] = dl
+				}
 				out = append(out, block)
 			}
 			continue
@@ -175,6 +182,9 @@ func openAIToolsToAnthropic(v any) []any {
 		} else {
 			// input_schema 必填：没有参数的函数也得给一个空对象结构
 			block["input_schema"] = map[string]any{"type": "object", "properties": map[string]any{}}
+		}
+		if dl, ok := t[deferLoadingKey]; ok {
+			block[deferLoadingKey] = dl
 		}
 		out = append(out, block)
 	}
@@ -273,10 +283,20 @@ func openAIMessagesToAnthropic(v any) (any, []any, error) {
 			}
 			continue
 		case "tool", "function":
+			// 入站是 Anthropic 且内容里含通用语表达不了的块（tool_reference 等）时，
+			// 原始数组暂存在消息上（见 anthropicToolResultKey）：降级后的文本是给
+			// 非 Anthropic 上游的形态，出站还是 Anthropic 就该原样放回，免得把
+			// 结构化的「工具已解锁」标记改写成一行自然语言。
+			content := toolResultToAnthropic(m["content"])
+			if carried, ok := m[anthropicToolResultKey]; ok {
+				if arr, isArr := carried.([]any); isArr && len(arr) > 0 {
+					content = arr
+				}
+			}
 			blk := map[string]any{
 				"type":        "tool_result",
 				"tool_use_id": asString(m["tool_call_id"]),
-				"content":     toolResultToAnthropic(m["content"]),
+				"content":     content,
 			}
 			// tool 消息上的断点也要带上：多轮工具调用的场景里，
 			// 断点通常就落在最后一条 tool_result 上

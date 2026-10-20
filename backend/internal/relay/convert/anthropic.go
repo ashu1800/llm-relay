@@ -118,6 +118,12 @@ func AnthropicRequestToOpenAIChat(body []byte) ([]byte, error) {
 					"tool_call_id": asString(blk["tool_use_id"]),
 					"content":      flattenToolResult(blk["content"]),
 				}
+				// 通用语表达不了的块（tool_reference 等）另存原文：
+				// 上面的 content 是给非 Anthropic 上游的降级形态，出站还是
+				// Anthropic 时用这份原文还原（见 anthropicToolResultKey）
+				if toolResultNeedsCarry(blk["content"]) {
+					result[anthropicToolResultKey] = blk["content"]
+				}
 				carryCacheControl(result, blk)
 				toolResults = append(toolResults, result)
 			default:
@@ -261,6 +267,29 @@ const anthropicParamsKey = "anthropic_params"
 // 发给其它上游前随 stripCacheControl 一起清掉。
 const anthropicBlocksKey = "anthropic_blocks"
 
+// deferLoadingKey 是工具条目上「延迟加载」标记的暂存字段。
+//
+// Claude Code 的工具搜索（beta advanced-tool-use-2025-11-20）把 MCP 工具的
+// schema 从首轮请求里拿掉：tools 里只留一个 DeferredToolPlaceholder，带
+// defer_loading: true；模型调 ToolSearch 后客户端在本地检索，再把完整 schema
+// **仍带 defer_loading: true** 塞回 tools。语义完全在客户端，上游只需要
+// 「不因为多了这个字段而拒绝」。
+//
+// 用原名字而不是再造一个 anthropic_ 前缀：出站目标是 Anthropic 时原样写回
+// （官方认它），其它上游由 stripCacheControl 清掉。名字若改成私有前缀，
+// 反而要多一次「还原成原名」的映射，没有收益。
+const deferLoadingKey = "defer_loading"
+
+// anthropicToolResultKey 是 tool 消息上暂存「Anthropic 原始 tool_result 内容」的
+// 消息级附加字段，与 anthropicBlocksKey 同一思路。
+//
+// 需要它的块目前是 tool_reference（工具搜索把「某工具已解锁」表达为
+// {"type":"tool_reference","tool_name":"..."}，不含 schema）。通用语里它被
+// 降级成一行 [Tool loaded: ...] 文本 —— 对 OpenAI 兼容上游这是能读懂的提示，
+// 但对 Anthropic 上游就是改写：原块表达的是结构化引用，且未来可能带更多字段。
+// 入站时把原始数组整个暂存，出站还是 Anthropic 就原样放回。
+const anthropicToolResultKey = "anthropic_tool_result"
+
 // carryAnthropicParams 把 Anthropic 特有顶层参数抄进通用语的私有字段。
 //
 // output_config 与 context_management 是 4.6 代客户端的报文形状：
@@ -309,16 +338,21 @@ func takeCacheControl(blk map[string]any) map[string]any {
 }
 
 // stripCacheControl 递归移除通用语里的私有附加字段（cache_control 与
-// anthropic_params、anthropic_blocks）。
+// anthropic_params、anthropic_blocks、anthropic_tool_result、defer_loading）。
 //
 // 用于出站目标是「非 Anthropic」协议的场景：那些上游不认识这些字段，
 // 严格校验的实现会直接 400。与其赌它被忽略，不如主动清掉。
+//
+// defer_loading 一并清掉：它对 OpenAI 兼容上游没有任何意义，而
+// 「多了一个字段就让整条请求 400」正是工具搜索要避免的失败模式。
 func stripCacheControl(v any) any {
 	switch t := v.(type) {
 	case map[string]any:
 		delete(t, cacheControlKey)
 		delete(t, anthropicParamsKey)
 		delete(t, anthropicBlocksKey)
+		delete(t, anthropicToolResultKey)
+		delete(t, deferLoadingKey)
 		for _, sub := range t {
 			stripCacheControl(sub)
 		}
@@ -333,11 +367,44 @@ func stripCacheControl(v any) any {
 	}
 }
 
+// toolResultNeedsCarry 判断 tool_result 的内容里是否有通用语无法表达的块。
+//
+// text / image 都在通用语里有对应形态（字符串与 image_url），其余类型
+// （目前是工具搜索的 tool_reference，将来可能还有新的）降级后会丢失结构，
+// 只留下给非 Anthropic 上游看的一行文本。判据独立成函数而不是内联在
+// 转换循环里：它决定 anthropic_tool_result 要不要写入，写错了上层链路
+// 会在 Anthropic→Anthropic 往返里静默改写内容。
+func toolResultNeedsCarry(content any) bool {
+	arr, ok := content.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range arr {
+		blk := asMap(item)
+		if blk == nil {
+			continue
+		}
+		switch asString(blk["type"]) {
+		case "text", "image":
+			// 通用语有对应形态，不需要原文
+		default:
+			return true
+		}
+	}
+	return false
+}
+
 // flattenToolResult 把工具结果的内容转换成 OpenAI 的 tool 消息 content。
 //
 // 纯文本（最常见）返回字符串，报文最简；含图片块时返回多模态数组
 // （text / image_url 与入站 image 块同一通用形态）—— 工具返回截图时
 // 拍平成空字符串会让模型按「空结果」继续推理，看起来正常、实际缺数据。
+//
+// tool_reference（Claude Code 工具搜索：客户端告诉模型「这个工具已解锁」）
+// 降级成一行文本。丢掉它也不算错（需求方原话：丢掉也可以），但模型少一条
+// 「工具已解锁」的提示，可能继续用 ToolSearch 而不是直接调用 —— 一行文本
+// 的成本几乎为零，保留信息更稳妥。Anthropic→Anthropic 往返不经过这条
+// 降级路径：原文由 anthropicToolResultKey 暂存后原样还原。
 func flattenToolResult(v any) any {
 	switch c := v.(type) {
 	case string:
@@ -360,6 +427,13 @@ func flattenToolResult(v any) any {
 					rich = append(rich, part)
 					hasImage = true
 				}
+			case "tool_reference":
+				// 工具搜索的「已解锁」标记，见函数头注释。
+				// 工具名可能缺失（上游报文不规范时），此时仍留一行，
+				// 免得整个结果变成空字符串、模型以为工具什么都没返回。
+				line := "[Tool loaded: " + asString(blk["tool_name"]) + "]"
+				texts = append(texts, line)
+				rich = append(rich, map[string]any{"type": "text", "text": line})
 			}
 		}
 		if !hasImage {
@@ -393,6 +467,12 @@ func anthropicImageToOpenAI(blk map[string]any) map[string]any {
 	return map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}}
 }
 
+// anthropicToolsToOpenAI 把 Anthropic 的 tools 转成 OpenAI 的 function 工具。
+//
+// 只抄 name / description / input_schema：其余字段（含工具搜索的
+// defer_loading）在 OpenAI 兼容上游没有意义，进通用语就会被出站剥离。
+// 唯一例外是 defer_loading —— 它在出站目标还是 Anthropic 时要原样写回，
+// 所以暂存在工具条目顶层（见 deferLoadingKey）。
 func anthropicToolsToOpenAI(v any) []any {
 	list, _ := v.([]any)
 	outTools := make([]any, 0, len(list))
@@ -408,7 +488,11 @@ func anthropicToolsToOpenAI(v any) []any {
 		if s, ok := t["input_schema"]; ok {
 			fn["parameters"] = s
 		}
-		outTools = append(outTools, map[string]any{"type": "function", "function": fn})
+		entry := map[string]any{"type": "function", "function": fn}
+		if dl, ok := t[deferLoadingKey]; ok {
+			entry[deferLoadingKey] = dl
+		}
+		outTools = append(outTools, entry)
 	}
 	return outTools
 }

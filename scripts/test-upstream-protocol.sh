@@ -163,7 +163,58 @@ chkcontains "带上了上游的拒绝原因，而不是整段 JSON" "mock 拒绝
 chkcontains "错误类型是 upstream_error" "upstream_error" "$R3_BODY"
 
 echo
-echo "=== 7. 清理探测数据 ==="
+echo "=== 7. Claude Code 工具搜索（advanced-tool-use-2025-11-20）==="
+# 实测报文（Claude Code 2.1.299）：tools 里一个 ToolSearch、一个带
+# defer_loading 的 DeferredToolPlaceholder、以及模型调完 ToolSearch 后
+# 客户端塞回来的 MCP 工具（**仍带 defer_loading**）；tool_result 里是
+# {"type":"tool_reference"} 块。中转站不实现检索，只负责不破坏协议。
+# 判据全部取自 mock 记录的 last_request 原文：defer_loading 丢失、
+# tool_reference 被降级都不会让请求失败，只有比对原文才看得出来。
+TS_REQ='{
+  "model": "'"$MODEL"'",
+  "max_tokens": 64,
+  "tools": [
+    {"name": "ToolSearch", "description": "Fetches full schema definitions for deferred tools",
+     "input_schema": {"type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "number"}},
+                      "required": ["query", "max_results"], "additionalProperties": false}},
+    {"name": "DeferredToolPlaceholder",
+     "description": "Reserved placeholder that keeps deferred tool loading active; never call this tool.",
+     "input_schema": {"type": "object", "properties": {}}, "defer_loading": true},
+    {"name": "mcp__demo-mcp__demo_tool_0", "description": "demo tool",
+     "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}}, "defer_loading": true}
+  ],
+  "messages": [
+    {"role": "user", "content": "帮我看下 demo 工具"},
+    {"role": "assistant", "content": [
+      {"type": "tool_use", "id": "toolu_ts", "name": "ToolSearch",
+       "input": {"query": "select:mcp__demo-mcp__demo_tool_0", "max_results": 5}}
+    ]},
+    {"role": "user", "content": [
+      {"type": "tool_result", "tool_use_id": "toolu_ts", "content": [
+        {"type": "tool_reference", "tool_name": "mcp__demo-mcp__demo_tool_0"}
+      ]}
+    ]}
+  ]
+}'
+curl -s "$MOCK/reset" >/dev/null
+RTS=$(curl -s -m 30 -w "\n%{http_code}" "$BASE/v1/messages" \
+  -H "x-api-key: $SK" -H 'Content-Type: application/json' \
+  -H 'anthropic-beta: advanced-tool-use-2025-11-20' \
+  -d "$TS_REQ")
+TS_CODE=$(echo "$RTS" | tail -1)
+echo "  HTTP $TS_CODE  响应: $(echo "$RTS" | sed '$d' | head -c 160)"
+chk "工具搜索请求成功（不认识 beta 也没 400）" "200" "$TS_CODE"
+chk "上游没拒绝（beta 头原样透传，不校验）" "0" "$(curl -s "$MOCK/stats" | jqg "d['rejected']")"
+chkcontains "beta 头原样到达上游" "advanced-tool-use-2025-11-20" "$(curl -s "$MOCK/stats" | jqg "d['last_beta']")"
+chk "tools 条数不变（不去重/不特殊处理）" "3" "$(curl -s "$MOCK/stats" | jqg "len(d['last_request']['tools'])")"
+chk "两个 defer_loading 都保留" "2" "$(curl -s "$MOCK/stats" | jqg "sum(1 for t in d['last_request']['tools'] if t.get('defer_loading') is True)")"
+chk "tool_reference 原样回到上游（未被降级成文本）" "tool_reference" \
+  "$(curl -s "$MOCK/stats" | jqg "d['last_request']['messages'][-1]['content'][0]['content'][0]['type']")"
+chk "tool_reference 的工具名保真" "mcp__demo-mcp__demo_tool_0" \
+  "$(curl -s "$MOCK/stats" | jqg "d['last_request']['messages'][-1]['content'][0]['content'][0]['tool_name']")"
+
+echo
+echo "=== 8. 清理探测数据 ==="
 purge
 chk "探测渠道已删除" "0" "$(P "SELECT count(*) FROM channels WHERE name='$CNAME'")"
 chk "探测分组已删除" "0" "$(P "SELECT count(*) FROM channel_groups WHERE name='$GNAME'")"

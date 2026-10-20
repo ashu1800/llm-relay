@@ -227,6 +227,13 @@ func (f *Forwarder) Do(
 	// anthropic-beta、以及客户端在用的 API 版本）。不透传的话，客户端明明在用
 	// 提示缓存，转出去的请求里却没有这个头 —— 缓存会静默失效，账单悄悄变贵，
 	// 而客户端看到的响应一切正常。所以这两个头按协议透传。
+	//
+	// beta 名称一律**不做白名单校验**，整串原样转发：能用的 beta 集合随上游
+	// 版本滚动（工具搜索是 advanced-tool-use-2025-11-20、思考强度是
+	// effort-2025-11-24……），中继维护一份「已知 beta」必然会滞后，而拦下
+	// 未知 beta 的代价是客户端拿到 400 且不会自动降级（Claude Code 实测会
+	// 原样重试一次，然后报错给用户）。非 Anthropic 渠道干脆不发这个头 ——
+	// OpenAI 兼容上游不认识它，静默丢弃就是需求要的行为。
 	if cand.Channel.Protocol == model.ProtocolAnthropic {
 		for _, h := range []string{"anthropic-beta", "anthropic-version"} {
 			if v := inboundHeaders.Get(h); v != "" {
