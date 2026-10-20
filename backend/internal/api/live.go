@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"gorm.io/gorm"
 
 	"llm-relay/internal/model"
 )
@@ -267,6 +268,20 @@ func (s *Server) budgetLoop(ctx context.Context) {
 	}
 }
 
+// liveLogQuery 是实时推送取增量的唯一查询实现。
+//
+// 抽成函数是为了让集成测试（live_logs_query_test.go）跑**同一份**查询：
+// 测试里另抄一份的话，改了生产代码而忘了改测试，用例就变成了自证清白。
+//
+// Omit 用 Go 字段名，不手写列名：见调用处关于 2026-10-20 事故的说明。
+func liveLogQuery(db *gorm.DB, lastID uint) ([]model.RequestLog, error) {
+	var rows []model.RequestLog
+	err := db.
+		Omit("client_ua", "pricing_snapshot", "retry_trail").
+		Where("id > ?", lastID).Order("id").Limit(50).Find(&rows).Error
+	return rows, err
+}
+
 // liveLogsLoop 每秒查一次增量日志并推给前端，有新行时顺带叫醒统计循环。
 func (s *Server) liveLogsLoop(ctx context.Context, kick chan<- struct{}) {
 	ticker := time.NewTicker(liveLogsInterval)
@@ -281,6 +296,9 @@ func (s *Server) liveLogsLoop(ctx context.Context, kick chan<- struct{}) {
 		s.logger().Warn("读取日志最大 id 失败，实时推送从 0 开始", "err", err)
 	}
 	last := maxID
+	// lastLogErr 是上一次查询失败的错误文本，用于「只在错误变化时告警」。
+	// 查询每秒一拍，持续失败时逐条记会在一分钟内刷出 60 行。
+	var lastLogErr string
 
 	for {
 		select {
@@ -299,18 +317,26 @@ func (s *Server) liveLogsLoop(ctx context.Context, kick chan<- struct{}) {
 		// 全量推出去是纯粹的带宽浪费（2026-10-19 审查）。
 		// 详情抽屉需要的字段（retry_trail / pricing_snapshot / payload 等）
 		// 本来也不在里面。
-		var rows []model.RequestLog
-		if err := db.
-			Select("id, trace_id, api_key_id, api_key_name, channel_id, channel_name, group_id, " +
-				"inbound_protocol, upstream_protocol, model_requested, model_upstream, fallback_mapped, " +
-				"thinking_level, stream, status_code, error, retry_count, " +
-				"prompt_tokens, completion_tokens, total_tokens, cached_tokens, cache_creation_tokens, " +
-				"reasoning_tokens, usage_estimated, estimated_cost, cost_currency, " +
-				"first_byte_ms, total_ms, body_reads, last_byte_ms, upstream_ms, " +
-				"client_id, client_name, client_ip, created_at").
-			Where("id > ?", last).Order("id").Limit(50).Find(&rows).Error; err != nil {
+		//
+		// 用 Omit + **Go 字段名**而不是手写列名清单：列名清单曾经照着自己的
+		// 判断写成 json tag 名（inbound_protocol / upstream_protocol / stream），
+		// 而真实列名是 inbound_proto / upstream_proto / is_stream —— SQL 每次
+		// 都报 column does not exist，错误又被下面的 continue 吞掉，表现为
+		// 「日志列表不实时更新了」且服务端一行日志都没有（2026-10-20 线上事故）。
+		// Omit 让 GORM 自己做字段→列的映射，加字段时也不必再维护清单。
+		// 查询本身抽在 liveLogQuery（同包另一文件），让集成测试直接跑同一份。
+		rows, err := liveLogQuery(db, last)
+		if err != nil {
+			// 不能静默 continue：这条查询是实时推送的唯一数据来源，
+			// 它一直失败就等于功能一直不工作，而现场只有「前端不更新」。
+			// 每行一条 WARN 会刷屏（1s 一拍），只在错误内容变化时记。
+			if msg := err.Error(); msg != lastLogErr {
+				lastLogErr = msg
+				s.logger().Warn("实时日志查询失败，列表将不会更新", "err", err)
+			}
 			continue
 		}
+		lastLogErr = ""
 		if len(rows) == 0 {
 			continue
 		}
