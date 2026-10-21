@@ -921,6 +921,48 @@ try {
 if (!priceBoundChecked) console.log('  SKIP  未找到后端 pricing/peak.go，跳过')
 
 console.log('')
+console.log('=== 思考档位词表前后端一致 ===')
+
+// 档位词表（off/auto/minimal/low/medium/high/xhigh/max）在两处各存一份：
+// 后端 convert.AllEfforts（/v1/models 的 supported_efforts 与转发映射的尺子）
+// 与前端 components/efforts.ts 的 EFFORT_LEVELS（白名单编辑器的下拉）。
+//
+// 为什么不能共享：档位常量在 relay/convert 包里，tygo 只生成 internal/model
+// 的实体类型，取不到它们。前端多一档或少一档的表现是「下拉里选不了某个
+// 上游明明支持的档位」，或者反过来「选了它、后端归一后丢掉」—— 两种都
+// 只在界面上看不出来，所以用静态比对钉住。
+{
+  const effortsGo = join(SRC, '..', '..', 'backend', 'internal', 'relay', 'convert', 'thinking_map.go')
+  try {
+    const goSrc = readFileSync(effortsGo, 'utf8')
+    const declared = goSrc.match(/var\s+AllEfforts\s*=\s*\[\]string\{([^}]+)\}/)
+    const tsSrc = readFileSync(join(SRC, 'components/efforts.ts'), 'utf8')
+    const tsList = tsSrc.match(/EFFORT_LEVELS\s*=\s*\[([^\]]+)\]/)
+    if (declared && tsList) {
+      // Go 侧写的是常量名（effortOff …），TS 侧写的是字面值 —— 先把常量名
+      // 按同一文件里的 `effortXxx = "值"` 定义翻译成字面值再比
+      const consts = new Map(
+        [...goSrc.matchAll(/^\s*(effort\w+)\s*=\s*"([^"]+)"/gm)].map((m) => [m[1], m[2]]),
+      )
+      const goList = declared[1]
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((name) => consts.get(name))
+      const tsValues = [...tsList[1].matchAll(/'([^']+)'/g)].map((m) => m[1])
+      check(
+        `档位词表一致（${goList.join('/')}）`,
+        goList.length > 0 && goList.join(',') === tsValues.join(','),
+        `后端 convert.AllEfforts=${goList.join('/')}，前端 EFFORT_LEVELS=${tsValues.join('/')}`,
+      )
+    }
+  } catch {
+    // 后端源码不在本地：跳过（CI 里前后端一起 checkout，会真正跑到）
+    console.log('  SKIP  未找到后端 convert/thinking_map.go，跳过')
+  }
+}
+
+console.log('')
 console.log('=== 请求日志列宽：测量锚点与模板必须对得上 ===')
 
 // 列宽现在由脚本按内容量出来（RequestLogPanel 的 remeasureColumns），量的对象是

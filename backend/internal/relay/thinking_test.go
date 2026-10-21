@@ -67,3 +67,75 @@ func TestExtractThinkingLevel(t *testing.T) {
 		})
 	}
 }
+
+// SupportedEfforts：行上显式声明优先，空声明回落到按协议推导。
+//
+// 两层缺一不可 —— 没有显式声明时，/v1/models 不能对所有模型一律回「八档全在」
+// （OpenAI 兼容上游的 off/auto/minimal 发过去就是 400），也不能一律回空
+// （客户端会以为这些模型不能用思考）。
+func TestSupportedEfforts(t *testing.T) {
+	cases := []struct {
+		name     string
+		declared []string
+		protocol string
+		want     []string
+	}{
+		{"没声明 + anthropic 渠道 → 全部八档", nil, "anthropic-messages",
+			[]string{"off", "auto", "minimal", "low", "medium", "high", "xhigh", "max"}},
+		{"没声明 + openai 渠道 → 五档", nil, "openai-chat",
+			[]string{"low", "medium", "high", "xhigh", "max"}},
+		{"没声明 + embeddings → 空", nil, "openai-embeddings", nil},
+		// 声明原样生效，即使它比协议「能表达的」更宽：用户选的是上游的真实能力，
+		// 中转后的协议不等于它直连时的表现（例如 openai-chat 渠道背后的网关
+		// 其实认 off）。声明是承诺，不是提示。
+		{"显式声明优先于协议推导", []string{"off", "max"}, "openai-chat", []string{"off", "max"}},
+		{"声明里的重复与大小写会被归一", []string{"Max", "low", "max"}, "anthropic-messages", []string{"low", "max"}},
+		// 全是无效条目 = 等于没配：不能因为「填了几个空格」就声明成空能力
+		{"声明全无效 → 回落协议推导", []string{"", "  "}, "anthropic-messages",
+			[]string{"off", "auto", "minimal", "low", "medium", "high", "xhigh", "max"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := SupportedEfforts(c.declared, c.protocol)
+			if len(got) != len(c.want) {
+				t.Fatalf("得到 %v，期望 %v", got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("得到 %v，期望 %v", got, c.want)
+				}
+			}
+		})
+	}
+}
+
+// MergeModelEfforts：同名模型挂在多条渠道上时取并集。
+//
+// 取并集而不是交集：请求最终只落在一条渠道上，只要有一条能表达这个档位，
+// 这个档位就有意义。顺序必须是站内强度序（客户端按下标读会按它展示）。
+func TestMergeModelEfforts(t *testing.T) {
+	cases := []struct {
+		name       string
+		perChannel [][]string
+		want       []string
+	}{
+		{"没有渠道 → nil", nil, nil},
+		{"每条渠道都空 → nil", [][]string{nil, {}}, nil},
+		{"单条渠道原样", [][]string{{"low", "high"}}, []string{"low", "high"}},
+		{"两条渠道取并集并按强度序", [][]string{{"high", "max"}, {"low", "high"}}, []string{"low", "high", "max"}},
+		{"一条空不影响另一条", [][]string{nil, {"medium"}}, []string{"medium"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := MergeModelEfforts(c.perChannel)
+			if len(got) != len(c.want) {
+				t.Fatalf("得到 %v，期望 %v", got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("得到 %v，期望 %v", got, c.want)
+				}
+			}
+		})
+	}
+}

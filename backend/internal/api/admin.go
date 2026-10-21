@@ -15,6 +15,7 @@ import (
 
 	"llm-relay/internal/model"
 	"llm-relay/internal/relay"
+	"llm-relay/internal/relay/convert"
 	"llm-relay/internal/secure"
 )
 
@@ -132,6 +133,11 @@ type whitelistItem struct {
 	// Multiplier 用指针区分「没传」与「显式填 0」；0 与不传都归一成 1
 	Multiplier *float64       `json:"multiplier"`
 	PeakRules  model.JSONList `json:"peak_rules"`
+	// SupportedEfforts 是这一行对外声明的思考档位（/v1/models 用）。
+	// 用指针区分「没传」与「显式清空」：整表提交时没传表示「这次不动它」，
+	// 空数组表示「清掉、回落到按协议推导」—— 两者都归一成 nil 落库，
+	// 但单条绑定接口（bindPayload）靠指针避免把已配的档位静默抹掉。
+	SupportedEfforts *model.StringList `json:"supported_efforts"`
 }
 
 // channelPayload 是渠道的写入载荷。
@@ -313,6 +319,11 @@ func normalizeWhitelist(items []whitelistItem) ([]model.ChannelModel, error) {
 		}
 		row := model.ChannelModel{
 			PublicName: name, UpstreamName: upstream, Enabled: enabled, ProxyID: it.ProxyID,
+		}
+		// 档位：整表提交时「没传」与「空数组」都是「回落到按协议推导」，
+		// 归一成 nil 落库（读侧把 nil 与空数组一视同仁，见 relay.SupportedEfforts）
+		if it.SupportedEfforts != nil {
+			row.SupportedEfforts = convert.NormalizeEfforts(*it.SupportedEfforts)
 		}
 		// 价格与模型一起提交（见 applyPriceFields）：校验失败时整表都不写，
 		// 免得出现「模型加进去了、价格没保存」这种半截状态
@@ -1098,6 +1109,8 @@ type bindPayload struct {
 	CacheWritePer1M string         `json:"cache_write_per_1m"`
 	Multiplier      *float64       `json:"multiplier"`
 	PeakRules       model.JSONList `json:"peak_rules"`
+	// 与 whitelistItem 同名字段同语义：nil = 这次不动它
+	SupportedEfforts *model.StringList `json:"supported_efforts"`
 }
 
 func (p bindPayload) whitelistItem() whitelistItem {
@@ -1107,6 +1120,7 @@ func (p bindPayload) whitelistItem() whitelistItem {
 		InputPer1M: p.InputPer1M, OutputPer1M: p.OutputPer1M,
 		CacheReadPer1M: p.CacheReadPer1M, CacheWritePer1M: p.CacheWritePer1M,
 		Multiplier: p.Multiplier, PeakRules: p.PeakRules,
+		SupportedEfforts: p.SupportedEfforts,
 	}
 }
 
@@ -1212,6 +1226,7 @@ func (s *Server) bindChannelModel(c *gin.Context) {
 			InputPer1M: item.InputPer1M, OutputPer1M: item.OutputPer1M,
 			CacheReadPer1M: item.CacheReadPer1M, CacheWritePer1M: item.CacheWritePer1M,
 			Multiplier: item.Multiplier, PeakRules: item.PeakRules,
+			SupportedEfforts: item.SupportedEfforts,
 		}
 		if err := db.Create(&binding).Error; err != nil {
 			writeInternalError(c, err)
@@ -1221,20 +1236,29 @@ func (s *Server) bindChannelModel(c *gin.Context) {
 		writeInternalError(c, err)
 		return
 	default:
-		if err := db.Model(&binding).Updates(map[string]any{
+		updates := map[string]any{
 			"upstream_name": item.UpstreamName,
 			"enabled":       item.Enabled,
 			// proxy_id 也要写：0 表示跟随渠道，是合法值而非「没传」，
 			// 不补这行的话改绑定代理会被静默丢弃（价格不同：空载荷
 			// 等于 0，写它会清掉用户配好的价，所以那边刻意不动）
 			"proxy_id": item.ProxyID,
-		}).Error; err != nil {
+		}
+		// 档位只在载荷真的带了才写：nil 表示「这次不动它」，
+		// 与价格同一个道理 —— 空载荷不该把用户配好的档位抹掉
+		if p.SupportedEfforts != nil {
+			updates["supported_efforts"] = item.SupportedEfforts
+		}
+		if err := db.Model(&binding).Updates(updates).Error; err != nil {
 			writeInternalError(c, err)
 			return
 		}
 		binding.UpstreamName = item.UpstreamName
 		binding.Enabled = item.Enabled
 		binding.ProxyID = item.ProxyID
+		if p.SupportedEfforts != nil {
+			binding.SupportedEfforts = item.SupportedEfforts
+		}
 		// 这里刻意不动价格：载荷里没传价格时是空字符串，按 applyPriceFields
 		// 的语义等于 0，会把用户配好的价格悄悄清掉。改价走整表提交那条路
 	}

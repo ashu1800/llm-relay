@@ -380,3 +380,79 @@ func TestAnthropicOutputConfigStrippedForGeminiUpstream(t *testing.T) {
 		t.Fatalf("max 应落成 Gemini thinkingBudget=%d，实际 %v", ThinkingBudgetMax, got["generationConfig"])
 	}
 }
+
+// ---------- 档位声明：某协议能表达哪些、用户声明怎么归一 ----------
+
+// 推导必须与出站映射同源：说支持的档位，发过去就得被上游认。
+// 这份表是 /v1/models 的 supported_efforts 的默认值，写错的表现是
+// 「客户端按列表选了某档，请求到上游 400」。
+func TestEffortsForProtocol(t *testing.T) {
+	all := []string{"off", "auto", "minimal", "low", "medium", "high", "xhigh", "max"}
+	// OpenAI 兼容上游：off / auto 实测 400（见 stripUnsupportedEffort），
+	// minimal 只能向上收敛到 low（见 design 文档「已知不等价」）——
+	// 四者都不该出现在声明里，因为声明是「发过去不会报错」的承诺
+	openai := []string{"low", "medium", "high", "xhigh", "max"}
+	cases := []struct {
+		protocol string
+		want     []string
+	}{
+		{"anthropic-messages", all},
+		{"gemini-generateContent", all},
+		{"openai-chat", openai},
+		{"openai-responses", openai},
+		{"custom", openai},
+		{"openai-embeddings", nil},
+		{"something-else", nil},
+		{"", nil},
+	}
+	for _, c := range cases {
+		got := EffortsForProtocol(c.protocol)
+		if len(got) != len(c.want) {
+			t.Errorf("%q: 档位 %v，期望 %v", c.protocol, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%q: 第 %d 档是 %q，期望 %q（顺序即强度序）", c.protocol, i, got[i], c.want[i])
+			}
+		}
+	}
+	// 返回的必须是副本：调用方（合并同名模型）会 append 它，
+	// 共享底层数组等于把一条渠道的声明写进词表本身
+	first := EffortsForProtocol("anthropic-messages")
+	first[0] = "被改掉了"
+	if AllEfforts[0] == "被改掉了" {
+		t.Fatal("EffortsForProtocol 返回的切片与 AllEfforts 共享底层数组")
+	}
+}
+
+func TestNormalizeEfforts(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"空输入回 nil", nil, nil},
+		{"全空串回 nil", []string{"", "  "}, nil},
+		{"按强度序重排，不按输入顺序", []string{"max", "low", "medium"}, []string{"low", "medium", "max"}},
+		{"大小写与空白归一", []string{" HIGH ", "Low"}, []string{"low", "high"}},
+		{"去重", []string{"low", "low", "LOW"}, []string{"low"}},
+		{"none 归成 off", []string{"none"}, []string{"off"}},
+		// 认不得的档位保留并殿后：它是用户的声明，可能对应上游将来新增的档位
+		{"未知档位保留在末尾", []string{"ultra", "low"}, []string{"low", "ultra"}},
+		{"未知档位也去重", []string{"ultra", "ultra"}, []string{"ultra"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := NormalizeEfforts(c.in)
+			if len(got) != len(c.want) {
+				t.Fatalf("输入 %v，得到 %v，期望 %v", c.in, got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("输入 %v，得到 %v，期望 %v", c.in, got, c.want)
+				}
+			}
+		})
+	}
+}

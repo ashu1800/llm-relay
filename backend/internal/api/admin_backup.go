@@ -16,6 +16,7 @@ import (
 
 	"llm-relay/internal/model"
 	"llm-relay/internal/relay"
+	"llm-relay/internal/relay/convert"
 )
 
 // maxImportBodyBytes 是配置导入的请求体上限。
@@ -411,6 +412,10 @@ func (s *Server) importConfig(c *gin.Context) {
 					"模型 "+bd.PublicName+" 单独指定的出站代理在本机不存在，已改为跟随渠道")
 			}
 		}
+		// 档位声明同样过一遍归一：备份文件可手工编辑，写进大小写不一或
+		// 重复的条目会让 /v1/models 里出现两个 low。认不得的档位保留
+		//（见 convert.NormalizeEfforts 的说明），空的落成 nil 表示按协议推导
+		bd.SupportedEfforts = convert.NormalizeEfforts(bd.SupportedEfforts)
 		if err := db.Create(&bd).Error; err != nil {
 			report.Warnings = append(report.Warnings, "模型白名单导入失败: "+err.Error())
 			continue

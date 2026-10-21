@@ -310,3 +310,82 @@ func stripUnsupportedEffort(body []byte) []byte {
 	}
 	return out
 }
+
+// ---- 对外声明：某个上游协议能接受哪些档位 ----
+
+// AllEfforts 是站内词表的全部档位，按强度从低到高排列。
+//
+// 顺序就是界面上的展示顺序（白名单编辑器的多选、/v1/models 的返回），
+// 别按字母排 —— 用户看这一列时想的是「从关到最强」。
+var AllEfforts = []string{effortOff, effortAuto, effortMinimal, effortLow, effortMedium, effortHigh, effortXHigh, effortMax}
+
+// EffortsForProtocol 返回某个上游协议**实际能表达**的档位。
+//
+// 依据是 thinking_map 里已有的出站映射（不是另拍的一套）：
+//
+//   - Anthropic：off → thinking.disabled、auto → thinking.adaptive，
+//     其余原样写 output_config.effort。八档全在。
+//   - Gemini：off → budget 0、auto → budget -1，其余按 budgetOf 的刻度表，
+//     词表里的每一档都有数值，八档全在。
+//   - OpenAI Chat / Responses / custom：实测 auto 与 off 会 400（见
+//     stripUnsupportedEffort 的注释），minimal 也 400（设计文档「已知不等价」
+//     记着 minimal 只能向上收敛成 low）。所以实际能表达的是
+//     low / medium / high / xhigh / max 五档 —— 设计文档的实测表里
+//     xhigh / max 在 openai-chat 上游是 200 接受。
+//   - embeddings 没有思考概念：空。
+//
+// 这份结果只用于**展示与推导**（/v1/models 与后台的默认值），不参与转发：
+// 转发侧永远按 thinking_map 的实际映射走，两边共用同一套词表与刻度。
+func EffortsForProtocol(protocol string) []string {
+	switch protocol {
+	case "anthropic-messages", "gemini-generateContent":
+		return append([]string(nil), AllEfforts...)
+	case "openai-chat", "openai-responses", "custom":
+		return []string{effortLow, effortMedium, effortHigh, effortXHigh, effortMax}
+	default:
+		// embeddings 等没有思考概念的协议
+		return nil
+	}
+}
+
+// NormalizeEfforts 把一组档位归一成词表里的合法值：去空白、小写、
+// 认不得的丢掉、重复的只留一个，并按 AllEfforts 的顺序排好。
+//
+// 返回 nil 表示「一个都不剩」——调用方据此回落。**不报错**：这个字段是
+// 展示用的能力声明，写错一个词的代价不该是整条白名单保存失败；
+// 而悄悄丢掉一个合法档位才是真问题，所以只丢认不得的。
+func NormalizeEfforts(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	want := make(map[string]bool, len(in))
+	for _, raw := range in {
+		if v := NormalizeEffort(raw); v != "" {
+			want[v] = true
+		}
+	}
+	out := make([]string, 0, len(want))
+	for _, e := range AllEfforts {
+		if want[e] {
+			out = append(out, e)
+		}
+	}
+	// 认不得的档位不丢：它是用户的声明，可能对应上游将来新增的档位。
+	// 按原样补在已知档位之后，保持「已知的按强度排、未知的殿后」。
+	seen := make(map[string]bool, len(out))
+	for _, e := range out {
+		seen[e] = true
+	}
+	for _, raw := range in {
+		v := NormalizeEffort(raw)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}

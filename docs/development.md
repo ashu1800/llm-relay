@@ -753,9 +753,41 @@ MCP 工具名以纯文本列在 system prompt 里。模型先调客户端侧的 
 - **不去重**（需求方明确要求）：同名工具两条、其中一条带 `defer_loading` 时两条都保留，
   `convert` 里没有提供任何按名字合并的逻辑。
 
-回归：`convert/tool_search_test.go`（7 条用例）、`relay/forward_headers_test.go`
+回归：`convert/tool_search_test.go`（9 条用例）、`relay/forward_headers_test.go`
 （beta 整串透传）、`scripts/test-upstream-protocol.sh` 第 7 节（真机链路，
 判据取自 mock 上游记录的 `last_request` 原文）。
+
+### `/v1/models` 的思考档位声明（2026-10-21）
+
+每个模型条目带 `supported_efforts`（`off/auto/minimal/low/medium/high/xhigh/max`），
+回答的是「客户端对**这个模型**能安全发哪些思考档位」。两点决定性设计：
+
+- **数据挂在白名单行上**（`channel_models.supported_efforts`，jsonb），不是另建
+  能力表：同一个模型名在不同渠道背后可能是不同上游（官网直连 vs 中转站），
+  「支持哪些档位」本来就该跟着渠道走 —— 与价格挂在这一行是同一条理由。
+- **空 = 没配，回落到按渠道协议推导**（`relay.SupportedEfforts` →
+  `convert.EffortsForProtocol`）。推导的依据是 `thinking_map.go` 里已有的**出站
+  映射**，不是另拍的一套：Anthropic / Gemini 八档全在（off→disabled、auto→adaptive，
+  其余按 effort 或 budget）；OpenAI Chat / Responses / custom 只列
+  `low/medium/high/xhigh/max` —— 实测 `off`/`auto` 发过去 400（见
+  `stripUnsupportedEffort`），`minimal` 只能向上收敛成 `low`，把它们写进声明
+  等于承诺一条会报错的路径。embeddings 没有思考概念，回 `[]`。
+
+同名模型挂在多条渠道上时取**并集**（`relay.MergeModelEfforts`）：请求最终只落在
+一条渠道上，只要有一条能表达这个档位，它就有意义。顺序由
+`convert.NormalizeEfforts` 收成强度序，不按渠道遍历顺序。
+
+写路径：后台白名单编辑器的「档位」一列（多选，`components/efforts.ts`），
+经 `whitelistItem.supported_efforts` 提交；`normalizeWhitelist` 归一后落库，
+空数组与没传都归一成 NULL。单条绑定接口（`bindChannelModel`）用指针区分
+「这次不动它」与「显式清空」，避免空载荷把已配的档位抹掉。备份导入同样过归一。
+
+两边的一致性由 `scripts/check-contracts.mjs` 的「档位词表前后端一致」静态比对
+兜住（前端 `EFFORT_LEVELS` 与后端 `convert.AllEfforts` 必须逐项相同：前端词表
+在 `relay/convert` 包里，tygo 只生成 `internal/model`，没法自然共享）。
+回归：`convert/thinking_map_test.go`、`relay/thinking_test.go`、
+`api/model_efforts_test.go`（后者的 `/v1/models` 用例连库，钉住「空能力回 []
+而不是 null」与停用行/渠道/分组的过滤）。
 
 ### 密钥 → 分组的强一致引用
 

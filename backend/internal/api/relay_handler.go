@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"llm-relay/internal/model"
 	"llm-relay/internal/relay"
 	"llm-relay/internal/relay/convert"
 )
@@ -24,9 +25,14 @@ import (
 // 模型白名单同理：配了 allowed_models 就只列其中的 —— 原来这里只落实了
 // 分组那一半，模型这一半漏着，客户端（Claude Code、Cursor 都靠这个接口
 // 探测）看到的仍是全量，选中才被 403。
+//
+// 每个模型额外带 supported_efforts：这个模型能接受的思考档位。同名模型可能挂在
+// 多条渠道上，取并集（见 relay.MergeModelEfforts）—— 请求最终只落在一条渠道上。
 func (s *Server) listModels(c *gin.Context) {
+	// 查行而不是只查名字：supported_efforts 与渠道协议都要用来推导档位。
+	// 同一个模型名可能有多行，所以不能 DISTINCT，去重放到内存里做。
 	q := s.deps.Store.DB().Table("channel_models").
-		Distinct("channel_models.public_name").
+		Select("channel_models.public_name, channel_models.supported_efforts, channels.protocol").
 		Joins("JOIN channels ON channels.id = channel_models.channel_id AND channels.enabled = true").
 		Joins("JOIN channel_groups ON channel_groups.id = channels.group_id AND channel_groups.enabled = true").
 		Where("channel_models.enabled = true")
@@ -40,33 +46,51 @@ func (s *Server) listModels(c *gin.Context) {
 		}
 	}
 
-	var names []string
-	if err := q.Order("channel_models.public_name").Pluck("channel_models.public_name", &names).Error; err != nil {
+	type modelRow struct {
+		PublicName       string           `gorm:"column:public_name"`
+		SupportedEfforts model.StringList `gorm:"column:supported_efforts"`
+		Protocol         string           `gorm:"column:protocol"`
+	}
+	var rows []modelRow
+	if err := q.Order("channel_models.public_name").Scan(&rows).Error; err != nil {
 		// 这个接口是 /v1/models，客户端是任意 OpenAI 兼容工具。
 		// 同样不能把原始 DB 错误回显出去（表名、列名、被拒数据都在里面）。
 		writeInternalError(c, err)
 		return
 	}
-	// 模型白名单在内存里过滤而不是拼进 SQL：判据必须与拦截请求的
-	// modelAllowed 完全同一份（relay_handler 里就是它在 403），
-	// 两处各写一个查询条件迟早漂移成「列表里有、一调就被拒」。
-	if key := apiKeyFromContext(c); key != nil && len(key.AllowedModels) > 0 {
-		filtered := make([]string, 0, len(names))
-		for _, n := range names {
-			if modelAllowed(key.AllowedModels, n) {
-				filtered = append(filtered, n)
-			}
+
+	// 按对外名归并：顺序沿用查询的 public_name 升序（第一次出现的顺序），
+	// 档位取并集。名称白名单的过滤与原来一样在内存里做，判据必须与拦截
+	// 请求的 modelAllowed 完全同一份（两处各写一个查询条件迟早漂移成
+	// 「列表里有、一调就被拒」）。
+	key := apiKeyFromContext(c)
+	order := make([]string, 0, len(rows))
+	perName := make(map[string][][]string, len(rows))
+	for _, r := range rows {
+		if key != nil && len(key.AllowedModels) > 0 && !modelAllowed(key.AllowedModels, r.PublicName) {
+			continue
 		}
-		names = filtered
+		if _, seen := perName[r.PublicName]; !seen {
+			order = append(order, r.PublicName)
+		}
+		perName[r.PublicName] = append(perName[r.PublicName],
+			relay.SupportedEfforts(r.SupportedEfforts, r.Protocol))
 	}
+
 	now := time.Now().Unix()
-	data := make([]gin.H, 0, len(names))
-	for _, name := range names {
+	data := make([]gin.H, 0, len(order))
+	for _, name := range order {
+		efforts := relay.MergeModelEfforts(perName[name])
+		if efforts == nil {
+			// JSON 里给空数组而不是 null：客户端（SDK）遍历它时不必先判空指针
+			efforts = []string{}
+		}
 		data = append(data, gin.H{
-			"id":       name,
-			"object":   "model",
-			"created":  now,
-			"owned_by": "llm-relay",
+			"id":                name,
+			"object":            "model",
+			"created":           now,
+			"owned_by":          "llm-relay",
+			"supported_efforts": efforts,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"object": "list", "data": data})

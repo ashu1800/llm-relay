@@ -373,7 +373,9 @@ function blankForm() {
     enabled: true,
     default_model_enabled: false,
     default_model: '',
-    models: [{ public_name: '', upstream_name: '', enabled: true, ...emptyPrice() }]
+    models: [
+      { public_name: '', upstream_name: '', enabled: true, supported_efforts: [], ...emptyPrice() }
+    ]
   })
 }
 
@@ -392,7 +394,7 @@ const dirty = useDirtyClose({
   }
 })
 
-// 白名单抽屉的防误关。抽屉里是一张可编辑的表（六个格子 × N 行），
+// 白名单抽屉的防误关。抽屉里是一张可编辑的表（七个格子 × N 行），
 // 改动量同样不小，待遇与弹窗一致
 const bindDirty = useDirtyClose({
   open: bindOpen,
@@ -405,13 +407,16 @@ const bindDirty = useDirtyClose({
 
 // bindingRows 把接口返回的白名单行转成表单行。
 // 价格必须一起带上：编辑一次渠道再保存，提交的就是这张表，
-// 漏掉价格等于把用户配好的价全部清零
+// 漏掉价格等于把用户配好的价全部清零。档位同理（supported_efforts）——
+// 漏了它，编辑一次渠道就会把逐模型配好的思考档位全部抹回「按协议推导」，
+// 而界面上只是那一格显示回「自动」，看不出是被清掉的。
 function bindingRows(items: ChannelBinding[]): WhitelistRow[] {
   return items.map((b) => ({
     public_name: b.public_name,
     upstream_name: b.upstream_name === b.public_name ? '' : b.upstream_name,
     enabled: b.enabled,
     proxy_id: b.proxy_id || 0,
+    supported_efforts: [...(b.supported_efforts || [])],
     ...pickPrice(b)
   }))
 }
@@ -510,6 +515,7 @@ function whitelistPayload(): WhitelistRow[] | null {
       upstream_name: r.upstream_name.trim(),
       enabled: r.enabled,
       proxy_id: r.proxy_id || 0,
+      supported_efforts: [...(r.supported_efforts || [])],
       ...pickPrice(r)
     }))
     .filter((r) => r.public_name || r.upstream_name)
@@ -960,6 +966,7 @@ async function saveBindings() {
       upstream_name: r.upstream_name.trim() || r.public_name.trim(),
       enabled: r.enabled,
       proxy_id: r.proxy_id || 0,
+      supported_efforts: [...(r.supported_efforts || [])],
       ...pickPrice(r)
     }))
     .filter((r) => r.public_name)
@@ -1623,12 +1630,15 @@ onBeforeUnmount(() => {
 
     <!-- centered + theme.css 里的 .ant-modal-body 上限：弹窗始终完整居中，
          上下留白固定，内容长了滚内容区而不是把弹窗顶出屏幕。
-         760 与白名单抽屉同宽：白名单有六个格子，再窄模型名就被截了 -->
+         860 与白名单抽屉同宽：白名单现在有七格（对外名 / 上游名 / 代理 /
+         档位 / 定价 / 启用 / 删除），760 时两个模型名输入框只剩 130px
+         （2026-10-21 实测），claude-sonnet-5 这种名字被截成 claude-sonne…
+         —— 而模型名写错正是最常见的 502 原因，恰恰最不该看不见 -->
     <a-modal
       v-model:open="modalOpen"
       :title="title"
       :confirm-loading="saving"
-      :width="modalWidth(760)"
+      :width="modalWidth(860)"
       centered
       ok-text="保存"
       :mask-closable="false"
@@ -1854,13 +1864,16 @@ onBeforeUnmount(() => {
       </a-form>
     </a-modal>
 
-    <!-- 抽屉宽度 760：白名单一行有六个格子，620 时两个模型名输入框只剩
-         90 多像素，模型名和占位符都被截成「deepsee」「deeps...」。
+    <!-- 抽屉宽度 860：白名单现在有七格（对外名 / 上游名 / 代理 / 档位 /
+         定价 / 启用 / 删除），760 时两个模型名输入框只剩 130px，模型名和
+         占位符都被截成「claude-sonne…」（2026-10-21 实测）。加宽只加在
+         需要它的这两处（渠道弹窗与白名单抽屉），不铺到全站 ——
+         其余弹窗没有这张表，跟着加宽只是浪费屏幕。
          用 min(...) 而不是写死：窄窗口下不至于把抽屉顶出屏幕 -->
     <a-drawer
       v-model:open="bindOpen"
       :title="'模型白名单 · ' + (bindChannel?.name ?? '')"
-      :width="modalWidth(760)"
+      :width="modalWidth(860)"
       :mask-closable="false"
       @close="bindDirty.guardCancel"
     >

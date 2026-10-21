@@ -183,6 +183,21 @@ type ChannelModel struct {
 	// PeakRules 是时段倍率规则（命中时段时以它为准，优先于固定倍率）
 	PeakRules JSONList `gorm:"type:jsonb" json:"peak_rules"`
 
+	// SupportedEfforts 是这一个模型**对外声明**支持的思考档位
+	// （off/auto/minimal/low/medium/high/xhigh/max，见 convert 的词表）。
+	//
+	// 为什么挂在白名单行而不是另建一张能力表：同一个模型名在不同渠道背后可能是
+	// 不同上游（官网直连 vs 中转站），支持的档位本来就该跟着渠道走 —— 与价格
+	// 挂在白名单行是同一条理由。空 = 没配，/v1/models 回落到按渠道协议
+	// 推导的那份（见 relay.SupportedEfforts）。
+	//
+	// 不给列默认值：加这一列时已有数据的表里全是存量行，AutoMigrate 会建成
+	// 可空 jsonb 列（有默认值的 NOT NULL 列在升级时另有一堆坑，见 CLAUDE.md）。
+	// 于是这个字段有三种「空」的形态：存量行的 NULL、写入路径的空数组
+	// （StringList.Value 把 nil 写成 []）、以及显式传 []。读侧三者一视同仁
+	// （见 relay.SupportedEfforts），写入侧统一归一成 nil。
+	SupportedEfforts StringList `gorm:"type:jsonb" json:"supported_efforts"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

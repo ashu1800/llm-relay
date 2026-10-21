@@ -12,6 +12,12 @@ export interface WhitelistRow extends Partial<PriceConfig> {
   enabled: boolean
   /** 这一个模型走哪个代理；0 / 不填 = 跟随渠道 */
   proxy_id?: number
+  /**
+   * 这个模型对外声明支持的思考档位（/v1/models 的 supported_efforts）。
+   * 空 / 不填 = 没配，读侧按渠道协议推导（见 relay.SupportedEfforts）——
+   * 推导出来的那份不写回这里：它是随协议变化的结果，固化下来就成了两份真相。
+   */
+  supported_efforts?: string[]
 }
 </script>
 
@@ -22,6 +28,7 @@ import { PlusOutlined, DeleteOutlined, SnippetsOutlined, DollarOutlined, UndoOut
 import { modalWidth } from '@/utils/modalWidth'
 import { useDirtyClose } from '@/composables/useDirtyClose'
 import ModelPricingEditor, { emptyPrice, hasPrice, priceSummary } from './ModelPricingEditor.vue'
+import { effortOptions, normalizeEfforts } from './efforts'
 
 // 这是纯展示型编辑器：数据的保存方式由父组件决定 ——
 // 建/改渠道时随渠道一起提交，抽屉里则单独整表提交。
@@ -63,7 +70,10 @@ function savePrice(cfg: PriceConfig) {
 }
 
 function addRow() {
-  update([...props.items, { public_name: '', upstream_name: '', enabled: true, ...emptyPrice() }])
+  update([
+    ...props.items,
+    { public_name: '', upstream_name: '', enabled: true, supported_efforts: [], ...emptyPrice() }
+  ])
 }
 
 /**
@@ -129,10 +139,34 @@ function setProxy(index: number, value: number) {
   update(next)
 }
 
+// 档位：空数组的语义是「没配」，落库时后端归一成 NULL（读侧按渠道协议推导）。
+// 这里不做「全选时写成空」之类的折叠 —— 用户勾了哪几档就是哪几档，
+// 「回落到推导」只能由他主动清空表达。
+function setEfforts(index: number, value: string[]) {
+  const next = props.items.map((row, i) =>
+    (i === index ? { ...row, supported_efforts: normalizeEfforts(value) } : row)
+  )
+  update(next)
+}
+
 const proxyOptions = computed(() => [
   { value: 0, label: '跟随渠道' },
   ...(props.proxies || []).map((p) => ({ value: p.id, label: p.name + (p.enabled ? '' : '（已停用）') }))
 ])
+
+// 档位下拉的候选：八档全出，外加这一行声明里词表之外的条目
+// （从备份导入或后端新增档位时会遇到，丢掉它们等于静默改写用户的配置）
+function rowEffortOptions(row: WhitelistRow) {
+  return effortOptions(row.supported_efforts)
+}
+
+// 档位格的悬停说明：只写「这一格是什么」，不重复提示里的推导规则
+function effortTip(row: WhitelistRow) {
+  const n = normalizeEfforts(row.supported_efforts).length
+  return n
+    ? `已声明 ${n} 档：${normalizeEfforts(row.supported_efforts).join(' / ')}`
+    : '留空 = 按渠道协议自动推导（Anthropic / Gemini 八档全在，OpenAI 兼容上游只列 low 以上）'
+}
 
 // 价格胶囊的悬停说明：胶囊本身宽度有限（列宽固定），带时段规则的摘要
 // 会被省略号截掉，完整内容在这里给出，同时说清点下去会发生什么
@@ -189,7 +223,10 @@ function applyBulk() {
     next.push({
       public_name: rawName,
       upstream_name: rawUpstream || '',
-      enabled: true
+      enabled: true,
+      // 批量粘贴只带模型名：档位留空，按渠道协议推导 ——
+      // 这里凭空填一套会让「导入完就锁定了推理档位」变成隐形默认值
+      supported_efforts: []
     })
     added++
   }
@@ -209,6 +246,7 @@ function applyBulk() {
       <span title="客户端请求时用的名字。写错这里是最常见的 502 原因。">对外模型名</span>
       <span title="转发给上游时替换成的名字；留空表示与对外名相同。">上游模型名</span>
       <span v-if="proxies" title="这一个模型单独走哪个出口；默认跟随渠道。">代理</span>
+      <span title="这个模型支持的思考档位（/v1/models 的 supported_efforts）；留空按渠道协议推导。">档位</span>
       <span title="单价（每百万词元）；点右边的胶囊可改。">定价</span>
       <span class="wl-center">启用</span>
       <span></span>
@@ -235,6 +273,25 @@ function applyBulk() {
         :options="proxyOptions"
         :aria-label="`第 ${index + 1} 行使用的代理`"
         @change="(v: any) => setProxy(index, Number(v) || 0)"
+      />
+      <!-- 档位：多选而不是自由输入。候选是固定词表，允许用户敲出词表外的值
+           只会造出「后端归一后丢掉」的静默偏差（见 efforts.ts 的说明）。
+           高度与同排控件对齐：antd 在多选模式下会把高度撑到内容，这里用
+           .wl-efforts 把内边距收住，一行里不至于比输入框高出一截。
+           不加悬停提示：下拉展开时 tooltip 会压住选项列表（与 ColumnSettings
+           的触发按钮同一类坑，那边因此改用原生 title） -->
+      <a-select
+        class="wl-efforts"
+        size="small"
+        mode="multiple"
+        :value="normalizeEfforts(row.supported_efforts)"
+        :options="rowEffortOptions(row)"
+        :max-tag-count="1"
+        :max-tag-placeholder="(omitted: any[]) => '+' + omitted.length"
+        :allow-clear="true"
+        :title="effortTip(row)"
+        :aria-label="`第 ${index + 1} 行支持的思考档位，留空按协议推导`"
+        @change="(v: any) => setEfforts(index, v || [])"
       />
       <span class="wl-price">
         <!-- 定价做成弹窗而不是行内输入：四个单价 + 倍率 + 时段规则塞进一行
@@ -323,14 +380,14 @@ function applyBulk() {
    用 minmax(0, 1fr) 而不是 1fr：默认的 min-width:auto 会让内容把列撑开，
    窄容器里就会溢出。 */
 .wl-editor {
-  --wl-cols: minmax(0, 1fr) minmax(0, 1fr) 124px 42px 26px;
+  --wl-cols: minmax(0, 1fr) minmax(0, 1fr) 124px 124px 42px 26px;
   --wl-gap: 6px;
   display: flex;
   flex-direction: column;
   gap: 0;
 }
 .wl-editor.has-proxy {
-  --wl-cols: minmax(0, 1fr) minmax(0, 1fr) 104px 124px 42px 26px;
+  --wl-cols: minmax(0, 1fr) minmax(0, 1fr) 104px 124px 124px 42px 26px;
 }
 
 .wl-head,
@@ -397,6 +454,41 @@ function applyBulk() {
 }
 
 .wl-center { display: flex; justify-content: center; }
+
+/* 档位下拉：多选模式默认会随内容换行、把行撑高，这里把它压成单行控件高度，
+   与同一行的输入框、下拉、开关齐平（同 .price-pill 的高度处理）。
+   溢出用省略号而不是换行 —— 一行白名单的高度必须稳定，否则几十行下来
+   每一行都不一样高，横向看过去全是错位。 */
+.wl-efforts {
+  width: 100%;
+  /* 默认 min-height 是多选模式的 auto，会把行撑到 32px+；钉成与
+     --size-control-height（24px）一致 */
+  min-height: var(--size-control-height);
+}
+.wl-efforts :deep(.ant-select-selector) {
+  min-height: var(--size-control-height);
+  padding-top: 0;
+  padding-bottom: 0;
+  align-items: center;
+}
+.wl-efforts :deep(.ant-select-selection-overflow) {
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+/* 选中项标签收窄：124px 的格里放得下「xhigh」这种短词，多选的其余档位
+   收成「+N」（max-tag-placeholder 里只给计数，antd 默认的「+ N ...」在
+   这么窄的格里会把省略号也画出来，读起来像被截断了）。
+   注意不能把整个格压得更窄 —— 它是这一行唯一能表达思考能力的控件，
+   被压成「+3」之后就看不见到底选了哪几档了（悬停有完整说明，
+   但那要求把鼠标停在上面，而滑过长表的动作不会停）。 */
+.wl-efforts :deep(.ant-select-selection-item) {
+  font-size: var(--font-size-sm);
+  line-height: 18px;
+  margin-inline-end: 2px;
+}
+.wl-efforts :deep(.ant-select-selection-item-content) { overflow: hidden; text-overflow: ellipsis; }
+/* 多选模式下清空按钮与标签挤在同一行，右内边距留出来 */
+.wl-efforts :deep(.ant-select-clear) { right: 22px; }
 
 /* 价格胶囊：与密钥胶囊同一套视觉语言 —— 一眼能看出「这条配过价没有」。
    高度对齐 --size-control-height，和同一行的输入框、下拉、开关齐平

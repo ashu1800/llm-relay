@@ -150,6 +150,48 @@ chkcontains "含 wl-probe-b" "$MODELS" "wl-probe-b"
 chk "停用条目不入列表" "0" "$(echo "$MODELS" | jqg "sum(1 for m in d['data'] if m['id']=='wl-probe-c')")"
 
 echo
+echo "=== 6b. supported_efforts：没配时按渠道协议推导，配了按声明 ==="
+# 探测渠道是 openai-chat：没声明时推导出五档（off/auto 实测 400、minimal 只能
+# 收敛成 low，见 docs/development.md「/v1/models 的思考档位声明」）
+chk "openai-chat 渠道未声明 -> 推导五档" \
+  "low,medium,high,xhigh,max" \
+  "$(echo "$MODELS" | jqg "','.join([m for m in d['data'] if m['id']=='wl-probe-a'][0]['supported_efforts'])")"
+# 空能力必须是 [] 而不是 null：null 会让 SDK 遍历时炸
+chk "字段存在且是数组（不是 null）" "True" \
+  "$(echo "$MODELS" | jqg "isinstance([m for m in d['data'] if m['id']=='wl-probe-a'][0].get('supported_efforts'), list)")"
+# 声明（含大小写与重复）落库前归一、按强度序返回
+curl -s -X PUT "$API/channels/$CID/models" -H 'Content-Type: application/json' \
+  -d '{"items":[
+    {"public_name":"wl-probe-a","supported_efforts":["Max","off","max"]},
+    {"public_name":"wl-probe-b","upstream_name":"upstream-b-real"},
+    {"public_name":"wl-probe-c","enabled":false}
+  ]}' -o /dev/null
+chk "声明归一后落库" "off,max" \
+  "$(P "SELECT array_to_string(ARRAY(SELECT jsonb_array_elements_text(supported_efforts)), ',') FROM channel_models WHERE channel_id=$CID AND public_name='wl-probe-a'")"
+MODELS3=$(curl -s "$BASE/v1/models" -H "Authorization: Bearer $SK")
+chk "声明优先于协议推导" "off,max" \
+  "$(echo "$MODELS3" | jqg "','.join([m for m in d['data'] if m['id']=='wl-probe-a'][0]['supported_efforts'])")"
+chk "未声明的模型仍走推导" "low,medium,high,xhigh,max" \
+  "$(echo "$MODELS3" | jqg "','.join([m for m in d['data'] if m['id']=='wl-probe-b'][0]['supported_efforts'])")"
+# 显式空数组 = 清掉声明、回落到推导。
+# 库里落成 [] 还是 NULL 都可以（StringList 的 Value() 把 nil 写成 []，读侧两者
+# 一视同仁，见 relay.SupportedEfforts）；判据取**行为**：列表回到推导出来的五档
+curl -s -X POST "$API/channels/$CID/models" -H 'Content-Type: application/json' \
+  -d '{"public_name":"wl-probe-a","supported_efforts":[]}' -o /dev/null
+MODELS4=$(curl -s "$BASE/v1/models" -H "Authorization: Bearer $SK")
+chk "空数组清掉声明 -> 回到协议推导" "low,medium,high,xhigh,max" \
+  "$(echo "$MODELS4" | jqg "','.join([m for m in d['data'] if m['id']=='wl-probe-a'][0]['supported_efforts'])")"
+# 单条 POST 不带该字段时不能把已有声明抹掉
+curl -s -X POST "$API/channels/$CID/models" -H 'Content-Type: application/json' \
+  -d '{"public_name":"wl-probe-a","supported_efforts":["high"]}' -o /dev/null
+curl -s -X POST "$API/channels/$CID/models" -H 'Content-Type: application/json' \
+  -d '{"public_name":"wl-probe-a"}' -o /dev/null
+chk "单条 POST 不带档位时保留原声明" "high" \
+  "$(P "SELECT array_to_string(ARRAY(SELECT jsonb_array_elements_text(supported_efforts)), ',') FROM channel_models WHERE channel_id=$CID AND public_name='wl-probe-a'")"
+curl -s -X PUT "$API/channels/$CID/models" -H 'Content-Type: application/json' \
+  -d '{"items":[{"public_name":"wl-probe-a"},{"public_name":"wl-probe-b","upstream_name":"upstream-b-real"},{"public_name":"wl-probe-c","enabled":false}]}' -o /dev/null
+
+echo
 echo "=== 7. 路由按白名单命中（探测渠道的地址打不通，报错必须来自连接而不是「没有可用渠道」）==="
 curl -s -o $TMP/wl_route.json -w '%{http_code}' -m 30 "$BASE/v1/chat/completions" \
   -H "Authorization: Bearer $SK" -H 'Content-Type: application/json' \

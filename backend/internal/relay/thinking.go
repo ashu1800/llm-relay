@@ -192,3 +192,44 @@ func normalizeSwitch(s string) string {
 	}
 	return ""
 }
+
+// SupportedEfforts 是某条白名单行对外声明的思考档位。
+//
+// 两层：行上显式配了（model.ChannelModel.SupportedEfforts，后台白名单编辑器的
+// 「档位」一栏）就照它；没配则按**该行所属渠道的协议**推导
+// （convert.EffortsForProtocol）。推导放在 relay 包而不是 handler 里，是为了让
+// 「怎么算出一行的档位」只有一个实现 —— /v1/models 与将来的其它消费者
+// 共用它，两边各写一份迟早漂移成「列表说支持、上游其实 400」。
+//
+// 只收声明列表而不是整个 model.ChannelModel：调用方手里是逐行扫出来的
+// 行视图（见 api.listModels 的 modelRow），拼一个实体再拆开纯属多余。
+func SupportedEfforts(declared []string, protocol string) []string {
+	if len(declared) > 0 {
+		// 库里存的是用户配的原文；读出时再归一一次，防止历史数据里混进
+		// 大小写不一或重复的条目（写入路径已经归一，这里是兜底）
+		if out := convert.NormalizeEfforts(declared); len(out) > 0 {
+			return out
+		}
+	}
+	return convert.EffortsForProtocol(protocol)
+}
+
+// MergeModelEfforts 把同名模型在多条渠道上的档位取并集。
+//
+// 一个对外模型名可能挂在多条渠道上（路由会在它们之间故障转移），客户端能
+// 指望的档位是其中**任意一条**能接受的档位 —— 取并集而不是交集：请求最终
+// 只落在一条渠道上，只要有一条能表达这个档位，这个档位就有意义。
+// 顺序按站内词表的强度序（convert.NormalizeEfforts 保证），不按渠道遍历顺序。
+//
+// 返回 nil 表示「一条都没有」（例如 embeddings 渠道），由调用方决定回什么形态；
+// /v1/models 回的是空数组而不是 null（见那里的说明）。
+func MergeModelEfforts(perChannel [][]string) []string {
+	var all []string
+	for _, effs := range perChannel {
+		all = append(all, effs...)
+	}
+	if len(all) == 0 {
+		return nil
+	}
+	return convert.NormalizeEfforts(all)
+}
