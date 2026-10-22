@@ -423,7 +423,7 @@ func (s *Store) normalizeGroupStrategies() error {
 //
 // 映射表的行为模型（见 model.ClientAlias 的注释）：客户端第一次被观测到
 // 就落一行「待设置」，等用户来配名字与图标。映射表晚于日志的客户端列
-// 上线，历史行不会经过写路径的自动登记（logwriter.ensureClientAlias），
+// 上线，历史行不会经过写路径的自动登记（logwriter.logClientAlias），
 // 所以启动时按 DISTINCT 补一次。
 //
 // **只在第一次跑，之后每次启动都直接返回**（2026-10-19 审查发现）：
@@ -431,7 +431,7 @@ func (s *Store) normalizeGroupStrategies() error {
 // client_name 都没有索引，ON CONFLICT DO NOTHING 也不会让计划器跳过源行
 // （它只抑制插入）。默认保留 30 天、日 10 万行时，每次重启与自更新都要在
 // 监听端口之前扫数百万宽行 —— 而它的产出在第一次之后恒为空。
-// 这个回填本来就是一次性的数据修复：新客户端由写路径的 ensureClientAlias
+// 这个回填本来就是一次性的数据修复：新客户端由写路径的 logClientAlias
 // 持续登记，不需要每次启动再扫一遍。
 //
 // 标记写进 settings 表而不是「判断表里有没有行」：后者在用户删光全部映射

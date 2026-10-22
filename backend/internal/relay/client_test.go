@@ -161,25 +161,27 @@ func TestExtractClient(t *testing.T) {
 		},
 
 		// ---- 4. fallback：认不出就展示客户端自报的第一个 product token ----
+		// id 与 name 同值（2026-10-22 事故修复）：id 曾经留空，而它是日志里
+		// 唯一机器可用的稳定键 —— 留空等于让未识别客户端彻底失去身份。
 		{
-			name: "未知工具取第一个 product token",
+			name: "未知工具取第一个 product token（id 与 name 同值）",
 			ua:   "my-tool/1.0 (Windows NT 10.0)",
-			want: want{"", "my-tool"},
+			want: want{"my-tool", "my-tool"},
 		},
 		{
 			name: "无版本号的首 token 原样保留",
 			ua:   "SomeAgent",
-			want: want{"", "SomeAgent"},
+			want: want{"SomeAgent", "SomeAgent"},
 		},
 		{
 			name: "首 token 带尾逗号时去掉标点",
 			ua:   "SomeAgent, foo/1.0",
-			want: want{"", "SomeAgent"},
+			want: want{"SomeAgent", "SomeAgent"},
 		},
 		{
 			name: "首段是注释时跳过它（RFC 9110 的 comment 段）",
 			ua:   "(compatible; Foo/1.0)",
-			want: want{"", "Foo"},
+			want: want{"Foo", "Foo"},
 		},
 		{
 			name: "裸 Mozilla 不做噪音过滤（过滤本身是另一种猜测）",

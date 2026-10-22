@@ -88,3 +88,67 @@ func TestValidateSessionTTL(t *testing.T) {
 		}
 	})
 }
+
+// 客户端映射缓存的两项配置（2026-10-22 事故修复新增）：
+//   · 上限是「防随机 UA 撑爆」的安全边界，0/负数会让它失效；
+//   · 负 TTL 会让条目一写入就过期（每次请求都落一次 DB），同样是错的配置。
+// 默认值必须与 relay 包的 DefaultClientMapLimit / DefaultClientMapTTL 一致 ——
+// config 不 import relay，两处靠注释互指，这条用例把漂移变成会红的断言。
+func TestValidateClientMap(t *testing.T) {
+	t.Run("默认值可用且与 relay 包一致", func(t *testing.T) {
+		c := Default()
+		if c.Relay.ClientMapLimit != 2048 {
+			t.Errorf("默认上限 = %d，期望 2048（与 relay.DefaultClientMapLimit 一致）", c.Relay.ClientMapLimit)
+		}
+		if c.Relay.ClientMapTTL != 7*24*time.Hour {
+			t.Errorf("默认 TTL = %s，期望 168h（与 relay.DefaultClientMapTTL 一致）", c.Relay.ClientMapTTL)
+		}
+		if err := c.validate(); err != nil {
+			t.Fatalf("默认配置不该报错：%v", err)
+		}
+	})
+
+	t.Run("非正上限拒绝启动", func(t *testing.T) {
+		for _, n := range []int{0, -1} {
+			c := Default()
+			c.Relay.ClientMapLimit = n
+			if err := c.validate(); err == nil || !strings.Contains(err.Error(), "client_map_limit") {
+				t.Fatalf("上限 %d 应被拒绝，实际 %v", n, err)
+			}
+		}
+	})
+
+	t.Run("负 TTL 拒绝启动，0 表示不过期", func(t *testing.T) {
+		c := Default()
+		c.Relay.ClientMapTTL = -time.Second
+		if err := c.validate(); err == nil || !strings.Contains(err.Error(), "client_map_ttl") {
+			t.Fatalf("负 TTL 应被拒绝，实际 %v", err)
+		}
+		c = Default()
+		c.Relay.ClientMapTTL = 0
+		if err := c.validate(); err != nil {
+			t.Fatalf("TTL=0（不过期）应被接受：%v", err)
+		}
+	})
+}
+
+// 环境变量入口必须真的接上：CLAUDE.md 硬约定 13 —— 新增配置项要在
+// applyEnv 与 envKeys 两处都补，否则部署侧想改也改不了、且不会有提示。
+func TestClientMapEnv(t *testing.T) {
+	t.Setenv("RELAY_CLIENT_MAP_LIMIT", "512")
+	t.Setenv("RELAY_CLIENT_MAP_TTL", "48h")
+	c := Default()
+	applyEnv(c)
+	if c.Relay.ClientMapLimit != 512 {
+		t.Errorf("上限 = %d，期望 512", c.Relay.ClientMapLimit)
+	}
+	if c.Relay.ClientMapTTL != 48*time.Hour {
+		t.Errorf("TTL = %s，期望 48h", c.Relay.ClientMapTTL)
+	}
+	keys := envKeys()
+	for _, field := range []string{"client_map_limit", "client_map_ttl_hours"} {
+		if keys[field] == "" {
+			t.Errorf("envKeys 缺少 %s —— 部署侧无法从界面看到可用的环境变量名", field)
+		}
+	}
+}

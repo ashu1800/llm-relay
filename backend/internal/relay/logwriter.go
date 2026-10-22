@@ -50,28 +50,53 @@ type LogWriter struct {
 	mu     sync.RWMutex
 	closed bool
 
-	// seenAlias 是「本进程已登记过」的客户端映射键缓存（见 ensureClientAlias）。
-	// 稳态下每条日志只花一次 map 查找，不为显示映射多付一次 DB 往返。
+	// clientCache 是「本进程已登记过」的客户端映射键缓存（见 logClientAlias）。
 	//
-	// 键来自请求方：未命中规则时取 UA 的第一个 product token（见 ExtractClient），
-	// 完全由调用方控制。不加限制的话，逐请求换随机 UA 的爬虫/压测会让这张表
-	// 与本 map 无界增长，而 client_aliases 不随日志保留期淘汰（2026-10-19 审查）。
-	// 上限取 2048：真实部署里不同的客户端以「几十」计，2048 已经宽松到不可能
-	// 误伤正常使用，同时把「被随机 UA 撑爆」变成有界。到顶之后**不再登记新键**
-	// （该客户端的日志照常落库，只是显示层回落到原始 token）。
-	seenAlias sync.Map
-	// aliasKeys 记录 seenAlias 的条目数（sync.Map 没有 Len）。
-	// 与 seenAlias 的写入在同一把锁下配对维护，只在「新键」时付一次原子加。
-	aliasMu   sync.Mutex
-	aliasKeys int
+	// 它解决的问题没变：稳态下每条日志只花一次 map 查找，不为显示映射多付
+	// 一次 DB 往返。键来自请求方（未命中规则时取 UA 的第一个 product token，
+	// 见 ExtractClient），所以必须有界 —— 细节与「为什么是 LRU+TTL」见
+	// clientcache.go 的包内注释。
+	alias *clientCache
+
+	// aliasWarn 给两条映射相关告警限频（首次 + 每 5 分钟最多一次）。
+	// 原来「已登记」被误当成「已达上限」，于是每个已登记客户端每写一条日志
+	// 就刷一条 WARN（2026-10-22 生产事故：每天 5000+ 条）。
+	aliasLimitWarn  *warnThrottle
+	aliasFailedWarn *warnThrottle
+}
+
+// aliasWarnInterval 是映射相关告警的最小间隔。
+// 5 分钟：这类告警的条件（表满、DB 写失败）是持续状态而不是事件，
+// 更密的重复不提供新信息，只会把排障需要看的日志挤出去。
+const aliasWarnInterval = 5 * time.Minute
+
+// ClientMapOptions 是映射缓存的容量与 TTL（来自 config.relay.client_map_*）。
+// 零值表示用默认值，供测试与「不想关心它」的调用方使用。
+type ClientMapOptions struct {
+	Limit int
+	TTL   time.Duration
 }
 
 // NewLogWriter 启动后台写入协程。
 func NewLogWriter(db *gorm.DB, buffer int, logger *slog.Logger) *LogWriter {
+	return NewLogWriterWithClientMap(db, buffer, logger, ClientMapOptions{})
+}
+
+// NewLogWriterWithClientMap 同上，但可配置映射缓存的容量与 TTL。
+func NewLogWriterWithClientMap(db *gorm.DB, buffer int, logger *slog.Logger, opts ClientMapOptions) *LogWriter {
 	if buffer <= 0 {
 		buffer = 1024
 	}
-	w := &LogWriter{db: db, queue: make(chan queuedLog, buffer), capacity: buffer, logger: logger, done: make(chan struct{})}
+	w := &LogWriter{
+		db:              db,
+		queue:           make(chan queuedLog, buffer),
+		capacity:        buffer,
+		logger:          logger,
+		done:            make(chan struct{}),
+		alias:           newClientCache(opts.Limit, opts.TTL),
+		aliasLimitWarn:  newWarnThrottle(aliasWarnInterval),
+		aliasFailedWarn: newWarnThrottle(aliasWarnInterval),
+	}
 	go w.loop()
 	return w
 }
@@ -143,8 +168,7 @@ func (w *LogWriter) loop() {
 			continue
 		}
 		// 客户端首次观测到时登记进显示映射表（待设置行）。
-		// 放在日志落库成功之后：日志是主、映射是辅，登记失败只留 Warn。
-		w.ensureClientAlias(ClientKey(item.Log.ClientID, item.Log.ClientName))
+		w.logClientAlias(item.Log)
 		if item.Payload == nil {
 			continue
 		}
@@ -155,66 +179,49 @@ func (w *LogWriter) loop() {
 	}
 }
 
-// ensureClientAlias 把首次观测到的客户端登记进显示映射表（待设置行，
-// 见 model.ClientAlias 的注释）。任何失败只 Warn 并把键从缓存里摘掉
-// （下一条日志会重试），绝不影响日志写路径 —— 映射是显示层的增强，
-// 没有它顶多少一个待设置行，日志本身一行都不能少。
+// logClientAlias 把日志里的客户端登记进显示映射表。
 //
-// 缓存只挡「本进程见过」，DB 侧由 uniqueIndex + ON CONFLICT DO NOTHING
-// 兜底（重启后缓存为空、或表里已有回填/导入的行都不会重复报错）。
-func (w *LogWriter) ensureClientAlias(key string) {
+// 放在日志落库成功之后：日志是主、映射是辅，登记失败只留 Warn。
+// 判定收在 clientCache.Add 里 —— 同一个键只在**首次观测**（或 TTL 到期后
+// 重新出现）时返回 Register=true，稳态下每条日志只付一次 map 查找。
+func (w *LogWriter) logClientAlias(entry model.RequestLog) {
+	key := ClientKey(entry.ClientID, entry.ClientName)
 	if key == "" {
 		return
 	}
-	if !w.rememberAliasKey(key) {
-		if w.logger != nil {
-			w.logger.Warn("客户端映射键数量已达上限，不再自动登记新客户端",
-				"key", key, "limit", maxTrackedClients)
+	res := w.alias.Add(key)
+	if res.Evicted && w.logger != nil {
+		// 容量满只会淘汰最久未用的条目，不会拒绝新客户端 —— 但这是容量
+		// 可能配小的信号，带上当前水位与累计淘汰数，便于判断要不要调大。
+		if ok, suppressed := w.aliasLimitWarn.allow(); ok {
+			st := w.alias.Stats()
+			w.logger.Warn("客户端映射缓存已满，按最近最少使用淘汰旧条目",
+				"key", key, "limit", st.Limit, "entries", st.Entries,
+				"evicted", st.Evicted, "expired", st.Expired,
+				"suppressed", suppressed)
 		}
+	}
+	if !res.Register {
 		return
 	}
 	err := w.db.Clauses(clause.OnConflict{DoNothing: true}).
 		Create(&model.ClientAlias{Key: key}).Error
 	if err != nil {
-		w.forgetAliasKey(key)
+		// 摘掉缓存让下一条日志重试，但把这次失败与后续压掉的一起限频：
+		// DB 不可用是持续状态，按条告警只会刷屏。
+		w.alias.Remove(key)
 		if w.logger != nil {
-			w.logger.Warn("登记客户端显示映射失败", "key", key, "err", err)
+			if ok, suppressed := w.aliasFailedWarn.allow(); ok {
+				w.logger.Warn("登记客户端显示映射失败", "key", key, "err", err,
+					"suppressed", suppressed)
+			}
 		}
 	}
 }
 
-// maxTrackedClients 是本进程最多记住多少个客户端键（见 seenAlias 的说明）。
-const maxTrackedClients = 2048
-
-// rememberAliasKey 把键记进缓存；已有或已达上限时返回 false。
-//
-// 上限计数与写入必须在同一把锁下完成：分成「先查 Len 再 Store」会让
-// 并发调用同时越过上限（虽然这里只有单个日志写入协程在调，但上限本身
-// 是安全边界，不该依赖调用方的数量）。
-func (w *LogWriter) rememberAliasKey(key string) bool {
-	w.aliasMu.Lock()
-	defer w.aliasMu.Unlock()
-	if _, loaded := w.seenAlias.Load(key); loaded {
-		return false
-	}
-	if w.aliasKeys >= maxTrackedClients {
-		return false
-	}
-	w.seenAlias.Store(key, struct{}{})
-	w.aliasKeys++
-	return true
-}
-
-// forgetAliasKey 摘掉键（登记失败后重试、或管理接口删除映射后用）。
-func (w *LogWriter) forgetAliasKey(key string) {
-	if key == "" {
-		return
-	}
-	w.aliasMu.Lock()
-	defer w.aliasMu.Unlock()
-	if _, loaded := w.seenAlias.LoadAndDelete(key); loaded {
-		w.aliasKeys--
-	}
+// ClientCacheStats 暴露映射缓存的当前水位，供管理接口/诊断读取。
+func (w *LogWriter) ClientCacheStats() ClientCacheStats {
+	return w.alias.Stats()
 }
 
 // ForgetClientAlias 让某个键回到「本进程还没见过」的状态。
@@ -224,9 +231,9 @@ func (w *LogWriter) forgetAliasKey(key string) {
 // 进程级的，而删除只动了库（2026-10-19 审查发现）。
 //
 // 语义上这与「登记失败时摘掉缓存、下一条日志重试」是同一条路径 ——
-// 都是让下一次观测重新走一遍 ensureClientAlias。
+// 都是让下一次观测重新走一遍 logClientAlias。
 func (w *LogWriter) ForgetClientAlias(key string) {
-	w.forgetAliasKey(key)
+	w.alias.Remove(key)
 }
 
 // Close 停止写入协程。它只关通道、不等队列写完 ——

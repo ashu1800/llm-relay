@@ -16,9 +16,16 @@ import (
 // 三条设计原则：
 //
 //  1. **诚实展示优于猜测**（与思考档位透传同一条）：认不出就不假装认识 ——
-//     id 留空、name 取 UA 的第一个 product token（客户端自己报的名字），
-//     而不是猜一个「未知客户端」。认出但没来得及加映射的，id 也要落库，
-//     它比任何猜测都准确。
+//     id 取客户端自报的第一个 product token（不是猜一个「未知客户端」），
+//     name 与 id 同源。认出但没来得及加映射的，id 也要落库，它比任何猜测都准确。
+//
+//     为什么未识别时 id 也必须有值（2026-10-22 生产事故）：id 曾经在未命中
+//     规则时留空，而日志里只有 id 是机器可用的稳定键 —— 于是未识别的客户端
+//     （如 deepseek-harness）每条日志的 client_id 都是空串，按客户端维度的
+//     统计、筛选、限流全部失效。取 token 不违背「不猜」：这是客户端自己
+//     报的名字，与 client_name 同一个来源、同一个值。
+//     代价是它与「规则表里认出的 id」不再能靠空/非空区分，要看它是否出现在
+//     规则表里；显示层（clientDisplay.ts）本来也是按 id || name 取键，两边一致。
 //
 //  2. **有据可查**：UA 原文随日志落库（client_ua）。规则表里每一条
 //     「待实测」的匹配都是猜测，而排障时真正能定位问题的证据是原文 ——
@@ -33,7 +40,9 @@ import (
 //
 // 返回 (id, name, ua)：
 //   - 命中规则：id/name 来自规则表，ua 是原文（TrimSpace + 截到列宽以内）
-//   - 未命中：id 空串，name 是 UA 的第一个 product token（去版本、去尾部标点）
+//   - 未命中：name 是 UA 的第一个 product token（去版本、去尾部标点），
+//     id **与 name 相同** —— id 是机器可用的稳定键，留空会让该客户端在
+//     日志里彻底失去身份（详见上面的设计原则第 1 条）
 //   - 没有 UA：三元组全空串 —— 前端按「当时没记」显示 —，与 client_ip 同一种空值语义
 //
 // 入口收 http.Header 而不是 UA 字符串：辅助信号（x-app 这类客户端自报头）
@@ -56,7 +65,8 @@ func ExtractClient(h http.Header) (id, name, ua string) {
 			return r.id, r.name, ua
 		}
 	}
-	return "", firstProductToken(ua), ua
+	name = firstProductToken(ua)
+	return name, name, ua
 }
 
 // clientRule 是一条识别规则：UA 子串命中，或（hdr 非空且）头信号命中。
@@ -194,8 +204,11 @@ var clientRules = []clientRule{
 }
 
 // ClientKey 返回客户端显示映射（model.ClientAlias）的查找键：识别出的
-// id 非空取 id，否则取观测到的 name token —— 未识别的客户端（如
-// deepseek-harness）只有 token 这一个身份。
+// id 非空取 id，否则取观测到的 name token。
+//
+// 未识别的客户端 id 与 name 同为 product token（见 ExtractClient），所以
+// 这个键对它们而言与历史值一致 —— 已有的 client_aliases 行不会因为
+// 「未识别时 id 不再留空」而失配。
 //
 // 同一口径有三份实现、注释互指：这里（权威）、store.backfillClientAliases
 // 的 SQL 版、前端 clientDisplay.ts 的显示层版。改口径必须三处一起动，

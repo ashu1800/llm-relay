@@ -170,7 +170,7 @@ func (s *Server) deleteClientAlias(c *gin.Context) {
 	// 一行待设置。想让它不再出现，把名字配成与原样一致即可 —— 那才是
 	// 「映射成原样」而不是「假装没见过」。
 	//
-	// 注意「重新登记」不是自动发生的：logwriter 的 seenAlias 是**进程级**
+	// 注意「重新登记」不是自动发生的：logwriter 的客户端缓存是**进程级**
 	// 缓存，不失效的话这个键在本进程内永远不会再走登记（2026-10-19 审查
 	// 发现注释承诺过、实现没做）。所以删成功后必须显式忘掉它。
 	if !deleteByID(c, s.deps.Store.DB(), &model.ClientAlias{}, id, "映射不存在") {

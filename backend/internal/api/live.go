@@ -192,6 +192,8 @@ func (s *Server) liveStatsLoop(ctx context.Context, kick <-chan struct{}) {
 	var lastSent string
 	// health 帧的上次内容：日志队列水位与丢弃计数，变了才推（与 stats 同一原则）
 	var lastHealth string
+	// client_map 帧的上次内容（映射缓存的容量 / 条目 / 淘汰 / 过期）
+	var lastClientMap string
 	for {
 		select {
 		case <-ctx.Done():
@@ -215,6 +217,17 @@ func (s *Server) liveStatsLoop(ctx context.Context, kick <-chan struct{}) {
 			if b, err := json.Marshal(st); err == nil && string(b) != lastHealth {
 				lastHealth = string(b)
 				s.deps.Live.broadcast(mustJSON(liveMessage{Type: "health", Data: st}))
+			}
+			// ---- 客户端映射缓存水位（client_map 帧）----
+			//
+			// 单独一帧而不是并进 health：health 的消费方（RequestLogPanel）
+			// 把 data 当成 LogQueueInfo 用，往里塞新字段会让它读到的形状
+			// 与类型声明不一致。这一帧回答的是「映射缓存是否在淘汰 / 过期」，
+			// 排查「某个客户端的映射没登记上」时不必去翻进程日志。
+			cs := s.deps.Logs.ClientCacheStats()
+			if b, err := json.Marshal(cs); err == nil && string(b) != lastClientMap {
+				lastClientMap = string(b)
+				s.deps.Live.broadcast(mustJSON(liveMessage{Type: "client_map", Data: cs}))
 			}
 		}
 		start, end, _ := resolveRange("today")
@@ -444,6 +457,8 @@ func (s *Server) liveSocket(c *gin.Context) {
 	// 平稳的，那一等可能就是永远）
 	if s.deps.Logs != nil {
 		_ = ws.WriteMessage(websocket.TextMessage, mustJSON(liveMessage{Type: "health", Data: s.deps.Logs.QueueStats()}))
+		// 映射缓存水位同一条理由：它平时不变，不补首帧就永远看不到
+		_ = ws.WriteMessage(websocket.TextMessage, mustJSON(liveMessage{Type: "client_map", Data: s.deps.Logs.ClientCacheStats()}))
 	}
 
 	// WebSocket 连接不允许并发写，所以写只在这个 goroutine 里做。

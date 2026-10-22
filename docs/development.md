@@ -798,6 +798,48 @@ MCP 工具名以纯文本列在 system prompt 里。模型先调客户端侧的 
 不会选一个就被 403 一次。老数据在启动时自动迁移（名字条目换算成 ID，幂等；
 解析不了的保留原样并在日志里点名）。
 
+### 客户端映射缓存与 client_id（2026-10-22 事故）
+
+**症状**：日志每 10–40 秒一条
+`客户端映射键数量已达上限，不再自动登记新客户端 key=… limit=2048`，
+而库里只有 7–19 个不同客户端；同时 `request_logs.client_id` 覆盖率从
+98.5% 一路掉到 4.9%。
+
+**两个独立的根因，别混为一谈**：
+
+1. **告警是误报，2048 从未被触及。** 旧 `rememberAliasKey` 把
+   「键已在缓存里」与「容量已满」都返回 `false`，调用方一律当作「已达上限」
+   并打 WARN。于是**每个已登记客户端每写一条日志就告警一次** —— 这解释了
+   「重启后 10–34 秒就复发」（重启后第一批请求立刻是已登记客户端）、
+   「告警与请求量正相关」，以及「key 只有三种」（真实客户端就那三种）。
+   `deepseek-harness` 出现最多，因为它是未识别客户端里流量最大的那个。
+2. **`client_id` 空是另一回事。** `ExtractClient` 在规则表未命中时返回
+   空 id（只有 `client_name` 有 token），而未识别客户端恰恰是
+   `deepseek-harness` 这类自建工具 —— 它们的每条日志 `client_id` 都是空串。
+   这与映射缓存无关，改缓存不会让它恢复。
+
+**修复**（`relay/clientcache.go`、`relay/client.go`、`relay/logwriter.go`）：
+
+- 判定结果拆成 `aliasAddResult{Register, Evicted}`：已存在 = 不登记且不告警，
+  容量满 = 淘汰最久未用的条目后**照常登记**。
+- 缓存换成 LRU + TTL（`container/list` + 一把短锁）。上限
+  `RELAY_CLIENT_MAP_LIMIT`（默认 2048）、闲置过期 `RELAY_CLIENT_MAP_TTL`
+  （默认 168h）。过期条目必然连续落在链表尾部，回收只从尾部弹，O(淘汰数)。
+- 两条映射告警走 `warnThrottle`（首次 + 每 5 分钟最多一次），并带
+  `entries / evicted / expired / suppressed` 供诊断。
+- 未识别时 `client_id` 取 UA 的第一个 product token，**与 `client_name` 同值**。
+  映射键口径（`ClientKey`）不变，已有 `client_aliases` 行不会失配。
+  取 token 不是「猜」：那是客户端自报的名字，与 name 同源同值。
+
+**为什么不是简单调大常量**：容量满后永久拒绝新客户端会让「表满」成为
+不可逆状态（重启后又会被同样灌满）；而随机 UA 的键空间本身是无限的，
+调大只是把复发时间往后推。LRU 保证容量始终服务「最近在用的客户端」，
+TTL 让长期不出现的条目退场，两者合起来才有界且不误伤。
+
+**验证**：`relay/clientcache_test.go` 覆盖重复键不重复登记、少量客户端
+零淘汰、LRU 顺序、5000 键容量有界、TTL 回收、并发（`-race`）、告警限频；
+`config_test.go` 钉住默认值与两个环境变量入口。
+
 ## UI 还原说明
 
 设计令牌与布局尺寸均通过 Chrome DevTools Protocol 抓取参考站（`llm.ohub.vip`）

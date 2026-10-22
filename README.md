@@ -185,6 +185,8 @@ curl -s http://127.0.0.1:8888/system/info | python3 -m json.tool
 | `RELAY_MAX_CONCURRENCY` | `64` | 全局在途请求上限，超出排队（最多 60 秒）；`0` 不限 |
 | `RELAY_DEFAULT_RPM` | `0` | 密钥默认每分钟配额；单把密钥可覆盖，负数表示该密钥不限 |
 | `RELAY_RETRY_SAME_UPSTREAM_DELAY` | `500ms` | 换渠道前后仍打同一台上游时的等待间隔，`0` 关闭 |
+| `RELAY_CLIENT_MAP_LIMIT` | `2048` | 客户端显示映射的进程内缓存上限；满了淘汰最久未用的，不拒绝新客户端 |
+| `RELAY_CLIENT_MAP_TTL` | `168h` | 映射缓存条目的闲置过期时间，`0` 表示只靠容量淘汰 |
 | `TZ` | `Asia/Shanghai` | 进程本地时区：可用时段与时段倍率按它判断 |
 
 ## 密钥与安全

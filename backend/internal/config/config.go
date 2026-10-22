@@ -95,6 +95,17 @@ type RelayConfig struct {
 	// 我们攻击、直接熔断的形态（详见 relay/backoff.go）。而切到另一个
 	// 上游时立刻重试不会给任何一方造成压力，白等只是让用户多等。
 	RetrySameUpstreamDelay time.Duration `yaml:"retry_same_upstream_delay"`
+
+	// ClientMapLimit / ClientMapTTL 控制「客户端显示映射」的进程内缓存：
+	// 最多记住多少个客户端键、多久没被观测到就让它退场。
+	//
+	// 为什么要可配：键来自请求方的 UA（未命中规则时取第一个 product token），
+	// 上限既是「防随机 UA 撑爆」的安全边界，配得太小又会让真实客户端在
+	// 流量里被来回淘汰。默认 2048 / 7 天对个人自用部署足够，但换环境
+	// （例如公网多租户）时运维应当能自己调，而不是来改代码。
+	// 容量满时淘汰最久未使用的条目，**不会**拒绝新客户端。
+	ClientMapLimit int           `yaml:"client_map_limit"`
+	ClientMapTTL   time.Duration `yaml:"client_map_ttl"`
 }
 
 type LogConfig struct {
@@ -128,6 +139,11 @@ func Default() *Config {
 			// 不是 0：默认要能护住「两条渠道共用同一上游」的配置，
 			// 否则这个功能等于没开。
 			RetrySameUpstreamDelay: 500 * time.Millisecond,
+			// 与 relay.DefaultClientMapLimit / DefaultClientMapTTL 同值。
+			// config 包不 import relay（依赖方向是 relay 之上），两处默认值
+			// 靠这条注释互相指认，改一个必须看另一个。
+			ClientMapLimit: 2048,
+			ClientMapTTL:   7 * 24 * time.Hour,
 		},
 		Log: LogConfig{Level: "info", Format: "text"},
 	}
@@ -189,6 +205,8 @@ func applyEnv(c *Config) {
 	setInt(&c.Relay.MaxConcurrency, "RELAY_MAX_CONCURRENCY")
 	setInt(&c.Relay.DefaultRPM, "RELAY_DEFAULT_RPM")
 	setDuration(&c.Relay.RetrySameUpstreamDelay, "RELAY_RETRY_SAME_UPSTREAM_DELAY")
+	setInt(&c.Relay.ClientMapLimit, "RELAY_CLIENT_MAP_LIMIT")
+	setDuration(&c.Relay.ClientMapTTL, "RELAY_CLIENT_MAP_TTL")
 
 	setStr(&c.Security.Secret, "RELAY_SECRET")
 	// 管理台登录密钥与会话时长。密钥缺失不报错（保持旧部署可升级），
@@ -226,6 +244,8 @@ func envKeys() map[string]string {
 		"max_concurrency":              "RELAY_MAX_CONCURRENCY",
 		"default_rpm":                  "RELAY_DEFAULT_RPM",
 		"retry_same_upstream_delay_ms": "RELAY_RETRY_SAME_UPSTREAM_DELAY",
+		"client_map_limit":             "RELAY_CLIENT_MAP_LIMIT",
+		"client_map_ttl_hours":         "RELAY_CLIENT_MAP_TTL",
 		"secret":                       "RELAY_SECRET",
 		"console_auth_enabled":         "RELAY_ADMIN_KEY",
 		"session_ttl_hours":            "RELAY_SESSION_TTL",
@@ -289,6 +309,14 @@ func (c *Config) validate() error {
 	}
 	if c.Relay.RetrySameUpstreamDelay > 30*time.Second {
 		return fmt.Errorf("relay.retry_same_upstream_delay 不应超过 30s: %s", c.Relay.RetrySameUpstreamDelay)
+	}
+	// 映射缓存的上限是安全边界，配成 0/负数会让「防随机 UA 撑爆」失效；
+	// 负 TTL 会让条目一写入就过期（每次请求都落一次 DB），同样是错的配置。
+	if c.Relay.ClientMapLimit <= 0 {
+		return fmt.Errorf("relay.client_map_limit 必须为正，当前: %d", c.Relay.ClientMapLimit)
+	}
+	if c.Relay.ClientMapTTL < 0 {
+		return fmt.Errorf("relay.client_map_ttl 不能为负: %s", c.Relay.ClientMapTTL)
 	}
 	return nil
 }

@@ -126,7 +126,10 @@ func run() error {
 	live := api.NewLiveHub(logger)
 	gate := relay.NewConcurrencyGate(cfg.Relay.MaxConcurrency)
 	rateLimiter := relay.NewRateLimiter()
-	logs := relay.NewLogWriter(st.DB(), 2048, logger)
+	logs := relay.NewLogWriterWithClientMap(st.DB(), 2048, logger, relay.ClientMapOptions{
+		Limit: cfg.Relay.ClientMapLimit,
+		TTL:   cfg.Relay.ClientMapTTL,
+	})
 	// 注意这里**没有** defer logs.Close()：关闭要等队列写完，而 defer 是在
 	// run() 返回时才跑，那时已经过了优雅关闭的预算。收尾统一放在下面
 	// logs.CloseAndFlush(...)，给它一个明确的上限。
