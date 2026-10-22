@@ -4,7 +4,8 @@
 [![Release](https://img.shields.io/github/v/release/ashu1800/llm-relay)](https://github.com/ashu1800/llm-relay/releases)
 
 个人自用优先的大模型 API 网关：多协议入站、分组多渠道转发、按渠道 × 模型计价。
-单个裸二进制 + systemd 运行，前端产物 embed 进二进制，装好即带 Web 管理台。
+单个裸二进制运行（Linux 交给 systemd，Windows 注册为系统服务），前端产物 embed
+进二进制，装好即带 Web 管理台。
 
 - 后端 Go 1.25 + Gin，前端 Vue 3 + Ant Design Vue 4，PostgreSQL 存储
 - 默认监听 `127.0.0.1:8888`
@@ -67,7 +68,7 @@
 ### 一键安装（推荐）
 
 自动从 GitHub Releases 下载预编译二进制（前端已 embed），装好 PostgreSQL 并注册
-systemd 服务。
+为系统服务（Linux 用 systemd，Windows 用 SCM）。
 
 **前置条件**：Linux 服务器（amd64 / arm64，Debian/Ubuntu）+ Root + systemd 运行中
 （WSL 需在 `/etc/wsl.conf` 里启用 `[boot] systemd=true`）。PostgreSQL 由脚本自动
@@ -121,6 +122,52 @@ journalctl -u llm-relay -f                 # 实时日志
 bash deploy/restore.sh --list              # 查看升级前的自动备份
 ```
 
+### Windows 安装
+
+Windows 侧产物是 `llm-relay_<版本>_windows_amd64.zip`，用归档里的
+`deploy/install.ps1` 安装。以**管理员**身份打开 PowerShell：
+
+```powershell
+# 解压归档后，在归档目录里执行
+pwsh -File .\deploy\install.ps1
+```
+
+**前置条件**：Windows 10/11 或 Server 2016+（amd64）+ 管理员权限。
+PostgreSQL 由脚本自动静默安装（约 348 MB，只装 server 与命令行工具）；
+已有实例时可加 `-PgMode skip` 跳过安装。
+
+脚本会自动：检测架构 → 下载并 sha256 校验 → 解压到 `%ProgramData%\llm-relay`
+→ 装 PostgreSQL 并建库建角色 → 生成配置与随机密钥（ACL 只允许 SYSTEM 与
+Administrators 读取）→ 注册为 Windows 服务并配置失败自动重启 → 健康检查。
+
+常用参数（与 `install.sh` 同名同义）：
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `-InstallDir` | `%ProgramData%\llm-relay` | 安装目录 |
+| `-Port` | `8888` | 监听端口 |
+| `-BindAddr` | `127.0.0.1` | 监听地址 |
+| `-PublicOrigin` | — | 公网/反代部署时的管理台来源 |
+| `-DbName` / `-DbUser` | `llm_relay` / `llmrelay` | 数据库 |
+| `-Version` | 最新 Release | 要安装的版本号（不带 v） |
+| `-GhProxy` | — | GitHub 下载加速前缀 |
+| `-PgMode` | `auto` | `auto` 按需安装 PostgreSQL；`skip` 只检测 |
+
+> - 安装目录特意放在 `%ProgramData%` 而不是 `Program Files`：**一键更新**需要在
+>   可执行文件同目录写临时文件并改名，`Program Files` 对服务账户不可写。
+> - 日志走文件（`<InstallDir>\logs\llm-relay.log`，100 MB 轮转一份历史），
+>   因为 Windows 服务没有 stdout 接收方，systemd 的 journald 在这里没有对应物。
+> - 重复运行就是升级：三把密钥（DB 密码 / `RELAY_SECRET` / `RELAY_ADMIN_KEY`）
+>   原样沿用，升级前自动把数据库 `pg_dump` 到 `<InstallDir>ackups\`。
+
+常用命令：
+
+```powershell
+Get-Service llm-relay                          # 服务状态
+Restart-Service llm-relay                      # 重启
+Get-Content -Wait "$env:ProgramData\llm-relay\logs\llm-relay.log"   # 实时日志
+```
+
 ## 在线更新
 
 管理台侧栏品牌下方的版本徽标就是更新入口：当前版本、检测新版本、一键更新与回滚。
@@ -129,7 +176,7 @@ bash deploy/restore.sh --list              # 查看升级前的自动备份
 
 | 形态 | 谁注入 | 一键更新 | 原因 |
 |---|---|---|---|
-| `binary` | goreleaser 发布产物（`install.sh` 安装的即此形态） | 原子替换自己的可执行文件 | systemd `Restart=always` 负责拉起新版本 |
+| `binary` | goreleaser 发布产物（`install.sh` / `install.ps1` 安装的即此形态） | 原子替换自己的可执行文件 | 托管方负责拉起新版本：Linux 是 systemd `Restart=always`，Windows 是 SCM 的 `sc failure` 恢复策略 |
 | `source` | 兜底（本地 `go build` 未注入时一律按它处理） | **不允许** | 避免用官方二进制覆盖开发者本地的构建产物 |
 
 更新流程的几个刻意取舍：
@@ -254,7 +301,7 @@ llm-relay/
 │   └── internal/               api / config / model / store / relay / pricing /
 │                               proxy / secure / version / update / web(前端 embed)
 ├── frontend/                   Vue 3 + Vite + Ant Design Vue 4
-├── deploy/                     install.sh / restore.sh / .env.example
+├── deploy/                     install.sh / install.ps1 / restore.sh / .env.example
 ├── scripts/                    端到端验证脚本与发布脚本（见 docs/development.md）
 ├── docs/                       ui-spec.md（UI 规格）、development.md（开发细节）
 └── .github/workflows/          ci.yml（push/PR）、release.yml（tag 触发发布）

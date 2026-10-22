@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // ErrNoBackup 表示没有可回滚的备份。
@@ -43,6 +44,125 @@ func SelfPath() (string, error) {
 
 // BackupPath 返回给定可执行文件对应的备份路径。
 func BackupPath(exePath string) string { return exePath + backupSuffix }
+
+// RollbackFromPath 是回滚时「当前版本」的临时落脚点。
+// 它与 backupSuffix 分开命名：.backup 始终表示「上一版」，
+// 而这个文件表示「回滚前正在跑的那一版」，两者用途不同，不能混用一个位置。
+func RollbackFromPath(exePath string) string { return exePath + ".rollback-from" }
+
+// moveAside 把 src 改名到「同目录、带时间戳、且当前空闲」的名字上。
+//
+// 用来处理一个 Windows 特有的僵局：某个文件既删不掉（是运行中的映像），
+// 又必须从当前名字上让开（正位要放新内容）。改名是允许的 —— 实测
+// 「运行中映像可改名、不可删/不可覆盖」—— 所以挪开是唯一出路。
+//
+// 返回挪到的新路径；任何一步失败都返回空串，由调用方报错。
+// 名字带时间戳而不是固定后缀：连续多次「更新但不重启」会在磁盘上
+// 留下多份挪开的备份，固定名字第二次就会撞车。撞车时追加 -1、-2…
+// 数字后缀用连字符隔开，好让 CleanupStaleBackups 的「时间戳」判定
+// 不会把那个后缀当成时间戳的一部分。
+func moveAside(src string) string {
+	stamp := time.Now().Format("20060102-150405")
+	for i := 0; i < 100; i++ {
+		dst := src + "." + stamp
+		if i > 0 {
+			dst = fmt.Sprintf("%s.%s-%d", src, stamp, i)
+		}
+		if _, err := os.Stat(dst); err == nil {
+			continue // 已存在，换下一个
+		}
+		if err := os.Rename(src, dst); err != nil {
+			return ""
+		}
+		return dst
+	}
+	return ""
+}
+
+// MoveAsideBackup 把当前备份挪到一个空闲名字上，返回新路径（失败返回空串）。
+//
+// 导出是因为「启动时清理」与「替换时让位」用的是同一套命名规则：
+// 两者如果各写一份，清理就可能删不到替换挪出来的文件。
+func MoveAsideBackup(exePath string) string {
+	backup := BackupPath(filepath.Clean(exePath))
+	if _, err := os.Stat(backup); err != nil {
+		return ""
+	}
+	return moveAside(backup)
+}
+
+// isMovedAsideName 判断 name 是否是 moveAside 生成的形状：
+// <base>.<8位日期>-<6位时间>[-<序号>]。
+//
+// 只按数字/连字符形状判断会误伤（.backup.1 这种手写文件名也会命中），
+// 所以要求第一段必须是 8+1+6 的日期时间形状。用户的 .backup-notes.txt
+// 之类因此不会被清掉。
+func isMovedAsideName(name, base string) bool {
+	rest, ok := strings.CutPrefix(name, base+".")
+	if !ok {
+		return false
+	}
+	const stampLen = len("20060102-150405") // 15
+	if len(rest) < stampLen {
+		return false
+	}
+	stamp := rest[:stampLen]
+	if stamp[8] != '-' {
+		return false
+	}
+	if strings.Trim(stamp[:8]+stamp[9:], "0123456789") != "" {
+		return false
+	}
+	// 时间戳之后只允许「空」或「-<序号>」
+	tail := rest[stampLen:]
+	if tail == "" {
+		return true
+	}
+	if !strings.HasPrefix(tail, "-") {
+		return false
+	}
+	seq := tail[1:]
+	return seq != "" && strings.Trim(seq, "0123456789") == ""
+}
+
+// CleanupStaleBackups 删除上一个进程遗留的、被挪开的备份，返回删除个数。
+//
+// 必须在**启动早期**调用，理由有两层：
+//   - 那些文件是上一次更新/回滚时「删不掉只好挪开」的运行中影像，
+//     此刻新进程已经起来，旧影像早就不在了，删得掉；
+//   - 不删的话它们会一直堆在安装目录里，每点一次更新多一份。
+//
+// 正位备份（exePath+".backup"）必须保留 —— 那是回滚的目标。
+// 只匹配 moveAside 生成的形状，避免误删用户自己的文件。
+func CleanupStaleBackups(exePath string) int {
+	exePath = filepath.Clean(exePath)
+	dir := filepath.Dir(exePath)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+
+	n := 0
+	bases := []string{filepath.Base(BackupPath(exePath)), filepath.Base(RollbackFromPath(exePath))}
+	for _, e := range entries {
+		name := e.Name()
+		matched := false
+		for _, base := range bases {
+			if isMovedAsideName(name, base) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, name)); err == nil {
+			n++
+		}
+	}
+	return n
+}
 
 // ReplaceSelf 用 newBinary 原子替换 exePath，并把原文件留作备份。
 //
@@ -94,9 +214,23 @@ func ReplaceSelf(exePath, newBinary string) error {
 
 	backupPath := BackupPath(exePath)
 
-	// 清掉上一轮的备份。失败不致命：可能是上一个进程留下的、
-	// 权限不对，rename 会覆盖它（rename 到已存在文件是允许的）
-	_ = os.Remove(backupPath)
+	// 清掉上一轮的备份。失败**不能**忽略。
+	//
+	// 原实现是 `_ = os.Remove(backupPath)`，注释里假设「rename 会覆盖它」。
+	// 那个假设在 Linux 上成立，在 Windows 上不成立：上一轮的备份很可能
+	// 正是**正在运行的那个映像**（第一次更新把运行中的 exe 改名成了备份，
+	// 进程在重启之前一直从它运行）。映像节锁删除 —— os.Remove 被拒、
+	// os.Rename 到同一个已存在的名字同样被拒。于是第二次更新会在这里
+	// 失败，报出来却是「备份当前版本失败」，把排查引向「目录不可写」。
+	//
+	// 正确做法：删不掉就把它**挪到时间戳名下**让出正位。不能让备份换名字，
+	// 因为 RestoreBackup 只认 exePath+".backup"，回滚目标必须留在正位上。
+	if err := os.Remove(backupPath); err != nil && !os.IsNotExist(err) {
+		if moved := moveAside(backupPath); moved == "" {
+			return fmt.Errorf("清理上一轮的备份失败（%s）：%w。"+
+				"它可能仍是正在运行的旧版本，重启服务后再试", filepath.Base(backupPath), err)
+		}
+	}
 
 	// 第 1 步：旧版本转入备份位
 	if err := os.Rename(exePath, backupPath); err != nil {
@@ -140,9 +274,17 @@ func RestoreBackup(exePath string) error {
 	// 把当前版本挪到一个临时名字而不是直接删掉：
 	// 回滚本身也可能是个错误决定（比如回滚到了一个更老的、有已知问题的版本），
 	// 留着它就能再换回来。命名为 .rollback-from 以便与 .backup 区分 ——
-	// 后者始终表示「上一版」，是回滚的目标
-	cur := exePath + ".rollback-from"
-	_ = os.Remove(cur)
+	// 后者始终表示「上一版」，是回滚的目标。
+	//
+	// 这里同样不能假设删得掉：.rollback-from 可能是**上一轮回滚留下的、
+	// 仍在运行中的映像**（回滚后没重启，用户又点了一次回滚）。删不掉就
+	// 挪到时间戳名下 —— 它已经是个待清理的残骸，不需要留在正位。
+	cur := RollbackFromPath(exePath)
+	if err := os.Remove(cur); err != nil && !os.IsNotExist(err) {
+		if moved := moveAside(cur); moved == "" {
+			return fmt.Errorf("暂存当前版本失败（%s 已存在且删不掉）: %w", filepath.Base(cur), err)
+		}
+	}
 	if err := os.Rename(exePath, cur); err != nil {
 		return fmt.Errorf("暂存当前版本失败: %w", err)
 	}

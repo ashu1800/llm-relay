@@ -5,14 +5,25 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
+	"path/filepath"
+	"runtime"
 	"sync"
-	"syscall"
 	"time"
+	// 内嵌 IANA 时区库。
+	//
+	// 这一行解决的是 Windows 上一个静默的错误：Go 在 Windows 上**忽略 TZ
+	// 环境变量**（实测 time.Local 恒为 "Local"），而 statsZoneName 的
+	// /etc/timezone、/etc/localtime 探测在 Windows 全部落空 —— 于是统计
+	// 分桶退化成「按当前 UTC 偏移的固定区间」，跨夏令时的时区会在切换日
+	// 附近算错，而且只有一条告警。内嵌 tzdata 后 time.LoadLocation 在
+	// 任何平台都能解析 IANA 名，安装器只要把时区名写进 statsZoneName
+	// 认识的位置（TZ 或配置）即可。代价是二进制大约 +450KB。
+	_ "time/tzdata"
 
 	"github.com/gin-gonic/gin"
 
@@ -23,14 +34,50 @@ import (
 	"llm-relay/internal/proxy"
 	"llm-relay/internal/relay"
 	"llm-relay/internal/secure"
+	"llm-relay/internal/service"
 	"llm-relay/internal/store"
 	"llm-relay/internal/update"
 	"llm-relay/internal/version"
 )
 
-// 退出预算。三个数加起来必须小于停机宽限（systemd 默认 90 秒，
-// 官方部署单元里配了 Restart=always），否则进程会被 SIGKILL ——
+// defaultConfigPath 决定没有 -config / CONFIG_PATH 时去哪个位置读配置。
+//
+// 原来写死 "config.yaml"（相对**当前工作目录**）。这在 Linux 上没问题
+// （systemd 单元里写了 WorkingDirectory），在 Windows 服务形态下必然失败：
+// SCM 启动的进程 CWD 是 C:\Windows\System32，那里当然没有 config.yaml，
+// 而 config.Load 对「文件不存在」是静默忽略的 —— 表现为「服务起来了但
+// 连不上数据库」，日志里没有任何关于配置的线索。
+//
+// 所以：先看 CWD（保持原有行为，本地开发不受影响），再看**可执行文件同目录**
+// （安装器把 config.yaml 放在那里，与服务自身的生命周期绑定）。
+// 两处都没有时返回 CWD 下的默认名，让后续行为与改动前一致。
+func defaultConfigPath() string {
+	const name = "config.yaml"
+	if _, err := os.Stat(name); err == nil {
+		return name
+	}
+	if exe, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = resolved
+		}
+		beside := filepath.Join(filepath.Dir(exe), name)
+		if _, err := os.Stat(beside); err == nil {
+			return beside
+		}
+	}
+	return name
+}
+
+// 退出预算。三个数加起来必须小于停机宽限，否则进程会被强杀 ——
 // 那时连日志都来不及落库，比多停机几秒更糟。改这几个值时要一起看。
+//
+// 两边的宽限差别很大，所以按平台取不同的预算（见下方 shutdownBudget）：
+//   - systemd 默认给 90 秒（官方部署单元还配了 Restart=always），
+//     但真实停机时间直接等于用户感知的不可用时长，所以仍按秒级收紧；
+//   - Windows 只有约 5 秒：SCM 的 WaitToKillServiceTimeout 默认 5000ms，
+//     控制台关窗口也是同一量级。原来的 3s+1.5s+0.5s=5.0s 正好踩线、
+//     零余量 —— 在 Windows 上会把「刚好来得及的优雅关闭」变成
+//     「收到 Stop 后超时被 TerminateProcess」，日志队列丢一部分。
 const (
 	// 等在途请求收尾的上限
 	shutdownHTTPTimeout = 3 * time.Second
@@ -40,24 +87,85 @@ const (
 	shutdownHeaderGrace = 500 * time.Millisecond
 )
 
+// windowsShutdownBudget 是 Windows 下的对应三项。
+//
+// 留出 1.2 秒余量给进程退出本身（SCM 从收到 Stopped 到真正回收还要时间）。
+// 3.8s 的总账：http 2.2s + flush 1.3s + header grace 0.3s。
+// 数字不是拍的：Windows 上 WaitToKillServiceTimeout 默认 5000ms，
+// 拿满 5.0s 就等于每次都踩在边界上。
+const (
+	windowsShutdownHTTPTimeout  = 2200 * time.Millisecond
+	windowsShutdownFlushTimeout = 1300 * time.Millisecond
+	windowsShutdownHeaderGrace  = 300 * time.Millisecond
+)
+
+// shutdownBudget 返回当前平台的三项退出预算。
+func shutdownBudget() (httpTimeout, flushTimeout, headerGrace time.Duration) {
+	if runtime.GOOS == "windows" {
+		return windowsShutdownHTTPTimeout, windowsShutdownFlushTimeout, windowsShutdownHeaderGrace
+	}
+	return shutdownHTTPTimeout, shutdownFlushTimeout, shutdownHeaderGrace
+}
+
 func main() {
-	if err := run(); err != nil {
+	// 由 service 包决定托管形态：Linux 走信号（systemd / 终端），
+	// Windows 由 SCM 启动时走服务协议，否则走控制台信号。
+	// 上层只看到「ctx 被取消 = 该收尾了」这一件事。
+	if err := service.Run(serviceName, run); err != nil {
 		fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	configPath := flag.String("config", envOr("CONFIG_PATH", "config.yaml"), "配置文件路径")
+// serviceName 必须与 SCM 里注册的服务名一致（deploy/install.ps1 用同一个）。
+// 不一致时 svc.Run 会在启动阶段返回 ERROR_SERVICE_NOT_IN_EXE / 1060，
+// 表现为「服务装上了但一启动就停」。
+const serviceName = "llm-relay"
+
+// run 是进程主体。ctx 由托管方提供：取消即表示托管方要求停止。
+func run(ctx context.Context) error {
+	explicitConfig := envOr("CONFIG_PATH", "")
+	defaultCfg := defaultConfigPath()
+	configPath := flag.String("config", defaultCfg, "配置文件路径")
 	flag.Parse()
+	if *configPath != defaultCfg {
+		explicitConfig = *configPath
+	}
+
+	// 显式指定的配置文件不存在时要**报错**，不能沿用 config.Load 的
+	// 「不存在就用默认值」—— 那是为「没打算用配置文件」的场景准备的。
+	// 用户写了 -config D:\x\config.yaml 却拼错路径时，静默回落会让
+	// 服务用内置默认值连一个不存在的数据库，排查方向完全错。
+	if explicitConfig != "" {
+		if _, err := os.Stat(explicitConfig); err != nil {
+			return fmt.Errorf("配置文件不可用: %w", err)
+		}
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		return err
 	}
 
-	logger := newLogger(cfg.Log)
+	logger, logOut, err := newLogger(cfg.Log)
+	if err != nil {
+		return err
+	}
+	// 日志输出跟着进程走：正常退出时关掉它（Windows 上文件句柄不放，
+	// 下一次更新替换/删日志文件就会被拒）。
+	defer logOut.Close()
 	slog.SetDefault(logger)
+
+	// 清理上一次更新/回滚留下的「挪开的备份」。
+	//
+	// 必须在启动早期做：那些文件在上一个进程还活着时是运行中的映像、
+	// 删不掉，此刻已经可以删了。不清理的话它们会随每次更新累积。
+	// 失败不影响启动 —— 它们是残留物，不是运行必需。
+	if exe, err := update.SelfPath(); err == nil {
+		if n := update.CleanupStaleBackups(exe); n > 0 {
+			logger.Info("已清理上一次更新留下的残留备份", "count", n)
+		}
+	}
 
 	// ---- 加密主密钥 ----
 	cipher, err := secure.NewCipher(cfg.Security.Secret)
@@ -220,8 +328,10 @@ func run() error {
 		},
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	// ctx 由托管方提供（service.Run）：Linux 上来自 SIGTERM/Ctrl-C，
+	// Windows 服务形态下来自 SCM 的 Stop/Shutdown 请求。
+	// 这里不再自己 signal.NotifyContext —— 两处各接一次的话，
+	// Windows 服务下 SCM 的请求会没人理，进程只能被 TerminateProcess。
 
 	// 推送循环跟着进程生命周期走：退出时 ctx 结束，两个 goroutine 自行收尾
 	srv.StartLive(ctx)
@@ -255,8 +365,12 @@ func run() error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		logger.Info("收到退出信号，开始优雅关闭")
+		logger.Info("收到停止请求，开始优雅关闭", "os", runtime.GOOS)
 	}
+
+	// 退出预算按平台取：Windows 的停机宽限只有约 5 秒，
+	// 用 Linux 的 5.0s 会踩线被强杀（见常量处的说明）。
+	httpTimeout, flushTimeout, headerGrace := shutdownBudget()
 
 	// 先叫醒那些「连上了但一个字节都没发」的连接，再 Shutdown。
 	//
@@ -280,7 +394,7 @@ func run() error {
 	shutdownDone := make(chan struct{})
 	go func() {
 		if conns.count() > 0 {
-			time.Sleep(shutdownHeaderGrace)
+			time.Sleep(headerGrace)
 			if n := conns.closeAll(); n > 0 {
 				logger.Info("关闭尚未发出请求的连接", "count", n)
 			}
@@ -295,7 +409,7 @@ func run() error {
 		}
 	}()
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownHTTPTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), httpTimeout)
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		// 超时也要往下走：日志队列里还有没落库的记录，直接 return 会连它一起丢。
@@ -307,7 +421,7 @@ func run() error {
 	// 把日志队列里还没落库的记录写完再退。这个 defer 原本注册在 logs 创建处，
 	// 而它只 close 通道、不等写完 —— 进程一退出，队列里剩下的请求日志就没了。
 	// 队列上限 2048，必须在宽限期内做完，所以给它一个明确的上限。
-	logs.CloseAndFlush(shutdownFlushTimeout, logger)
+	logs.CloseAndFlush(flushTimeout, logger)
 
 	logger.Info("已退出")
 	return nil
@@ -356,7 +470,14 @@ func (t *newConnTracker) closeAll() int {
 	return n
 }
 
-func newLogger(cfg config.LogConfig) *slog.Logger {
+// newLogger 按配置构造日志器，并交回它写死的输出以便退出时关闭。
+//
+// 输出位置由 config.Log.File 决定：空 = stdout（Linux/systemd 形态，日志
+// 由 journald 收），非空 = 直接写文件（Windows 服务形态，SCM 不接管 stdout）。
+//
+// 返回 error 而不是吞掉：日志文件打不开时服务**不该假装正常启动** ——
+// 一个没有日志的服务在出事时等于瞎的，还不如启动就失败、让安装器报出来。
+func newLogger(cfg config.LogConfig) (*slog.Logger, io.WriteCloser, error) {
 	level := slog.LevelInfo
 	switch cfg.Level {
 	case "debug":
@@ -366,11 +487,15 @@ func newLogger(cfg config.LogConfig) *slog.Logger {
 	case "error":
 		level = slog.LevelError
 	}
+	out, err := config.OpenLogWriter(cfg.File, cfg.MaxSizeMB)
+	if err != nil {
+		return nil, nil, err
+	}
 	opts := &slog.HandlerOptions{Level: level}
 	if cfg.Format == "json" {
-		return slog.New(slog.NewJSONHandler(os.Stdout, opts))
+		return slog.New(slog.NewJSONHandler(out, opts)), out, nil
 	}
-	return slog.New(slog.NewTextHandler(os.Stdout, opts))
+	return slog.New(slog.NewTextHandler(out, opts)), out, nil
 }
 
 func requestLogger(logger *slog.Logger) gin.HandlerFunc {

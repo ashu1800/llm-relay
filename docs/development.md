@@ -1059,6 +1059,45 @@ Invoke-WslScript -Path .\deploy\install.sh
 | `Set-Content` 写 CRLF/BOM | `bash: $'\r': command not found` 或 shebang 失效 | `New-WslScript` 按 LF + UTF-8 无 BOM 写，并 `chmod +x` |
 | `-lc` 会读 ~/.profile | 启动文件可能污染退出码（命令成功却是 1） | 模块用 `-c` 起干净的非登录 shell |
 
+### Windows 原生部署与验证
+
+Windows 不是「Linux 部署的翻译」，有几条平台语义必须单独记：
+
+| 事实（实测） | 影响 |
+|---|---|
+| 运行中的 exe **可以**改名，但改名后那份映像**删不掉、也覆盖不了**（`Access is denied`） | 自更新不能假设「先删旧备份」。`update.ReplaceSelf` 在删不掉时把它挪到 `<name>.backup.<时间戳>` 让出正位；正位必须留给「上一版」，否则 `RestoreBackup` 找不到回滚目标 |
+| 进程退出后，那份被挪开的映像立即可删 | 清理放在**启动早期**（`update.CleanupStaleBackups`），不能在替换时硬删 |
+| SCM 的 Stop 不会变成任何 Go 信号 | 必须走 `x/sys/windows/svc`（`internal/service/service_windows.go`）。否则 5 个后台循环停不下来、日志队列不 flush，SCM 超时后直接 `TerminateProcess` |
+| SCM 的恢复动作**只对非零退出码生效** | 「重启服务」在 Windows 上 `os.Exit(75)`（`api.restartExitCode`）；Linux 仍为 0（systemd 只看「退出」这件事） |
+| 服务的 CWD 是 `C:\Windows\System32` | 默认配置路径改成「CWD 优先、exe 同目录兜底」（`defaultConfigPath`）；安装器显式传 `-config` 绝对路径 |
+| 服务没有 stdout 接收方 | 日志必须落文件（`log.file`），否则等于丢日志。`log.max_size_mb` 控制轮转（保留一份 `.1`） |
+| Go 在 Windows 上**忽略 `TZ`**，`time.Local` 恒为 `Local` | `main` 匿名导入 `time/tzdata`，让 `time.LoadLocation` 在任何平台都能解析 IANA 名；`statsZoneName` 的 `/etc/*` 探测在 Windows 自然落空 |
+| Windows PowerShell 5.1 按**系统 ANSI** 读无 BOM 的 `.ps1` | 含中文的 `.ps1` 必须是 **UTF-8 with BOM**，否则引号会被截断成语法错误（`deploy/install.ps1` 已带 BOM） |
+
+验证顺序（本机 Windows）：
+
+```powershell
+cd backend
+go vet ./... ; GOOS=windows go vet ./...
+go test ./...            # replace_windows_test.go 用 SEC_IMAGE 映射复现运行中映像
+GOOS=windows go build -o ..\dist\llm-relay.exe ./cmd/server
+```
+
+端到端手工验证（改服务托管/更新链路之后必须做一次）：
+
+```powershell
+sc.exe create llm-relay-e2e binPath= "...\llm-relay.exe -config ...\config.yaml" start= demand
+sc.exe failure llm-relay-e2e reset= 86400 actions= restart/5000/restart/10000/restart/30000
+sc.exe start llm-relay-e2e
+# 1) 日志里应出现「LLM Relay 已启动」
+# 2) sc.exe stop：日志里必须出现「收到停止请求，开始优雅关闭」+「已退出」——
+#    没有这两行说明 SCM 的 STOP 没接上 ctx，是被 TerminateProcess 收掉的
+```
+
+`SEC_IMAGE` 复现法的要点：单纯 open 一个句柄会**同时**挡住改名，与真实语义
+不符；必须用 `windows.CreateFileMapping(..., PAGE_READONLY|SEC_IMAGE, ...)`
+才复现出「改名可以、删除不行」。
+
 ### 光标审计：`scripts/audit-cursors.mjs`
 
 需要先起一个带调试端口的 Chrome（用法见文件顶部）：把七个路由连同弹窗、

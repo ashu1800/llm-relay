@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -206,9 +207,29 @@ func (s *Server) restartService(c *gin.Context) {
 	// 经反代也不过几十毫秒），同时短到用户察觉不到。
 	go func() {
 		time.Sleep(200 * time.Millisecond)
-		slog.Info("收到重启请求，进程即将退出以触发自动拉起")
-		os.Exit(0)
+		code := restartExitCode()
+		slog.Info("收到重启请求，进程即将退出以触发托管方拉起", "exit_code", code)
+		os.Exit(code)
 	}()
+}
+
+// restartExitCode 返回「主动退出以让托管方重新拉起」时该用的退出码。
+//
+// 两个平台的判据不同，而写错的表现都是「点了重启，服务再也没回来」：
+//
+//   - systemd 的 Restart=always 只看「进程退出」，不看退出码 —— 用 0 即可，
+//     避免在 OnFailure= 之类按非零码统计的场合把一次正常重启记成故障。
+//   - Windows SCM 的恢复动作（install.ps1 配的 sc failure）**只对非零退出码
+//     生效**：exit(0) 会被当成「服务正常停止」，恢复策略不触发，
+//     服务就永远停在那里，只能人工 sc start。
+//
+// 用 75 而不是 1：1 与「启动失败」的退出码撞了，运维看事件日志时
+// 分不清这次退出是「用户点了重启」还是「程序起不来」。
+func restartExitCode() int {
+	if runtime.GOOS == "windows" {
+		return 75
+	}
+	return 0
 }
 
 // writeUpdateError 把更新相关的错误翻译成合适的响应。

@@ -168,15 +168,16 @@ fi
 
 echo
 echo "### 8. 归档里的 deploy/ 是否完整"
-# install.sh 从 Release 归档解包安装，deploy/ 下这三个文件随归档走：
-# .env.example 是手动部署的说明模板，restore.sh 是备份恢复的入口。
+# install.sh 从 Release 归档解包安装，deploy/ 下这几个文件随归档走：
+# .env.example 是手动部署的说明模板，restore.sh 是备份恢复的入口，
+# install.ps1 是 Windows 侧唯一的安装入口（zip 里执行不了 .sh）。
 # 这类「缺一个文件就悄悄少一个功能」的缺口必须由脚本守住。
 #
 # 先把清单存进变量，不要用 `tar | grep -q`：脚本开了 pipefail，
 # 而 grep -q 一匹配上就退出，会让还在写的 tar 收到 SIGPIPE 而以 141 结束，
 # 于是整条管道判定为失败 —— 明明匹配上了却报「不在归档里」。实测踩过。
 ARCHIVE_LIST=$(tar -tzf "$SAMPLE")
-for f in .env.example install.sh restore.sh; do
+for f in .env.example install.sh install.ps1 restore.sh; do
   if printf '%s\n' "$ARCHIVE_LIST" | grep -qx "deploy/$f"; then
     echo "  ✓ deploy/$f"
   else
@@ -185,7 +186,27 @@ for f in .env.example install.sh restore.sh; do
 done
 
 echo
-echo "### 9. 主密钥轮换工具"
+echo "### 9. Windows 归档的安装入口"
+# Windows 的 zip 与 linux 的 tar.gz 是两套解压路径，文件名也不同 ——
+# 单独验一遍，因为「windows 归档里只有 linux 脚本」这种缺口在
+# tar 抽样的第 8 步里看不见。
+WIN_ARCHIVE=$(echo "$ACTUAL" | grep 'windows_amd64.zip' | head -1)
+if [ -n "$WIN_ARCHIVE" ]; then
+  WIN_LIST=$(unzip -Z1 "$WIN_ARCHIVE")
+  for f in deploy/install.ps1 llm-relay.exe; do
+    if printf '%s
+' "$WIN_LIST" | grep -qx "$f"; then
+      echo "  ✓ windows 归档含 $f"
+    else
+      echo "  ✗ windows 归档缺 $f"; rc=1
+    fi
+  done
+else
+  echo "  ✗ 找不到 windows/amd64 归档"; rc=1
+fi
+
+echo
+echo "### 10. 主密钥轮换工具"
 if printf '%s\n' "$ARCHIVE_LIST" | grep -qx 'rotate-secret'; then
   echo "  ✓ 含 rotate-secret（scripts/rotate-secret.sh 调它）"
 else

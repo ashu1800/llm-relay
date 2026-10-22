@@ -73,6 +73,41 @@ jobs:
           CGO_ENABLED=1 go test -race ./...
 
   # ----------------------------------------------------------
+  # 后端（Windows）：编译 + 测试
+  #
+  # 存在的理由只有一个：**Windows 专属的代码路径必须有 CI 守**。
+  # update 包的自替换在 Windows 上语义与 unix 不同（运行中映像可改名、
+  # 不可删/不可覆盖），replace_windows_test.go 用 SEC_IMAGE 映射复现了
+  # 这个语义；service 包的 SCM 托管也只在 windows 上编译。
+  # 不跑这一条，这些分支就只有开发机手测覆盖，回归时没人拦。
+  #
+  # 不跑 -race：race detector 需要 cgo，Windows runner 上要装 MinGW，
+  # 额外失败源大于收益。race 由 ubuntu job 覆盖。
+  # ----------------------------------------------------------
+  backend-windows:
+    name: 后端检查（Windows）
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Go 环境
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: go vet
+        working-directory: backend
+        shell: bash
+        run: go vet ./...
+
+      - name: go test
+        working-directory: backend
+        shell: bash
+        run: go test ./...
+
+  # ----------------------------------------------------------
   # 前端：类型检查 + 构建
   # ----------------------------------------------------------
   frontend:

@@ -110,8 +110,12 @@ archives:
       # glob 会把它整个打进归档 —— make release-snapshot 时会产出一个
       # 几 GB 的 tar.gz，而里面装的是 postgres 的数据文件。
       # CI 里该目录不存在，但本机快照会；列出具体文件两种场景都对。
+      #
+      # install.ps1 必须在列表里：Windows 用户拿到的 zip 是唯一的安装入口，
+      # 而 zip 无法执行 .sh。漏了它，Windows 侧只能手工解压 + 自己注册服务。
       - deploy/.env.example
       - deploy/install.sh
+      - deploy/install.ps1
       - deploy/restore.sh
 
 checksum:

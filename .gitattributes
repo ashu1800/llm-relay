@@ -61,6 +61,11 @@ backend/internal/version/VERSION text eol=lf
 # PowerShell 脚本：Windows 侧执行，CRLF 本身无害，但这里仍然钉 LF ——
 # 理由是**一致性**而不是兼容性：不声明的话它们走 core.autocrlf，
 # 每台机器 checkout 出来的行尾可能不同，diff 里会混入看不见的换行改动。
+#
+# 注意：deploy/install.ps1 含中文，且必须以 **UTF-8 BOM** 入库。
+# Windows PowerShell 5.1 在没有 BOM 时按系统 ANSI 代码页读脚本，
+# 中文会被截断、进而让引号失配报「字符串缺少终止符」（实测踩过）。
+# BOM 与 eol=lf 不冲突：BOM 是文件头的 3 个字节，不受行尾转换影响。
 # （scripts/wsl-bash.psm1 是给 WSL 里的 bash 调用的工具，保持与其它
 #   仓库文本同一种行尾，省得日后有人拿它当 .sh 用而踩 CRLF 的坑。）
 *.ps1 text eol=lf
@@ -89,3 +94,8 @@ backend/internal/version/VERSION text eol=lf
 # 字体是二进制：不写这行会被 text=auto 当文本处理（检出时改换行、比对失真）
 *.ttf binary
 *.otf binary
+
+# install.ps1 的 BOM 是**内容**的一部分，不是编码猜测：
+# git 把它当普通文本存，上面的 *.ps1 eol=lf 继续生效。
+# 如果哪天编辑器把 BOM 去掉了，PowerShell 5.1 会立刻解析失败 ——
+# 这是有意的强约束，别把它「修」成无 BOM。

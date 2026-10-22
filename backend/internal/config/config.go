@@ -111,6 +111,19 @@ type RelayConfig struct {
 type LogConfig struct {
 	Level  string `yaml:"level"`  // debug | info | warn | error
 	Format string `yaml:"format"` // text | json
+
+	// File 非空时把日志写进这个文件而不是 stdout，超过 MaxSizeMB 后轮转。
+	//
+	// 为什么需要它：Linux 上日志交给 journald（systemd 单元里
+	// StandardOutput=journal），本程序只写 stdout 就够了。Windows 服务由
+	// SCM 启动，**没有 stdout 接收方** —— 写 stdout 等于把日志丢进虚空，
+	// 出任何问题都没有线索。所以 Windows 安装器必须把 File 指到文件上。
+	//
+	// 默认空 = 保持原有行为（stdout），Linux 部署不需要改任何配置。
+	File string `yaml:"file"`
+	// MaxSizeMB 是单个日志文件的轮转阈值，单位 MB。<= 0 表示不轮转。
+	// 只保留一份历史（.1）：目标是「别把磁盘写满」，不是日志归档。
+	MaxSizeMB int `yaml:"max_size_mb"`
 }
 
 // Default 返回内置默认值。
@@ -145,7 +158,7 @@ func Default() *Config {
 			ClientMapLimit: 2048,
 			ClientMapTTL:   7 * 24 * time.Hour,
 		},
-		Log: LogConfig{Level: "info", Format: "text"},
+		Log: LogConfig{Level: "info", Format: "text", MaxSizeMB: 100},
 	}
 	// TrustedProxies 不能写进上面的字面量后统一返回 —— 切片是可变值，
 	// 两个调用方拿到同一底层数组会互相改写；每次现造一份。
@@ -195,6 +208,9 @@ func applyEnv(c *Config) {
 	setStr(&c.Database.SSLMode, "DB_SSLMODE")
 	setStr(&c.Database.TimeZone, "DB_TIMEZONE")
 
+	setStr(&c.Log.File, "LOG_FILE")
+	setInt(&c.Log.MaxSizeMB, "LOG_MAX_SIZE_MB")
+
 	setDuration(&c.Relay.UpstreamTimeout, "RELAY_UPSTREAM_TIMEOUT")
 	setDuration(&c.Relay.FirstByteTimeout, "RELAY_FIRST_BYTE_TIMEOUT")
 	setInt(&c.Relay.MaxRetries, "RELAY_MAX_RETRIES")
@@ -234,6 +250,8 @@ func envKeys() map[string]string {
 		"trusted_proxies":              "SERVER_TRUSTED_PROXIES",
 		"log_level":                    "LOG_LEVEL",
 		"log_format":                   "LOG_FORMAT",
+		"log_file":                     "LOG_FILE",
+		"log_max_size_mb":              "LOG_MAX_SIZE_MB",
 		"upstream_timeout_sec":         "RELAY_UPSTREAM_TIMEOUT",
 		"first_byte_timeout_sec":       "RELAY_FIRST_BYTE_TIMEOUT",
 		"max_retries":                  "RELAY_MAX_RETRIES",
