@@ -1,4 +1,4 @@
-#!/usr/bin/env powershell
+﻿#!/usr/bin/env powershell
 # ============================================================
 #  release.ps1 —— 发布一个新版本（Windows 侧入口，逻辑同 scripts/release.sh）
 #
