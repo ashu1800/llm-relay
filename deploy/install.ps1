@@ -207,8 +207,30 @@ try {
     $pgBin = Join-Path $pgsqlRoot 'bin'
     $pgData = Join-Path $InstallDir 'pgdata'
     $psql = Join-Path $pgBin 'psql.exe'
+    $envFile = Join-Path $InstallDir 'install.env'
 
-    # 复用已有实例：已有 psql 或已装了官方安装包时不再下 348MB
+    # 超级用户密码：先取参数，再取上次自动安装时记下的，最后随机生成
+    # （Windows 密码复杂度要求：大写+小写+数字+符号）。
+    function New-PgSuperPassword {
+        $alphabet = [char[]]((48..57) + (65..90) + (97..122))
+        $rand = -join (1..18 | ForEach-Object { $alphabet | Get-Random })
+        return "$rand#A1"
+    }
+    function Read-SavedSuperPassword {
+        if (-not (Test-Path -LiteralPath $envFile)) { return '' }
+        foreach ($line in Get-Content -LiteralPath $envFile) {
+            if ($line -match '^PG_SUPER_PASSWORD=(.+)$') { return $Matches[1].Trim('"') }
+        }
+        return ''
+    }
+
+    $pgPort = 5432
+    # 超管密码必须先初始化 —— Set-StrictMode 下引用未定义变量会直接抛错。
+    $superPassword = $PgSuperPassword
+    if ([string]::IsNullOrWhiteSpace($superPassword)) { $superPassword = Read-SavedSuperPassword }
+    if ([string]::IsNullOrWhiteSpace($superPassword)) { $superPassword = New-PgSuperPassword }
+
+    # 候选 psql：本安装器自己装的那份优先，其次是系统里 EnterpriseDB 的安装包。
     $systemPsql = $null
     foreach ($candidate in @(
             (Join-Path $pgsqlRoot 'bin\psql.exe'),
@@ -218,21 +240,59 @@ try {
         if ($candidate -and (Test-Path -LiteralPath $candidate)) { $systemPsql = $candidate; break }
     }
 
-    $pgPort = 5432
-    $pgOwned = $false   # 本次安装器自己管理的实例
-    # 超管密码：复用已有实例/跳过安装时它一直是空的（那两种情况下
-    # 建库走的是用户已有的认证方式）。必须先初始化 —— Set-StrictMode
-    # 下引用未定义变量会直接抛错，而不是像普通 PowerShell 那样给 $null。
-    $superPassword = $PgSuperPassword
-
+    # ----------------------------------------------------------------
+    # 决定用哪个实例：**能连上才复用，连不上就自己装一个**。
+    #
+    # 这里曾经是「检测到 psql.exe 就复用」，代价在 2026-10-23 暴露：
+    # 机器上装过 EnterpriseDB 的 PostgreSQL 17 时，脚本会把**那个实例**
+    # 当成目标，然后用空密码去连 postgres 超级用户 —— 而那个密码是当初
+    # 装 PostgreSQL 时设的，安装器既不知道也无从绕过。
+    #
+    # 更糟的是没传 -w（禁止交互式索要密码）：psql 会反复提示「用户 postgres
+    # 的口令」，用户输入什么都是错的，屏幕上看起来像一个死循环。
+    #
+    # 所以判据改成「真的能连上吗」：
+    #   · 连得上 → 复用（用户自己装好并在 pg_hba 里放过认证的实例）
+    #   · 连不上 → 不问、不等，直接在 <InstallDir> 下装一个独立实例。
+    #     两者端口相同会冲突，所以已有实例占着 5432 时用 5433。
+    # 无论哪条路，数据库密码都由本脚本随机生成并最后打印给用户。
+    # ----------------------------------------------------------------
+    $useExisting = $false
     if ($systemPsql) {
-        $psql = $systemPsql
-        Write-Ok "检测到已有 PostgreSQL：$psql"
-        # 端口沿用实例实际监听的；这里从 pg_ctl 的注册信息读不出来，
-        # 直接按默认 5432 试连接，连不上再让用户显式指定（-PgMode skip）
+        # -w：永不提示输入密码。连不上就立刻失败，而不是卡在口令提示上。
+        $env:PGPASSWORD = $superPassword
+        $probe = & $systemPsql -w -U postgres -h 127.0.0.1 -p $pgPort -tAc "SELECT 1" 2>&1
+        $probeOk = ($LASTEXITCODE -eq 0 -and "$probe".Trim() -eq '1')
+        Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
+        if ($probeOk) {
+            $useExisting = $true
+            $psql = $systemPsql
+            Write-Ok "复用已有 PostgreSQL：$systemPsql（端口 $pgPort）"
+        } else {
+            if ($PgMode -eq 'skip') {
+                Fail @"
+检测到 PostgreSQL（$systemPsql），但用当前凭据连不上 postgres 超级用户。
+
+当前是 -PgMode skip（不自动安装），请任选其一：
+  · 指定已有实例的超级用户密码：-PgSuperPassword <密码>
+  · 手动建好库与用户后，用与服务一致的密码重新运行本脚本
+  · 去掉 -PgMode skip，让安装器在 $InstallDir 下装一个独立实例（推荐）
+"@
+            }
+            Write-Warn "检测到 PostgreSQL（$systemPsql），但用当前凭据连不上，将安装独立实例"
+            Write-Warn '  （已有实例的 postgres 密码是当初安装时设的，本脚本无法得知；'
+            Write-Warn '   若想复用它，请用 -PgMode skip -PgSuperPassword <密码> 指定）'
+        }
     } elseif ($PgMode -eq 'skip') {
         Fail "未检测到 psql.exe。当前为 -PgMode skip，请先自行安装 PostgreSQL 并把 bin 目录加入 PATH，或去掉该参数让安装器自动安装。"
-    } else {
+    }
+
+    if (-not $useExisting) {
+        # 独立实例：端口避开已被占用的那个
+        if (Get-NetTCPConnection -LocalPort $pgPort -State Listen -ErrorAction SilentlyContinue) {
+            $pgPort = 5433
+            Write-Warn "端口 5432 已被其它服务占用，独立实例改用 $pgPort"
+        }
         Write-Log "下载 PostgreSQL $PgMajor 安装器（约 348MB，首次安装需要几分钟）"
         $pgInstaller = Join-Path $tmp "postgresql-$PgInstallerVersion-windows-x64.exe"
         $pgUrl = "https://get.enterprisedb.com/postgresql/postgresql-$PgInstallerVersion-windows-x64.exe"
@@ -240,21 +300,6 @@ try {
             Invoke-WebRequest -Uri $pgUrl -OutFile $pgInstaller -TimeoutSec 900 -UseBasicParsing
         } catch {
             Fail "下载 PostgreSQL 安装器失败：$($_.Exception.Message)。可改用 -PgMode skip 并自行安装。"
-        }
-
-        # 超级用户密码：Windows 密码复杂度要求（大写+小写+数字+符号）。
-        # 首次随机生成并打印；重装从既有配置沿用。
-        $envFile = Join-Path $InstallDir 'install.env'
-        $superPassword = $PgSuperPassword
-        if ([string]::IsNullOrWhiteSpace($superPassword) -and (Test-Path -LiteralPath $envFile)) {
-            foreach ($line in Get-Content -LiteralPath $envFile) {
-                if ($line -match '^PG_SUPER_PASSWORD=(.+)$') { $superPassword = $Matches[1].Trim('"'); break }
-            }
-        }
-        if ([string]::IsNullOrWhiteSpace($superPassword)) {
-            $alphabet = [char[]]((48..57) + (65..90) + (97..122))
-            $rand = -join (1..18 | ForEach-Object { $alphabet | Get-Random })
-            $superPassword = "$rand#A1"
         }
 
         # 用 optionfile 而不是命令行参数：路径里有空格（ProgramData）
@@ -330,32 +375,28 @@ try {
     $adminKey = if ($oldAdminKey) { $oldAdminKey; Write-Log '复用已有配置中的管理台登录密钥' } else { New-HexSecret }
 
     # 复用已有实例时，超管密码只可能来自 install.env（之前自动装过）
-    if ([string]::IsNullOrWhiteSpace($superPassword) -and (Test-Path -LiteralPath (Join-Path $InstallDir 'install.env'))) {
-        foreach ($line in Get-Content -LiteralPath (Join-Path $InstallDir 'install.env')) {
-            if ($line -match '^PG_SUPER_PASSWORD=(.+)$') { $superPassword = $Matches[1].Trim('"'); break }
-        }
-    }
+    # —— 已在上面统一读过，这里不再重复。
 
     # ------------------------------------------------------------ 建库建角色
     Write-Log '配置数据库'
     $env:PGPASSWORD = $superPassword
     try {
-        $roleExists = (& $psql -U postgres -h 127.0.0.1 -p $pgPort -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DbUser'") 2>$null
+        $roleExists = (& $psql -w -U postgres -h 127.0.0.1 -p $pgPort -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DbUser'") 2>$null
         if ($roleExists -notmatch '1') {
-            & $psql -U postgres -h 127.0.0.1 -p $pgPort -c "CREATE USER $DbUser WITH PASSWORD '$dbPass'" | Out-Null
+            & $psql -w -U postgres -h 127.0.0.1 -p $pgPort -c "CREATE USER $DbUser WITH PASSWORD '$dbPass'" | Out-Null
             if ($LASTEXITCODE -ne 0) { Fail '创建数据库用户失败（超级用户密码是否正确？可先用 -PgSuperPassword 指定）' }
         } else {
             # 已有用户也要同步密码，否则改过密码后服务连不上
-            & $psql -U postgres -h 127.0.0.1 -p $pgPort -c "ALTER USER $DbUser WITH PASSWORD '$dbPass'" | Out-Null
+            & $psql -w -U postgres -h 127.0.0.1 -p $pgPort -c "ALTER USER $DbUser WITH PASSWORD '$dbPass'" | Out-Null
         }
-        $dbExists = (& $psql -U postgres -h 127.0.0.1 -p $pgPort -tAc "SELECT 1 FROM pg_database WHERE datname='$DbName'") 2>$null
+        $dbExists = (& $psql -w -U postgres -h 127.0.0.1 -p $pgPort -tAc "SELECT 1 FROM pg_database WHERE datname='$DbName'") 2>$null
         if ($dbExists -notmatch '1') {
-            & $psql -U postgres -h 127.0.0.1 -p $pgPort -c "CREATE DATABASE $DbName OWNER $DbUser" | Out-Null
+            & $psql -w -U postgres -h 127.0.0.1 -p $pgPort -c "CREATE DATABASE $DbName OWNER $DbUser" | Out-Null
             if ($LASTEXITCODE -ne 0) { Fail '创建数据库失败' }
         }
-        & $psql -U postgres -h 127.0.0.1 -p $pgPort -c "GRANT ALL PRIVILEGES ON DATABASE $DbName TO $DbUser" | Out-Null
+        & $psql -w -U postgres -h 127.0.0.1 -p $pgPort -c "GRANT ALL PRIVILEGES ON DATABASE $DbName TO $DbUser" | Out-Null
         # PostgreSQL 15+ 起 public schema 默认不再给普通用户建表权限
-        & $psql -U postgres -h 127.0.0.1 -p $pgPort -d $DbName -c "GRANT ALL ON SCHEMA public TO $DbUser" | Out-Null
+        & $psql -w -U postgres -h 127.0.0.1 -p $pgPort -d $DbName -c "GRANT ALL ON SCHEMA public TO $DbUser" | Out-Null
     } finally {
         Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
     }
@@ -468,18 +509,50 @@ relay:
 
     Write-Host ''
     if ($ok) {
+        # 凭据清单：全部密码都在这里一次性给出，用户装完不必再去翻配置文件。
+        # 同时写一份到 <InstallDir>\credentials.txt（ACL 同配置文件），
+        # 因为控制台历史会被关掉、截图会丢，而「刚才那个密码是什么」是
+        # 部署后最常被问到的问题。
+        $credLines = @()
+        $credLines += "LLM Relay $Version  (windows/amd64)"
+        $credLines += "安装时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        $credLines += ''
+        $credLines += "管理后台:   http://localhost:$Port"
+        $credLines += "管理密钥:   $adminKey"
+        $credLines += ''
+        $credLines += '数据库连接:'
+        $credLines += "  地址:     127.0.0.1:$pgPort"
+        $credLines += "  库名:     $DbName"
+        $credLines += "  用户名:   $DbUser"
+        $credLines += "  密码:     $dbPass"
+        $credLines += "  PG 超管:  postgres / $superPassword"
+        $credLines += "  （超管密码同样保存在 $(Join-Path $InstallDir 'install.env')）"
+        $credLines += ''
+        $credLines += "配置文件:   $configPath"
+        $credLines += "日志文件:   $logFile"
+
+        $credFile = Join-Path $InstallDir 'credentials.txt'
+        $credLines | Set-Content -LiteralPath $credFile -Encoding UTF8
+        & icacls.exe $credFile /inheritance:r /grant:r 'SYSTEM:(R,W)' 'Administrators:(F)' | Out-Null
+
         Write-Host "部署完成（llm-relay $Version windows/amd64）" -ForegroundColor Green
-        Write-Host "  管理后台: http://localhost:$Port"
-        Write-Host "  监听地址: ${BindAddr}:$Port"
+        Write-Host '────────────────────────────────────────────' -ForegroundColor DarkGray
+        Write-Host '  管理后台   ' -NoNewline; Write-Host "http://localhost:$Port" -ForegroundColor Cyan
+        Write-Host '  管理密钥   ' -NoNewline; Write-Host $adminKey -ForegroundColor Yellow
+        if ($adminGenerated) {
+            Write-Host '             （本次新生成，请妥善保存；泄露后修改配置文件并重启服务）' -ForegroundColor DarkGray
+        }
+        Write-Host ''
+        Write-Host "  数据库     127.0.0.1:$pgPort / $DbName" -ForegroundColor Cyan
+        Write-Host '  数据库用户 ' -NoNewline; Write-Host "$DbUser" -ForegroundColor Yellow
+        Write-Host '  数据库密码 ' -NoNewline; Write-Host $dbPass -ForegroundColor Yellow
+        Write-Host '  PG 超管    ' -NoNewline; Write-Host "postgres / $superPassword" -ForegroundColor DarkYellow
+        Write-Host '────────────────────────────────────────────' -ForegroundColor DarkGray
+        Write-Host "  凭据已保存到 $credFile" -ForegroundColor DarkGray
+        Write-Host '  （仅 SYSTEM 与 Administrators 可读）' -ForegroundColor DarkGray
+        Write-Host ''
         Write-Host "  安装目录: $InstallDir"
         Write-Host "  配置文件: $configPath"
-        Write-Host "  管理密钥: $adminKey（打开管理台时输入它登录）"
-        if ($adminGenerated) {
-            Write-Host '            （本次新生成，请妥善保存；泄露后修改配置文件并重启服务）'
-        }
-        if (-not $PgSuperPassword) {
-            Write-Host "  PG 超管密码: 见 $(Join-Path $InstallDir 'install.env')（仅自动安装的实例有）"
-        }
         Write-Host ''
         Write-Host '  常用命令：'
         Write-Host "    Get-Service $ServiceName                    # 服务状态"

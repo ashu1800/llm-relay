@@ -165,8 +165,23 @@ pwsh -File .\deploy\install.ps1
 `install.ps1` 里 —— 两者没有重复实现。
 
 **前置条件**：Windows 10/11 或 Server 2016+（amd64）+ 管理员权限。
-PostgreSQL 由脚本自动静默安装（约 348 MB，只装 server 与命令行工具）；
-已有实例时可加 `-PgMode skip` 跳过安装。
+
+**关于数据库**：安装器默认在 `%ProgramData%\llm-relay\pgsql` 下装一个**独立**的
+PostgreSQL 实例（约 348 MB，只装 server 与命令行工具），**不需要你提供任何密码**
+—— 超级用户与业务账号的密码都由安装器随机生成，装完会打印出来并写进
+`%ProgramData%\llm-relay\credentials.txt`。
+
+机器上已有 PostgreSQL 时，安装器会先试着用它：**连得上就复用**，连不上
+（例如那个实例的 `postgres` 密码是当初装 PostgreSQL 时设的、安装器不知道）
+就自动改装独立实例，**不会卡在要求你输入密码上**。两者端口冲突时独立实例改用 5433。
+
+想强制复用已有实例时：
+
+```powershell
+pwsh -File .\deploy\install.ps1 -PgMode skip -PgSuperPassword '<已有实例的 postgres 密码>'
+```
+
+`-PgMode skip` 表示**绝不自动安装**：连不上会直接报错并说明下一步，而不是悄悄装一个。
 
 脚本会自动：检测架构 → 下载并 sha256 校验 → 解压到 `%ProgramData%\llm-relay`
 → 装 PostgreSQL 并建库建角色 → 生成配置与随机密钥（ACL 只允许 SYSTEM 与
@@ -183,7 +198,7 @@ Administrators 读取）→ 注册为 Windows 服务并配置失败自动重启 
 | `-DbName` / `-DbUser` | `llm_relay` / `llmrelay` | 数据库 |
 | `-Version` | 最新 Release | 要安装的版本号（不带 v） |
 | `-GhProxy` | — | GitHub 下载加速前缀 |
-| `-PgMode` | `auto` | `auto` 按需安装 PostgreSQL；`skip` 只检测 |
+| `-PgMode` | `auto` | `auto` 连不上已有实例就装独立的；`skip` 绝不自动安装 |
 | `-Ref` | `main` | 仅一键入口：拉取哪个分支 / tag 的安装器 |
 
 > - 安装目录特意放在 `%ProgramData%` 而不是 `Program Files`：**一键更新**需要在
