@@ -183,27 +183,25 @@ irm https://raw.githubusercontent.com/ashu1800/llm-relay/main/deploy/uninstall-w
 
 **前置条件**：Windows 10/11 或 Server 2016+（amd64）+ 管理员权限。
 
-**关于数据库**：机器上**没有** PostgreSQL 时，安装器直接在
-`%ProgramData%\llm-relay` 下装一个独立实例（约 348 MB），超级用户与业务账号
-的密码都由它随机生成，装完打印出来并写进 `credentials.txt`。
+**关于数据库**：安装器不问你用哪个数据库，它只看机器上有没有：
 
-机器上**已有** PostgreSQL 时，安装器会**停下来问你**：
+- **没有** PostgreSQL → 在 `%ProgramData%\llm-relay` 下装一个独立实例（约 348 MB），
+  超级用户口令随机生成，装完打印出来并写进 `credentials.txt`。
+- **已有** PostgreSQL → 直接复用它，只建一个数据库，**不动**该实例里其他任何东西。
+  建库需要该实例 postgres 超级用户的口令：交互运行时提示输入，脚本化时用
+  `-PgSuperPassword` 传入。
 
-```
-  检测到已安装的 PostgreSQL 17
-    C:\Program Files\PostgreSQL\17\bin\psql.exe
+两种情况**都用 `postgres` 作为应用的连接身份**，安装器不再单独建业务角色——
+少一个「角色是否存在 / 密码是否同步」的失败面。
 
-  复用它需要该实例 postgres 超级用户的口令（当初装 PostgreSQL 时设的）。
-  装新实例则在下面目录另建一个，完全不动现有数据库。
-
-  请选择： [1] 使用已安装的实例    [2] 安装新的独立实例  (默认 2)
-```
-
-选 1 才会让你输入口令，输入后立刻验证；连不上就直接告诉你原因，
-不会再出现「反复要密码却永远是错的」。
+> 为什么不再提供「重新装一个实例」的选项：那条路依赖 EnterpriseDB 安装器的
+> unattended option file，而在已有 PostgreSQL 的机器上它会**静默忽略**
+> `prefix`、`servicename`、`disable-components` 并仍然返回退出码 0
+> （2026-10-23 实测：目标目录为空，pgAdmin 被解包 21136 次到既有安装目录）。
+> 一个失败时不会报错的选项，不如没有选项。
 
 脚本会自动：检测架构 → 下载并 sha256 校验 → 解压到 `%ProgramData%\llm-relay`
-→ 装 PostgreSQL 并建库建角色 → 生成配置与随机密钥（ACL 只允许 SYSTEM 与
+→ 复用或安装 PostgreSQL 并建库 → 生成配置与随机密钥（ACL 只允许 SYSTEM 与
 Administrators 读取）→ 注册为 Windows 服务并配置失败自动重启 → 健康检查 →
 打印全部凭据并写入 `credentials.txt`。
 
@@ -215,11 +213,10 @@ Administrators 读取）→ 注册为 Windows 服务并配置失败自动重启 
 | `-Port` | `8888` | 监听端口 |
 | `-BindAddr` | `127.0.0.1` | 监听地址 |
 | `-PublicOrigin` | — | 公网/反代部署时的管理台来源 |
-| `-DbName` / `-DbUser` | `llm_relay` / `llmrelay` | 数据库 |
+| `-DbName` | `llm_relay` | 数据库名（连接身份固定为 `postgres`） |
 | `-Version` | 最新 Release | 要安装的版本号（不带 v） |
 | `-GhProxy` | — | GitHub 下载加速前缀 |
-| `-PgDecision` | 交互询问 | `existing` 复用已有实例；`new` 装独立实例 |
-| `-PgSuperPassword` | — | 复用已有实例时的 postgres 口令（配合上面的参数，适合脚本化） |
+| `-PgSuperPassword` | — | 复用已有实例时建库用的 postgres 口令；不传则交互提示，非交互直接报错 |
 | `-Force` | — | 已装同版本时仍然重新下载并覆盖 |
 
 > 重复运行同一个版本时**不会重新下载**（归档缓存在

@@ -24,10 +24,10 @@
         data directory with the install directory.
 
       * pg_owned = false -- an existing PostgreSQL the user chose to reuse.
-        Uninstall drops ONLY this project's database and role. It never
-        uninstalls or stops that PostgreSQL, because other applications on
-        the machine share it. Dropping the role needs the superuser password,
-        so you are asked for it (Enter skips and prints the SQL instead).
+        Uninstall drops ONLY this project's database. It never uninstalls or
+        stops that PostgreSQL, because other applications on the machine share
+        it. No separate application role is created any more, so there is
+        nothing else to drop.
 
     ENCODING: plain ASCII on purpose -- see the note in install.ps1 (PS 5.1
     decodes BOM-less scripts as ANSI; a BOM breaks `irm | iex`).
@@ -151,7 +151,6 @@ $metaPath = Join-Path $InstallDir 'install.json'
 $pgOwned = $false
 $pgPort = 5432
 $pgDb = 'llm_relay'
-$pgUser = 'llmrelay'
 $pgSvcName = $PgServiceName
 if (Test-Path -LiteralPath $metaPath) {
     try {
@@ -162,7 +161,9 @@ if (Test-Path -LiteralPath $metaPath) {
         if ($meta.PSObject.Properties['pg_owned']) { $pgOwned = [bool]$meta.pg_owned }
         if ($meta.PSObject.Properties['pg_port'] -and $meta.pg_port) { $pgPort = [int]$meta.pg_port }
         if ($meta.PSObject.Properties['pg_database'] -and $meta.pg_database) { $pgDb = $meta.pg_database }
-        if ($meta.PSObject.Properties['pg_user'] -and $meta.pg_user) { $pgUser = $meta.pg_user }
+        # pg_user is not read: every install since the simplification connects
+        # as postgres. The field stays in install.json only so that a marker
+        # written by an older installer still parses.
         if ($meta.PSObject.Properties['pg_service'] -and $meta.pg_service) { $pgSvcName = $meta.pg_service }
     } catch {
         Write-Warn2 "Could not read $metaPath; inferring database provenance from the directory"
@@ -201,8 +202,8 @@ if ($pgOwned) {
     Write-Host '               removing data deletes the instance as well' -ForegroundColor DarkGray
 } else {
     Write-Host '  Database     an existing PostgreSQL instance you chose to reuse' -ForegroundColor Cyan
-    Write-Host "               127.0.0.1:$pgPort / $pgDb (user $pgUser)" -ForegroundColor DarkGray
-    Write-Host '               removing data drops only this project''s DB and role;' -ForegroundColor DarkGray
+    Write-Host "               127.0.0.1:$pgPort / $pgDb" -ForegroundColor DarkGray
+    Write-Host '               removing data drops only this project''s DB;' -ForegroundColor DarkGray
     Write-Host '               PostgreSQL itself is left installed' -ForegroundColor DarkGray
 }
 if ($backupCount -gt 0) {
@@ -220,6 +221,12 @@ if ($Purge) {
     $mode = 'keep'
 } elseif ($Force) {
     $mode = 'keep'
+} elseif ([Console]::IsInputRedirected) {
+    # No terminal to answer on. Default to the destructive-free option instead
+    # of blocking: [Environment]::UserInteractive is true even with stdin
+    # redirected, so it cannot be used to detect this (measured 2026-10-23).
+    $mode = 'keep'
+    Write-Warn2 'No interactive terminal; defaulting to -KeepData. Pass -Purge to remove data.'
 } else {
     Write-Host ''
     Write-Host '  Choose how to uninstall:'
@@ -229,7 +236,7 @@ if ($Purge) {
     if ($pgOwned) {
         Write-Host 'delete the database instance, all data and backups'
     } else {
-        Write-Host 'drop this project''s database and role (PostgreSQL stays installed)'
+        Write-Host 'drop this project''s database (PostgreSQL stays installed)'
     }
     Write-Host ''
     while (-not $mode) {
@@ -248,7 +255,12 @@ if ($mode -eq 'purge' -and -not $Force) {
     if ($pgOwned) {
         Write-Warn2 'This permanently deletes the database instance, all data and every backup.'
     } else {
-        Write-Warn2 "This permanently deletes database $pgDb and role $pgUser (PostgreSQL itself is untouched)."
+        Write-Warn2 "This permanently deletes database $pgDb (PostgreSQL itself is untouched)."
+    }
+    if ([Console]::IsInputRedirected) {
+        # A destructive action must not proceed on silence. Without a terminal
+        # to type DELETE into, refuse and point at the explicit flag.
+        Fail 'Refusing to purge without confirmation. Pass -Purge -Force to proceed non-interactively.'
     }
     $typed = Read-Host '  Type DELETE to confirm (anything else cancels)'
     if ($typed.Trim() -ne 'DELETE') {
@@ -305,7 +317,7 @@ foreach ($n in $servicesToDelete) {
 #   dedicated: an instance this installer created. Service already removed,
 #              its data directory goes with the install directory.
 #   existing : the user's own PostgreSQL. NEVER touch that installation;
-#              drop only this project's database and role.
+#              drop only this project's database.
 if ($mode -eq 'purge') {
     Write-Head 'Removing database'
 
@@ -323,63 +335,40 @@ if ($mode -eq 'purge') {
     } else {
         if (-not $psql) {
             Write-Warn2 'psql.exe not found; cannot drop this project''s database automatically.'
-            Write-Warn2 "  Run manually: DROP DATABASE $pgDb; DROP USER $pgUser;"
+            Write-Warn2 "  Run manually: DROP DATABASE $pgDb;"
         } else {
+            # The connection identity in config.yaml is the instance superuser
+            # (install.ps1 creates no separate application role), so that same
+            # password drops the database. No extra prompt: uninstalling should
+            # not be harder than installing.
             $pgPass = ''
             if (Test-Path -LiteralPath $configPath) {
                 $raw = Get-Content -LiteralPath $configPath -Raw
                 if ($raw -match '(?m)^\s*password:\s*"([^"]*)"') { $pgPass = $Matches[1] }
             }
-            # Connect as the application role (it owns the database, so it can
-            # drop it). We deliberately do NOT ask for the postgres superuser
-            # password just to drop the database: uninstalling should not be
-            # harder than installing.
             $env:PGPASSWORD = $pgPass
             try {
-                & $psql -w -U $pgUser -h 127.0.0.1 -p $pgPort -d postgres -c "DROP DATABASE IF EXISTS $pgDb" 2>&1 | Out-Null
-                if ($LASTEXITCODE -eq 0) {
+                $pgErr = Join-Path $env:TEMP ('llm-relay-drop-' + [Guid]::NewGuid().ToString('N').Substring(0,6) + '.err')
+                # 'localhost', not 127.0.0.1: on a host where WSL publishes its
+                # own PostgreSQL on the loopback IPv4, 127.0.0.1 reaches that
+                # instance instead of the Windows one (see install.ps1).
+                # stdout and stderr are separated because a bare `2>&1` turns
+                # psql's stderr into terminating ErrorRecords under
+                # $ErrorActionPreference='Stop'.
+                & $psql -w -U postgres -h localhost -p $pgPort -d postgres -c "DROP DATABASE IF EXISTS $pgDb" 2>$pgErr | Out-Null
+                # Capture before anything else runs: $LASTEXITCODE belongs to
+                # the most recent native command and any following cmdlet
+                # would not overwrite it, but keeping it adjacent is clearer.
+                $dropExit = $LASTEXITCODE
+                if (Test-Path -LiteralPath $pgErr) { Remove-Item -LiteralPath $pgErr -Force -ErrorAction SilentlyContinue }
+                if ($dropExit -eq 0) {
                     Write-Ok "Dropped database $pgDb"
                 } else {
-                    Write-Warn2 "Failed to drop database $pgDb (insufficient privileges? run as the postgres superuser)"
+                    Write-Warn2 "Failed to drop database $pgDb (wrong superuser password in config.yaml?)"
                     Write-Warn2 "  DROP DATABASE $pgDb;"
                 }
             } finally {
                 Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
-            }
-
-            # The role is a separate matter and cannot be done as $pgUser:
-            # PostgreSQL refuses "DROP ROLE" for the current user ("current user
-            # cannot be dropped"), and a role owning objects cannot be dropped
-            # either -- so the database must go first (above) and the drop needs
-            # the superuser. Rather than leave the role behind silently -- the
-            # earlier version did exactly that while claiming the role was
-            # removed -- ask for the superuser password, and say plainly what is
-            # left to do if it is not given.
-            $pgSuper = ''
-            if (-not $Force -and [Environment]::UserInteractive) {
-                Write-Host ''
-                Write-Host "  The role $pgUser cannot drop itself; dropping it needs the" -ForegroundColor DarkGray
-                Write-Host '  postgres superuser password (Enter to skip and keep the role):' -ForegroundColor DarkGray
-                $secure = Read-Host "  postgres password for the instance at 127.0.0.1:$pgPort" -AsSecureString
-                $pgSuper = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-                    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
-            }
-            if ([string]::IsNullOrWhiteSpace($pgSuper)) {
-                Write-Warn2 "Role $pgUser was left in place (no superuser password given)."
-                Write-Warn2 "  psql -U postgres -c `"DROP ROLE IF EXISTS $pgUser`""
-            } else {
-                $env:PGPASSWORD = $pgSuper
-                try {
-                    & $psql -w -U postgres -h 127.0.0.1 -p $pgPort -d postgres -c "DROP ROLE IF EXISTS $pgUser" 2>&1 | Out-Null
-                    if ($LASTEXITCODE -eq 0) {
-                        Write-Ok "Dropped role $pgUser"
-                    } else {
-                        Write-Warn2 "Failed to drop role $pgUser (still owns objects outside this database?)"
-                        Write-Warn2 "  DROP OWNED BY $pgUser; DROP ROLE $pgUser;"
-                    }
-                } finally {
-                    Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
-                }
             }
             Write-Ok 'The existing PostgreSQL instance was left installed and running'
         }
@@ -450,7 +439,7 @@ if ($mode -eq 'keep') {
     if (-not $pgOwned) {
         Write-Host ''
         Write-Host '  Your PostgreSQL installation was not uninstalled; only this' -ForegroundColor DarkGray
-        Write-Host '  project''s database and role were dropped.' -ForegroundColor DarkGray
+        Write-Host '  project''s database was dropped.' -ForegroundColor DarkGray
     }
 }
 Write-Host '------------------------------------------------------------' -ForegroundColor DarkGray

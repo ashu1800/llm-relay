@@ -57,8 +57,9 @@
 .PARAMETER PublicOrigin
     Fixed origin allowed to reach the console, e.g. https://relay.example.com.
 
-.PARAMETER DbName / DbUser
-    Database name / user. Defaults llm_relay / llmrelay.
+.PARAMETER DbName
+    Database to create. Defaults to llm_relay. The owning role is always the
+    instance's postgres superuser, so no separate -DbUser exists.
 
 .PARAMETER Version
     Version to install (no v prefix). Defaults to the latest Release.
@@ -66,19 +67,11 @@
 .PARAMETER GhProxy
     GitHub download accelerator prefix (e.g. https://gh-proxy.com).
 
-.PARAMETER PgMode
-    auto (default): install a dedicated PostgreSQL instance when none works.
-    skip: never install automatically; only use an existing instance.
-
-.PARAMETER PgDecision
-    What to do when an existing PostgreSQL is found:
-      existing -- reuse it (requires -PgSuperPassword, or you will be asked)
-      new      -- install a separate instance, leaving the existing one alone
-    Empty (default) means: ask on an interactive terminal, default to new.
-
 .PARAMETER PgSuperPassword
-    Password of the existing instance's postgres superuser. Generated
-    automatically for instances this installer creates.
+    Password of an existing PostgreSQL's postgres superuser. Only relevant
+    when an instance is already installed and the owning role has to be
+    created; add -Force to redo that. Omitted: you are prompted interactively,
+    and a non-interactive run fails with an explanation.
 
 .PARAMETER Force
     Re-download and overwrite even when the same version is already installed.
@@ -98,16 +91,12 @@ param(
     [string]$BindAddr = '127.0.0.1',
     [string]$PublicOrigin = '',
     [string]$DbName = 'llm_relay',
-    [string]$DbUser = 'llmrelay',
     [string]$Version = '',
     [string]$GhProxy = '',
-    [ValidateSet('auto', 'skip')]
-    [string]$PgMode = 'auto',
-    # existing = reuse the instance already on this machine
-    # new      = install a separate instance next to it
-    # empty    = ask (interactive) / default to new (non-interactive)
-    [ValidateSet('', 'existing', 'new')]
-    [string]$PgDecision = '',
+    # Password of the *existing* PostgreSQL's postgres superuser, used when an
+    # instance is already on this machine. Only needed for a one-off install of
+    # the owning role; omitted, you are prompted, and non-interactive runs fail
+    # with an explanation rather than guessing.
     [string]$PgSuperPassword = '',
     # Re-download even when this version is already installed
     [switch]$Force
@@ -227,11 +216,9 @@ if ($loopback -notcontains $BindAddr -and [string]::IsNullOrWhiteSpace($PublicOr
 if ($PublicOrigin -and $PublicOrigin -notmatch '^https?://[^\s/]+$') {
     Fail 'PublicOrigin must be a full scheme://host (no path, query or credentials)'
 }
-# Database identifiers end up in SQL: allow only safe characters.
-foreach ($pair in @(@('DbUser', $DbUser), @('DbName', $DbName))) {
-    if ($pair[1] -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
-        Fail "$($pair[0]) may contain only letters, digits and underscores, and must start with a letter or underscore"
-    }
+# The database name ends up in SQL: allow only safe characters.
+if ($DbName -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
+    Fail 'DbName may contain only letters, digits and underscores, and must start with a letter or underscore'
 }
 
 # ---------------------------------------------------------------- version
@@ -388,6 +375,56 @@ try {
     $psql = Join-Path $pgBin 'psql.exe'
     $envFile = Join-Path $InstallDir 'install.env'
 
+    # Runs psql and returns its stdout, with stderr captured to a file instead
+    # of reaching the pipeline.
+    #
+    # Every psql call in this script MUST go through here. With
+    # $ErrorActionPreference='Stop', a native command's redirect `2>&1` turns
+    # its stderr lines into ErrorRecords, and the first one terminates the
+    # script before $LASTEXITCODE can be inspected -- so an expected failure
+    # (wrong password, database missing) killed the installer with a raw
+    # native-command dump instead of reaching the message written for it.
+    # Two rounds of fixing this at individual call sites still left one
+    # uncovered (measured 2026-10-23), hence the single funnel.
+    #
+    # Returns $null when psql could not be started at all.
+    #
+    # -PsqlPath exists because the probe loop points at the system psql
+    # ($systemPsql) before $psql is settled; passing it explicitly avoids
+    # reassigning the script-scope variable from inside a function, which does
+    # not work in PowerShell without the script: prefix and would silently
+    # leave the caller's $psql unchanged.
+    #
+    # $ErrorActionPreference is lowered around the call. In Windows PowerShell
+    # 5.1 a native command writing to stderr becomes a NativeCommandError
+    # ErrorRecord even when stderr is redirected to a file (`2>$ErrFile` is not
+    # enough -- measured 2026-10-23), and under 'Stop' that record terminates
+    # the script. Any expected psql failure (wrong password, missing database)
+    # would therefore abort before $LASTEXITCODE could be checked. 'Continue'
+    # keeps the process's own exit code authoritative; the caller reads stderr
+    # from $ErrFile via Get-PsqlError.
+    function Invoke-Psql {
+        param(
+            [string[]]$Arguments,
+            [string]$ErrFile,
+            [string]$PsqlPath = $psql
+        )
+        if (-not (Test-Path -LiteralPath $PsqlPath)) { return $null }
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $out = (& $PsqlPath @Arguments 2>$ErrFile | Out-String)
+        } finally {
+            $ErrorActionPreference = $previous
+        }
+        return $out
+    }
+    function Get-PsqlError {
+        param([string]$ErrFile)
+        if (-not $ErrFile -or -not (Test-Path -LiteralPath $ErrFile)) { return '' }
+        return (Get-Content -LiteralPath $ErrFile -Raw -ErrorAction SilentlyContinue)
+    }
+
     function New-PgSuperPassword {
         # Windows password policy: upper + lower + digit + symbol.
         $alphabet = [char[]]((48..57) + (65..90) + (97..122))
@@ -416,6 +453,25 @@ try {
     if ($installedMeta -and $installedMeta.PSObject.Properties['pg_port'] -and $installedMeta.pg_port) {
         $pgPort = [int]$installedMeta.pg_port
     }
+
+    # Host used for every client connection.
+    #
+    # No single loopback name is safe. On a machine running WSL, the Linux
+    # distribution can publish its own PostgreSQL on the loopback addresses:
+    # measured 2026-10-23 on this host, wslrelay.exe held 127.0.0.1:5432 and
+    # a WSL PostgreSQL 18 held ::1:5432, while the Windows instance listened
+    # on the wildcard addresses 0.0.0.0 and [::]. A more specific loopback
+    # binding always wins over a wildcard one, so:
+    #   -h 127.0.0.1  -> the WSL instance (wrong database, misleading
+    #                    "password authentication failed for user postgres")
+    #   -h localhost  -> whatever the resolver returns first, which is ::1 or
+    #                    127.0.0.1 depending on the machine -- unstable
+    #
+    # So the host is not chosen by name at all: it is whichever address
+    # actually answers as the instance we are about to manage. Probe the
+    # candidates and keep the first that authenticates. This also covers a
+    # dedicated instance, which only ever listens on the configured port.
+    $pgHostCandidates = @('127.0.0.1', '::1', 'localhost')
     # Must be initialised before use: under Set-StrictMode referencing an
     # undefined variable throws.
     $superPassword = $PgSuperPassword
@@ -434,64 +490,60 @@ try {
     }
 
     # ----------------------------------------------------------------
-    # Which PostgreSQL instance to use. This judgement has changed twice
-    # after reported problems (2026-10-23):
+    # Which PostgreSQL to use: reuse what is already there, else install one.
     #
-    #   Round 1 (wrong): reuse whenever psql.exe exists. On a machine with the
-    #   EnterpriseDB PostgreSQL 17 installed, that targeted the *user's own*
-    #   instance and connected with an empty password; worse, every psql call
-    #   lacked -w, so psql stopped and prompted for the superuser password in
-    #   a loop that could never succeed.
+    # There is deliberately no question here any more. The installer used to
+    # offer "reuse / install a separate instance", which asked the user to
+    # decide something they cannot see -- and the "separate instance" branch
+    # leaned on EnterpriseDB's unattended option file, whose prefix,
+    # servicename and disable-components keys are silently ignored on a
+    # machine that already has PostgreSQL. Measured 2026-10-23: exit code 0,
+    # pgAdmin unpacked 21136 times into C:\Program Files\PostgreSQL\17, the
+    # requested prefix left empty. A choice whose losing branch cannot report
+    # failure is worse than no choice.
     #
-    #   Round 2 (current): ASK. When an existing instance is found, offer a
-    #   clear choice -- reuse it (then request that instance's postgres
-    #   password) or install a separate instance that touches nothing else.
-    #   The two outcomes are very different, so the user decides.
-    #
-    # Non-interactive runs use -PgDecision instead of prompting.
+    # So: any working instance is reused. The only privileged step left is one
+    # CREATE DATABASE, which is verified directly on the next line. When no
+    # instance exists, a dedicated one is installed.
     # ----------------------------------------------------------------
     $useExisting = $false
     if ($systemPsql) {
+        $useExisting = $true
+        $psql = $systemPsql
         $ownInstance = Test-Path -LiteralPath (Join-Path $pgsqlRoot 'bin\psql.exe')
         $pgLabel = 'PostgreSQL'
         if ($systemPsql -match 'PostgreSQL\\(\d+)\\') { $pgLabel = "PostgreSQL $($Matches[1])" }
 
         if ($ownInstance) {
-            # Created by this installer previously: reuse without asking, the
-            # password is in install.env.
+            # Created by this installer previously; its superuser password is
+            # in install.env.
             #
             # The service is checked, not assumed. Reasons it can be missing or
-            # stopped on a machine whose pgsql\ directory still exists:
-            #   * `uninstall-windows.ps1 -KeepData` used to delete the service
-            #     while keeping the data directory;
-            #   * a manual `sc delete`, a failed upgrade, or a reboot with the
-            #     service set to manual.
-            # Without this check every later psql call fails to connect and the
-            # script reports "is the superuser password correct?", which sends
-            # the user looking in the wrong place (measured 2026-10-23).
-            $useExisting = $true
-            $psql = $systemPsql
+            # stopped while pgsql\ still exists: `uninstall-windows.ps1
+            # -KeepData` used to delete the service but keep the data, a manual
+            # `sc delete`, a failed upgrade, or a reboot with the service set
+            # to manual. Without the check every later psql call fails to
+            # connect and the script reports "wrong password", which sends the
+            # user looking in the wrong place (measured 2026-10-23).
             $pgSvc = Get-Service -Name $PgServiceName -ErrorAction SilentlyContinue
             if (-not $pgSvc) {
                 Fail @"
 The PostgreSQL instance at $pgsqlRoot has no service '$PgServiceName'.
 Its data is still in $pgData, but nothing can start it.
 
-Either restore the service (created by the EnterpriseDB installer, so the
-cleanest fix is to uninstall and reinstall this product, choosing the
-existing instance), or move the data directory away and let the installer
-create a fresh instance.
+Restore the service, or remove the pgsql/pgdata directories and run this
+installer again to create a fresh instance.
 "@
             }
-            # Service present but stopped is normal after a reboot; start it.
+            # Stopped is normal after a reboot; start it.
             if ($pgSvc.Status -ne 'Running') {
                 Write-Log "Starting the PostgreSQL service ($PgServiceName)"
                 Start-Service -Name $PgServiceName
                 (Get-Service -Name $PgServiceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
             }
-            # And confirm the port from install.json is really the one it bound:
-            # if nothing listens there, the connection errors below are not
-            # about the password.
+            # Confirm the recorded port is really the one it bound: if nothing
+            # listens there, the connection errors below are not about the
+            # password.
             $listening = $false
             for ($i = 0; $i -lt 20; $i++) {
                 if (Get-NetTCPConnection -LocalPort $pgPort -State Listen -ErrorAction SilentlyContinue) {
@@ -501,87 +553,82 @@ create a fresh instance.
                 Start-Sleep -Milliseconds 500
             }
             if (-not $listening) {
-                Fail "PostgreSQL service $PgServiceName is running but nothing listens on port $pgPort (expected from install.json). Check its postgresql.conf, or pass -Force with a fresh instance."
+                Fail "PostgreSQL service $PgServiceName is running but nothing listens on port $pgPort (recorded in install.json). Check its postgresql.conf."
             }
-            Write-Ok "Reusing the instance created by this installer: $systemPsql (port $pgPort)"
         } else {
-            Write-Host ''
-            Write-Host '------------------------------------------------------------' -ForegroundColor DarkGray
-            Write-Host "  Found an existing $pgLabel" -ForegroundColor Yellow
-            Write-Host "    $systemPsql" -ForegroundColor DarkGray
-            Write-Host ''
-            Write-Host '  Reusing it needs that instance''s postgres superuser password'
-            Write-Host '  (set when PostgreSQL itself was installed).'
-            Write-Host '  Installing a new instance creates a separate one here and'
-            Write-Host '  leaves the existing database completely untouched:'
-            Write-Host "    $InstallDir" -ForegroundColor DarkGray
-            Write-Host '------------------------------------------------------------' -ForegroundColor DarkGray
+            Write-Ok "Found $pgLabel at $systemPsql; reusing it"
+        }
 
-            $decision = $PgDecision
-            if ([string]::IsNullOrWhiteSpace($decision)) {
-                if ($PgMode -eq 'skip') {
-                    # -PgMode skip means "reuse only, never install"
-                    $decision = 'existing'
-                } elseif (-not [Environment]::UserInteractive) {
-                    $decision = 'new'
-                    Write-Warn 'Non-interactive session: defaulting to a new instance (use -PgDecision existing|new)'
-                } else {
-                    while (-not $decision) {
-                        Write-Host ''
-                        Write-Host '  Choose: ' -NoNewline
-                        Write-Host '[1] Use the existing instance    ' -NoNewline -ForegroundColor Cyan
-                        Write-Host '[2] Install a new instance'
-                        Write-Host '  (default 2)'
-                        $answer = Read-Host '  Enter 1 or 2'
-                        switch ($answer.Trim()) {
-                            '1' { $decision = 'existing'; break }
-                            '2' { $decision = 'new'; break }
-                            ''  { $decision = 'new'; break }
-                            default { Write-Warn 'Please enter 1 or 2' }
-                        }
-                    }
-                }
-            }
+        # The superuser password is needed exactly once per database: CREATE
+        # DATABASE runs as postgres, and nothing else here needs privileges.
+        $entered = $PgSuperPassword
+        if ([string]::IsNullOrWhiteSpace($entered) -and $ownInstance) { $entered = Read-SavedSuperPassword }
+        # [Environment]::UserInteractive is TRUE even when stdin is redirected
+        # -- it only means the process is attached to a window station. Guarding
+        # Read-Host with it therefore does not work: measured 2026-10-23, the
+        # installer hung indefinitely under `< /dev/null` because Read-Host
+        # blocked on a pipe with no writer. [Console]::IsInputRedirected
+        # reports what actually matters here.
+        if ([string]::IsNullOrWhiteSpace($entered) -and -not [Console]::IsInputRedirected) {
+            $secure = Read-Host "  Enter the postgres superuser password for $pgLabel (port $pgPort)" -AsSecureString
+            $entered = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
+        }
+        if ([string]::IsNullOrWhiteSpace($entered)) {
+            Fail @"
+An existing $pgLabel was found at $systemPsql, and creating the database needs
+its postgres superuser password.
 
-            if ($decision -eq 'existing') {
-                $entered = $PgSuperPassword
-                if ([string]::IsNullOrWhiteSpace($entered) -and [Environment]::UserInteractive) {
-                    $secure = Read-Host "  Enter the postgres password for $pgLabel" -AsSecureString
-                    $entered = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-                        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
-                }
-                if ([string]::IsNullOrWhiteSpace($entered)) {
-                    Fail 'Chose to reuse the existing instance but no postgres password was given. Pass -PgSuperPassword.'
-                }
-                # -w: never prompt. One wrong password fails immediately.
-                $env:PGPASSWORD = $entered
-                $probe = & $systemPsql -w -U postgres -h 127.0.0.1 -p $pgPort -tAc "SELECT 1" 2>&1
-                $probeOk = ($LASTEXITCODE -eq 0 -and "$probe".Trim() -eq '1')
-                Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
-                if (-not $probeOk) {
-                    Fail @"
-Cannot connect to the postgres superuser of $pgLabel at 127.0.0.1:$pgPort with that password.
-
-Possible causes: wrong password, the instance is not listening on 5432, or
-pg_hba.conf does not allow password auth from localhost.
-
-Either run again and choose [2] (a separate instance, existing data untouched),
-or retry with -PgDecision existing -PgSuperPassword <password>.
+Either pass -PgSuperPassword <password>, or run this installer from an
+interactive terminal so it can prompt.
 "@
-                }
-                $superPassword = $entered
-                $useExisting = $true
-                $psql = $systemPsql
-                Write-Ok "Reusing the existing instance: $systemPsql (port $pgPort)"
-            } else {
-                Write-Ok 'Installing a separate instance; the existing database is untouched'
+        }
+        # -w: never prompt. One wrong password fails immediately instead of
+        # looping (that loop was the original bug, 2026-10-23).
+        #
+        # Redirect only stdout and capture stderr separately. A bare `2>&1`
+        # turns psql's stderr into ErrorRecords, and with
+        # $ErrorActionPreference='Stop' the first one is a TERMINATING error
+        # that propagates before $LASTEXITCODE is examined -- so a wrong
+        # password killed the script with a raw native-command dump instead of
+        # reaching the explanation below (measured 2026-10-23).
+        #
+        # Each candidate host is tried in turn; the first one whose psql
+        # authenticates becomes $pgHost for the rest of the run.
+        $env:PGPASSWORD = $entered
+        $pgHost = ''
+        $probeErr = Join-Path $tmp 'pg-probe.err'
+        foreach ($candidateHost in $pgHostCandidates) {
+            $probe = Invoke-Psql -PsqlPath $systemPsql -Arguments @('-w','-U','postgres','-h',$candidateHost,'-p',"$pgPort",'-tAc','SELECT 1') -ErrFile $probeErr
+            $probeExit = $LASTEXITCODE
+            if ($probeExit -eq 0 -and "$probe".Trim() -eq '1') {
+                $pgHost = $candidateHost
+                break
             }
         }
-    } elseif ($PgMode -eq 'skip') {
-        Fail 'No psql.exe found and -PgMode skip was given. Install PostgreSQL yourself and add its bin directory to PATH, or drop -PgMode skip.'
+        Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
+        if (-not $pgHost) {
+            if (Test-Path -LiteralPath $probeErr) {
+                $detail = (Get-Content -LiteralPath $probeErr -Raw -ErrorAction SilentlyContinue)
+                if ($detail) { Write-Host $detail.Trim() -ForegroundColor DarkYellow }
+            }
+            Fail @"
+Cannot connect to the postgres superuser of $pgLabel on port $pgPort.
+Tried: $($pgHostCandidates -join ', ').
+
+Possible causes: wrong password, the instance is not listening on $pgPort, or
+pg_hba.conf does not allow password auth from the loopback address.
+"@
+        }
+        $superPassword = $entered
+        Write-Ok "Reusing $pgLabel at ${pgHost}:$pgPort as user postgres"
     }
 
+
     if (-not $useExisting) {
+        # A fresh instance only ever listens on this port, so the loopback
+        # address is unambiguous; 127.0.0.1 avoids IPv6 resolution surprises.
+        $pgHost = '127.0.0.1'
         # Separate instance: move off 5432 when something else is listening.
         if (Get-NetTCPConnection -LocalPort $pgPort -State Listen -ErrorAction SilentlyContinue) {
             Write-Warn "Port $pgPort is in use; the separate instance will listen on 5433"
@@ -601,7 +648,7 @@ or retry with -PgDecision existing -PgSuperPassword <password>.
             try {
                 Invoke-WebRequest -Uri $pgUrl -OutFile $pgCached -TimeoutSec 900 -UseBasicParsing
             } catch {
-                Fail "Failed to download the PostgreSQL installer: $($_.Exception.Message). Alternatively install PostgreSQL yourself and rerun with -PgMode skip -PgDecision existing -PgSuperPassword <password>."
+                Fail "Failed to download the PostgreSQL installer: $($_.Exception.Message). Install PostgreSQL yourself first, then rerun this installer -- it will reuse that instance."
             }
         }
 
@@ -726,16 +773,14 @@ or retry with -PgDecision existing -PgSuperPassword <password>.
     }
 
     # ------------------------------------------------------------ secrets
-    # All three must survive a reinstall (same rule as install.sh): changing
-    # the DB password breaks the service, and changing RELAY_SECRET makes
-    # every stored channel key permanently undecryptable.
+    # Both must survive a reinstall (same rule as install.sh): changing
+    # RELAY_SECRET makes every stored channel key permanently undecryptable,
+    # and changing the admin key locks the operator out of the console.
     $configPath = Join-Path $InstallDir 'config.yaml'
-    $oldDbPass = $null
     $oldSecret = $null
     $oldAdminKey = $null
     if (Test-Path -LiteralPath $configPath) {
         $raw = Get-Content -LiteralPath $configPath -Raw
-        if ($raw -match '(?m)^\s*password:\s*"([^"]*)"')      { $oldDbPass = $Matches[1] }
         if ($raw -match '(?m)^\s*secret:\s*"([^"]*)"')        { $oldSecret = $Matches[1] }
         if ($raw -match '(?m)^\s*admin_key:\s*"([^"]*)"')     { $oldAdminKey = $Matches[1] }
     }
@@ -743,40 +788,46 @@ or retry with -PgDecision existing -PgSuperPassword <password>.
     function New-HexSecret {
         param([int]$Bytes = 24)
         $buf = New-Object byte[] $Bytes
-        [System.Security.Cryptography.RandomNumberGenerator]::Fill($buf)
+        # Create() + GetBytes(), not the static Fill(): Fill was added in
+        # .NET Core 3.0 and does not exist in Windows PowerShell 5.1's .NET
+        # Framework, where it fails with MethodNotFound (measured 2026-10-23
+        # on the first real run of this installer).
+        $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        try { $rng.GetBytes($buf) } finally { $rng.Dispose() }
         return ($buf | ForEach-Object { $_.ToString('x2') }) -join ''
     }
 
-    $dbPass = if ($oldDbPass) { $oldDbPass; Write-Log 'Reusing the DB password from the existing config' } else { New-HexSecret }
     $relaySecret = if ($oldSecret) { $oldSecret; Write-Log 'Reusing the encryption master key from the existing config' } else { New-HexSecret }
     $adminGenerated = -not $oldAdminKey
     $adminKey = if ($oldAdminKey) { $oldAdminKey; Write-Log 'Reusing the console login key from the existing config' } else { New-HexSecret }
 
     # ------------------------------------------------------------ database
+    #
+    # Only the database is created; the connection identity is always the
+    # postgres superuser. A dedicated application role used to be created here,
+    # which made every install carry three extra pieces of mutable state (does
+    # the role exist, is its password in sync with config.yaml, and can the
+    # uninstaller drop a role that cannot drop itself). For a single-tenant
+    # self-hosted install that is cost without benefit, and it was another way
+    # for the install to fail halfway.
     Write-Log 'Configuring the database'
     $env:PGPASSWORD = $superPassword
     try {
-        $roleExists = (& $psql -w -U postgres -h 127.0.0.1 -p $pgPort -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DbUser'") 2>$null
-        if ($roleExists -notmatch '1') {
-            & $psql -w -U postgres -h 127.0.0.1 -p $pgPort -c "CREATE USER $DbUser WITH PASSWORD '$dbPass'" | Out-Null
-            if ($LASTEXITCODE -ne 0) { Fail "Failed to create the database user. The superuser password was rejected or PostgreSQL refused the statement (see the psql output above; pass -PgSuperPassword if the password came from an existing instance)." }
-        } else {
-            # Sync the password even for an existing role, otherwise a rotated
-            # password would leave the service unable to connect.
-            & $psql -w -U postgres -h 127.0.0.1 -p $pgPort -c "ALTER USER $DbUser WITH PASSWORD '$dbPass'" | Out-Null
-        }
-        $dbExists = (& $psql -w -U postgres -h 127.0.0.1 -p $pgPort -tAc "SELECT 1 FROM pg_database WHERE datname='$DbName'") 2>$null
+        $dbErr = Join-Path $tmp 'pg-dbprobe.err'
+        $dbExists = Invoke-Psql -Arguments @('-w','-U','postgres','-h',$pgHost,'-p',"$pgPort",'-tAc',"SELECT 1 FROM pg_database WHERE datname='$DbName'") -ErrFile $dbErr
         if ($dbExists -notmatch '1') {
-            & $psql -w -U postgres -h 127.0.0.1 -p $pgPort -c "CREATE DATABASE $DbName OWNER $DbUser" | Out-Null
-            if ($LASTEXITCODE -ne 0) { Fail 'Failed to create the database' }
+            $createErr = Join-Path $tmp 'pg-createdb.err'
+            Invoke-Psql -Arguments @('-w','-U','postgres','-h',$pgHost,'-p',"$pgPort",'-c',"CREATE DATABASE $DbName") -ErrFile $createErr | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                $msg = Get-PsqlError -ErrFile $createErr
+                if ($msg) { Write-Host $msg.Trim() -ForegroundColor DarkYellow }
+                Fail 'Failed to create the database. The superuser password was rejected, or PostgreSQL refused the statement (psql output is above).'
+            }
         }
-        & $psql -w -U postgres -h 127.0.0.1 -p $pgPort -c "GRANT ALL PRIVILEGES ON DATABASE $DbName TO $DbUser" | Out-Null
-        # PostgreSQL 15+ no longer grants CREATE on public to ordinary users.
-        & $psql -w -U postgres -h 127.0.0.1 -p $pgPort -d $DbName -c "GRANT ALL ON SCHEMA public TO $DbUser" | Out-Null
     } finally {
         Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
     }
-    Write-Ok 'Database ready'
+    Write-Ok "Database $DbName ready (owner postgres)"
 
     # ------------------------------------------------------------ pre-upgrade backup
     # Keyed on the pre-existing install, not on "$exePath exists": by this point
@@ -787,10 +838,20 @@ or retry with -PgDecision existing -PgSuperPassword <password>.
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
         $backupFile = Join-Path (Join-Path $InstallDir 'backups') "pre-upgrade-$stamp.sql"
         $pgDump = Join-Path (Split-Path $psql -Parent) 'pg_dump.exe'
-        $env:PGPASSWORD = $dbPass
+        $env:PGPASSWORD = $superPassword
         try {
-            & $pgDump -U $DbUser -h 127.0.0.1 -p $pgPort -d $DbName -f $backupFile 2>$null
-            if ($LASTEXITCODE -eq 0) {
+            $dumpErr = Join-Path $tmp 'pg-dump.err'
+            # Same stderr hazard as Invoke-Psql: keep the action preference
+            # lowered so a failing pg_dump cannot terminate the script.
+            $previous = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                & $pgDump -U postgres -h $pgHost -p $pgPort -d $DbName -f $backupFile 2>$dumpErr | Out-Null
+                $dumpExit = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $previous
+            }
+            if ($dumpExit -eq 0) {
                 Write-Ok "Backed up to $backupFile"
             } else {
                 Remove-Item -LiteralPath $backupFile -ErrorAction SilentlyContinue
@@ -815,10 +876,12 @@ server:
   public_origin: "$PublicOrigin"
 
 database:
-  host: 127.0.0.1
+  host: $pgHost
   port: $pgPort
-  user: "$DbUser"
-  password: "$dbPass"
+  # Always the instance superuser: this installer creates the database but no
+  # separate application role (see the "Configuring the database" note).
+  user: "postgres"
+  password: "$superPassword"
   dbname: "$DbName"
   sslmode: disable
   timezone: Asia/Shanghai
@@ -900,12 +963,11 @@ relay:
         $credLines += "Admin key:  $adminKey"
         $credLines += ''
         $credLines += 'Database:'
-        $credLines += "  Host:    127.0.0.1:$pgPort"
+        $credLines += "  Host:    ${pgHost}:$pgPort"
         $credLines += "  Name:    $DbName"
-        $credLines += "  User:    $DbUser"
-        $credLines += "  Pass:    $dbPass"
-        $credLines += "  Super:   postgres / $superPassword"
-        $credLines += "  (the superuser password is also in $(Join-Path $InstallDir 'install.env'))"
+        $credLines += "  User:    postgres"
+        $credLines += "  Pass:    $superPassword"
+        $credLines += "  (also in $(Join-Path $InstallDir 'install.env'))"
         $credLines += ''
         $credLines += "Config:    $configPath"
         $credLines += "Log:       $logFile"
@@ -917,8 +979,8 @@ relay:
         # Record which database instance this install uses; the uninstaller
         # reads it to decide how to clean up:
         #   pg_owned = $true  -> dedicated instance, removed entirely on uninstall
-        #   pg_owned = $false -> an existing instance, only this project's
-        #                        database and role are dropped
+        #   pg_owned = $false -> an existing instance; uninstall only drops this
+        #                        project's database, never the instance
         # A separate file rather than a config.yaml field: config is read by the
         # service, this marker is only for the install/uninstall scripts.
         $pgMeta = Join-Path $InstallDir 'install.json'
@@ -927,7 +989,7 @@ relay:
             pg_owned      = (-not $useExisting)
             pg_port       = $pgPort
             pg_database   = $DbName
-            pg_user       = $DbUser
+            pg_user       = 'postgres'
             pg_data_dir   = $(if ($useExisting) { '' } else { $pgData })
             pg_service    = $(if ($useExisting) { '' } else { $PgServiceName })
             installed_at  = (Get-Date -Format 'o')
@@ -943,10 +1005,9 @@ relay:
             Write-Host '             (newly generated; keep it. Change it in the config and restart to rotate)' -ForegroundColor DarkGray
         }
         Write-Host ''
-        Write-Host "  Database   127.0.0.1:$pgPort / $DbName" -ForegroundColor Cyan
-        Write-Host '  DB user    ' -NoNewline; Write-Host "$DbUser" -ForegroundColor Yellow
-        Write-Host '  DB pass    ' -NoNewline; Write-Host $dbPass -ForegroundColor Yellow
-        Write-Host '  PG super   ' -NoNewline; Write-Host "postgres / $superPassword" -ForegroundColor DarkYellow
+        Write-Host "  Database   ${pgHost}:$pgPort / $DbName" -ForegroundColor Cyan
+        Write-Host '  DB user    ' -NoNewline; Write-Host 'postgres' -ForegroundColor Yellow
+        Write-Host '  DB pass    ' -NoNewline; Write-Host $superPassword -ForegroundColor Yellow
         Write-Host '------------------------------------------------------------' -ForegroundColor DarkGray
         Write-Host "  Credentials saved to $credFile" -ForegroundColor DarkGray
         Write-Host '  (readable only by SYSTEM and Administrators)' -ForegroundColor DarkGray
