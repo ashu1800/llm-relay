@@ -39,6 +39,7 @@ import AnimatedNumber from '@/components/AnimatedNumber.vue'
 import DataState from '@/components/DataState.vue'
 import PulseBar from '@/components/PulseBar.vue'
 import LiveStatus from '@/components/LiveStatus.vue'
+import BandwidthMeter from '@/components/BandwidthMeter.vue'
 import DailyReport from '@/components/DailyReport.vue'
 import RequestLogPanel from '@/components/RequestLogPanel.vue'
 import { onLive, createThrottledLiveReloader } from '@/composables/useLive'
@@ -863,9 +864,12 @@ onMounted(async () => {
     <!-- 请求脉搏条：一个请求一道流光，失败闪红。它回答的是数字回答不了的
          「此刻还有没有人用」—— 光带安静了就是没流量。
          右侧那枚胶囊回答的是另一半：「光带安静」到底是因为没流量，
-         还是因为实时连接断了（两者看起来一模一样，而处置完全不同）。 -->
+         还是因为实时连接断了（两者看起来一模一样，而处置完全不同）。
+         带宽读数排在胶囊右边：它回答的是第三个问题 ——「这台机器还有多少
+         余量」，包含备份同步、系统更新这些网关看不见的流量（见组件说明）。 -->
     <div class="dash-live-row">
       <PulseBar class="dash-pulse" />
+      <BandwidthMeter class="dash-bandwidth" />
       <LiveStatus class="dash-live-status" />
     </div>
 

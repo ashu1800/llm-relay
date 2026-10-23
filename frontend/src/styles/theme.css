@@ -1260,6 +1260,20 @@ body {
   max-width: 40vw;
 }
 
+/* ---- 「这条线现在不传递信息」的斜纹底轨（2026-10-23）----
+   两处用它表达同一件事：脉搏条断线时的底轨（PulseBar）与带宽采集失败时的
+   曲线位置（BandwidthMeter）。两者必须看起来完全一致 —— 它们都是
+   「仪表静默」的视觉语言，一条 3px 细线加一片 22px 高的槽。
+   放全局而不是各写一份：条纹几何或颜色改了一处、另一处悄悄分叉，
+   而这种分叉在界面上表现为「两个仪表坏得不一样」，没人会去比对。 */
+.hatch-off {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--color-border) 0 3px,
+    transparent 3px 6px
+  );
+}
+
 ::-webkit-scrollbar { width: var(--scrollbar-width); height: var(--scrollbar-width); }
 ::-webkit-scrollbar-track { background: var(--scrollbar-track); }
 ::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: calc(var(--scrollbar-width) / 2); }

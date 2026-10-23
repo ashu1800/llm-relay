@@ -3,15 +3,11 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-
-	"llm-relay/internal/config"
 )
 
 // 实时推送心跳的测试（2026-09-24，配合前端 P1-10 的实时状态指示）。
@@ -25,27 +21,14 @@ import (
 // 测试不连数据库：Store 为 nil 时 liveSocket 会跳过快照（见那边的防御），
 // 这条用例关心的只是「ticker 到了会不会发 heartbeat 帧」。
 func TestLiveSocketHeartbeat(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
 	// 把节拍改小：真等 25 秒的用例不会有人跑第二次
 	old := heartbeatInterval
 	heartbeatInterval = 60 * time.Millisecond
 	defer func() { heartbeatInterval = old }()
 
-	s := &Server{
-		deps: &Deps{
-			Config: &config.Config{Server: config.ServerConfig{Port: 8888}},
-			Live:   NewLiveHub(nil),
-		},
-		startedAt: time.Now(),
-		keys:      newKeyCache(),
-		lastTouch: map[uint]time.Time{},
-	}
-
-	r := gin.New()
-	s.registerAdminRoutes(r)
-	srv := httptest.NewServer(r)
-	defer srv.Close()
+	// 共用的测试 Server 构造（与带宽推送用例同一份：加字段或改路由接线时
+	// 不必再改第二个地方）
+	_, srv := newLiveTestServer(t)
 
 	// httptest 的地址是 http://，换成 ws://
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/admin/live"

@@ -4,6 +4,13 @@ server:
   host: 127.0.0.1
   port: 8888
   mode: release
+  # 看板上的带宽读数取哪张网卡；留空 = 自动选择承载默认路由的那张。
+  # 多网卡机器（专线 + 家宽、WiFi 备份）上默认路由未必是你在看的那条链路，
+  # 采错网卡时读数看起来完全正常、只是答的不是你问的问题 —— 这种错误在界面上
+  # 没有任何痕迹，所以需要时显式指定。Linux 填 eth0 / ens18，
+  # Windows 填「以太网 2」这种显示名（与 ipconfig 里的一致）。
+  # 填错时管理台会直接显示可用网卡列表。
+  # bandwidth_interface: eth0
   # 公网/反代部署时设置为浏览器访问管理台的固定来源，例如 https://relay.example.com。
   # public_origin: https://relay.example.com
   # trusted_proxies: ["127.0.0.1", "::1"]

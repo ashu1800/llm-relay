@@ -39,6 +39,16 @@ type ServerConfig struct {
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"`
 	Mode string `yaml:"mode"` // debug | release
+	// BandwidthInterface 指定带宽读数取哪张网卡，留空 = 自动选择承载默认路由的那张。
+	//
+	// 为什么需要它：自动选择在多网卡机器上并不总是运维想要的那条链路 ——
+	// 服务器可能挂着专线 + 家宽、或者 WiFi 作为备份，而默认路由走的是备份线。
+	// 采错网卡时读数**看起来完全正常**（有起有落、数值也不离谱），
+	// 只是它不是运维在问的那条链路 —— 这种错误没有任何界面上的痕迹。
+	//
+	// 名字取网卡名本身：Linux 是 eth0 / ens18，Windows 是「以太网 2」
+	// （与 GetIfTable2 的 Alias 一致）。配错时错误信息里会列出可用网卡。
+	BandwidthInterface string `yaml:"bandwidth_interface"`
 	// PublicOrigin 是管理台允许的固定浏览器来源，例如 https://relay.example.com。
 	// 留空时仅允许与请求 Host 完全一致的来源；公网部署建议显式配置。
 	PublicOrigin string `yaml:"public_origin"`
@@ -197,6 +207,7 @@ func applyEnv(c *Config) {
 	setStr(&c.Server.Host, "SERVER_HOST")
 	setInt(&c.Server.Port, "SERVER_PORT")
 	setStr(&c.Server.Mode, "GIN_MODE")
+	setStr(&c.Server.BandwidthInterface, "SERVER_BANDWIDTH_INTERFACE")
 	setStr(&c.Server.PublicOrigin, "SERVER_PUBLIC_ORIGIN")
 	setCsv(&c.Server.TrustedProxies, "SERVER_TRUSTED_PROXIES")
 
@@ -246,6 +257,7 @@ func envKeys() map[string]string {
 		"host":                         "SERVER_HOST",
 		"port":                         "SERVER_PORT",
 		"mode":                         "GIN_MODE",
+		"bandwidth_interface":          "SERVER_BANDWIDTH_INTERFACE",
 		"public_origin":                "SERVER_PUBLIC_ORIGIN",
 		"trusted_proxies":              "SERVER_TRUSTED_PROXIES",
 		"log_level":                    "LOG_LEVEL",

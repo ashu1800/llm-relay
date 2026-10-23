@@ -1559,6 +1559,37 @@ console.log('=== 标题层级契约 ===')
 }
 
 console.log('')
+console.log('=== 带宽缓冲前后端一致 ===')
+
+// 带宽环形缓冲的长度在两边各存一份：后端 live.go 的 bandwidthHistory（决定
+// 补帧时下发多少拍）与前端 bandwidth.ts 的 BANDWIDTH_POINTS（决定客户端自己
+// 封到多少点）。数量级参数没法自然共享，但可以锁住它们相等 ——
+// 不等时没有任何报错：服务端发 120 点、客户端裁到 60（或反过来只剩半分钟），
+// 曲线上看起来都「正常」，只是窗口长度悄悄变了。
+//
+// 静态比对源码常量，不依赖构建产物；后端文件缺失时跳过而不是判失败。
+{
+  let checked = false
+  try {
+    const goSrc = readFileSync(join(SRC, '..', '..', 'backend', 'internal', 'api', 'live.go'), 'utf8')
+    const goN = goSrc.match(/const\s+bandwidthHistory\s*=\s*(\d+)/)
+    const tsSrc = readFileSync(join(SRC, 'components/bandwidth.ts'), 'utf8')
+    const tsN = tsSrc.match(/export\s+const\s+BANDWIDTH_POINTS\s*=\s*(\d+)/)
+    if (goN && tsN) {
+      checked = true
+      check(
+        `带宽缓冲长度前后端一致（${goN[1]} 拍）`,
+        Number(goN[1]) === Number(tsN[1]),
+        `后端 bandwidthHistory=${goN[1]}，前端 BANDWIDTH_POINTS=${tsN[1]}`,
+      )
+    }
+  } catch {
+    // 后端源码不在本地：跳过（CI 里前后端一起 checkout，会真正跑到）
+  }
+  if (!checked) console.log('  SKIP  未找到后端 api/live.go，跳过')
+}
+
+console.log('')
 if (failed > 0) {
   console.log(`${failed} 项未通过`)
   process.exit(1)

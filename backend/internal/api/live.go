@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm"
 
 	"llm-relay/internal/model"
+	"llm-relay/internal/netstat"
 )
 
 // liveHub 管理实时推送的订阅者。
@@ -33,6 +34,11 @@ type liveHub struct {
 	next int
 	subs map[int]chan []byte
 
+	// bwMu 保护下面两段带宽状态。它们与订阅表是两件不相干的事，
+	// 所以用独立的锁而不是复用 mu：播报带宽时不该挡住订阅/退订。
+	bwMu  sync.Mutex
+	bwBuf []netstat.Stats
+
 	// 每条连接各自的心跳由写循环负责；这里只记订阅者数量用于日志
 	logger *slog.Logger
 }
@@ -40,6 +46,61 @@ type liveHub struct {
 // NewLiveHub 构造实时推送中心。
 func NewLiveHub(logger *slog.Logger) *liveHub {
 	return &liveHub{subs: make(map[int]chan []byte), logger: logger}
+}
+
+// bandwidthHistory 是新连上的订阅者能立刻拿到的一段历史读数。
+//
+// 60 拍 × 1 秒 = 过去一分钟。为什么不存更长：曲线在界面上只有几十像素宽，
+// 一分钟（60 个点）已经能把「刚才有没有一波流量」显示清楚；
+// 存十分钟是 600 个点，每 GB 流量对应的数据量无所谓，但下发与重绘都变贵，
+// 而这段历史存在的唯一目的就是「打开页面时曲线上不是空的」。
+const bandwidthHistory = 60
+
+// recordBandwidth 记一拍带宽读数，并把它推给所有订阅者。
+//
+// 与另外几条推送不同，带宽**不等变化**：曲线需要的是连续的采样点，
+// 「和上一拍一样」本身就是有信息量的（说明这段时间没有流量）。
+//
+// 没人订阅时**只记不推**：采样必须继续（速率是差分出来的，见
+// liveBandwidthLoop），但推送路径的代价并不只是几十字节 ——
+// broadcast 每次都会写一行 Info 日志，1 Hz × 7×24 是每天 8 万多行、
+// 约 8 MB（journald 条目或轮转文件）。那行日志的理由是
+// 「排查『连上了却收不到推送』」，而零订阅者时它证明不了任何事。
+// 这也顺带保住了 broadcast 注释里「推送本身是低频的」那个前提 ——
+// 带宽是第一条每秒无条件触发的推送。
+func (h *liveHub) recordBandwidth(st netstat.Stats) {
+	h.bwMu.Lock()
+	if h.bwBuf == nil {
+		// 按固定长度建一次：长度始终是 bandwidthHistory，前 bandwidthHistory-1
+		// 个位置在填满之前是零值（At 为零时间），补帧时前端按 available=false 处理
+		h.bwBuf = make([]netstat.Stats, bandwidthHistory)
+	}
+	copy(h.bwBuf, h.bwBuf[1:])
+	h.bwBuf[bandwidthHistory-1] = st
+	h.bwMu.Unlock()
+
+	if h.subscribers() == 0 {
+		return
+	}
+	h.broadcast(mustJSON(liveMessage{Type: "bandwidth", Data: netstat.Frame{Latest: st}}))
+}
+
+// bandwidthSnapshot 返回当前的历史读数，供连接建立时补帧。
+//
+// 跳过零值：缓冲是定长的，服务刚启动时前面的位置还没被填过（At 为零时间）。
+// 把那些「从未采样」的槽当成读数发给前端，曲线上会出现一段贴底的假平线，
+// 大号读数也会显示成一张空网卡。
+func (h *liveHub) bandwidthSnapshot() []netstat.Stats {
+	h.bwMu.Lock()
+	defer h.bwMu.Unlock()
+	out := make([]netstat.Stats, 0, len(h.bwBuf))
+	for _, st := range h.bwBuf {
+		if st.At.IsZero() {
+			continue
+		}
+		out = append(out, st)
+	}
+	return out
 }
 
 // 订阅队列的长度。满了就丢最旧的推送，而不是阻塞广播方 ——
@@ -115,6 +176,14 @@ type liveMessage struct {
 const liveStatsInterval = 2 * time.Second
 const liveLogsInterval = time.Second
 
+// 带宽采样节拍。1 秒是曲线可用的下限：再密（比如 200ms）会让前端每秒重绘
+// 五次，而人眼在一条几十像素高的曲线上分辨不出差别；再疏则会把短突发摊平。
+const liveBandwidthInterval = time.Second
+
+// bandwidthInterval 是实际使用的节拍。默认取上面的常量；
+// 测试里会改小 —— 与 heartbeatInterval 同一个做法。
+var bandwidthInterval = liveBandwidthInterval
+
 // 单帧写入的超时。正常帧只有几百字节，10 秒足够；
 // 超时说明这个客户端已经不消费数据了，断开比无限等更合适。
 const liveWriteTimeout = 10 * time.Second
@@ -166,6 +235,37 @@ func (s *Server) StartLive(ctx context.Context) {
 	//（记账面告警不能因为没人开看板就整体静默），而 statsKick 是容量 1 的
 	// 合并信号，多一个消费者就会把统计推送的唤醒抢走一半 —— 详见 budgetLoop。
 	go s.budgetLoop(ctx)
+	go s.liveBandwidthLoop(ctx)
+}
+
+// liveBandwidthLoop 每秒采一拍网卡计数并推出去。
+//
+// 为什么要单独一个循环、且**不看订阅者数**：
+//
+//  1. 节拍与统计不同（1s vs 2s）。挂在统计循环里意味着曲线每两秒才有一个点，
+//     而带宽是瞬变量 —— 两秒一采会把一个 1.5 秒的突发摊薄成一半高度，
+//     曲线上看不出「刚才猛了一下」。
+//  2. 速率要差分才成立，差分依赖「上一拍是什么时候」。只在有人看的时候采样，
+//     会让「没人看」的那几分钟变成一个大间隔，重新有人连上时第一拍算出来的是
+//     那几分钟的平均值，看起来像一条平稳的直线 —— 而事实上中间发生过什么
+//     谁也不知道。持续采样才能保证每拍都是 1 秒窗口。
+//  3. 代价可以忽略：一次 /proc 读取加一次广播，闲时每秒几十微秒。
+func (s *Server) liveBandwidthLoop(ctx context.Context) {
+	ticker := time.NewTicker(bandwidthInterval)
+	defer ticker.Stop()
+	var iface string
+	if s.deps.Config != nil {
+		iface = s.deps.Config.Server.BandwidthInterface
+	}
+	clock := netstat.NewClock(iface)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		s.deps.Live.recordBandwidth(clock.Sample())
+	}
 }
 
 // liveStatsLoop 每 2 秒算一次今日汇总，变了才推。
@@ -459,6 +559,21 @@ func (s *Server) liveSocket(c *gin.Context) {
 		_ = ws.WriteMessage(websocket.TextMessage, mustJSON(liveMessage{Type: "health", Data: s.deps.Logs.QueueStats()}))
 		// 映射缓存水位同一条理由：它平时不变，不补首帧就永远看不到
 		_ = ws.WriteMessage(websocket.TextMessage, mustJSON(liveMessage{Type: "client_map", Data: s.deps.Logs.ClientCacheStats()}))
+	}
+
+	// 带宽历史同样要补：曲线在打开那一刻就该是「过去一分钟发生过什么」，
+	// 只推实时帧的话用户要盯着看满一分钟才能得到一条有意义的曲线。
+	// 与上面几条不同，这一帧在 Store/Logs 都缺省时仍然要发 ——
+	// 带宽采集不依赖数据库。
+	//
+	// 缓冲在填满之前含零值（服务刚启动时），这里按「已经采样过」过滤：
+	// 零值 Stats 的 At 是零时间，直接发出去会让前端画出一段假的贴底曲线，
+	// 并让 latest 显示成一台根本不存在的网卡。
+	if hist := s.deps.Live.bandwidthSnapshot(); len(hist) > 0 {
+		_ = ws.WriteMessage(websocket.TextMessage, mustJSON(liveMessage{Type: "bandwidth", Data: netstat.Frame{
+			Latest:  hist[len(hist)-1],
+			History: hist,
+		}}))
 	}
 
 	// WebSocket 连接不允许并发写，所以写只在这个 goroutine 里做。

@@ -48,7 +48,7 @@ const title = computed(() => {
 <template>
   <div
     class="pulse-bar"
-    :class="[beat?.kind, { 'is-offline': !liveConnected }]"
+    :class="[beat?.kind, { 'is-offline': !liveConnected, 'hatch-off': !liveConnected }]"
     :title="title"
   >
     <!-- :key 绑时间戳：每来一批就换一个新节点，CSS 动画从头重放 -->
@@ -68,16 +68,11 @@ const title = computed(() => {
 .pulse-bar.ok { --pulse-color: var(--color-green); }
 .pulse-bar.bad { --pulse-color: var(--color-red); }
 
-/* 断线：底轨换成斜纹，明确表达「这条线现在不传递信息」。
-   斜纹用边框色与底轨色交替，两套主题下都看得见；条纹是 45° 的细线，
-   不抢视线（它只占 3px 高）。 */
+/* 断线：底轨换成斜纹（与带宽采集失败共用 .hatch-off，定义在 theme.css），
+   明确表达「这条线现在不传递信息」。条纹是 45° 的细线，不抢视线
+   （它只占 3px 高）；--pulse-color 同时换成灰，亮带不再闪。 */
 .pulse-bar.is-offline {
   --pulse-color: var(--color-text-tertiary);
-  background: repeating-linear-gradient(
-    45deg,
-    var(--color-border) 0 3px,
-    transparent 3px 6px
-  );
 }
 
 .pulse-spark {
