@@ -124,13 +124,45 @@ bash deploy/restore.sh --list              # 查看升级前的自动备份
 
 ### Windows 安装
 
-Windows 侧产物是 `llm-relay_<版本>_windows_amd64.zip`，用归档里的
-`deploy/install.ps1` 安装。以**管理员**身份打开 PowerShell：
+Windows 侧产物是 `llm-relay_<版本>_windows_amd64.zip`。有**一键**与离线两种装法。
+
+**一键（推荐）**：以**管理员**身份打开 PowerShell（开始菜单搜索 PowerShell →
+右键「以管理员身份运行」；或 Win+X →「终端(管理员)」），执行：
 
 ```powershell
-# 解压归档后，在归档目录里执行
+irm https://raw.githubusercontent.com/ashu1800/llm-relay/main/deploy/install-windows.ps1 | iex
+```
+
+国内网络直连 raw.githubusercontent.com 失败时改用加速前缀：
+
+```powershell
+irm https://gh-proxy.com/https://raw.githubusercontent.com/ashu1800/llm-relay/main/deploy/install-windows.ps1 | iex
+```
+
+带参数安装时，用 `[scriptblock]::Create` 包一层（`$args` 无法直接透传给 `iex`）：
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ashu1800/llm-relay/main/deploy/install-windows.ps1))) -InstallerArgs '-Port','9000','-BindAddr','0.0.0.0','-PublicOrigin','https://relay.example.com'
+```
+
+> 一行式的信任锚点是 **GitHub 仓库本身**，与 Linux 侧 `curl | bash` 完全一样：
+> 安装器本身没有签名，脚本会在执行前去掉「来自 Internet」标记（否则
+> RemoteSigned 策略会拒绝）。安装器下载的二进制仍要过 sha256 校验，
+> 但那只防传输损坏 / 归档被替换，不防仓库被改。不接受这一点就用手动方式。
+>
+> `install-windows.ps1` 内部是**纯 ASCII**，这不是疏忽：Windows PowerShell 5.1
+> 会把无 BOM 的 .ps1 按 ANSI 解码，而带 BOM 又会让 `irm ... | iex` 失败
+> （BOM 字符会留在字符串开头，导致 `<#` 块注释失效）。它必须同时支持
+> `-File` 与 `iex` 两种走法，只有纯 ASCII 两边都成立 —— 改这个文件时别加中文。
+
+**手动（离线 / 想先看脚本内容）**：解压归档后，在归档目录里执行：
+
+```powershell
 pwsh -File .\deploy\install.ps1
 ```
+
+`install-windows.ps1` 只负责「拉取 + 去标记 + 调用」，安装逻辑全在
+`install.ps1` 里 —— 两者没有重复实现。
 
 **前置条件**：Windows 10/11 或 Server 2016+（amd64）+ 管理员权限。
 PostgreSQL 由脚本自动静默安装（约 348 MB，只装 server 与命令行工具）；
@@ -152,6 +184,7 @@ Administrators 读取）→ 注册为 Windows 服务并配置失败自动重启 
 | `-Version` | 最新 Release | 要安装的版本号（不带 v） |
 | `-GhProxy` | — | GitHub 下载加速前缀 |
 | `-PgMode` | `auto` | `auto` 按需安装 PostgreSQL；`skip` 只检测 |
+| `-Ref` | `main` | 仅一键入口：拉取哪个分支 / tag 的安装器 |
 
 > - 安装目录特意放在 `%ProgramData%` 而不是 `Program Files`：**一键更新**需要在
 >   可执行文件同目录写临时文件并改名，`Program Files` 对服务账户不可写。
@@ -301,7 +334,7 @@ llm-relay/
 │   └── internal/               api / config / model / store / relay / pricing /
 │                               proxy / secure / version / update / web(前端 embed)
 ├── frontend/                   Vue 3 + Vite + Ant Design Vue 4
-├── deploy/                     install.sh / install.ps1 / restore.sh / .env.example
+├── deploy/                     install.sh / install.ps1 / install-windows.ps1 / restore.sh / .env.example
 ├── scripts/                    端到端验证脚本与发布脚本（见 docs/development.md）
 ├── docs/                       ui-spec.md（UI 规格）、development.md（开发细节）
 └── .github/workflows/          ci.yml（push/PR）、release.yml（tag 触发发布）

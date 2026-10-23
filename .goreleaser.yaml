@@ -116,6 +116,10 @@ archives:
       - deploy/.env.example
       - deploy/install.sh
       - deploy/install.ps1
+      # Windows 的一键入口。它只是把上面的 install.ps1 拉下来执行，
+      # 但对「手里只有一段命令」的用户来说，它是唯一不需要先解压的入口 ——
+      # 与 Linux 侧的 curl | bash 对应。
+      - deploy/install-windows.ps1
       - deploy/restore.sh
 
 checksum:
