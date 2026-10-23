@@ -77,7 +77,12 @@ case "$SERVER_PUBLIC_ORIGIN" in *[[:space:]\"\'\`\$\\]*|*$'\n'*|*$'\r'*) die "SE
 case "$BIND_ADDR" in *[[:space:]\"\'\`\$\\]*|*$'\n'*|*$'\r'*) die "BIND_ADDR 不能包含空白或 shell 特殊字符" ;; esac
 case "$BIND_ADDR" in
   127.0.0.1|localhost|::1) ;;
-  *) [ -n "$SERVER_PUBLIC_ORIGIN" ] || die "BIND_ADDR=$BIND_ADDR 时必须设置 SERVER_PUBLIC_ORIGIN（例如 https://relay.example.com）" ;;
+  # 不再强制 SERVER_PUBLIC_ORIGIN：内网穿透下外网地址由隧道平台分配，
+  # 安装时写不死。留空时管理台回落到「只接受 Host 与请求地址一致的同源
+  # 请求」（api.sameOriginOnly / sameOriginMatches），跨站防护仍在。
+  # 与 deploy/install.ps1 的判定保持一致 —— 两个安装器对同一份配置
+  # 必须给出同一结论，否则同一台机器换个平台装就会一半成功一半失败。
+  *) [ -n "$SERVER_PUBLIC_ORIGIN" ] || warn "BIND_ADDR=$BIND_ADDR 未设 SERVER_PUBLIC_ORIGIN：管理台将接受任何 Host 与请求地址一致的同源请求；有固定域名时建议设置" ;;
 esac
 
 command -v apt-get >/dev/null || die "本脚本只支持 Debian/Ubuntu（需要 apt-get）"

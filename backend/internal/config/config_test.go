@@ -59,8 +59,11 @@ func TestValidatePublicDeployment(t *testing.T) {
 		t.Fatalf("公网监听缺少管理密钥应拒绝，实际 %v", err)
 	}
 	base.Security.AdminKey = "0123456789abcdef-random-value"
-	if err := base.validate(); err == nil || !strings.Contains(err.Error(), "public_origin") {
-		t.Fatalf("公网监听缺少固定来源应拒绝，实际 %v", err)
+	// public_origin 现在可以留空：内网穿透下外网地址由隧道平台分配，
+	// 安装时写不死。留空时 api.sameOriginOnly 回落到「Host 必须与请求一致」，
+	// 跨站防护仍在（见 api/sameorigin_test.go）。
+	if err := base.validate(); err != nil {
+		t.Fatalf("公网监听不设固定来源也应通过（穿透部署），实际 %v", err)
 	}
 	base.Server.PublicOrigin = "https://relay.example.com"
 	if err := base.validate(); err != nil {
@@ -90,8 +93,10 @@ func TestValidateSessionTTL(t *testing.T) {
 }
 
 // 客户端映射缓存的两项配置（2026-10-22 事故修复新增）：
-//   · 上限是「防随机 UA 撑爆」的安全边界，0/负数会让它失效；
-//   · 负 TTL 会让条目一写入就过期（每次请求都落一次 DB），同样是错的配置。
+//
+//	· 上限是「防随机 UA 撑爆」的安全边界，0/负数会让它失效；
+//	· 负 TTL 会让条目一写入就过期（每次请求都落一次 DB），同样是错的配置。
+//
 // 默认值必须与 relay 包的 DefaultClientMapLimit / DefaultClientMapTTL 一致 ——
 // config 不 import relay，两处靠注释互指，这条用例把漂移变成会红的断言。
 func TestValidateClientMap(t *testing.T) {

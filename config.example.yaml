@@ -12,6 +12,8 @@ server:
   # 填错时管理台会直接显示可用网卡列表。
   # bandwidth_interface: eth0
   # 公网/反代部署时设置为浏览器访问管理台的固定来源，例如 https://relay.example.com。
+  # 可选：留空时只接受 Host 与请求地址一致的同源请求（内网穿透下外网地址
+  # 由隧道平台分配、安装时写不死，就是这种场景）。有固定域名时填上更严格。
   # public_origin: https://relay.example.com
   # trusted_proxies: ["127.0.0.1", "::1"]
   # 经 nginx/caddy 反代时按它采信 X-Forwarded-For 解析真实客户端 IP

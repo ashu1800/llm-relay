@@ -46,15 +46,17 @@ func (s *Server) sameOriginOnly() gin.HandlerFunc {
 			return
 		}
 		allowed := strings.TrimSpace(s.deps.Config.Server.PublicOrigin)
-		if allowed == "" {
-			// 配置校验会拒绝非回环监听缺少 PublicOrigin；回环开发环境允许当前 Host，
-			// 便于 httptest 和随机本地端口工作。
-			allowed = "http://" + c.Request.Host
-			if c.Request.TLS != nil {
-				allowed = "https://" + c.Request.Host
-			}
+		// 显式配置来源时严格比对；留空时只比 Host。为什么回落路径不比
+		// scheme，见 sameOriginMatches 的注释 —— 简单说：内网穿透在边缘
+		// 终结 TLS，本进程看到的永远是明文，按 TLS 推 scheme 会把合法请求
+		// 全拒掉。
+		ok := false
+		if allowed != "" {
+			ok = sameOriginValue(origin, allowed)
+		} else {
+			ok = sameOriginMatches(origin, c.Request.Host)
 		}
-		if !sameOriginValue(origin, allowed) {
+		if !ok {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": gin.H{
 				"code":    http.StatusForbidden,
 				"message": "拒绝跨站请求：管理接口只接受来自配置来源的调用",
@@ -64,6 +66,42 @@ func (s *Server) sameOriginOnly() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// sameOriginMatches 判定「Origin 是否就是这个 Host 提供的页面」，
+// 用于 public_origin 留空时的回落路径。与 sameOriginValue 的区别只有一点：
+// **不比 scheme**。
+//
+// 为什么不比 scheme：
+//
+//	允许的 scheme 从哪来？本进程只有两条线索，都不可靠。
+//	  - c.Request.TLS：内网穿透（frp / ngrok / cloudflare tunnel）在边缘
+//	    终结 TLS，转给本机的是明文 HTTP，这里恒为 nil；用户浏览器里却是
+//	    https。按它推 scheme，合法请求全部 403。
+//	  - X-Forwarded-Proto：隧道进程往往不做这一步，或者来源不在
+//	    trusted_proxies 里，采信它等于把判定交给一个可伪造的头部。
+//
+//	而 scheme 在这里本来就不提供防护：跨站防护要挡的是「别的站点发起的
+//	请求」，那由 Host 不匹配拦住；能伪造 Origin 的攻击者同时伪造 scheme
+//	是零成本的，多比一个字段只会换来误拒（2026-10-23，Windows 部署 +
+//	穿透后「登录成功但管理接口全 403、页面空白」的实测）。
+//
+// 仍然严格的部分：port 属于 Host 的一部分，必须一致（:8443 ≠ 无端口）；
+// 配置里显式写了 public_origin 时走 sameOriginValue，那里 scheme 照比 ——
+// 用户写的就是浏览器地址栏里的那个值，没有推断成分。
+func sameOriginMatches(origin, host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	u, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil || u.User != nil || u.Scheme == "" || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	if !strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https") {
+		return false
+	}
+	return strings.EqualFold(u.Host, host)
 }
 
 func sameOriginValue(a, b string) bool {

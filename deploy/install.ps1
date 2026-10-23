@@ -51,11 +51,15 @@
     Listen port. Default 8888.
 
 .PARAMETER BindAddr
-    Listen address. Default 127.0.0.1; changing it to 0.0.0.0 (public
-    deployment) requires -PublicOrigin.
+    Listen address. Default 0.0.0.0 (reachable from the LAN and from a
+    tunnel). -PublicOrigin is optional: when empty the console accepts any
+    origin whose host equals the request address. Pass it to pin the console
+    to one domain.
 
 .PARAMETER PublicOrigin
     Fixed origin allowed to reach the console, e.g. https://relay.example.com.
+    Optional. Worth setting when the console has a stable domain; leave it
+    empty when the address comes from a tunnel that assigns one.
 
 .PARAMETER DbName
     Database to create. Defaults to llm_relay. The owning role is always the
@@ -88,7 +92,12 @@
 param(
     [string]$InstallDir = (Join-Path $env:ProgramData 'llm-relay'),
     [int]$Port = 8888,
-    [string]$BindAddr = '127.0.0.1',
+    # Defaults to the wildcard address: the machine is reached through a
+    # tunnel / on the LAN, so binding to loopback makes the console
+    # unreachable from anywhere but the server itself. PublicOrigin is no
+    # longer required for this -- the console accepts any same-host origin
+    # when public_origin is empty (see api.sameOriginOnly).
+    [string]$BindAddr = '0.0.0.0',
     [string]$PublicOrigin = '',
     [string]$DbName = 'llm_relay',
     [string]$Version = '',
@@ -206,12 +215,19 @@ if ($arch -ne 'AMD64') {
 
 if ($Port -lt 1 -or $Port -gt 65535) { Fail 'PORT must be between 1 and 65535' }
 
-# Same rule as install.sh: a non-loopback listen address requires a fixed
-# origin, otherwise the console's same-origin check rejects every admin
-# request (symptom: blank page after login).
+# Same rule as install.sh's warning, minus the hard stop: a non-loopback
+# listen address no longer REQUIRES a fixed origin.
+#
+# It used to, and that made tunnel deployments impossible to install: frp /
+# ngrok / cloudflare tunnel hand out an address that changes, so there is
+# nothing stable to write down at install time. The console now falls back to
+# "Origin host must equal the request Host" when public_origin is empty, which
+# is what actually blocks cross-site requests. What still must hold for a
+# non-loopback bind is a real admin key -- enforced below and again by the
+# binary at startup.
 $loopback = @('127.0.0.1', 'localhost', '::1')
 if ($loopback -notcontains $BindAddr -and [string]::IsNullOrWhiteSpace($PublicOrigin)) {
-    Fail "BindAddr=$BindAddr requires -PublicOrigin (e.g. https://relay.example.com)"
+    Write-Warn "BindAddr=$BindAddr with no -PublicOrigin: the console will accept any origin whose host matches the request address. Pass -PublicOrigin https://your.domain to pin it."
 }
 if ($PublicOrigin -and $PublicOrigin -notmatch '^https?://[^\s/]+$') {
     Fail 'PublicOrigin must be a full scheme://host (no path, query or credentials)'
@@ -507,12 +523,54 @@ try {
     # instance exists, a dedicated one is installed.
     # ----------------------------------------------------------------
     $useExisting = $false
+    # Name of the PostgreSQL service this install depends on. Empty means
+    # "could not determine" -- the service dependency is then skipped rather
+    # than guessed (a wrong name makes SCM refuse to start llm-relay at boot,
+    # which is worse than the race we are trying to fix).
+    $pgServiceName = ''
     if ($systemPsql) {
         $useExisting = $true
         $psql = $systemPsql
         $ownInstance = Test-Path -LiteralPath (Join-Path $pgsqlRoot 'bin\psql.exe')
         $pgLabel = 'PostgreSQL'
         if ($systemPsql -match 'PostgreSQL\\(\d+)\\') { $pgLabel = "PostgreSQL $($Matches[1])" }
+
+        # Find the service that hosts this binary. Needed for the SCM
+        # dependency set later -- without it, Windows starts llm-relay and
+        # PostgreSQL in parallel and the gateway can reach "connection
+        # refused" before the database is up (measured 2026-10-23: the
+        # service died 7s after boot with SCM error 7023 while postgres.exe
+        # had not finished starting).
+        #
+        # Match on the service's ImagePath containing this bin directory,
+        # neither on a name pattern nor on the port: the EnterpriseDB name is
+        # versioned (postgresql-x64-17) and a renamed/relocated service is
+        # still the right one. A fresh install's own instance is handled by
+        # name below because we just created it.
+        #
+        # install.json is consulted first. It is the surviving record on this
+        # machine, and older versions wrote it only for a self-installed
+        # instance (empty when reusing a system one), so the probe below stays
+        # as the fallback rather than the sole source.
+        if ($installedMeta -and $installedMeta.PSObject.Properties['pg_service'] -and $installedMeta.pg_service) {
+            $recorded = "$($installedMeta.pg_service)"
+            if (Get-Service -Name $recorded -ErrorAction SilentlyContinue) {
+                $pgServiceName = $recorded
+            }
+        }
+        $pgBinDir = Split-Path $systemPsql -Parent
+        if (-not $pgServiceName) {
+            try {
+                $svcHit = Get-CimInstance Win32_Service -ErrorAction Stop |
+                    Where-Object {
+                        $_.PathName -and $_.PathName.ToLowerInvariant().Contains($pgBinDir.ToLowerInvariant())
+                    } | Select-Object -First 1
+                if ($svcHit) { $pgServiceName = $svcHit.Name }
+            } catch { }
+        }
+        if (-not $pgServiceName) {
+            Write-Warn "Could not determine which Windows service hosts $systemPsql; the relay service will start without a database dependency."
+        }
 
         if ($ownInstance) {
             # Created by this installer previously; its superuser password is
@@ -689,6 +747,8 @@ pg_hba.conf does not allow password auth from the loopback address.
             Fail "Installer reported success but $psql is missing"
         }
         Write-Ok "PostgreSQL $PgMajor installed (service $PgServiceName, port $pgPort)"
+        # Fresh instance: we created it, so its name is known for certain.
+        $pgServiceName = $PgServiceName
 
         # ------------------------------------------------------------
         # Verify the service actually RUNS, and move it if it cannot bind.
@@ -925,14 +985,86 @@ relay:
         if ($LASTEXITCODE -ne 0) { Fail 'Failed to register the service (sc.exe create)' }
     }
 
+    # --- DependOnService ---
+    #
+    # This is the actual fix for "the service does not start at boot".
+    #
+    # Without a dependency, SCM starts every auto-start service in parallel.
+    # Measured on a real boot (2026-10-23): llm-relay died 7 seconds after the
+    # system came up with SCM event 7023 while PostgreSQL was still starting,
+    # so every connection attempt was refused and the process exited with
+    # code 1. The service was registered AUTO_START the whole time -- the
+    # start type was never the problem.
+    #
+    # `sc config depend=` replaces the dependency list wholesale, so an empty
+    # value is meaningful: it clears a stale dependency from an earlier run
+    # (e.g. the user reinstalled against a different PostgreSQL, or removed
+    # the dedicated instance and now points at a system one).
+    #
+    # Only set when the name is known: a wrong name makes SCM refuse to start
+    # the service at all ("dependency ... failed to start"), which is a worse
+    # failure than the race being fixed.
+    #
+    # Clearing needs the literal `/` terminator, NOT an empty string.
+    # Measured 2026-10-23: `sc.exe config S depend= $null` from PowerShell
+    # drops the argument entirely (Windows PowerShell 5.1 removes $null/
+    # empty-string arguments from native command lines), so sc receives a
+    # bare `depend=` and silently keeps the OLD value -- a reinstall against
+    # a different PostgreSQL would then fail at boot with "dependency does
+    # not exist". `depend= /` makes sc read an explicitly empty list.
+    $depValue = $pgServiceName
+    if ($depValue) {
+        $depSvc = Get-Service -Name $depValue -ErrorAction SilentlyContinue
+        if (-not $depSvc) {
+            Write-Warn "PostgreSQL service '$depValue' not found at registration time; leaving the dependency unset."
+            $depValue = ''
+        }
+    }
+    if ($depValue) {
+        & sc.exe config $ServiceName depend= $depValue | Out-Null
+        Write-Ok "Service dependency: $depValue"
+    } else {
+        & sc.exe config $ServiceName depend= / | Out-Null
+    }
+
     & sc.exe description $ServiceName 'LLM Relay - local LLM API gateway' | Out-Null
     # Recovery = systemd's Restart=always. SCM recovery actions only fire on a
     # NON-ZERO exit code (which is why restartService exits with 75 on
     # Windows). reset= 86400 clears the failure counter daily so a crash after
     # a long uptime still restarts.
     & sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/10000/restart/30000 | Out-Null
+    # failureflag=1 is what makes "exit code != 0" COUNT as a failure.
+    #
+    # Without it SCM treats a clean-but-non-zero exit as a normal stop and
+    # ignores the recovery actions above entirely -- so the process could die
+    # at boot (exit code 1, event 7023) and stay dead forever with three
+    # restart actions configured. This is the second half of the boot
+    # failure: the dependency prevents the typical race, this catches
+    # everything else (DB still recovering after a crash, a transient disk
+    # error) without waiting for a human.
+    #
+    # restartService intentionally exits with 75 on Windows (ERROR_...), so
+    # the restart path itself keeps working under this flag.
+    & sc.exe failureflag $ServiceName 1 | Out-Null
 
     # ------------------------------------------------------------ start + health
+    #
+    # Bring the database up first. The dependency set above only orders
+    # *boot*; here -- during the install itself -- PostgreSQL may have been
+    # stopped earlier in this run (the port-walk loop stops it between
+    # attempts, and a stopped service is normal on a machine someone just
+    # rebooted). Starting llm-relay against a stopped database produces a
+    # service that starts and immediately exits, which reads as "the
+    # installer registered a broken service".
+    if ($pgServiceName) {
+        $pgSvcNow = Get-Service -Name $pgServiceName -ErrorAction SilentlyContinue
+        if ($pgSvcNow -and $pgSvcNow.Status -ne 'Running') {
+            Write-Log "Starting $pgServiceName before the relay service"
+            Start-Service -Name $pgServiceName
+            (Get-Service -Name $pgServiceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(60))
+        }
+    }
+
     Write-Log 'Starting the service'
     $svc = Get-Service -Name $ServiceName
     if ($svc.Status -ne 'Running') {
@@ -952,6 +1084,23 @@ relay:
 
     Write-Host ''
     if ($ok) {
+        # Console URL depends on the bind address. With the wildcard bind the
+        # user will reach the console at the machine's LAN address, or at
+        # whatever the tunnel publishes -- "localhost" would be misleading in
+        # the credentials file, which is the thing people come back to.
+        $lanIp = ''
+        if ($loopback -notcontains $BindAddr) {
+            try {
+                $lanIp = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+                    Where-Object {
+                        $_.IPAddress -notlike '127.*' -and
+                        $_.IPAddress -notlike '169.254.*' -and
+                        $_.PrefixOrigin -ne 'WellKnown'
+                    } | Select-Object -First 1 -ExpandProperty IPAddress)
+            } catch { }
+        }
+        if ($lanIp) { $consoleUrl = "http://${lanIp}:$Port" } else { $consoleUrl = "http://localhost:$Port" }
+
         # Credentials are printed here and written to credentials.txt: the
         # console history is closed or the screenshot lost, and "what was that
         # password" is the most common post-install question.
@@ -959,7 +1108,10 @@ relay:
         $credLines += "LLM Relay $Version  (windows/amd64)"
         $credLines += "Installed: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
         $credLines += ''
-        $credLines += "Console:    http://localhost:$Port"
+        $credLines += "Console:    $consoleUrl"
+        if ($loopback -notcontains $BindAddr) {
+            $credLines += "            (listening on ${BindAddr}:$Port; also reachable at any address the machine answers on)"
+        }
         $credLines += "Admin key:  $adminKey"
         $credLines += ''
         $credLines += 'Database:'
@@ -991,7 +1143,12 @@ relay:
             pg_database   = $DbName
             pg_user       = 'postgres'
             pg_data_dir   = $(if ($useExisting) { '' } else { $pgData })
-            pg_service    = $(if ($useExisting) { '' } else { $PgServiceName })
+            # Recorded for BOTH branches now. It was empty when reusing a
+            # system instance, and the rebuild of the service dependency on
+            # a reinstall needs the name -- without it, `sc config depend=`
+            # would run with an empty value and silently keep whatever was
+            # there (measured: PowerShell drops empty arguments).
+            pg_service    = $pgServiceName
             installed_at  = (Get-Date -Format 'o')
             llm_relay_ver = $Version
         } | ConvertTo-Json | Set-Content -LiteralPath $pgMeta -Encoding UTF8
@@ -999,7 +1156,10 @@ relay:
 
         Write-Host "Install complete (llm-relay $Version windows/amd64)" -ForegroundColor Green
         Write-Host '------------------------------------------------------------' -ForegroundColor DarkGray
-        Write-Host '  Console    ' -NoNewline; Write-Host "http://localhost:$Port" -ForegroundColor Cyan
+        Write-Host '  Console    ' -NoNewline; Write-Host $consoleUrl -ForegroundColor Cyan
+        if ($loopback -notcontains $BindAddr) {
+            Write-Host '             ' -NoNewline; Write-Host "listening on ${BindAddr}:$Port" -ForegroundColor DarkGray
+        }
         Write-Host '  Admin key  ' -NoNewline; Write-Host $adminKey -ForegroundColor Yellow
         if ($adminGenerated) {
             Write-Host '             (newly generated; keep it. Change it in the config and restart to rotate)' -ForegroundColor DarkGray
@@ -1031,6 +1191,21 @@ relay:
     if (Test-Path -LiteralPath $logFile) { Get-Content -LiteralPath $logFile -Tail 40 }
     Write-Host ''
     & sc.exe query $ServiceName
+    # The exit code is the single most useful bit when the log file is empty
+    # -- which is exactly what happens when the process dies before the
+    # logger exists (bad config path, unwritable log dir, missing DB driver
+    # settings). `sc query` prints it as WIN32_EXIT_CODE; the SCM event log
+    # carries the same number as 7023 with a human-readable reason, so print
+    # both rather than making the user hunt.
+    & sc.exe qc $ServiceName
+    Write-Host ''
+    Write-Host 'Recent Service Control Manager events for this service:' -ForegroundColor DarkYellow
+    try {
+        Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = (Get-Date).AddHours(-1) } -ErrorAction Stop |
+            Where-Object { $_.ProviderName -eq 'Service Control Manager' -and $_.Message -match [regex]::Escape($ServiceName) } |
+            Select-Object -First 5 |
+            ForEach-Object { Write-Host ("  {0}  {1}  {2}" -f $_.TimeCreated, $_.Id, ($_.Message -replace '\s+', ' ')) }
+    } catch { }
     Fail "Service installed but the health check failed. Check: sc query $ServiceName, log at $logFile"
 }
 finally {

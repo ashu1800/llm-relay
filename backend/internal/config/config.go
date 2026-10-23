@@ -50,7 +50,10 @@ type ServerConfig struct {
 	// （与 GetIfTable2 的 Alias 一致）。配错时错误信息里会列出可用网卡。
 	BandwidthInterface string `yaml:"bandwidth_interface"`
 	// PublicOrigin 是管理台允许的固定浏览器来源，例如 https://relay.example.com。
-	// 留空时仅允许与请求 Host 完全一致的来源；公网部署建议显式配置。
+	// 留空时只接受 Host 与请求地址一致的同源请求（不比 scheme，见
+	// api.sameOriginMatches）——内网穿透把 TLS 终结在边缘，本进程看到的
+	// 永远是明文，按 scheme 比对会拒掉全部合法请求。有固定域名时显式配置
+	// 可以把来源锁死，更严格。
 	PublicOrigin string `yaml:"public_origin"`
 	// TrustedProxies 是可信反向代理的地址列表，交给 gin.SetTrustedProxies。
 	// 登录限流按客户端 IP 计数，而经反代部署时请求的远端地址是代理本身，
@@ -303,9 +306,18 @@ func (c *Config) validate() error {
 		if strings.TrimSpace(c.Security.AdminKey) == "" {
 			return fmt.Errorf("server.host=%s 不是回环地址时必须设置 security.admin_key（RELAY_ADMIN_KEY）", c.Server.Host)
 		}
-		if strings.TrimSpace(c.Server.PublicOrigin) == "" {
-			return fmt.Errorf("server.host=%s 不是回环地址时必须设置 server.public_origin（SERVER_PUBLIC_ORIGIN）", c.Server.Host)
-		}
+		// public_origin 在非回环监听下**不再是必填**。
+		//
+		// 原来这里拒绝启动，理由是「没有固定来源就没有跨站防护」。那条推理
+		// 漏了一种部署：内网穿透（frp / ngrok / cloudflare tunnel）下，外网
+		// 地址由隧道平台分配、随时会变，用户没法在安装时写死一个来源；
+		// 强制填写的结果要么是装不上，要么是填一个假的、登录后全 403。
+		//
+		// 留空时的防护由 api.sameOriginOnly 的回落路径提供：只接受 Host 与
+		// 请求地址一致的同源请求（见 sameOriginMatches）。挡住的是「别的
+		// 站点发起的跨站请求」，这正是这条检查原本要防的东西；区别只是它
+		// 不再要求一个安装时固定的域名。真正把管理台锁住的是 admin_key，
+		// 那条检查仍在上面，未动。
 	}
 	// 管理密钥的强度在启动时就地卡死，而不是等到被暴力破解才后悔：
 	// 公网上的登录接口面对的是无限次的自动化尝试，太短的密钥（哪怕有

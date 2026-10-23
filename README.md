@@ -108,7 +108,10 @@ curl -sSL https://raw.githubusercontent.com/ashu1800/llm-relay/main/deploy/insta
 | `RELAY_GH_PROXY` | — | GitHub 下载加速前缀（形如 `https://gh-proxy.com`） |
 
 > - 默认只绑 `127.0.0.1`。放到公网时加 `BIND_ADDR=0.0.0.0`，并同时设置
->   `SERVER_PUBLIC_ORIGIN=https://你的管理台域名` 与 `RELAY_ADMIN_KEY`，建议再加反向代理 + HTTPS。
+>   `RELAY_ADMIN_KEY`，建议再加反向代理 + HTTPS。`SERVER_PUBLIC_ORIGIN`
+>   是可选的：有固定域名时设置它可以把管理台锁死到该来源；留空（例如内网
+>   穿透地址由隧道平台分配、写不死）时，管理台只接受 Host 与请求地址一致
+>   的同源请求。
 > - **重复运行就是升级**：已有密钥原样沿用，升级前自动备份数据库到
 >   `$INSTALL_DIR/backups/`（恢复用 `deploy/restore.sh`）。
 > - 小内存服务器（2 核 1.6G）也能装：不编译任何东西，下载归档约 8 MB。
@@ -211,8 +214,8 @@ Administrators 读取）→ 注册为 Windows 服务并配置失败自动重启 
 |---|---|---|
 | `-InstallDir` | `%ProgramData%\llm-relay` | 安装目录 |
 | `-Port` | `8888` | 监听端口 |
-| `-BindAddr` | `127.0.0.1` | 监听地址 |
-| `-PublicOrigin` | — | 公网/反代部署时的管理台来源 |
+| `-BindAddr` | `0.0.0.0` | 监听地址（内网/穿透访问需要；只本机用可传 `127.0.0.1`） |
+| `-PublicOrigin` | — | 固定管理台来源，可选。留空时只接受 Host 与请求地址一致的同源请求 |
 | `-DbName` | `llm_relay` | 数据库名（连接身份固定为 `postgres`） |
 | `-Version` | 最新 Release | 要安装的版本号（不带 v） |
 | `-GhProxy` | — | GitHub 下载加速前缀 |
@@ -229,6 +232,11 @@ Administrators 读取）→ 注册为 Windows 服务并配置失败自动重启 
 >   可执行文件同目录写临时文件并改名，`Program Files` 对服务账户不可写。
 > - 日志走文件（`<InstallDir>\logs\llm-relay.log`，100 MB 轮转一份历史），
 >   因为 Windows 服务没有 stdout 接收方，systemd 的 journald 在这里没有对应物。
+> - **开机自启**靠两件事一起保证：服务注册时写入对 PostgreSQL 服务的
+>   `DependOnService`（SCM 因此先等数据库起来），以及 `sc failureflag=1`
+>   加失败重启策略（进程即便仍以非零码退出，SCM 也会按 5s/10s/30s 重试）。
+>   二进制自身在启动阶段还会对「数据库尚未就绪」这类连接错误做 30 秒有界重试；
+>   认错密码、库不存在则立即失败并写日志——以前这类启动失败在服务形态下**没有任何记录**。
 > - 重复运行就是升级：三把密钥（DB 密码 / `RELAY_SECRET` / `RELAY_ADMIN_KEY`）
 >   原样沿用，升级前自动把数据库 `pg_dump` 到 `<InstallDir>ackups\`。
 
@@ -340,8 +348,10 @@ curl -s http://127.0.0.1:8888/system/info | python3 -m json.tool
   bash scripts/rotate-secret.sh          # 内部会先 dry-run 再正式迁移
   ```
 
-**公网部署**：先设好 `RELAY_ADMIN_KEY` 与 `SERVER_PUBLIC_ORIGIN`，再把 `SERVER_HOST` 改成 `0.0.0.0`，
-建议加反向代理 + HTTPS（Caddy / Nginx 均可）。经反代时按 `SERVER_TRUSTED_PROXIES`
+**公网部署**：先设好 `RELAY_ADMIN_KEY`，再把 `SERVER_HOST` 改成 `0.0.0.0`，
+建议加反向代理 + HTTPS（Caddy / Nginx 均可）。有固定域名时再设 `SERVER_PUBLIC_ORIGIN`
+把管理台锁死到该来源；域名不固定（内网穿透）可留空，此时只接受同源请求。
+经反代时按 `SERVER_TRUSTED_PROXIES`
 （默认只信回环）采信 `X-Forwarded-For`，登录限流才能拿到真实客户端 IP。
 
 ## 本地开发

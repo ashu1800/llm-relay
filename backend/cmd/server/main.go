@@ -35,7 +35,6 @@ import (
 	"llm-relay/internal/relay"
 	"llm-relay/internal/secure"
 	"llm-relay/internal/service"
-	"llm-relay/internal/store"
 	"llm-relay/internal/update"
 	"llm-relay/internal/version"
 )
@@ -170,7 +169,7 @@ func run(ctx context.Context) error {
 	// ---- 加密主密钥 ----
 	cipher, err := secure.NewCipher(cfg.Security.Secret)
 	if err != nil {
-		return fmt.Errorf("初始化加密模块失败: %w", err)
+		return startupFailure(logger, fmt.Errorf("初始化加密模块失败: %w", err))
 	}
 	if api.UsingDefaultSecret(cfg.Security.Secret) {
 		logger.Warn("正在使用默认加密密钥，渠道密钥的加密形同虚设；请通过 RELAY_SECRET 环境变量覆盖。" +
@@ -178,20 +177,17 @@ func run(ctx context.Context) error {
 	}
 
 	// ---- 数据库 ----
-	st, err := store.Open(cfg)
+	//
+	// 连接 + 迁移 + 种子 + 外键放在带重试的包装里：Windows 服务与
+	// PostgreSQL 都由 SCM 并行启动，开机时本进程可能先于数据库就绪
+	// （实测 2026-10-23：开机 7 秒后以退出码 1 终止，SCM 7023）。
+	// 判定与预算见 startup.go。
+	//
+	// ctx 传进去是为了「SCM 在等待期间要求停止」时能立刻放弃，
+	// 而不是把 30 秒的重试窗口拖满。
+	st, err := openStoreWithRetry(ctx, cfg, logger)
 	if err != nil {
-		return err
-	}
-	if err := st.Migrate(); err != nil {
-		return err
-	}
-	if err := st.Seed(); err != nil {
-		return err
-	}
-	// 必须排在 Seed 之后：回填模板分组需要默认分组已经存在，
-	// 否则全新安装时这里找不到分组就直接跳过了，外键一直不会被建出来
-	if err := st.EnsureForeignKeys(); err != nil {
-		return err
+		return startupFailure(logger, err)
 	}
 
 	// ---- 转发内核 ----
