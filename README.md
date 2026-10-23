@@ -124,70 +124,90 @@ bash deploy/restore.sh --list              # 查看升级前的自动备份
 
 ### Windows 安装
 
-Windows 侧产物是 `llm-relay_<版本>_windows_amd64.zip`。有**一键**与离线两种装法。
+**一个安装脚本，一个卸载脚本**，各自支持一键与本地两种用法 —— 不需要判断该用哪个。
 
-**一键（推荐）**：以**管理员**身份打开 PowerShell（开始菜单搜索 PowerShell →
+**一键安装**：以**管理员**身份打开 PowerShell（开始菜单搜索 PowerShell →
 右键「以管理员身份运行」；或 Win+X →「终端(管理员)」），执行：
 
 ```powershell
-irm https://raw.githubusercontent.com/ashu1800/llm-relay/main/deploy/install-windows.ps1 | iex
+irm https://raw.githubusercontent.com/ashu1800/llm-relay/main/deploy/install.ps1 | iex
 ```
 
-国内网络直连 raw.githubusercontent.com 失败时改用加速前缀：
+国内网络直连 raw.githubusercontent.com 失败时，连**脚本本身**也要走加速前缀——
+`-GhProxy` 参数救不了这一步，因为它只在脚本已经跑起来之后才生效：
 
 ```powershell
-irm https://gh-proxy.com/https://raw.githubusercontent.com/ashu1800/llm-relay/main/deploy/install-windows.ps1 | iex
+irm https://gh-proxy.com/https://raw.githubusercontent.com/ashu1800/llm-relay/main/deploy/install.ps1 | iex
 ```
 
-带参数安装时，用 `[scriptblock]::Create` 包一层（`$args` 无法直接透传给 `iex`）：
+需要用 `-GhProxy` 是另一件事：脚本里下载 Release 归档和 PostgreSQL 安装包
+（`install.ps1` 会把前缀拼到 `https://github.com` 前面），带参数时用
+`[scriptblock]::Create` 包一层（`$args` 无法直接透传给 `iex`）：
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ashu1800/llm-relay/main/deploy/install-windows.ps1))) -InstallerArgs '-Port','9000','-BindAddr','0.0.0.0','-PublicOrigin','https://relay.example.com'
+& ([scriptblock]::Create((irm https://gh-proxy.com/https://raw.githubusercontent.com/ashu1800/llm-relay/main/deploy/install.ps1))) -GhProxy https://gh-proxy.com
 ```
 
-> 一行式的信任锚点是 **GitHub 仓库本身**，与 Linux 侧 `curl | bash` 完全一样：
-> 安装器本身没有签名，脚本会在执行前去掉「来自 Internet」标记（否则
-> RemoteSigned 策略会拒绝）。安装器下载的二进制仍要过 sha256 校验，
-> 但那只防传输损坏 / 归档被替换，不防仓库被改。不接受这一点就用手动方式。
->
-> `install-windows.ps1` 内部是**纯 ASCII**，这不是疏忽：Windows PowerShell 5.1
-> 会把无 BOM 的 .ps1 按 ANSI 解码，而带 BOM 又会让 `irm ... | iex` 失败
-> （BOM 字符会留在字符串开头，导致 `<#` 块注释失效）。它必须同时支持
-> `-File` 与 `iex` 两种走法，只有纯 ASCII 两边都成立 —— 改这个文件时别加中文。
+> 一行式与本地运行**是同一个文件**：脚本开头会检测自己是不是从管道执行的，
+> 是的话先把自己下载到临时文件再以文件方式重跑，所以两条路径共用同一段
+> 安装逻辑，不会出现「一键版和本地版行为不一样」。
 
-**手动（离线 / 想先看脚本内容）**：解压归档后，在归档目录里执行：
+**离线安装**（解压归档后）：
 
 ```powershell
 pwsh -File .\deploy\install.ps1
 ```
 
-`install-windows.ps1` 只负责「拉取 + 去标记 + 调用」，安装逻辑全在
-`install.ps1` 里 —— 两者没有重复实现。
+**卸载**（同样是管理员 PowerShell）：
+
+```powershell
+irm https://raw.githubusercontent.com/ashu1800/llm-relay/main/deploy/uninstall-windows.ps1 | iex
+```
+
+或本地：`pwsh -File .\deploy\uninstall-windows.ps1`。
+
+卸载会先列出将删除什么，然后让你选：
+
+| 选项 | 删除什么 |
+|---|---|
+| **1. 保留数据**（默认） | 只删 `llm-relay` 服务与程序文件；独立的 PostgreSQL 服务、数据库、配置、日志、备份全部保留（重装可直接复用） |
+| **2. 连同数据删除** | 需要再输入 `DELETE` 确认 |
+
+「连同数据删除」的行为**取决于当初安装时用的哪个数据库**（安装时记录在
+`install.json`）：
+
+- 安装时选了**新的独立实例** → 停掉并删除该实例的服务，整个数据目录随安装目录一起删除
+- 安装时选了**已有的 PostgreSQL** → 只删本项目的数据库与用户，
+  **PostgreSQL 本身保留**，也不会停你别的服务。删用户需要 postgres 超管口令，
+  脚本会问你要；直接回车跳过则会打印手动执行的 SQL
 
 **前置条件**：Windows 10/11 或 Server 2016+（amd64）+ 管理员权限。
 
-**关于数据库**：安装器默认在 `%ProgramData%\llm-relay\pgsql` 下装一个**独立**的
-PostgreSQL 实例（约 348 MB，只装 server 与命令行工具），**不需要你提供任何密码**
-—— 超级用户与业务账号的密码都由安装器随机生成，装完会打印出来并写进
-`%ProgramData%\llm-relay\credentials.txt`。
+**关于数据库**：机器上**没有** PostgreSQL 时，安装器直接在
+`%ProgramData%\llm-relay` 下装一个独立实例（约 348 MB），超级用户与业务账号
+的密码都由它随机生成，装完打印出来并写进 `credentials.txt`。
 
-机器上已有 PostgreSQL 时，安装器会先试着用它：**连得上就复用**，连不上
-（例如那个实例的 `postgres` 密码是当初装 PostgreSQL 时设的、安装器不知道）
-就自动改装独立实例，**不会卡在要求你输入密码上**。两者端口冲突时独立实例改用 5433。
+机器上**已有** PostgreSQL 时，安装器会**停下来问你**：
 
-想强制复用已有实例时：
+```
+  检测到已安装的 PostgreSQL 17
+    C:\Program Files\PostgreSQL\17\bin\psql.exe
 
-```powershell
-pwsh -File .\deploy\install.ps1 -PgMode skip -PgSuperPassword '<已有实例的 postgres 密码>'
+  复用它需要该实例 postgres 超级用户的口令（当初装 PostgreSQL 时设的）。
+  装新实例则在下面目录另建一个，完全不动现有数据库。
+
+  请选择： [1] 使用已安装的实例    [2] 安装新的独立实例  (默认 2)
 ```
 
-`-PgMode skip` 表示**绝不自动安装**：连不上会直接报错并说明下一步，而不是悄悄装一个。
+选 1 才会让你输入口令，输入后立刻验证；连不上就直接告诉你原因，
+不会再出现「反复要密码却永远是错的」。
 
 脚本会自动：检测架构 → 下载并 sha256 校验 → 解压到 `%ProgramData%\llm-relay`
 → 装 PostgreSQL 并建库建角色 → 生成配置与随机密钥（ACL 只允许 SYSTEM 与
-Administrators 读取）→ 注册为 Windows 服务并配置失败自动重启 → 健康检查。
+Administrators 读取）→ 注册为 Windows 服务并配置失败自动重启 → 健康检查 →
+打印全部凭据并写入 `credentials.txt`。
 
-常用参数（与 `install.sh` 同名同义）：
+全部选项都有合理默认值，**直接运行即可，不需要任何参数**。需要定制时：
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
@@ -198,8 +218,15 @@ Administrators 读取）→ 注册为 Windows 服务并配置失败自动重启 
 | `-DbName` / `-DbUser` | `llm_relay` / `llmrelay` | 数据库 |
 | `-Version` | 最新 Release | 要安装的版本号（不带 v） |
 | `-GhProxy` | — | GitHub 下载加速前缀 |
-| `-PgMode` | `auto` | `auto` 连不上已有实例就装独立的；`skip` 绝不自动安装 |
-| `-Ref` | `main` | 仅一键入口：拉取哪个分支 / tag 的安装器 |
+| `-PgDecision` | 交互询问 | `existing` 复用已有实例；`new` 装独立实例 |
+| `-PgSuperPassword` | — | 复用已有实例时的 postgres 口令（配合上面的参数，适合脚本化） |
+| `-Force` | — | 已装同版本时仍然重新下载并覆盖 |
+
+> 重复运行同一个版本时**不会重新下载**（归档缓存在
+> `%LOCALAPPDATA%\llm-relay\cache`，且已装同版本会跳过替换），升级到新版本
+> 才下载。要强制重装加 `-Force`。「已装哪个版本」读的是安装时写下的
+> `install.json`，不是 exe 的文件版本属性——Go 的 `-ldflags -X` 不会生成
+> PE 版本资源，发布出来的 exe 里 `ProductVersion` 是空的。
 
 > - 安装目录特意放在 `%ProgramData%` 而不是 `Program Files`：**一键更新**需要在
 >   可执行文件同目录写临时文件并改名，`Program Files` 对服务账户不可写。
@@ -349,7 +376,7 @@ llm-relay/
 │   └── internal/               api / config / model / store / relay / pricing /
 │                               proxy / secure / version / update / web(前端 embed)
 ├── frontend/                   Vue 3 + Vite + Ant Design Vue 4
-├── deploy/                     install.sh / install.ps1 / install-windows.ps1 / restore.sh / .env.example
+├── deploy/                     install.sh / install.ps1 / uninstall-windows.ps1 / restore.sh / .env.example
 ├── scripts/                    端到端验证脚本与发布脚本（见 docs/development.md）
 ├── docs/                       ui-spec.md（UI 规格）、development.md（开发细节）
 └── .github/workflows/          ci.yml（push/PR）、release.yml（tag 触发发布）

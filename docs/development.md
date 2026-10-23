@@ -1119,7 +1119,7 @@ Windows 不是「Linux 部署的翻译」，有几条平台语义必须单独记
 | 服务的 CWD 是 `C:\Windows\System32` | 默认配置路径改成「CWD 优先、exe 同目录兜底」（`defaultConfigPath`）；安装器显式传 `-config` 绝对路径 |
 | 服务没有 stdout 接收方 | 日志必须落文件（`log.file`），否则等于丢日志。`log.max_size_mb` 控制轮转（保留一份 `.1`） |
 | Go 在 Windows 上**忽略 `TZ`**，`time.Local` 恒为 `Local` | `main` 匿名导入 `time/tzdata`，让 `time.LoadLocation` 在任何平台都能解析 IANA 名；`statsZoneName` 的 `/etc/*` 探测在 Windows 自然落空 |
-| Windows PowerShell 5.1 按**系统 ANSI** 读无 BOM 的 `.ps1` | 含中文的 `.ps1` 必须是 **UTF-8 with BOM**，否则引号会被截断成语法错误（`deploy/install.ps1` 已带 BOM） |
+| Windows PowerShell 5.1 按**系统 ANSI** 读无 BOM 的 `.ps1` | 所以部署脚本（`deploy/install.ps1`、`deploy/uninstall-windows.ps1`）**必须保持纯 ASCII 且无 BOM**。含中文就必须带 BOM，但带 BOM 会让 `irm ... \| iex` 直接失败（BOM 字符留在字符串开头，`<#` 打不开块注释，实测 13 个解析错误）——两个入口都要能用，只有 ASCII 同时成立。改这两个文件时别加中文，也别用 `Set-Content -Encoding UTF8` 重写（PS 5.1 会补 BOM） |
 
 验证顺序（本机 Windows）：
 
