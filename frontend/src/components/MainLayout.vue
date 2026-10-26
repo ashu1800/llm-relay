@@ -16,7 +16,8 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   MenuOutlined,
-  LogoutOutlined
+  LogoutOutlined,
+  SearchOutlined
 } from '@ant-design/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { message } from '@/utils/feedback'
@@ -24,12 +25,15 @@ import { onLive } from '@/composables/useLive'
 import { startTabPulse } from '@/utils/tabPulse'
 import { moneyText } from '@/utils/money'
 import VersionBadge from '@/components/VersionBadge.vue'
+import CommandPalette from '@/components/CommandPalette.vue'
 // 页面级错误边界：某个视图渲染抛异常时兜住它，保住侧栏（见模板里的说明）
 import ErrorBoundary from '@/components/ErrorBoundary.vue'
 
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
+
+const paletteOpen = ref(false)
 
 // 退出登录：服务端清掉会话 Cookie，本地状态随之置否，回登录页。
 // logout 内部已保证「请求失败也清本地状态」—— 会话可能早已过期。
@@ -171,6 +175,11 @@ function closeNav() {
 }
 
 function onKeydown(e: KeyboardEvent) {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault()
+    paletteOpen.value = !paletteOpen.value
+    return
+  }
   if (e.key === 'Escape' && navOpen.value) {
     closeNav()
     return
@@ -442,6 +451,19 @@ onUnmounted(() => {
                  那时上下都是纯图标，一条线反而显得挤 -->
             <div v-if="!railMode" class="sidebar-divider" aria-hidden="true"></div>
 
+            <button
+              type="button"
+              class="console-menu-item command-palette-trigger"
+              :aria-label="'打开命令面板 (Ctrl+K)'"
+              :title="'命令面板 (Ctrl+K)'"
+              style="margin-bottom: 4px"
+              @click="paletteOpen = true"
+            >
+              <SearchOutlined class="console-menu-icon" aria-hidden="true" />
+              <span v-if="!railMode" class="console-menu-label">命令面板</span>
+              <kbd v-if="!railMode" class="palette-mini-kbd">Ctrl K</kbd>
+            </button>
+
             <nav class="console-menu-list">
               <button
                 v-for="m in menus"
@@ -578,6 +600,7 @@ onUnmounted(() => {
         </main>
       </div>
     </div>
+    <CommandPalette v-model:open="paletteOpen" />
   </div>
 </template>
 
@@ -935,6 +958,17 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 4px;
   padding-top: var(--gap);
+}
+
+.palette-mini-kbd {
+  font-size: var(--font-size-2xs);
+  padding: 1px 5px;
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--color-text-secondary) 12%, transparent);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  margin-left: auto;
+  line-height: 1.2;
 }
 
 /* 占满整栏：标签有 75px 余量，不会再被省略号截断。

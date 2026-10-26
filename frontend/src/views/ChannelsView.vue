@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { message, modal } from '@/utils/feedback'
 import Sortable from 'sortablejs'
 import {
@@ -142,6 +143,17 @@ const {
       .filter(Boolean)
       .join(' ')
 })
+
+const route = useRoute()
+watch(
+  () => route.query.q,
+  (queryQ) => {
+    if (queryQ != null) {
+      q.value = String(queryQ)
+    }
+  },
+  { immediate: true }
+)
 
 // 搜索或分页把视图切开了 → 不许拖拽/键盘调序（理由见模板里那一列上方的注释）。
 // 用 isSplit 而不是自己拼「有搜索词 || 有多页」：这条判断关系到数据完整性，
