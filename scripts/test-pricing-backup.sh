@@ -25,7 +25,6 @@ chk() {
   else echo "  [失败] $1 期望 $2 实际 $3"; bad=$((bad+1)); fi
 }
 
-GNAME="__backup-probe-group"
 CNAME="__backup-probe-ch"
 M_PRICED="__backup-probe-priced"
 M_BLANK="__backup-probe-blank"
@@ -38,7 +37,6 @@ purge() {
   for cid in $(P "SELECT id FROM channels WHERE name='$CNAME'"); do
     curl -s -X DELETE "$API/channels/$cid" >/dev/null
   done
-  P "DELETE FROM channel_groups WHERE name='$GNAME'" >/dev/null
   P "DELETE FROM request_payloads WHERE log_id IN (SELECT id FROM request_logs WHERE model_requested IN ('$M_PRICED','$M_BLANK'))" >/dev/null
   P "DELETE FROM request_logs WHERE model_requested IN ('$M_PRICED','$M_BLANK')" >/dev/null
 }
@@ -63,17 +61,16 @@ purge
 rm -f "$EXPORT" "$LEGACY" "$IMPORT"
 
 echo "=== 1. 建临时渠道：一条有价（含倍率与时段规则）、一条没价 ==="
-GID=$(curl -s -X POST "$API/groups" -H 'Content-Type: application/json' -d "{\"name\":\"$GNAME\"}" | jqg "d['id']")
 CID=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
-  \"name\": \"$CNAME\", \"group_id\": $GID, \"protocol\": \"openai-chat\",
-  \"base_url\": \"http://127.0.0.1:1\", \"api_key\": \"probe\", \"weight\": 1,
+  \"name\": \"$CNAME\", \"protocol\": \"openai-chat\",
+  \"base_url\": \"http://127.0.0.1:1\", \"api_key\": \"probe\",
   \"models\": [
     {\"public_name\": \"$M_PRICED\", \"input_per_1m\": \"1.25\", \"output_per_1m\": \"2.5\",
      \"cache_read_per_1m\": \"0.125\", \"multiplier\": 1.5,
      \"peak_rules\": [{\"days\":[1,2,3],\"start\":\"09:00\",\"end\":\"12:00\",\"multiplier\":2,\"label\":\"上午高峰\"}]},
     {\"public_name\": \"$M_BLANK\"}
   ]}" | jqg "d['id']")
-echo "  渠道 id=$CID 分组=$GID"
+echo "  渠道 id=$CID"
 chk "有价那条的价格" "1.25|2.5|0.125|0|1.5|1" "$(dbrow "$M_PRICED")"
 chk "没价那条的默认值" "0|0|0|0|1|0" "$(dbrow "$M_BLANK")"
 
@@ -139,9 +136,8 @@ def emit(desc, exp, act):
 created = d.get('created') or {}
 warn = d.get('warnings') or []
 emit('应用了 1 条旧定价', '1', str(created.get('模型定价', 0)))
-# 只带 pricings 的旧备份不该顺带建出渠道/分组：产物越多，越可能碰到用户的数据
+# 只带 pricings 的旧备份不该顺带建出渠道：产物越多，越可能碰到用户的数据
 emit('没有建出任何渠道', '0', str(created.get('渠道', 0)))
-emit('没有建出任何分组', '0', str(created.get('分组', 0)))
 emit('匹配不到的定价出现在 warnings 里', 'yes',
      'yes' if any('__backup-probe-missing' in w for w in warn) else 'no')
 emit('已有价格的那条被跳过并说明', 'yes',
@@ -179,7 +175,6 @@ curl -s -X DELETE "$API/channels/$CID" >/dev/null
 purge
 rm -f "$EXPORT" "$LEGACY" "$IMPORT" /tmp/__backup-checks.txt
 chk "探测渠道已删除" "0" "$(P "SELECT count(*) FROM channels WHERE name='$CNAME'")"
-chk "探测分组已删除" "0" "$(P "SELECT count(*) FROM channel_groups WHERE name='$GNAME'")"
 chk "探测白名单已删除" "0" "$(P "SELECT count(*) FROM channel_models WHERE public_name IN ('$M_PRICED','$M_BLANK')")"
 # 匹配不到的那条只应该出现在 warnings 里，绝不能凭空建出一条白名单来
 chk "匹配不到的定价没有凭空造出白名单" "0" "$(P "SELECT count(*) FROM channel_models WHERE public_name='$M_MISSING'")"

@@ -16,11 +16,6 @@ func (s *Server) finalizeLog(req *relay.RelayRequest, res *relay.RelayResult, us
 	respBody []byte, respHeader http.Header,
 ) {
 	entry := relay.BuildLog(req, res, usage, status, errMsg, tm)
-	// 分组 TPM 记账：只认上游回报的实际用量（usage.Estimated 为真时是按报文长度
-	// 估的，也一并计入 —— 估出来的值同样代表消耗，不计反而会让限制失效）
-	if s.deps.GroupLimit != nil && entry.GroupID > 0 {
-		s.deps.GroupLimit.AddTokens(entry.GroupID, usage.BillableTokens(), time.Now())
-	}
 	// 价格是「渠道 × 模型」维度的：同一个模型名在不同渠道成本不同，
 	// 所以查价必须带上这次请求真正走的那条渠道（entry.ChannelID）。
 	//

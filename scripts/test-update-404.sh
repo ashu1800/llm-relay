@@ -20,23 +20,23 @@ probe() { # probe 说明 路径 载荷
 
 echo "=== 不存在的 ID 更新应返回 404 ==="
 probe "渠道"   "channels/999999"  '{"name":"x"}'
-probe "分组"   "groups/999999"    '{"name":"x"}'
 probe "密钥"   "keys/999999"      '{"name":"x"}'
 probe "定价"   "pricing/999999"   '{"match_type":"exact"}'
+# 分组接口已随分组功能整体移除（2026-10-26）：改探「应 404」而不是「能更新」
+probe "分组（已移除）" "groups/999999"    '{"name":"x"}'
 python3 -c "import json;print('  错误信息示例:', json.load(open('/tmp/u404.json')).get('error',{}).get('message','?'))"
 
 echo
 echo "=== 存在的 ID 仍应正常更新 ==="
-# 原来这里用 /models，那是「模型商 + 模型目录」时代就有的脚本；
-# 那个功能整体下线后，改成用分组做同样的验证（改成原名，幂等、不动真实数据）
-read -r GID GNAME <<<"$(curl -s "$BASE/groups" | python3 -c "
+# 分组没了之后改用渠道做这条验证（改成原名，幂等、不动真实数据）
+read -r CID CNAME <<<"$(curl -s "$BASE/channels" | python3 -c "
 import sys,json
-g=json.load(sys.stdin)['items'][0]
-print(g['id'], g['name'])
+c=json.load(sys.stdin)['items'][0]
+print(c['id'], c['name'].replace('\"','\\\\\"'))
 ")"
-code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$BASE/groups/$GID" \
-  -H 'Content-Type: application/json' -d "{\"name\":\"$GNAME\"}")
-chk "分组正常更新" "200" "$code"
+code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$BASE/channels/$CID" \
+  -H 'Content-Type: application/json' -d "{\"name\":\"$CNAME\"}")
+chk "渠道正常更新" "200" "$code"
 
 echo
 echo "=== 全接口回归 ==="

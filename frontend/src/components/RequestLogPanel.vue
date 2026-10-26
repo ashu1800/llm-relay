@@ -4,22 +4,21 @@
 // 为什么是组件而不是继续当页面：并进看板之后外壳（内边距、工具栏、卡片排）留在
 // 看板那边，这里只输出「表格 + 分页 + 详情抽屉」这一块。
 //
-// 列表**不吃**工具栏的筛选条件（2026-09-16 站主要求）：它恒定显示全部最新请求，
-// 不按时间范围 / 分组 / 渠道 / 模型取数。并进看板时这两者本来共用一套条件，
-// 但列表的用处是「盯着最新发生了什么」，筛过之后反而看不到刚进来的请求 ——
-// 而刚进来的请求恰恰是最该被看到的那几条。筛选留给上面的概览卡：
-// 「这一部分用了多少」才是那些条件真正要回答的问题。
-//
-// 仍能约束列表的只有两个排障深链：?trace_id=… 与 ?status_class=error（「仅失败」）。
-// 它们由详情抽屉或外链带进来，是明确的排障动作，不是日常筛选视角。
+// 列表**与卡片吃同一组筛选**（2026-10-26 站主要求，撤销 2026-09-16 的
+// 「列表恒定全量」决定）：时间范围 / 密钥 / 渠道 / 模型四个条件由看板传进来，
+// 与上面的概览卡说的是同一批请求 —— 「卡片筛了 A、列表显示 B」的两套口径
+// 不再存在。另外仍能叠加约束的是两个排障深链：?trace_id=… 与 ?status_class=error，
+// 它们由详情抽屉或外链带进来，是明确的排障动作。
+// （契约脚本 check-contracts.mjs 里「列表不吃筛选」的旧断言已同步反转成
+// 「必须吃筛选」，改这里时记得两边一起看。）
 //
 // 页面外壳（内边距、工具栏、卡片排、分页以上的留白）都在看板那边；
 // 这里输出的是一个面板：表格 + 分页，外加详情抽屉。
 //
 // 面板标题栏与「导出」按钮已经去掉（2026-09-16）：标题「请求日志」只说了一遍
 // 表头下面那排列名已经说清的事，却占掉 40px 高度 —— 去掉之后表体多出一整行；
-// 导出按钮一并撤掉（接口 /logs/export 仍在，脚本与后端测试照旧用它，
-// 只是界面上不再开这个口子）。面板本身（背景 / 边框 / 圆角 / 内边距）
+// 导出按钮一并撤掉（接口 /logs/export 仍在，看板工具栏的导出走它，
+// 只是界面上不再单独开这个口子）。面板本身（背景 / 边框 / 圆角 / 内边距）
 // 仍用 PanelCard，不传 title 时它不会渲染标题栏。
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { message } from '@/utils/feedback'
@@ -62,11 +61,11 @@ import {
 // 埋在 onLive 回调里测不到，而判错的表现是静默的 —— 见 logLive.ts 顶部
 import { decideLiveInsert, pendingLogText } from '@/components/logLive'
 import { logColumns, logDensity } from '@/components/logColumnVisibility'
-import type { Channel, ChannelGroup, Paged, RequestLog } from '@/api/types'
+import type { Channel, Paged, RequestLog } from '@/api/types'
 
 const props = defineProps<{
   /** 从 URL 带进来的排障深链（?trace_id=… / ?status_class=error），可在工具栏上关掉。
-   *  这是列表仅有的两个条件 —— 时间范围 / 分组 / 渠道 / 模型不再传给列表。 */
+   *  它们与下面四个筛选条件叠加生效。 */
   traceId: string
   statusClass: string
   /**
@@ -74,12 +73,20 @@ const props = defineProps<{
    * 那一条的详情抽屉。
    *
    * 为什么值得加：站内唯一的「把一条请求发给别人看」的方式原来是截屏或
-   * 口述「第 3 行那个」，而排障常常是两个人一起看。列表本身不吃筛选条件，
-   * 所以「第 3 行」换个时间打开就不是同一条了。
+   * 口述「第 3 行那个」。列表现在与卡片吃同一组筛选，「第 3 行」跟着视角走，
+   * 换个时间打开同一条链接仍然是同一批记录。
    */
   logId?: number | null
-  /** 低频配置：标签配色与渠道图标取自它们，由看板取一次传下来 */
-  groups: ChannelGroup[]
+  /**
+   * 看板工具栏的四个筛选（2026-10-26 起由列表共同承担，撤销 2026-09-16
+   * 的「列表恒定全量」决定 —— 契约脚本同步反转）。'all' 表示不筛选，
+   * 与卡片同一套哨兵值。
+   */
+  range: string
+  channelId: string
+  model: string
+  keyId: string
+  /** 低频配置：渠道图标取自它，由看板取一次传下来 */
   channels: Channel[]
 }>()
 
@@ -93,31 +100,11 @@ const emit = defineEmits<{
   (e: 'update:logId', v: number | null): void
 }>()
 
-// 分组表：日志里的模型、密钥、分组三处标签共用该请求所属分组的颜色。
-//
-// 为什么日志要按分组着色而不是按模型名（原来是后者）：
-// 分组是用户自己配的边界（哪个密钥能走哪批渠道），日志里要一眼看出
-// 「这条请求走的是哪个分组」；模型名着色对排障没有帮助，反而多一套颜色规则。
-function groupOf(id: number) {
-  return props.groups.find((g) => g.id === id)
-}
-
-/**
- * 胶囊的颜色参数：同一个分组下的模型 / 密钥 / 分组三个标签共用它。
- *
- * colorFrom 必须传分组名 —— 三个标签的展示名各不相同，
- * 若让它们各自按自己的名字派色，同一行会出现三种颜色（实测踩过）。
- */
-function tagColorOf(id: number) {
-  const g = groupOf(id)
-  // 找不到分组时（分组已删、或历史日志里 group_id=0）统一用一个固定的来源名：
-  // 否则同一行的三个胶囊会各按自己的名字派色，看起来像三个不同分组
-  return { color: g?.color, colorFrom: g ? g.name : '未知分组' }
-}
-
-function groupName(id: number) {
-  return groupOf(id)?.name ?? (id ? String(id) : '—')
-}
+// 胶囊配色：分组已移除，模型与密钥的胶囊各自按**自己的名字**派色
+//（utils/groupStyle 的名字派色回落路径）。一行内多枚胶囊颜色不同
+// 曾被视为缺陷（那时要靠同色表达「同属一个分组」）；现在分组没了，
+// 「同一来源同色」的约束也随之消失，名字派色反而让跨行扫读时
+// 同一模型 / 同一把密钥的颜色保持稳定。
 
 const loading = ref(false)
 const rows = ref<RequestLog[]>([])
@@ -863,11 +850,12 @@ function channelIconOf(id: number) {
 
 // buildParams 拼列表的查询串。
 //
-// 只有分页与那两个排障深链：时间范围 / 分组 / 渠道 / 模型一律不带 ——
-// 列表恒定取全量最新（理由见文件头）。
-// 这里原来还要传 range（四档关键字，后端拿它调与统计接口同一个 resolveRange，
-// 以保证卡片与列表落在同一个窗口里）。列表不再跟着卡片走之后，
-// 那段「两套算法会跨时区对不上」的顾虑也就一起消失了。
+// 2026-10-26 起列表与卡片吃**同一组**条件（站主要求列表纳入筛选，
+// 撤销 2026-09-16 的「列表恒定全量」决定）：时间范围 / 密钥 / 渠道 / 模型
+// 全部进查询串，与 /stats 的参数名一一对应（后端 /logs 的同一套筛选）。
+// 两个排障深链（trace_id / status_class）照旧叠加。
+// 'all' 是看板工具栏的「不筛选」哨兵值，不带进查询串 —— 后端约定
+// 「不传参数＝不筛选」。
 function buildParams(): URLSearchParams {
   const params = new URLSearchParams()
   params.set('page', String(page.value))
@@ -875,42 +863,55 @@ function buildParams(): URLSearchParams {
   // URL 带来的额外条件（深链过来的 trace / 状态）也要进查询串
   if (props.traceId) params.set('trace_id', props.traceId)
   if (props.statusClass) params.set('status_class', props.statusClass)
+  // 看板工具栏的四个筛选（与卡片同一组条件）
+  if (props.range) params.set('range', props.range)
+  if (props.channelId && props.channelId !== 'all') params.set('channel_id', props.channelId)
+  if (props.model && props.model !== 'all') params.set('model', props.model)
+  if (props.keyId && props.keyId !== 'all') params.set('key_id', props.keyId)
   // 排序（P1-9）：空串不传，让后端用默认的「最新在前」
   if (sort.value) params.set('sort', sort.value)
   return params
 }
 
 // 这里原来还有四组东西：三个下拉的候选（分组 / 渠道 / 模型）、筛选条件的持久化、
-// 从 URL 恢复额外条件、以及四个 @change 处理函数。它们全部搬去了
-// views/DashboardView.vue —— 那边的工具栏现在只服务概览卡，列表不再吃它
-// （原来两边共用一套条件，留在这里就会出现两份状态）。
+// 从 URL 恢复额外条件、以及四个 @change 处理函数。2026-09-16 它们搬去了
+// views/DashboardView.vue（列表当时恒定全量）；2026-10-26 列表重新纳入筛选后，
+// 四个条件以 props 形式传进来，下拉与持久化仍归看板 —— 状态只有一份，
+// 只是消费方重新变成了两处（卡片与列表）。
 
-// 深链条件变了就重新查，并且回到第一页。
-//
-// 回第一页是必须的：第 5 页的偏移量落在新条件的集合上可能已经越界，
-// 表现出来是「改完条件列表空着」，而数据其实是有的。
-// watch 的是 props 本身，所以无论是谁改的（详情里的「只看这条链路」、
-// 工具栏上关掉那个小标签、还是一个带 query 参数的链接）都会重新取数，
-// 不需要各处都记得手写一次 load()。
 // 深链条件变化的读屏播报文案（见下面 watch 里的说明）
 const conditionAnnounce = ref('')
 
-// 只盯这两个：工具栏那四个筛选已经不传进来了，它们不再影响列表。
+// 六个取数条件（两个深链 + 四个工具栏筛选）统一在一个 watch 里重查并回第一页。
 //
-// 顺带把「条件变了」这件事说给读屏（2026-10-11）：深链条件可以由面板内部触发
-// （详情里的「只看这条链路」、空表上的「清除排障条件」），也可以由外链带进来。
+// 合并成一个 watch 是刻意的：原先深链与筛选各挂一个 watch，URL 同时带两类
+// 参数时同帧触发两次 search() —— load() 只有 loadSeq 作废守卫（不是请求去重），
+// 会并发发出两个参数相同的 /logs，首屏最多三次请求（加挂载自带的一次）。
+// 一个 watch 同帧多次触发只会跑一次回调（pre-flush 合并），重复请求自然消失。
+//
+// 深链变化时顺带把「条件变了」说给读屏（2026-10-11）：深链条件可以由面板内部
+// 触发（详情里的「只看这条链路」、空表上的「清除排障条件」），也可以由外链带进来。
 // 视觉上列表整体换了一批行、上方多/少一枚条件标签，而读屏用户只听到
-// 「焦点回来了」—— 不知道视角已经变了。用一个不 immediate 的 watch：
-// 首屏不该播报（那时用户刚进页面，条件是什么由页面本身读出来）。
-watch(() => [props.traceId, props.statusClass], () => {
-  const parts: string[] = []
-  if (props.traceId) parts.push('只看链路 ' + props.traceId)
-  if (props.statusClass) parts.push(props.statusClass === 'error' ? '只看失败' : '只看成功')
-  conditionAnnounce.value = parts.length
-    ? '排障条件已更新：' + parts.join('，')
-    : '排障条件已清除，显示全部最新请求'
-  search()
-})
+// 「焦点回来了」—— 不知道视角已经变了。只用**本次回调里深链两个字段确实变了**
+// 才更新播报：工具栏筛选变化不该播「排障条件」文案；首屏不播（immediate 无关，
+// watch 默认不在挂载时跑——但条件由 URL 恢复发生在 onMounted 之前，
+// 第一次真实变化仍然是用户操作）。
+watch(
+  () => [props.traceId, props.statusClass, props.range, props.channelId, props.model, props.keyId] as const,
+  (now, prev) => {
+    const deepLinkChanged =
+      prev && (now[0] !== prev[0] || now[1] !== prev[1])
+    if (deepLinkChanged) {
+      const parts: string[] = []
+      if (props.traceId) parts.push('只看链路 ' + props.traceId)
+      if (props.statusClass) parts.push(props.statusClass === 'error' ? '只看失败' : '只看成功')
+      conditionAnnounce.value = parts.length
+        ? '排障条件已更新：' + parts.join('，')
+        : '排障条件已清除，显示全部最新请求'
+    }
+    search()
+  }
+)
 
 // 详情里的「只看这条链路」：原来工具栏上有个 trace_id 输入框，
 // 但 trace_id 是从日志详情里才看得到的东西 —— 入口放在看得见它的地方更顺手。
@@ -980,7 +981,7 @@ async function copyCurl() {
  * 访问日志或防火墙。而抽屉是锁宽的（键盘用户还不好划选），一个一个手打
  * 很容易错一个字符。
  *
- * 没有给「请求模型 / 分组」加：那两个在页面上随处都有、且是点出来的
+ * 没有给「请求模型」加：那两个在页面上随处都有、且是点出来的
  * （不是打出来的），复制价值低。也没有给 trace_id 之外加第二个「只看这条链路」——
  * 一个入口够了。
  *
@@ -1602,13 +1603,15 @@ function goFirstPage() {
 
 // 实时插入：服务端每秒查一次新日志（id 增量），有就推过来。
 //
-// 分三种情况（判据 2026-10-11 抽到 components/logLive.ts，有单测）：
-// 1. 没有深链条件、没有排序、在第一页 —— 直接插到第一行（保留滚动动画，不重绘整页）。
-//    列表不带筛选之后这是常态路径：推到什么就插什么，连「符不符合条件」都不用问；
-// 2. 带 trace / 仅失败深链，**或者有排序** —— 立刻（受 1 秒节流）安静地重取一次
-//    当前查询。深链那一支：新日志符不符合条件只有服务端知道，客户端不重复实现
-//    一遍筛选语义（以后加一个条件就会漏一处，而且错得很安静）。排序那一支是
-//    2026-10-11 补的：unshift 会把新行插到最前面，用户刚点的「耗时降序」当场失效，
+// 分几种情况（判据抽到 components/logLive.ts，有单测）：
+// 1. 没有深链条件、没有工具栏筛选、没有排序、在第一页 —— 直接插到第一行
+//    （保留滚动动画，不重绘整页）。四个条件全空时「推到什么就符合什么」；
+// 2. 带 trace / 仅失败深链、**有工具栏筛选**（渠道/密钥/模型）、**或者有排序** ——
+//    立刻（受 1 秒节流）安静地重取一次当前查询。深链与筛选共用的理据：新日志
+//    符不符合条件只有服务端知道，客户端不重复实现一遍筛选语义（以后加一个
+//    条件就会漏一处，而且错得很安静；筛选分支是 2026-10-26 列表纳入筛选后补的，
+//    不补的话不匹配的新行会插进筛选视图）。排序那一支是 2026-10-11 补的：
+//    unshift 会把新行插到最前面，用户刚点的「耗时降序」当场失效，
 //    而且排序偏好是持久化的，刷新页面后错序还在 —— 看起来就像排序功能坏了。
 //    原来这里也是 setTimeout(1500)：与看板卡片那份同款的人为延迟，重取回来
 //    新增行才做入场动画 —— 数字/行的变动因此落在动画结束之后（2026-09-18
@@ -1659,11 +1662,19 @@ onLive('logs', (items: RequestLog[]) => {
   // 处置判据抽在 components/logLive.ts（有单测）：'insert' 直接插 / 'reload' 按当前
   // 视角静默重取 / 'count' 只计数。**排序生效时不能再插** —— 这是原来漏掉的一条，
   // unshift 会静默破坏用户刚点的「耗时降序」（且排序是持久化的，刷新后错序还在）。
+  // **工具栏筛选生效时同样不能插**（2026-10-26 列表纳入筛选）：不匹配筛选的
+  // 新日志 unshift 进来会让列表与筛选框矛盾，由重取保证口径。
   const action = decideLiveInsert({
     page: page.value,
     sort: sort.value,
     traceId: props.traceId,
-    statusClass: props.statusClass
+    statusClass: props.statusClass,
+    // 与 buildParams 同一套哨兵判断（'all' = 不筛选，不能算「筛选生效」）
+    toolbarFilter: {
+      channelId: props.channelId !== 'all' ? props.channelId : '',
+      model: props.model !== 'all' ? props.model : '',
+      keyId: props.keyId !== 'all' ? props.keyId : ''
+    }
   })
   if (action === 'reload') {
     liveReloader.request()
@@ -1675,7 +1686,9 @@ onLive('logs', (items: RequestLog[]) => {
     pendingNew.value += items.filter((it) => !known.has(it.id)).length
     return
   }
-  // 列表不带时间范围，新日志必然属于「全部最新」，直接插即可
+  // 列表的取数条件（时间窗/渠道/密钥/模型）与排序/深链成员资格都由
+  // decideLiveInsert 里的 'reload' 分支消化，走到这里的必然是「无条件全量第 1 页」，
+  // 新日志必然插在第一行才是对的
   const fresh = items.filter((it) => !rows.value.some((r) => r.id === it.id))
   if (!fresh.length) return
   insertFresh(fresh)
@@ -1850,7 +1863,7 @@ function onResize() {
 const onResizeRaf = rafThrottle(onResize)
 
 onMounted(() => {
-  // 分组表与渠道图标由看板取好传下来，这里只负责取列表。
+  // 渠道图标由看板取好传下来，这里只负责取列表。
   // 首次挂载不经过 watch（它只在 props 变化时触发），所以这一次必须显式取。
   load()
   // 列表字体（Harding-Regular.ttf）就绪前，量到的是回退字体的宽度 ——
@@ -2038,14 +2051,10 @@ onMounted(() => {
              完整名字悬停可见，详情里也有 -->
         <a-table-column v-if="colShown.model" title="模型" :width="colW.model" ellipsis>
           <template #default="{ record }">
-            <!-- 模型、密钥两处用的是同一个组件与同一个颜色：
-                 它们描述的是「这次请求属于哪个分组」，颜色因此必须一致。
-                 原来还有第三个「分组」列，后来删掉了：它写的就是这两个
-                 胶囊颜色所指的那件事，却占着 110px；分组名在详情抽屉里。
-                 （当初还有一条理由「按分组看整批请求时，工具栏的分组筛选更好用」，
-                 它随列表不再吃筛选而失效 —— 现在列表只回答「最新发生了什么」。） -->
+            <!-- 模型、密钥两处用同一个胶囊组件，颜色各自按名字派生
+                 （分组色已随分组移除，见文件里 groupStyle 相关说明）。 -->
             <span class="model-cell">
-              <GroupTag is-model :name="record.model_requested" v-bind="tagColorOf(record.group_id)" />
+              <GroupTag is-model :name="record.model_requested" />
               <!-- 思考胶囊：档位色由 CSS 变量 --pill-color 注入（一套底/字/边框
                    规则覆盖全部档位），分层样式与动效见 .think-pill 的注释。
                    没带思考参数的请求不渲染胶囊 —— 「没有」不需要占位。 -->
@@ -2241,7 +2250,6 @@ onMounted(() => {
               v-if="record.api_key_name"
               class="key-tag"
               :name="record.api_key_name"
-              v-bind="tagColorOf(record.group_id)"
             />
             <span v-else class="muted">—</span>
           </template>
@@ -2369,10 +2377,10 @@ onMounted(() => {
           </a-button>
         </a-descriptions-item>
         <a-descriptions-item label="请求模型">
-          <GroupTag is-model :name="current.model_requested" v-bind="tagColorOf(current.group_id)" />
+          <GroupTag is-model :name="current.model_requested" />
         </a-descriptions-item>
         <a-descriptions-item label="上游模型">
-          <GroupTag is-model v-if="current.model_upstream" :name="current.model_upstream" v-bind="tagColorOf(current.group_id)" />
+          <GroupTag is-model v-if="current.model_upstream" :name="current.model_upstream" />
           <template v-else>-</template>
           <!-- 上游模型也要复制：它是要贴进上游控制台、用量页面或工单的那个名字，
                与「请求模型」常常不是同一个（兜底映射时差得更远） -->
@@ -2400,9 +2408,6 @@ onMounted(() => {
         <a-descriptions-item label="思考等级">
           <span v-if="current.thinking_level" class="think-pill" :style="{ '--pill-color': thinkingColor(current.thinking_level) }">{{ current.thinking_level }}</span>
           <template v-else>-</template>
-        </a-descriptions-item>
-        <a-descriptions-item label="分组">
-          <GroupTag :name="groupName(current.group_id)" v-bind="tagColorOf(current.group_id)" />
         </a-descriptions-item>
         <a-descriptions-item label="入站 → 出站协议">
           {{ current.inbound_protocol }} → {{ current.upstream_protocol || '-' }}
@@ -2768,13 +2773,11 @@ onMounted(() => {
   color: var(--color-text-secondary);
 }
 
-/* 模型、密钥、分组三列各是一个胶囊，用的是同一个组件（components/GroupTag.vue）
-   与同一个颜色 —— 该请求所属分组的颜色。
-
-   原来的分工是「模型按模型名着色、密钥用中性色」：那套规则在排障时没用，
-   日志里真正要回答的是「这条请求走的是哪个分组」。三者同色之后，
-   扫一眼就能按颜色把同一分组的请求归到一起，也不必再记住两套配色规则。
-   颜色不是唯一线索：三列里都写着名字。 */
+/* 模型、密钥两列各是一个胶囊，用的是同一个组件（components/GroupTag.vue），
+   颜色各自按名字派生（utils/groupStyle 的回落路径）。
+   分组已随 2026-10-26 的重构移除：原来「同一行三枚胶囊共用分组色」的规则
+   没有了依附对象，名字派色让跨行扫读时同一模型 / 同一把密钥颜色稳定。
+   颜色不是唯一线索：两列里都写着名字。 */
 /* 词元三段各自的颜色（变量定义见 theme.css，深色主题自动换档）。
    挂在「图标 + 数值」这一组上：图标靠 currentColor 继承，数字直接继承，
    一组两处必然同色 */

@@ -40,16 +40,14 @@ def call(m, p, b=None):
         return x.status, json.loads(x.read().decode() or "{}")
 
 
-_, k = call("POST", "/keys", {"name": "ae-regress-key"})
-tok = k["key"]
-
 def probe_model():
     """探针模型名必须从库里现取：白名单是用户随时会改的，
     写死模型名会让用例以 502 失败，看起来像代码坏了。"""
     import subprocess
+    # 分组已删除：可服务的模型就是「启用渠道的启用白名单条目」，
+    # 与 /v1/models 的汇总口径一致（relay_handler.listModels 的查询）
     sql = ("SELECT m.public_name FROM channel_models m "
            "JOIN channels c ON c.id = m.channel_id AND c.enabled = true "
-           "JOIN channel_groups g ON g.id = c.group_id AND g.enabled = true "
            "WHERE m.enabled = true ORDER BY m.id LIMIT 1")
     try:
         out = subprocess.run(
@@ -65,6 +63,19 @@ if not MODEL:
     print("ALL_PASS")
     raise SystemExit(0)
 print("  探针模型: %s" % MODEL)
+
+# 密钥必须声明「模型 → 候选渠道」路由（新模型下 allowed_models 必填非空）：
+# 路由里带探针模型的那条渠道就是探针模型的渠道，从库里按白名单现取
+import subprocess
+_ch_sql = ("SELECT m.channel_id FROM channel_models m "
+           "JOIN channels c ON c.id = m.channel_id AND c.enabled = true "
+           "WHERE m.enabled = true AND m.public_name = '%s' ORDER BY m.id LIMIT 1" % MODEL)
+_ch_out = subprocess.run(psql_cmd() + ["-t", "-A", "-c", _ch_sql],
+                         capture_output=True, text=True, timeout=30).stdout.strip()
+_cid = int(_ch_out) if _ch_out.isdigit() else 0
+_, k = call("POST", "/keys", {"name": "ae-regress-key", "allowed_models": [MODEL],
+                              "model_channels": {MODEL: [_cid]}})
+tok = k["key"]
 
 
 def chat(accept_encoding=None):

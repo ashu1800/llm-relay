@@ -26,7 +26,6 @@ chk() {
 # 测试数据一律 __ 前缀，清理时按**精确名字**删。
 # 绝不能用 LIKE '__%'：LIKE 里的下划线是「任意单个字符」的通配符，
 # '__%' 实际等于「任意两个字符开头」，会把用户自己的密钥与日志一起删掉。
-GNAME="__price-probe-group"
 CNAME="__price-probe-ch"
 MODEL="__price-probe-model"
 MODEL2="__price-probe-model2"
@@ -35,7 +34,6 @@ purge() {
   for cid in $(P "SELECT id FROM channels WHERE name='$CNAME'"); do
     curl -s -X DELETE "$API/channels/$cid" >/dev/null
   done
-  P "DELETE FROM channel_groups WHERE name='$GNAME'" >/dev/null
   P "DELETE FROM request_payloads WHERE log_id IN (SELECT id FROM request_logs WHERE model_requested='$MODEL' OR model_requested='$MODEL2')" >/dev/null
   P "DELETE FROM request_logs WHERE model_requested='$MODEL' OR model_requested='$MODEL2'" >/dev/null
 }
@@ -71,14 +69,11 @@ print('NONE' if it is None else '%s|%s|%s' % (it['model_count'], it['unpriced_co
 purge
 
 echo "=== 1. 建临时渠道：白名单与价格一次提交 ==="
-GID=$(curl -s -X POST "$API/groups" -H 'Content-Type: application/json' -d "{\"name\":\"$GNAME\"}" | jqg "d['id']")
 CH=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
   \"name\": \"$CNAME\",
-  \"group_id\": $GID,
   \"protocol\": \"openai-chat\",
   \"base_url\": \"http://127.0.0.1:1\",
   \"api_key\": \"probe-key\",
-  \"weight\": 1,
   \"models\": [{
     \"public_name\": \"$MODEL\",
     \"upstream_name\": \"$MODEL\",
@@ -90,7 +85,7 @@ CH=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
   }]
 }")
 CID=$(echo "$CH" | jqg "d['id']")
-echo "  渠道 id=$CID 分组=$GID"
+echo "  渠道 id=$CID"
 case "$CID" in ''|*[!0-9]*) chk "渠道创建成功" "拿到数字 id" "$CH" ;; *) chk "渠道创建成功" "yes" "yes" ;; esac
 # 价格是随白名单一起写进去的：分两步写会出现「模型加进去了、价格没保存」的半截状态
 chk "建渠道时就带上了四个单价与倍率" "0.15|0.6|0.003|0|1|0|$MODEL" "$(prices "$CID" "$MODEL")"
@@ -152,7 +147,6 @@ echo "=== 6. 清理探测数据 ==="
 curl -s -X DELETE "$API/channels/$CID" >/dev/null
 purge
 chk "探测渠道已删除" "0" "$(P "SELECT count(*) FROM channels WHERE name='$CNAME'")"
-chk "探测分组已删除" "0" "$(P "SELECT count(*) FROM channel_groups WHERE name='$GNAME'")"
 # 白名单随渠道一起删（没有归属的绑定行会让「这个模型还存在吗」变得说不清）
 chk "探测白名单已删除" "0" "$(P "SELECT count(*) FROM channel_models WHERE public_name IN ('$MODEL','$MODEL2')")"
 

@@ -36,45 +36,41 @@ rejected() { curl -s "$MOCK/stats" | jqg "d['rejected']"; }
 
 bash "$(dirname "$0")/ensure-proto-upstream.sh" || exit 1
 
-G_A="think-anthropic-group"; C_A="think-anthropic-channel"; M_A="think-model-anthropic"
-G_G="think-gemini-group";    C_G="think-gemini-channel";    M_G="think-model-gemini"
-G_O="think-openai-group";    C_O="think-openai-channel";    M_O="think-model-openai"
+C_A="think-anthropic-channel"; M_A="think-model-anthropic"
+C_G="think-gemini-channel";    M_G="think-model-gemini"
+C_O="think-openai-channel";    M_O="think-model-openai"
 # 密钥名由渠道名派生（见 make_channel），统一用一个前缀清理
 KEY_LIKE="think-%-channel-key"
 
 purge() {
+  for kid in $(P "SELECT id FROM api_keys WHERE name LIKE '$KEY_LIKE'"); do curl -s -X DELETE "$API/keys/$kid" >/dev/null; done
   for c in "$C_A" "$C_G" "$C_O"; do
     for cid in $(P "SELECT id FROM channels WHERE name='$c'"); do curl -s -X DELETE "$API/channels/$cid" >/dev/null; done
   done
-  for kid in $(P "SELECT id FROM api_keys WHERE name LIKE '$KEY_LIKE'"); do curl -s -X DELETE "$API/keys/$kid" >/dev/null; done
-  for g in "$G_A" "$G_G" "$G_O"; do P "DELETE FROM channel_groups WHERE name='$g'" >/dev/null; done
 }
 purge
 curl -s "$MOCK/reset" >/dev/null
 
-# make_channel <分组名> <渠道名> <协议> <模型名>
-# 每个分组只挂一条渠道：同组多渠道会按权重轮询，断言就指不准是哪条收到的了。
+# make_channel <渠道名> <协议> <模型名>
+# 每个模型只挂在一条渠道上：一个模型挂多条时路由会按密钥列表顺序尝试，
+# 断言就指不准是哪条收到的了。密钥只为这一个模型建路由。
 make_channel() {
-  local gname="$1" cname="$2" proto="$3" model="$4" gid cid
-  gid=$(curl -s -X POST "$API/groups" -H 'Content-Type: application/json' \
-    -d "{\"name\":\"$gname\"}" | jqg "d['id']")
+  local cname="$1" proto="$2" model="$3" cid
   cid=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
     \"name\": \"$cname\",
-    \"group_id\": $gid,
     \"protocol\": \"$proto\",
     \"base_url\": \"$MOCK\",
     \"api_key\": \"mock-key\",
-    \"weight\": 1,
     \"models\": [{\"public_name\": \"$model\", \"upstream_name\": \"mock-upstream-model\"}]
   }" | jqg "d['id']")
   curl -s -X POST "$API/keys" -H 'Content-Type: application/json' \
-    -d "{\"name\":\"${cname}-key\",\"allowed_groups\":[\"$gname\"]}" | jqg "d['key']"
+    -d "{\"name\":\"${cname}-key\",\"allowed_models\":[\"$model\"],\"model_channels\":{\"$model\":[$cid]}}" | jqg "d['key']"
 }
 
-echo "=== 准备：三条渠道（anthropic / gemini / openai-chat 上游），各挂一个独立分组 ==="
-SK_A=$(make_channel "$G_A" "$C_A" "anthropic-messages" "$M_A")
-SK_G=$(make_channel "$G_G" "$C_G" "gemini-generateContent" "$M_G")
-SK_O=$(make_channel "$G_O" "$C_O" "openai-chat" "$M_O")
+echo "=== 准备：三条渠道（anthropic / gemini / openai-chat 上游），各挂一个独立模型 ==="
+SK_A=$(make_channel "$C_A" "anthropic-messages" "$M_A")
+SK_G=$(make_channel "$C_G" "gemini-generateContent" "$M_G")
+SK_O=$(make_channel "$C_O" "openai-chat" "$M_O")
 case "$SK_A$SK_G$SK_O" in
   *sk-*) echo "  三把探测密钥已签发" ;;
   *) echo "  密钥签发失败，无法继续"; purge; exit 1 ;;
@@ -150,7 +146,6 @@ echo "=== 6. 清理探测数据 ==="
 purge
 curl -s "$MOCK/reset" >/dev/null
 chk "探测渠道已删除" "0" "$(P "SELECT count(*) FROM channels WHERE name IN ('$C_A','$C_G','$C_O')")"
-chk "探测分组已删除" "0" "$(P "SELECT count(*) FROM channel_groups WHERE name IN ('$G_A','$G_G','$G_O')")"
 chk "探测密钥已删除" "0" "$(P "SELECT count(*) FROM api_keys WHERE name LIKE '$KEY_LIKE'")"
 bash "$(dirname "$0")/purge-test-logs.sh" >/dev/null 2>&1
 

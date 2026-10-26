@@ -101,10 +101,10 @@ func TestModelsHintText(t *testing.T) {
 			// 完全没提兜底那条也因为冷却没能顶上。用户据此无法判断
 			// 「是兜底没生效，还是兜底也被挡住了」。
 			// 开兜底的渠道一起冷却时必须单独说一句。
-			name:             "兜底渠道也冷却时要单独说明",
-			names:            []string{"claude-sonnet-4-6"},
-			cooling:          2,
-			fallbackCooling:  1,
+			name:            "兜底渠道也冷却时要单独说明",
+			names:           []string{"claude-sonnet-4-6"},
+			cooling:         2,
+			fallbackCooling: 1,
 			wantContains: []string{
 				"2 条渠道能接这个模型",
 				"其中 1 条是开了「默认模型映射」的兜底渠道",

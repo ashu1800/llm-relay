@@ -3,12 +3,12 @@ import { computed } from 'vue'
 import { groupStyle, groupVars } from '@/utils/groupStyle'
 import { parseModelName } from '@/utils/modelName'
 
-// 分组胶囊：全站所有显示分组名的地方都用它，颜色来自分组自己的配置
-// （没配就按分组名派生，见 utils/groupStyle.ts）。
+// 胶囊（名字沿用 GroupTag）：请求日志的模型/密钥标签用它渲染，
+// 颜色按名字自动派生（utils/groupStyle.ts；分组色随分组下线，color/colorFrom
+// 两个 prop 保留作兼容入参，调用方已不再传）。
 //
 // 为什么不直接用 a-tag：a-tag 的颜色只能从 antd 的预设色板里挑，
-// 而分组颜色是用户用取色器选的任意值；而且这里要保证「同一个分组在
-// 渠道列表、密钥白名单、请求日志里是同一个颜色」。
+// 而这里要的是「按名字派生的稳定低饱和色 + 模型名的分层排版」。
 const props = defineProps<{
   /** 展示的名字（模型名 / 密钥名 / 分组名都行） */
   name?: string | null
@@ -105,7 +105,7 @@ const modelSegments = computed(() => (props.isModel ? parseModelName(style.value
      0.50 时十三个预设最差值 5.27:1，0.45 时 4.37:1 仍有个别不达标，
      0.55 则过暗、分组之间失去区分度；深色族方向相反，混白 45% 最差 4.83:1。
      2026-09-30 之前这里是两条按 data-theme='dark' 分支的规则，
-     与 GroupsView 里的预览各写一份比例 —— 现在已经合成同一个令牌，
+     与密钥页的预览各写一份比例 —— 现在已经合成同一个令牌，
      两处的 50% / 45% 不可能再各改一次。 */
   --gt-base: color-mix(in oklab, var(--gt-color) var(--tag-custom-mix-amount), var(--tag-custom-mix-color));
 }

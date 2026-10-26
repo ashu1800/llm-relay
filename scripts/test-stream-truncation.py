@@ -49,10 +49,7 @@ def cleanup():
     for c in chans.get("items", []):
         if c["name"] == CHANNEL:
             call("DELETE", "/channels/%d" % c["id"])
-    _, ms = call("GET", "/models")
-    for m in ms.get("items", []):
-        if m["public_name"] == MODEL:
-            call("DELETE", "/models/%d" % m["id"])
+    # 模型没有独立接口了（白名单随渠道级联删除），密钥按名字删
     _, ks = call("GET", "/keys")
     for k in ks.get("items", []):
         if k["name"] == "truncate-key":
@@ -76,11 +73,13 @@ print("=== 准备：渠道指向会掐断连接的上游 ===")
 _, ch = call("POST", "/channels", {
     "name": CHANNEL, "protocol": "openai-chat",
     "base_url": "http://127.0.0.1:9997/v1",
-    "api_key": "k", "group_id": 1, "weight": 100,
+    "api_key": "k",
 })
 cid = ch["id"]
 call("POST", "/channels/%d/models" % cid, {"public_name": MODEL, "upstream_name": MODEL})
-_, key = call("POST", "/keys", {"name": "truncate-key"})
+_, key = call("POST", "/keys", {"name": "truncate-key",
+                                "allowed_models": [MODEL],
+                                "model_channels": {MODEL: [cid]}})
 token = key["key"]
 print("  渠道 id=%d" % cid)
 

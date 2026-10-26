@@ -28,7 +28,6 @@ func TestBooleanFieldsHaveNoGormDefault(t *testing.T) {
 		entity any
 		field  string
 	}{
-		{model.ChannelGroup{}, "Enabled"},
 		{model.Channel{}, "Enabled"},
 		{model.ChannelModel{}, "Enabled"},
 		{model.APIKey{}, "Enabled"},

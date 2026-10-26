@@ -108,36 +108,6 @@ export const ProtocolEmbeddings = "openai-embeddings";
  */
 export const ProtocolCustom = "custom";
 /**
- * 分组路由策略。
- * 曾经还有一个 StrategyWeighted（"weighted"，加权随机）：那时 weight 是抽签
- * 份额，权重越大越容易被抽中。现在 weight 改为**组内优先级序号**（1..N 连续
- * 唯一，越小越优先，见 Channel.Weight），抽签语义与「越靠前越优先」正好相反，
- * 已经去掉。老库里 strategy='weighted' 的行由迁移改成 failover。
- */
-export const StrategyRoundRobin = "round_robin";
-/**
- * 分组路由策略。
- * 曾经还有一个 StrategyWeighted（"weighted"，加权随机）：那时 weight 是抽签
- * 份额，权重越大越容易被抽中。现在 weight 改为**组内优先级序号**（1..N 连续
- * 唯一，越小越优先，见 Channel.Weight），抽签语义与「越靠前越优先」正好相反，
- * 已经去掉。老库里 strategy='weighted' 的行由迁移改成 failover。
- */
-export const StrategyLeastLatency = "least_latency";
-/**
- * 分组路由策略。
- * 曾经还有一个 StrategyWeighted（"weighted"，加权随机）：那时 weight 是抽签
- * 份额，权重越大越容易被抽中。现在 weight 改为**组内优先级序号**（1..N 连续
- * 唯一，越小越优先，见 Channel.Weight），抽签语义与「越靠前越优先」正好相反，
- * 已经去掉。老库里 strategy='weighted' 的行由迁移改成 failover。
- */
-export const StrategyFailover = "failover";
-/**
- * LegacyStrategyWeighted 是已废弃的策略值，只用于识别老数据。
- * 迁移会把它改成 failover；normalizeStrategy 也会把任何不认识的值收敛到
- * failover —— 否则库里留着一个前端下拉里没有的值，分组表单会显示空白。
- */
-export const LegacyStrategyWeighted = "weighted";
-/**
  * 报文留存策略。
  */
 export const PayloadStoreAll = "all";
@@ -150,48 +120,6 @@ export const PayloadStoreErrors = "errors";
  */
 export const PayloadStoreNone = "none";
 /**
- * ChannelGroup 渠道分组：一组渠道的路由与权限范围。
- * 「这个分组能用哪些模型」不由分组自己声明，而由组内渠道的模型白名单决定
- * （见 ChannelModel）。分组只回答「走哪批渠道、按什么策略排序、密钥能不能用它」。
- */
-export interface ChannelGroup {
-  id: number /* uint */;
-  name: string;
-  remark: string;
-  strategy: string;
-  is_default: boolean;
-  enabled: boolean;
-  /**
-   * Color 是分组在界面上的胶囊颜色（#rgb / #rrggbb）。
-   * 空值表示按分组名派生一个稳定颜色（见前端 utils/groupStyle.ts）——
-   * 不强制每个人都去挑颜色，但挑过就必须全站一致地用它。
-   */
-  color: string;
-  /**
-   * RPM / TPM 是这个分组整体的每分钟请求数 / token 数上限，0 表示不限制。
-   * 语义见 relay.GroupLimiter：RPM 统计发往上游的请求（含重试），
-   * TPM 统计上游回报的实际 token 数。
-   * 这两个列有 default 标签，AutoMigrate 给已有数据的表加列时会带上
-   * DEFAULT 0，因此不会像 multiplier 那样在升级时把应用卡死。
-   */
-  rpm: number /* int */;
-  tpm: number /* int */;
-  /**
-   * DailyBudget 是分组每日花费预算，按币种分别设额：
-   * {"CNY": 50, "USD": 10}。空 / 缺币种 = 该币种不限。
-   * 预算直接作为分组的属性而不是独立的一张表：分组本来就是计费的
-   * 自然边界（渠道价格按渠道币种记账，渠道挂在分组下），而且这样
-   * 编辑走分组现有的表单与接口，不需要一整套 CRUD。
-   * 金额**不做跨币种折算**（与看板金额同一铁律：人民币和美元之间
-   * 没有汇率就不该有相加），超支判定逐币种独立进行。目前它只是
-   * 一个提醒（80% / 100% 时经 live 推送各喊一次，每天每档一次），
-   * 不拦截请求 —— 预算配错一刀切断会全站瘫痪，还会腰斩流式响应。
-   */
-  daily_budget: JSONMap;
-  created_at: string;
-  updated_at: string;
-}
-/**
  * Channel 上游渠道。APIKeyEnc 存放 AES-GCM 密文，不随 JSON 输出。
  * 两条约定：
  *   - 渠道自己声明能跑哪些模型（ChannelModel = 对外名 → 上游名的白名单与映射），
@@ -202,23 +130,9 @@ export interface ChannelGroup {
 export interface Channel {
   id: number /* uint */;
   name: string;
-  group_id: number /* uint */;
   protocol: string;
   base_url: string;
   api_key_hint: string;
-  /**
-   * Weight 是**组内优先级序号**：1..N 连续且唯一，值越小越优先。
-   * 它不再是「加权随机」的抽签份额（那个策略已下线），而是故障转移顺序：
-   * 转发时每轮取候选链首个（见 relay.Service.Relay），候选按本列升序排列，
-   * 于是 weight=1 先试、失败换 weight=2，依此类推。
-   * 由此产生两条不变量，不要绕过它们直接写这一列：
-   *   - 同一分组内 weight 唯一且连续 —— 由 idx_group_weight 这个唯一索引
-   *     在数据库层兜底（AutoMigrate 创建，回填见 store.normalizeChannelWeights）
-   *   - 增删渠道、换分组之后要重排，别留空洞。统一走
-   *     api.renumberGroupChannels / api.applyChannelOrder，它们在事务里
-   *     先整体错位再赋 1..N，避免唯一索引在中途瞬时冲突
-   */
-  weight: number /* int */;
   /**
    * Currency 是这家上游给用户开账单用的币种（见 model.NormalizeCurrency）。
    * 价格、日志金额、看板金额都按它计量 —— 同一个模型名在人民币渠道与
@@ -398,7 +312,18 @@ export interface APIKey {
    * RateLimitRPM 是该密钥每分钟允许的请求数；0 表示用全局默认值，负值表示不限
    */
   rate_limit_rpm: number /* int */;
-  allowed_groups: StringList;
+  /**
+   * ModelRoutes 是每个模型的候选渠道优先级：{"模型名": [渠道ID按优先级升序]}。
+   * 分组已移除（2026-10-26 破坏性重构）：转发时在「白名单含该模型的启用渠道」
+   * 与本表条目的交集内、按列表顺序做故障转移 —— 顺序完全由密钥自己决定，
+   * 渠道不再有全局 weight。与 AllowedModels 的约束：
+   *   - AllowedModels 非空（创建密钥时强制），且本表的键集合与它一致；
+   *   - 列表里的渠道必须存在且白名单里有该模型（api.normalizeKeyRoutes 校验），
+   *     之后渠道被删 / 白名单被改导致条目失效时，路由侧静默跳过该条目 ——
+   *     剩余条目为空即「无可用渠道」，报错里会点名去密钥页修改。
+   * 老库升级由 store 的一次性回填生成（按当时的渠道 weight 顺序）。
+   */
+  model_channels: JSONMap;
   last_used_at?: string;
   created_at: string;
   updated_at: string;
@@ -413,7 +338,6 @@ export interface RequestLog {
   api_key_name: string;
   channel_id: number /* uint */;
   channel_name: string;
-  group_id: number /* uint */;
   inbound_protocol: string;
   upstream_protocol: string;
   model_requested: string;

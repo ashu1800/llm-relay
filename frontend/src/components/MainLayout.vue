@@ -10,7 +10,6 @@ import {
   DashboardOutlined,
   KeyOutlined,
   ApiOutlined,
-  ClusterOutlined,
   GlobalOutlined,
   SettingOutlined,
   MenuFoldOutlined,
@@ -23,7 +22,6 @@ import { useAuthStore } from '@/stores/auth'
 import { message } from '@/utils/feedback'
 import { onLive } from '@/composables/useLive'
 import { startTabPulse } from '@/utils/tabPulse'
-import { moneyText } from '@/utils/money'
 import VersionBadge from '@/components/VersionBadge.vue'
 import CommandPalette from '@/components/CommandPalette.vue'
 // 页面级错误边界：某个视图渲染抛异常时兜住它，保住侧栏（见模板里的说明）
@@ -41,38 +39,6 @@ async function logout() {
   await authStore.logout()
   router.push('/login')
 }
-
-// ---- 预算告警（全局）----
-//
-// 花费跨过分组日预算的 80% / 100% 档位时，后端经 live 推 budget_alert
-// （每天每档一次，见后端 budget.go —— 只提醒不拦截是站主拍板的策略）。
-// 放在常驻的布局层而不是某一页：预算烧穿这件事跟「用户此刻在哪个页面」
-// 无关，任何页面都该第一时间知道。
-type BudgetAlert = {
-  group_id: number
-  group_name: string
-  currency: string
-  level: '80' | '100'
-  limit: number
-  spent: number
-  ratio: number
-}
-
-onLive('budget_alert', (a: BudgetAlert) => {
-  // 金额走 utils/money 的统一规则（这里原来是 toFixed(2)，与日志的六位、
-  // 分组的两位各说各话）。告警里两个数是给用户去日志里核对的，
-  // 对不上就等于没给 —— 2026-09-24 UI 审评。
-  const money = moneyText(a.spent, a.currency)
-  const limitMoney = moneyText(a.limit, a.currency)
-  // 超支不显示百分比：花费 36 倍于预算时「已达预算 3600%」除了吓人没有信息量，
-  // 直接说「已超支」并给出两个数，用户自己看得懂
-  const text =
-    a.level === '100'
-      ? `分组「${a.group_name}」今日${a.currency}消费已超支（${money} / 预算 ${limitMoney}）`
-      : `分组「${a.group_name}」今日${a.currency}消费已达预算 ${Math.round(a.ratio * 100)}%（${money}）`
-  if (a.level === '100') message.error(text + '，请注意控制用量')
-  else message.warning(text)
-})
 
 // 默认加密密钥的提示。
 //
@@ -111,7 +77,6 @@ const menus = [
   { key: '/console/dashboard', label: '数据看板', icon: DashboardOutlined },
   { key: '/console/keys', label: '密钥信息', icon: KeyOutlined },
   { key: '/console/channels', label: '渠道管理', icon: ApiOutlined },
-  { key: '/console/groups', label: '分组管理', icon: ClusterOutlined },
   { key: '/console/proxies', label: '代理管理', icon: GlobalOutlined },
   { key: '/console/system', label: '系统设置', icon: SettingOutlined }
 ]
@@ -217,8 +182,6 @@ const GOTO_KEYS: Record<string, string> = {
   d: '/console/dashboard',
   k: '/console/keys',
   c: '/console/channels',
-  // 分组用 f（分组 = fēn）：g 已经被前缀占了，而 g+g 两手同键不好按
-  f: '/console/groups',
   p: '/console/proxies',
   s: '/console/system'
 }
@@ -451,19 +414,6 @@ onUnmounted(() => {
                  那时上下都是纯图标，一条线反而显得挤 -->
             <div v-if="!railMode" class="sidebar-divider" aria-hidden="true"></div>
 
-            <button
-              type="button"
-              class="console-menu-item command-palette-trigger"
-              :aria-label="'打开命令面板 (Ctrl+K)'"
-              :title="'命令面板 (Ctrl+K)'"
-              style="margin-bottom: 4px"
-              @click="paletteOpen = true"
-            >
-              <SearchOutlined class="console-menu-icon" aria-hidden="true" />
-              <span v-if="!railMode" class="console-menu-label">命令面板</span>
-              <kbd v-if="!railMode" class="palette-mini-kbd">Ctrl K</kbd>
-            </button>
-
             <nav class="console-menu-list">
               <button
                 v-for="m in menus"
@@ -500,6 +450,20 @@ onUnmounted(() => {
             <button class="console-menu-item" aria-label="退出登录" @click="logout">
               <LogoutOutlined class="console-menu-icon" aria-hidden="true" />
               <span v-if="!railMode" class="console-menu-label">退出登录</span>
+            </button>
+            <!-- 命令面板入口（2026-10-26 应站主要求从菜单顶部移到侧栏最底部）：
+                  它是全局工具而非页面导航，与「收起侧栏 / 退出登录」同属动作区，
+                  不该插在页面菜单中间打断「看板 → … → 设置」的顺序 -->
+            <button
+              type="button"
+              class="console-menu-item command-palette-trigger"
+              :aria-label="'打开命令面板 (Ctrl+K)'"
+              :title="'命令面板 (Ctrl+K)'"
+              @click="paletteOpen = true"
+            >
+              <SearchOutlined class="console-menu-icon" aria-hidden="true" />
+              <span v-if="!railMode" class="console-menu-label">命令面板</span>
+              <kbd v-if="!railMode" class="palette-mini-kbd">Ctrl K</kbd>
             </button>
             <!-- 图标栏形态下的版本入口（2026-10-11）：品牌名下方那枚徽标在
                  收起时不渲染，于是「有没有新版本」在 56px 形态下没有任何入口，

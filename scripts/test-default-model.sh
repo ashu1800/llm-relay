@@ -38,7 +38,6 @@ jqg() { python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
 
 bash "$(dirname "$0")/ensure-proto-upstream.sh" || exit 1
 
-GNAME="dm-probe-group"
 CNAME="dm-probe-channel"
 KNAME="dm-probe-key"
 KNAME_STRICT="dm-probe-key-strict"
@@ -48,28 +47,31 @@ CLIENT_MODEL="claude-opus-4-7"
 DEF_MODEL="dm-upstream-model"
 
 purge() {
-  for cid in $(P "SELECT id FROM channels WHERE name='$CNAME'"); do curl -s -X DELETE "$API/channels/$cid" >/dev/null; done
   for kid in $(P "SELECT id FROM api_keys WHERE name='$KNAME' OR name='$KNAME_STRICT'"); do curl -s -X DELETE "$API/keys/$kid" >/dev/null; done
-  P "DELETE FROM channel_groups WHERE name='$GNAME'" >/dev/null
+  for cid in $(P "SELECT id FROM channels WHERE name='$CNAME'"); do curl -s -X DELETE "$API/channels/$cid" >/dev/null; done
 }
 purge
 curl -s "$MOCK/reset" >/dev/null
 
-echo "=== 1. 建分组 + 渠道（只登记 $DEF_MODEL，并打开默认模型映射）==="
-GID=$(curl -s -X POST "$API/groups" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"$GNAME\",\"enabled\":true}" | jqg "d['id']")
+echo "=== 1. 建渠道（先带上客户端名建白名单与密钥，再把它从白名单撤掉）==="
+# 新模型下密钥创建时校验「路由里的渠道白名单必须有该模型」，而兜底要测的
+# 恰恰是「客户端请求的名字不在渠道白名单里」。所以先带着客户端名建渠道、
+# 建好密钥，再把客户端名从白名单撤掉 —— 密钥路由允许指向「曾经有、后来没了」
+# 的模型行：渠道配置的漂移本来就是兜底要接住的状态
 CH=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
   \"name\": \"$CNAME\",
-  \"group_id\": $GID,
   \"protocol\": \"anthropic-messages\",
   \"base_url\": \"http://127.0.0.1:9998\",
   \"api_key\": \"mock-anthropic-key\",
   \"extra_config\": {\"default_model_enabled\": true, \"default_model\": \"$DEF_MODEL\"},
-  \"models\": [{\"public_name\": \"$DEF_MODEL\", \"upstream_name\": \"$DEF_MODEL\"}]
+  \"models\": [
+    {\"public_name\": \"$DEF_MODEL\", \"upstream_name\": \"$DEF_MODEL\"},
+    {\"public_name\": \"$CLIENT_MODEL\", \"upstream_name\": \"$CLIENT_MODEL\"}
+  ]
 }")
 CID=$(echo "$CH" | jqg "d['id']")
 chkcontains "渠道已建立" "$CH" "\"id\""
-echo "  渠道 id=$CID 分组=$GID"
+echo "  渠道 id=$CID"
 
 # 列表接口要按与路由**同一判据**回显兜底模型，否则会出现
 # 「界面上标着兜底、路由里没兜底」
@@ -77,12 +79,21 @@ LIST=$(curl -s "$API/channels")
 chk "列表回显兜底模型" "$DEF_MODEL" \
   "$(echo "$LIST" | jqg "next(c for c in d['items'] if c['name']=='$CNAME')['fallback_model']")"
 
+# 密钥只声明客户端模型名（allowed_models 决定它被允许调什么），
+# 路由指向这条渠道；下一行把客户端名从渠道白名单撤掉后，
+# 请求只能靠兜底接管 —— 这正是本脚本要验证的路径
 SK=$(curl -s -X POST "$API/keys" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"$KNAME\",\"allowed_groups\":[\"$GNAME\"]}" | jqg "d['key']")
+  -d "{\"name\":\"$KNAME\",\"allowed_models\":[\"$CLIENT_MODEL\"],\"model_channels\":{\"$CLIENT_MODEL\":[$CID]}}" | jqg "d['key']")
 chkcontains "密钥已签发" "$SK" "sk-"
+# 白名单收窄成只剩兜底目标：漂移就位（extra_config 的开关与模型名不动）
+curl -s -X PUT "$API/channels/$CID" -H 'Content-Type: application/json' -d "{
+  \"models\": [{\"public_name\": \"$DEF_MODEL\", \"upstream_name\": \"$DEF_MODEL\"}]
+}" >/dev/null
 
 echo
-echo "=== 2. 请求一个不在白名单里的模型（原来必然 502）==="
+echo "=== 2. 请求一个不在渠道白名单里的模型（原来必然 502）==="
+# 密钥允许这个名字（allowed_models 里有它，创建时渠道白名单还带着它），
+# 但渠道白名单已经撤掉了 —— 精确命中落空，只能靠兜底接管
 curl -s "$MOCK/reset" >/dev/null
 R=$(curl -s -m 30 "$BASE/v1/messages" -H "x-api-key: $SK" -H 'Content-Type: application/json' \
   -d "{\"model\":\"$CLIENT_MODEL\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}")
@@ -130,7 +141,7 @@ chk "精确命中的响应同样回显上游名" "exact-mapped-name" "$(echo "$R
 echo
 echo "=== 5. 密钥白名单不豁免：配了 allowed_models 就挡住兜底 ==="
 SK2=$(curl -s -X POST "$API/keys" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"$KNAME_STRICT\",\"allowed_groups\":[\"$GNAME\"],\"allowed_models\":[\"$DEF_MODEL\"]}" | jqg "d['key']")
+  -d "{\"name\":\"$KNAME_STRICT\",\"allowed_models\":[\"$DEF_MODEL\"],\"model_channels\":{\"$DEF_MODEL\":[$CID]}}" | jqg "d['key']")
 R3=$(curl -s -m 30 -o "$TMP/r3.json" -w '%{http_code}' "$BASE/v1/messages" -H "x-api-key: $SK2" \
   -H 'Content-Type: application/json' \
   -d "{\"model\":\"$CLIENT_MODEL\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}")

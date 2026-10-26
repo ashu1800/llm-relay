@@ -72,15 +72,16 @@ const CASES = [
   { name: '请求日志列表', path: '/console/dashboard' },
   { name: '密钥信息', path: '/console/keys' },
   { name: '渠道管理', path: '/console/channels' },
-  { name: '分组管理', path: '/console/groups' },
   { name: '代理管理', path: '/console/proxies' },
   { name: '系统设置', path: '/console/system' },
   { name: '日志详情抽屉 + 下拉', path: '/console/dashboard', click: '详情', needsData: '至少一条请求日志' },
   { name: '渠道白名单抽屉', path: '/console/channels', click: '模型', needsData: '至少一条渠道' },
   { name: '渠道新建弹窗', path: '/console/channels', click: '新建渠道' },
-  { name: '分组新建弹窗', path: '/console/groups', click: '新建分组' },
   { name: '密钥新建弹窗', path: '/console/keys', click: '新建密钥' }
 ]
+// 「分组管理」「分组新建弹窗」两条已删（2026-10-26 分组下线）：
+// /console/groups 现在重定向到渠道页，按旧名字审计会量错页（measure-tables
+// 头注释里刚修过的失败模式），「新建分组」按钮不存在则每次跑都 FAIL。
 
 // 审计要按主题分别确认，所以浏览器里要先确认主题真的切过去了。
 // 只信 localStorage 不够：store 可能因为历史遗留值走了别的分支，

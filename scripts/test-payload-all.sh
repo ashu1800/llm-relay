@@ -6,18 +6,29 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
 
 BASE="http://127.0.0.1:8888"
-SK=$(curl -s -X POST "$BASE/api/admin/keys" -H 'Content-Type: application/json' -d '{"name":"payload-all"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['key'])")
+
+# 密钥的每模型路由（2026-10-26 分组下线）：allowed_models 必填非空。
+# 模型与承载渠道从库里现取：渠道白名单是用户随时会改的，写死必挂
+MODEL=$(db_psql -t -A -c "SELECT m.public_name FROM channel_models m JOIN channels c ON c.id = m.channel_id AND c.enabled = true WHERE m.enabled = true ORDER BY m.id LIMIT 1")
+CID=$(db_psql -t -A -c "SELECT channel_id FROM channel_models WHERE public_name='$MODEL' AND enabled = true ORDER BY id LIMIT 1")
+if [ -z "$MODEL" ] || [ -z "$CID" ]; then
+  echo "!! 没有任何启用的渠道模型白名单，无法建探针密钥（先给渠道配一个模型）"
+  exit 1
+fi
+SK=$(curl -s -X POST "$BASE/api/admin/keys" -H 'Content-Type: application/json' \
+  -d "{\"name\":\"payload-all\",\"allowed_models\":[\"$MODEL\"],\"model_channels\":{\"$MODEL\":[$CID]}}" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['key'])")
 MODE=$(curl -s "$BASE/api/admin/settings" | python3 -c "import sys,json;print(json.load(sys.stdin)['runtime']['payload_storage_mode'])")
 echo "当前留存模式: $MODE"
 
 echo
 echo "=== 非流式成功请求 ==="
 curl -s -m 60 "$BASE/v1/chat/completions" -H "Authorization: Bearer $SK" -H 'Content-Type: application/json' \
-  -d '{"model":"deepseek-v4-flash","max_tokens":12,"messages":[{"role":"user","content":"只回复:好"}]}' -o /dev/null -w "  HTTP %{http_code}\n"
+  -d "{\"model\":\"$MODEL\",\"max_tokens\":12,\"messages\":[{\"role\":\"user\",\"content\":\"只回复:好\"}]}" -o /dev/null -w "  HTTP %{http_code}\n"
 
 echo "=== 流式成功请求 ==="
 curl -s -m 60 -N "$BASE/v1/chat/completions" -H "Authorization: Bearer $SK" -H 'Content-Type: application/json' \
-  -d '{"model":"deepseek-v4-flash","max_tokens":12,"stream":true,"messages":[{"role":"user","content":"只回复:行"}]}' -o /dev/null -w "  HTTP %{http_code}\n"
+  -d "{\"model\":\"$MODEL\",\"max_tokens\":12,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"只回复:行\"}]}" -o /dev/null -w "  HTTP %{http_code}\n"
 
 sleep 3
 echo

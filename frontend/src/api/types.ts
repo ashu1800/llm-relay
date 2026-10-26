@@ -15,7 +15,6 @@
 import type {
   APIKey as APIKeyEntity,
   Channel as ChannelEntity,
-  ChannelGroup as ChannelGroupEntity,
   ChannelModel as ChannelBindingEntity,
   ClientAlias as ClientAliasEntity,
   Proxy as ProxyEntity,
@@ -83,20 +82,6 @@ export interface RateRule {
   label: string
 }
 
-export interface ChannelGroup extends Omit<ChannelGroupEntity, 'daily_budget'> {
-  /**
-   * 按币种的日预算（{"CNY": 50}）。逐币种独立判定，不做任何折算
-   * （与看板金额同一铁律）。null / 缺币种 = 该币种不限。
-   * 只提醒不拦截：80% / 100% 各档每天经 live 推送提醒一次。
-   */
-  daily_budget?: Record<string, number> | null
-  /**
-   * 今日各币种已花费金额（列表接口带出，只对配了预算的分组计算）。
-   * 与 daily_budget 逐币对照着读。
-   */
-  today_spent?: Record<string, number>
-}
-
 /**
  * Proxy 出站代理。密码只进不出：接口返回的是 has_password，
  * 编辑时留空即表示沿用原密码。
@@ -123,9 +108,14 @@ export interface ChannelBinding extends Omit<ChannelBindingEntity, 'peak_rules'>
 }
 
 export interface APIKey
-  extends Omit<APIKeyEntity, 'allowed_models' | 'allowed_groups' | 'last_used_at'> {
+  extends Omit<APIKeyEntity, 'allowed_models' | 'model_channels' | 'last_used_at'> {
   allowed_models: string[] | null
-  allowed_groups: string[] | null
+  /**
+   * 每模型的候选渠道优先级：{"模型名": [渠道ID按优先级升序]}。
+   * 转发时在「白名单含该模型的启用渠道」与列表的交集内、按顺序做故障转移。
+   * 渠道被删/白名单被改导致条目失效时静默跳过；列表为空 = 该模型暂时不可用。
+   */
+  model_channels: Record<string, number[]> | null
   last_used_at: string | null
 }
 
@@ -187,14 +177,5 @@ export const PROTOCOLS: { value: string; label: string }[] = [
   { value: ProtocolCustom, label: '自定义（可配置适配器）' }
 ]
 
-// 分组路由策略。全站只有这一份定义：GroupsView 以前自己抄了一份，
-// 两边的 label 已经不一致（'最低延迟' vs '延迟优先'），同一个策略两个名字。
-//
-// 「加权随机」（weighted）已下线：那时的 weight 是抽签份额，权重越大越容易被
-// 抽中；现在 weight 是渠道在分组内的优先级序号（越小越优先），
-// 抽签语义与它正好相反。老数据由后端迁移改成 failover。
-export const STRATEGIES = [
-  { value: 'failover', label: '顺序故障转移' },
-  { value: 'round_robin', label: '轮询' },
-  { value: 'least_latency', label: '最低延迟' }
-]
+// 路由策略已随分组一起移除（2026-10-26）：转发只按密钥里
+// 每个模型配置的渠道顺序做故障转移，不再有轮询/最低延迟。

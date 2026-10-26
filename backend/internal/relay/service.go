@@ -59,9 +59,6 @@ type Service struct {
 	opts   Options
 	logger *slog.Logger
 	state  *ChannelState
-	// groupLimit 是分组级的每分钟额度（分组上配的 RPM / TPM）。
-	// 为零值时 Check 直接放行，所以未注入也能正常工作。
-	groupLimit *GroupLimiter
 	// OnChannelEvent 是渠道健康事件的出口（冷却 / 自动熔断 / 恢复），
 	// 由 HTTP 层注入并转发到 live 推送。熔断机制本身早已生效，
 	// 但对外一直是黑盒 —— 这里的目的就是把它变成看得见的。
@@ -113,9 +110,6 @@ func (s *Service) SetProxyResolver(fn ProxyResolver) { s.fwd.SetProxyResolver(fn
 // 或被删掉时都要调用，否则旧连接会继续按老配置拨下去。
 func (s *Service) InvalidateProxy(id uint) { s.fwd.InvalidateProxy(id) }
 
-// SetGroupLimiter 注入分组限流器。不注入时分组限额不生效（等价于全部不限）。
-func (s *Service) SetGroupLimiter(l *GroupLimiter) { s.groupLimit = l }
-
 // NewService 构造转发服务。
 func NewService(db *gorm.DB, router *Router, opts Options, logger *slog.Logger) *Service {
 	if logger == nil {
@@ -136,16 +130,14 @@ type RelayRequest struct {
 	InboundProto string
 	UpstreamPath string
 	PublicModel  string
-	// AllowedGroups 是密钥上的分组白名单（已解析成分组 ID）。
-	// 非空时只在这些分组内选渠道；空表示不限制 —— 与没有配白名单是
-	// 两种状态，不要混为一谈。
+	// AllowedChannels 是密钥为该模型配置的候选渠道（有序，越小越优先，
+	// 来自 api 层对 model_channels 的解析）。非空时只在这些渠道内选；
+	// 空表示不按密钥限制。
 	//
-	// 曾经还有一个 GroupID 字段（「请求级指定分组」），但它从没有任何
-	// 生产调用方设置过 —— relay_handler 构造 RelayRequest 时只填白名单，
-	// 于是 noChannelReason / 提示查询里那些 GroupID 分支全是死代码，
-	// 还让「分组策略到底归谁管」看起来比实际复杂。删掉了；真要暴露
-	// 请求级分组，届时连同策略归属一起设计，别再留半截。
-	AllowedGroups []uint
+	// 曾经还有一个 AllowedGroups 字段（密钥的分组白名单）：分组随
+	// 2026-10-26 的破坏性重构一起移除，路由范围改由密钥的每模型渠道路由
+	// 决定 —— 那个字段连同它的解析链路一并删掉了。
+	AllowedChannels []uint
 	// Body 是归一化后发给上游的载荷；InboundBody 是客户端原始报文，仅用于留存排障
 	Body        []byte
 	InboundBody []byte
@@ -228,13 +220,6 @@ func attemptUsagePtr(att *Attempt) *Usage {
 // ErrNoChannel 表示该模型当前没有可用渠道。
 var ErrNoChannel = errors.New("没有可用的渠道")
 
-// ErrGroupLimited 表示候选渠道都在已达每分钟额度的分组里。
-//
-// 与 ErrNoChannel 分开是必须的：两者的处理方式完全不同 ——
-// 「没有可用渠道」要用户去配渠道，「分组超限」是过一会儿重试就好，
-// 混成一个错误会让用户跑去改一个根本没配错的配置。
-var ErrGroupLimited = errors.New("分组已达每分钟额度")
-
 // ErrRequestUnsupported 表示请求本身无法转成目标上游协议（例如发音频给 Anthropic）。
 //
 // 为什么必须单独一个类型：这是**客户端**的问题，不是渠道的问题。
@@ -249,20 +234,20 @@ var ErrRequestUnsupported = convert.ErrUnsupportedContent
 
 // noChannelReason 说明为什么没有可用渠道。
 //
-// 特意把「被密钥白名单挡住」讲清楚：否则从「没有可用的渠道: 模型 xxx」
+// 特意把「密钥路由范围」讲清楚：否则从「没有可用的渠道: 模型 xxx」
 // 完全看不出是密钥限制导致的，而这种失败往往出现在改完密钥配置之后，
 // 排查时最容易怀疑到别处去。
 func (req *RelayRequest) noChannelReason() string {
-	if len(req.AllowedGroups) > 0 {
-		return fmt.Sprintf("模型 %s 在密钥限定的分组 %v 内没有可用渠道",
-			req.PublicModel, req.AllowedGroups)
+	if len(req.AllowedChannels) > 0 {
+		return fmt.Sprintf("模型 %s 在密钥指定的 %d 条候选渠道内没有可用渠道（渠道可能已停用或被删除，请到「密钥信息」检查该模型的渠道路由）",
+			req.PublicModel, len(req.AllowedChannels))
 	}
 	return "模型 " + req.PublicModel
 }
 
 // availableModelsHint 在「没有可用渠道」时补一句「这个范围里现在能调什么」。
 //
-// 白名单化之后，请求失败的绝大多数原因就是「这个模型名没写进任何可用渠道的白名单」。
+// 白名单化之后，请求失败的绝大多数原因就是「这个模型名没被任何可用渠道的白名单覆盖」。
 // 只回一句「没有可用的渠道」，用户对着渠道列表也看不出差在哪；
 // 直接把可用模型名列出来，一眼就能发现是名字写错还是渠道没配。
 // 只在请求已经失败时查库，正常路径不受影响。
@@ -271,10 +256,9 @@ func (s *Service) availableModelsHint(ctx context.Context, req *RelayRequest) st
 	q := db.Table("channel_models").
 		Distinct("channel_models.public_name").
 		Joins("JOIN channels ON channels.id = channel_models.channel_id AND channels.enabled = true").
-		Joins("JOIN channel_groups ON channel_groups.id = channels.group_id AND channel_groups.enabled = true").
 		Where("channel_models.enabled = true")
-	if len(req.AllowedGroups) > 0 {
-		q = q.Where("channels.group_id IN ?", req.AllowedGroups)
+	if len(req.AllowedChannels) > 0 {
+		q = q.Where("channels.id IN ?", req.AllowedChannels)
 	}
 
 	var names []string
@@ -328,18 +312,16 @@ func (s *Service) coolingCount(req *RelayRequest) (total, fallback int) {
 //
 // 条件与 Router.queryCandidates 的 fallback 分支保持一致：开关真的开着
 // （lower(btrim(...))='true'，与 Go 侧 truthyFlag 对齐）、兜底目标在同渠道
-// 启用的白名单里、渠道与分组都启用。
+// 启用的白名单里、渠道启用。
 func (s *Service) fallbackChannelIDs(req *RelayRequest) []uint {
 	q := s.router.db.WithContext(context.Background()).
 		Table("channels").
 		Joins("JOIN channel_models ON channel_models.channel_id = channels.id AND channel_models.enabled = true").
-		Joins("JOIN channel_groups ON channel_groups.id = channels.group_id").
 		Where("channel_models.public_name = channels.extra_config->>'default_model'").
 		Where("lower(btrim(channels.extra_config->>'default_model_enabled')) = 'true'").
-		Where("channels.enabled = true").
-		Where("channel_groups.enabled = true")
-	if len(req.AllowedGroups) > 0 {
-		q = q.Where("channels.group_id IN ?", req.AllowedGroups)
+		Where("channels.enabled = true")
+	if len(req.AllowedChannels) > 0 {
+		q = q.Where("channels.id IN ?", req.AllowedChannels)
 	}
 	var ids []uint
 	if err := q.Pluck("channels.id", &ids).Error; err != nil {
@@ -356,12 +338,10 @@ func (s *Service) channelIDsForModel(req *RelayRequest) []uint {
 	q := s.router.db.WithContext(context.Background()).
 		Table("channels").
 		Joins("JOIN channel_models ON channel_models.channel_id = channels.id AND channel_models.enabled = true").
-		Joins("JOIN channel_groups ON channel_groups.id = channels.group_id").
 		Where("channel_models.public_name = ?", req.PublicModel).
-		Where("channels.enabled = true").
-		Where("channel_groups.enabled = true")
-	if len(req.AllowedGroups) > 0 {
-		q = q.Where("channels.group_id IN ?", req.AllowedGroups)
+		Where("channels.enabled = true")
+	if len(req.AllowedChannels) > 0 {
+		q = q.Where("channels.id IN ?", req.AllowedChannels)
 	}
 	var ids []uint
 	if err := q.Pluck("channels.id", &ids).Error; err != nil {
@@ -384,7 +364,6 @@ func (s *Service) channelIDsForModel(req *RelayRequest) []uint {
 func (s *Service) brokenFallbackCount(ctx context.Context, req *RelayRequest) int {
 	q := s.router.db.WithContext(ctx).
 		Table("channels").
-		Joins("JOIN channel_groups ON channel_groups.id = channels.group_id AND channel_groups.enabled = true").
 		Where("channels.enabled = true").
 		Where("lower(btrim(channels.extra_config->>'default_model_enabled')) = 'true'").
 		// 把「已配齐」的排除掉，剩下的就是半残的。
@@ -395,8 +374,8 @@ func (s *Service) brokenFallbackCount(ctx context.Context, req *RelayRequest) in
 			WHERE cm.channel_id = channels.id AND cm.enabled = true
 			  AND cm.public_name = channels.extra_config->>'default_model'
 		)`)
-	if len(req.AllowedGroups) > 0 {
-		q = q.Where("channels.group_id IN ?", req.AllowedGroups)
+	if len(req.AllowedChannels) > 0 {
+		q = q.Where("channels.id IN ?", req.AllowedChannels)
 	}
 	var n int64
 	if err := q.Count(&n).Error; err != nil {
@@ -497,8 +476,8 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 	// 附带修正轮转语义：RR 游标每个请求只前进一格 —— 原先每次重试都
 	// 推一格，带 3 次重试的请求让游标跳 4 格，轮转分布被故障转移流量扭曲。
 	allCands, err := s.router.Candidates(ctx, CandidateQuery{
-		PublicModel:   req.PublicModel,
-		AllowedGroups: req.AllowedGroups,
+		PublicModel:     req.PublicModel,
+		AllowedChannels: req.AllowedChannels,
 	})
 	if err != nil {
 		return res, err
@@ -509,32 +488,7 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 	attemptNo := 0
 	for ; attemptNo < maxAttempts; attemptNo++ {
 		cands := s.router.filterTried(allCands, tried)
-		// 分组限额：把已达每分钟上限的分组这一轮剔掉。
-		//
-		// 必须在这里做，而不是在入口中间件里按密钥的分组白名单做：
-		// 一个密钥可能允许好几个分组，只有选到具体候选才知道这次要走哪个分组。
-		// 也正因为如此，被剔掉的候选不写进 tried —— 下一个重试轮次还要能重新考虑它
-		// （限额是按分钟算的，跨过窗口边界就该恢复）。
-		limitedReason := ""
-		// 先筛掉当前额度已满的候选；真正选中后再原子预留 RPM 名额。
-		for len(cands) > 0 {
-			ok, reason := s.groupLimit.Check(cands[0].Channel.GroupID, cands[0].GroupRPM, cands[0].GroupTPM, time.Now())
-			if ok {
-				break
-			}
-			limitedReason = reason
-			cands = cands[1:]
-		}
 		if len(cands) == 0 {
-			if limitedReason != "" {
-				if attemptNo == 0 {
-					return res, fmt.Errorf("%w: %s", ErrGroupLimited, limitedReason)
-				}
-				// 重试途中撞上分组额度：剩下的候选多半也在同一个分组里，
-				// 继续重试只是重复撞墙。跳出循环，把真实的上游错误交给调用方
-				// （直接返回 ErrGroupLimited 会把上游到底报了什么给吞掉）
-				break
-			}
 			if attemptNo == 0 {
 				return res, fmt.Errorf("%w: %s", ErrNoChannel, req.noChannelReason()+s.availableModelsHint(ctx, req))
 			}
@@ -545,11 +499,9 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 
 		// 故障转移前的退避：下一次尝试若仍打在同一台上游，先等一会儿。
 		//
-		// 位置刻意选在这里（候选已定、还没记账、还没抢名额）：
+		// 位置刻意选在这里（候选已定、还没抢名额）：
 		//   · 候选已定 —— 「下一个是谁」要经过 filterTried（它会跳过刚进冷却
-		//     的渠道）与上面的分组额度裁剪才确定，两处 continue 那里还算不出来；
-		//   · 在 :s.groupLimit.Record 之前 —— RPM 口径保持「真正发往上游的
-		//     请求数」，等待不算一次请求；
+		//     的渠道）才确定；
 		//   · 在 AcquireWait 之前 —— 等待期间不占着渠道并发名额；
 		//   · 候选耗尽时走上面的 break/return，最后一次尝试之后不会白等。
 		//
@@ -582,16 +534,7 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 			}
 		}
 
-		reserved, reserveReason := s.groupLimit.AllowAndRecord(cand.Channel.GroupID, cand.GroupRPM, cand.GroupTPM, time.Now())
-		if !reserved {
-			if attemptNo == 0 {
-				return res, fmt.Errorf("%w: %s", ErrGroupLimited, reserveReason)
-			}
-			lastErr = fmt.Errorf("%w: %s", ErrGroupLimited, reserveReason)
-			break
-		}
 		tried = append(tried, cand.Channel.ID)
-		// AllowAndRecord 已在真正发出前原子预留了 RPM 名额。
 
 		acquired := s.state.AcquireWait(ctx, cand.Channel.ID,
 			ChannelMaxConcurrency(cand.Channel.ExtraConfig), channelSlotWait)
@@ -689,7 +632,9 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 		// 名额**不在这里释放**：流式响应此刻只拿到了响应头，正文还在从上游读，
 		// 调用方转发结束后会调 res.ReleaseSlot()。
 		s.markChannelSuccess(cand.Channel.ID)
-		// 首包延迟喂给 least_latency 策略：只记成功响应，失败渠道该被冷却而不是比快
+		// 首包延迟记入渠道运行态（EWMA），随健康快照下发到渠道页的
+		//「运行状态」tooltip（见 limit.go 对 latency 字段的说明 —— 它不再
+		// 参与路由排序，least_latency 已随 2026-10-26 分组重构移除）。
 		if s.state != nil {
 			s.state.RecordLatency(cand.Channel.ID, attempt.HeaderMs)
 		}
@@ -706,7 +651,7 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 	if lastErr == nil {
 		lastErr = ErrNoChannel
 	}
-	// 候选链全部失败（或撞上分组额度提前收场）：带上最后一次上游应答，
+	// 候选链全部失败：带上最后一次上游应答，
 	// 让调用方回真实状态码。此时 Stream 已关闭、名额已归还，
 	// ReleaseSlot 对空回调是幂等的，失败路径不会重复归还。
 	if lastAttempt != nil {

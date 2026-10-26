@@ -14,7 +14,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
 API=${API:-http://127.0.0.1:8888/api/admin}
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PG="db_psql -t -A -c"
-MODEL=$($PG "SELECT public_name FROM channel_models WHERE enabled = true ORDER BY id LIMIT 1")
+MODEL=$($PG "SELECT m.public_name FROM channel_models m JOIN channels c ON c.id = m.channel_id AND c.enabled = true WHERE m.enabled = true ORDER BY m.id LIMIT 1")
+# 密钥的路由必须指向白名单里有该模型的那条渠道：路由里没有这个模型的话，
+# 请求会以 502 失败，看起来像推送链路坏了 —— 其实是配置不完整
+CHID=$($PG "SELECT channel_id FROM channel_models WHERE public_name='$MODEL' AND enabled = true ORDER BY id LIMIT 1")
 KEYNAME=__live_probe__
 
 pass=0; fail=0
@@ -35,8 +38,9 @@ cleanup() {
 trap cleanup EXIT
 cleanup
 
-echo "=== 准备：一把探针密钥（模型 $MODEL）==="
-KEY=$(curl -s -X POST "$API/keys" -H 'Content-Type: application/json' -d "{\"name\":\"$KEYNAME\"}" \
+echo "=== 准备：一把探针密钥（模型 $MODEL，路由到渠道 #$CHID）==="
+KEY=$(curl -s -X POST "$API/keys" -H 'Content-Type: application/json' \
+  -d "{\"name\":\"$KEYNAME\",\"allowed_models\":[\"$MODEL\"],\"model_channels\":{\"$MODEL\":[$CHID]}}" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["key"])')
 
 echo

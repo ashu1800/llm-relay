@@ -39,7 +39,6 @@ CH1=$(post_json /api/admin/channels <<JSON
   "protocol": "openai-chat",
   "base_url": "$DS_BASE",
   "api_key": "$DS_KEY",
-  "weight": 1,
   "enabled": true
 }
 JSON
@@ -55,7 +54,6 @@ CH2=$(post_json /api/admin/channels <<JSON
   "protocol": "openai-chat",
   "base_url": "$OA_BASE",
   "api_key": "$OA_KEY",
-  "weight": 1,
   "enabled": true
 }
 JSON
@@ -72,7 +70,10 @@ curl -s -X POST "$BASE/api/admin/channels/$ID2/models" -H 'Content-Type: applica
 
 echo
 echo "===== 4. 创建对外密钥 ====="
-KEYRES=$(curl -s -X POST "$BASE/api/admin/keys" -H 'Content-Type: application/json' -d '{"name":"local-test"}')
+# 密钥的每模型路由（2026-10-26 分组下线）：allowed_models 必填非空，
+# 两个模型各自指到承载它的渠道
+KEYRES=$(curl -s -X POST "$BASE/api/admin/keys" -H 'Content-Type: application/json' \
+  -d "{\"name\":\"local-test\",\"allowed_models\":[\"deepseek-v4-flash\",\"gpt-5.6-sol\"],\"model_channels\":{\"deepseek-v4-flash\":[$ID1],\"gpt-5.6-sol\":[$ID2]}}")
 SK=$(echo "$KEYRES" | jqget "['key']")
 echo "对外密钥: $SK"
 

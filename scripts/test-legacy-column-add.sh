@@ -38,7 +38,6 @@ chk() {
   else echo "  [失败] $1 期望 $2 实际 $3"; bad=$((bad+1)); fi
 }
 
-GNAME="__col-probe-group"
 CNAME="__col-probe-ch"
 MODEL="__col-probe-model"
 BACKUP_TABLE="__probe_col_backup"
@@ -47,7 +46,6 @@ purge() {
   for cid in $(P "SELECT id FROM channels WHERE name='$CNAME'"); do
     curl -s -X DELETE "$API/channels/$cid" >/dev/null
   done
-  P "DELETE FROM channel_groups WHERE name='$GNAME'" >/dev/null
   P "DELETE FROM request_logs WHERE model_requested='$MODEL'" >/dev/null
 }
 
@@ -65,14 +63,13 @@ print('NONE' if not raw else '|'.join(str(Decimal(x).normalize()) for x in raw.s
 purge
 
 echo "=== 1. 建探针渠道：白名单里带一条配了价的模型（库里就有数据了）==="
-GID=$(curl -s -X POST "$API/groups" -H 'Content-Type: application/json' -d "{\"name\":\"$GNAME\"}" | jqg "d['id']")
 CID=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
-  \"name\": \"$CNAME\", \"group_id\": $GID, \"protocol\": \"openai-chat\",
-  \"base_url\": \"http://127.0.0.1:1\", \"api_key\": \"probe\", \"weight\": 1,
+  \"name\": \"$CNAME\", \"protocol\": \"openai-chat\",
+  \"base_url\": \"http://127.0.0.1:1\", \"api_key\": \"probe\",
   \"models\": [{\"public_name\": \"$MODEL\", \"input_per_1m\": \"1\", \"output_per_1m\": \"2\", \"multiplier\": 1.5}]
 }" | jqg "d['id']")
 ROWS_BEFORE=$(P "SELECT count(*) FROM channel_models")
-echo "  渠道 id=$CID 分组=$GID 白名单行数=$ROWS_BEFORE"
+echo "  渠道 id=$CID 白名单行数=$ROWS_BEFORE"
 chk "探针行已建好且带价" "1|2|0|0|1.5" "$(prow "$MODEL")"
 chk "老库里有数据（升级场景的前提）" "yes" "$( [ "$ROWS_BEFORE" -gt 0 ] && echo yes || echo no )"
 
@@ -197,7 +194,6 @@ purge
 P "DROP TABLE IF EXISTS $BACKUP_TABLE" >/dev/null
 rm -f /tmp/__col-deploy.log
 chk "探针渠道已删除" "0" "$(P "SELECT count(*) FROM channels WHERE name='$CNAME'")"
-chk "探针分组已删除" "0" "$(P "SELECT count(*) FROM channel_groups WHERE name='$GNAME'")"
 chk "探针白名单已删除" "0" "$(P "SELECT count(*) FROM channel_models WHERE public_name='$MODEL'")"
 chk "临时备份表已删除" "0" "$(P "SELECT count(*) FROM information_schema.tables WHERE table_name='$BACKUP_TABLE'")"
 

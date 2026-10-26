@@ -213,12 +213,6 @@ var heartbeatInterval = liveHeartbeatInterval
 // 否则循环会一个接一个地堆积查询。
 const liveQueryTimeout = 3 * time.Second
 
-// 预算检查的节拍。比统计慢得多是刻意的：预算的输入是「当天累计花费」，
-// 由请求量驱动、变化缓慢，而每次检查都要为每个配了预算的分组扫一遍
-// 当天日志；一分钟一拍既够及时，又不让它在空闲站点上成为唯一的常态负载。
-// 它不挂在 statsKick 上（见 budgetLoop）。
-const budgetCheckInterval = time.Minute
-
 // StartLive 启动实时推送循环，直到 ctx 结束。
 func (s *Server) StartLive(ctx context.Context) {
 	if s.deps.Live == nil {
@@ -231,10 +225,6 @@ func (s *Server) StartLive(ctx context.Context) {
 	statsKick := make(chan struct{}, 1)
 	go s.liveStatsLoop(ctx, statsKick)
 	go s.liveLogsLoop(ctx, statsKick)
-	// 预算检查独立成循环，且**不共享 statsKick**：预算不看订阅者数
-	//（记账面告警不能因为没人开看板就整体静默），而 statsKick 是容量 1 的
-	// 合并信号，多一个消费者就会把统计推送的唤醒抢走一半 —— 详见 budgetLoop。
-	go s.budgetLoop(ctx)
 	go s.liveBandwidthLoop(ctx)
 }
 
@@ -347,37 +337,6 @@ func (s *Server) liveStatsLoop(ctx context.Context, kick <-chan struct{}) {
 		}
 		lastSent = string(encoded)
 		s.deps.Live.broadcast(mustJSON(liveMessage{Type: "stats", Data: data}))
-	}
-}
-
-// budgetLoop 独立跑预算检查：**不看订阅者数**（统计推送没人看就是纯浪费，
-// 可以跳过；但「当天没人开看板就整体静默」是功能失效），也**不共享 statsKick**。
-//
-// 为什么不挂 statsKick（曾经挂过）：那个通道是容量 1 的合并信号，本意是让
-// 「新日志入库」立刻触发一次统计计算，从而消掉日志循环（1s 一拍）与统计循环
-// （2s 一拍）之间的相位差 —— 见 liveStatsLoop 的长注释，那是站主反馈过的
-// 「新行已经入场、卡片数字还要等一秒才动」。多一个消费者之后，一次 kick 只会
-// 唤醒其中任意一个，统计推送有一半概率退回定时器，恰好抵消了 kick 存在的理由。
-//
-// 而预算检查本来就不需要这种即时性：作者注释明说超支提醒迟到可以接受
-// （下次连上看板就补喊），且跨天清零这类变化压根不随新日志发生 ——
-// 挂在 kick 上换不来任何东西，却要拿统计的准时性去换。
-//
-// 一分钟一拍也足够：daily_budget 的输入是「当天累计花费」，变化速度受限于
-// 请求量，而超支提醒是记账面告警、不是实时风控。
-func (s *Server) budgetLoop(ctx context.Context) {
-	ticker := time.NewTicker(budgetCheckInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		start, end, _ := resolveRange("today")
-		qctx, cancel := context.WithTimeout(ctx, liveQueryTimeout)
-		s.checkBudgets(qctx, start, end)
-		cancel()
 	}
 }
 

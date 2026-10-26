@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -21,29 +22,46 @@ import (
 //
 // 模型目录不单独维护：它就是「启用渠道的启用白名单条目」的并集，
 // 与路由用的是同一份数据 —— 列表里有、请求却调不通（或反过来）是不可能出现的。
-// 密钥配了分组白名单时只列那些分组里的模型，否则客户端会看到一堆自己调不了的模型。
-// 模型白名单同理：配了 allowed_models 就只列其中的 —— 原来这里只落实了
-// 分组那一半，模型这一半漏着，客户端（Claude Code、Cursor 都靠这个接口
-// 探测）看到的仍是全量，选中才被 403。
+// 密钥配了模型路由时只列「路由里至少有一条渠道仍能跑」的模型，否则客户端会看到
+// 一堆自己调不了的模型（渠道被删/停用后路由条目失效的那部分要剔除）。
+// 模型白名单同理：配了 allowed_models 就只列其中的 —— 客户端（Claude Code、
+// Cursor 都靠这个接口探测）看到的仍是可调用全集，选中才不会 403。
 //
 // 每个模型额外带 supported_efforts：这个模型能接受的思考档位。同名模型可能挂在
 // 多条渠道上，取并集（见 relay.MergeModelEfforts）—— 请求最终只落在一条渠道上。
 func (s *Server) listModels(c *gin.Context) {
+	key := apiKeyFromContext(c)
+
+	// 先解析密钥路由：确定「哪些模型可服务」。路由为空的密钥（理论上创建
+	// 路径已拦，老数据兜底）按不限处理，与转发侧 CandidateQuery 空列表同一语义。
+	// 解析一次给两处用（servable 与下面的 scope 收窄）—— jsonb 解析虽轻，
+	// 每个 /v1/models 请求做两遍纯属浪费。
+	routes := KeyRoutesOf(key)
+	servable := map[string]bool{}
+	if key != nil {
+		for name, channels := range routes {
+			if len(channels) == 0 {
+				continue
+			}
+			servable[name] = true
+		}
+	}
+
 	// 查行而不是只查名字：supported_efforts 与渠道协议都要用来推导档位。
 	// 同一个模型名可能有多行，所以不能 DISTINCT，去重放到内存里做。
 	q := s.deps.Store.DB().Table("channel_models").
 		Select("channel_models.public_name, channel_models.supported_efforts, channels.protocol").
 		Joins("JOIN channels ON channels.id = channel_models.channel_id AND channels.enabled = true").
-		Joins("JOIN channel_groups ON channel_groups.id = channels.group_id AND channel_groups.enabled = true").
 		Where("channel_models.enabled = true")
-
-	if key := apiKeyFromContext(c); key != nil {
-		// 白名单解析结果由鉴权中间件随密钥一起查好（见 keyCache 注释），
-		// 这里不再逐条查库
-		groups := groupsFromContext(c)
-		if len(groups) > 0 {
-			q = q.Where("channels.group_id IN ?", groups)
+	if key != nil {
+		ids := KeyChannelScope(routes)
+		if len(ids) == 0 {
+			// 路由全部失效：没有任何渠道可服务，直接回空列表。
+			// 不返回错误 —— 客户端拿到空模型列表才知道配置有问题。
+			c.JSON(http.StatusOK, gin.H{"object": "list", "data": []gin.H{}})
+			return
 		}
+		q = q.Where("channels.id IN ?", ids)
 	}
 
 	type modelRow struct {
@@ -54,21 +72,27 @@ func (s *Server) listModels(c *gin.Context) {
 	var rows []modelRow
 	if err := q.Order("channel_models.public_name").Scan(&rows).Error; err != nil {
 		// 这个接口是 /v1/models，客户端是任意 OpenAI 兼容工具。
-		// 同样不能把原始 DB 错误回显出去（表名、列名、被拒数据都在里面）。
+		// 同样不能把原始 DB 错误回显出去（表名、列名、列值都在里面）。
 		writeInternalError(c, err)
 		return
 	}
 
 	// 按对外名归并：顺序沿用查询的 public_name 升序（第一次出现的顺序），
-	// 档位取并集。名称白名单的过滤与原来一样在内存里做，判据必须与拦截
-	// 请求的 modelAllowed 完全同一份（两处各写一个查询条件迟早漂移成
+	// 档位取并集。名称白名单与路由的过滤都在内存里做，判据必须与拦截
+	// 请求的 modelAllowed / 路由解析完全同一份（两处各写一个查询条件迟早漂移成
 	// 「列表里有、一调就被拒」）。
-	key := apiKeyFromContext(c)
 	order := make([]string, 0, len(rows))
 	perName := make(map[string][][]string, len(rows))
 	for _, r := range rows {
-		if key != nil && len(key.AllowedModels) > 0 && !modelAllowed(key.AllowedModels, r.PublicName) {
-			continue
+		if key != nil {
+			if len(key.AllowedModels) > 0 && !modelAllowed(key.AllowedModels, r.PublicName) {
+				continue
+			}
+			// 路由里没有这个模型（或它的候选渠道已全部失效）就不列：
+			// 列出来只会让客户端选中后被 403 / 503。
+			if !servable[r.PublicName] {
+				continue
+			}
 		}
 		if _, seen := perName[r.PublicName]; !seen {
 			order = append(order, r.PublicName)
@@ -184,19 +208,29 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 
 	// 密钥白名单在这里落地。
 	//
-	// allowed_models / allowed_groups 此前只有存储与回显：创建与更新会写库，
+	// allowed_models / model_channels 此前只有存储与回显：创建与更新会写库，
 	// 列表接口会显示，但路由侧完全不看。也就是说界面上配了限制却毫无效果 ——
 	// 属于「看起来有访问控制、实际没有」，比没有这个字段更危险。
-	var allowedGroups []uint
-	if key != nil {
-		if !modelAllowed(key.AllowedModels, publicModel) {
-			p.writeError(c, http.StatusForbidden,
-				"该密钥不允许调用模型 "+publicModel, "permission_error")
-			return
-		}
-		// 解析结果由鉴权中间件随密钥缓存（解析失败在那一层就已 403）
-		allowedGroups = groupsFromContext(c)
+	if key != nil && !modelAllowed(key.AllowedModels, publicModel) {
+		p.writeError(c, http.StatusForbidden,
+			"该密钥不允许调用模型 "+publicModel, "permission_error")
+		return
 	}
+	// 该密钥为此模型配置的候选渠道（有序）。
+	//
+	// **空列表不能交给转发层**：router 对空 AllowedChannels 的语义是「不按
+	// 密钥限制」（探测等无密钥路径复用），直接放行会把转发范围放宽到
+	// 全库能跑该模型的渠道 —— 备份导入把映射不到的条目置空（admin_backup）
+	// 或手工改库都能造出空列表，那是真实的静默权限放宽，不是理论问题。
+	// 正常保存路径有 normalizeKeyRoutes 拦空列表，这里是最后一道闸。
+	routes := KeyRoutesOf(key)
+	if key != nil && len(routes[publicModel]) == 0 {
+		p.writeError(c, http.StatusBadGateway,
+			fmt.Sprintf("模型 %s 没有可用的候选渠道：这条密钥的路由里没有该模型（或条目已失效），请到「密钥管理」修改渠道路由", publicModel),
+			"upstream_error")
+		return
+	}
+	allowedChannels := routes[publicModel]
 
 	// 客户端识别：从入站头认出「这次是谁在调」，随日志落一份快照。
 	// 与 ThinkingLevel 同一处采集 —— relay 包不能反向 import api，
@@ -204,20 +238,20 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 	clientID, clientName, clientUA := relay.ExtractClient(c.Request.Header)
 
 	req := &relay.RelayRequest{
-		TraceID:       traceID,
-		InboundProto:  p.Name,
-		UpstreamPath:  p.UpstreamPath,
-		PublicModel:   publicModel,
-		Body:          body,
-		InboundBody:   rawBody,
-		Headers:       c.Request.Header,
-		ClientIP:      c.ClientIP(),
-		ClientID:      clientID,
-		ClientName:    clientName,
-		ClientUA:      clientUA,
-		Stream:        relay.ExtractStream(body),
-		ThinkingLevel: relay.ExtractThinkingLevel(p.Name, rawBody),
-		AllowedGroups: allowedGroups,
+		TraceID:         traceID,
+		InboundProto:    p.Name,
+		UpstreamPath:    p.UpstreamPath,
+		PublicModel:     publicModel,
+		Body:            body,
+		InboundBody:     rawBody,
+		Headers:         c.Request.Header,
+		ClientIP:        c.ClientIP(),
+		ClientID:        clientID,
+		ClientName:      clientName,
+		ClientUA:        clientUA,
+		Stream:          relay.ExtractStream(body),
+		ThinkingLevel:   relay.ExtractThinkingLevel(p.Name, rawBody),
+		AllowedChannels: allowedChannels,
 	}
 	if key != nil {
 		req.APIKeyID = key.ID
@@ -258,16 +292,13 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 				relay.Timing{FirstByteMs: att.HeaderMs, TotalMs: totalMs}, att.Body, att.Headers)
 			return
 		}
-		// 分组超限要回 429 而不是 502：502 会让客户端以为上游坏了而重试，
-		// 而这里恰恰是「你现在不该重试」。带上 Retry-After 说明等多久。
+		// 「没有可用渠道」也回 502：它不是上游故障，但客户端重试与否都一样，
+		// 502 语义（网关侧无法代理）比 503（稍后重试会好）更接近真相 ——
+		// 要修的是密钥或渠道配置，不是等。
 		//
-		// 只认 ErrGroupLimited / ErrNoChannel 这种明确的语义错误，
-		// 其余（上游不可达等）仍然是 502。
+		// 只认 ErrRequestUnsupported 这种明确的语义错误来改状态码，
+		// 其余（无可用渠道、上游不可达等）仍然是 502。
 		status, errType := http.StatusBadGateway, "upstream_error"
-		if errors.Is(relayErr, relay.ErrGroupLimited) {
-			status, errType = http.StatusTooManyRequests, "rate_limit_error"
-			c.Header("Retry-After", "60")
-		}
 		// 请求内容无法转换（例如给 Anthropic 渠道发音频）是**客户端**的错，
 		// 不是上游的错：回 400 而不是 502。502 会让客户端以为上游坏了去重试，
 		// 而重试多少次结果都一样 —— 用户真正要做的是改请求。

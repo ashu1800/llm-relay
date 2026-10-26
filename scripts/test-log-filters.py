@@ -54,9 +54,6 @@ def call(m, p, b=None):
             return e.code, {}
 
 
-_, k = call("POST", "/keys", {"name": "filter-probe-key"})
-tok = k["key"]
-
 import subprocess
 
 
@@ -65,7 +62,6 @@ def probe_model():
     写死模型名会让用例以 502 失败，看起来像代码坏了。"""
     sql = ("SELECT m.public_name FROM channel_models m "
            "JOIN channels c ON c.id = m.channel_id AND c.enabled = true "
-           "JOIN channel_groups g ON g.id = c.group_id AND g.enabled = true "
            "WHERE m.enabled = true ORDER BY m.id LIMIT 1")
     try:
         out = subprocess.run(
@@ -84,12 +80,12 @@ print("  探针模型: %s" % MODEL)
 
 
 def probe_scope(model):
-    """探针模型所在渠道的 id 与它所属分组的 id。
+    """探针模型所在渠道的 id。
 
     和模型名一样从库里现取：写死 id 会在渠道被删、重建之后变成假的失败，
-    而这条用例要验证的是「按分组 / 按渠道筛得对不对」，不是「id 是不是这几个」。
+    而这条用例要验证的是「按密钥 / 按渠道筛得对不对」，不是「id 是不是这几个」。
     """
-    sql = ("SELECT c.id::text || ' ' || c.group_id::text FROM channel_models m "
+    sql = ("SELECT c.id::text FROM channel_models m "
            "JOIN channels c ON c.id = m.channel_id AND c.enabled = true "
            "WHERE m.public_name = '%s' AND m.enabled = true ORDER BY m.id LIMIT 1" % model)
     try:
@@ -98,26 +94,17 @@ def probe_scope(model):
             capture_output=True, text=True, timeout=30).stdout.strip()
     except Exception:
         out = ""
-    parts = out.split()
-    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
-        return 0, 0
-    return int(parts[0]), int(parts[1])
-
-
-def channel_outside(group_id):
-    """另一个分组里的渠道 id：用来证明「分组 + 渠道」是 AND 而不是 OR。
-
-    只有一个分组时返回 0，调用方跳过那条断言 —— 这种情况本身不是错误。
-    """
-    sql = ("SELECT c.id::text FROM channels c WHERE c.group_id <> %d "
-           "ORDER BY c.id LIMIT 1" % group_id)
-    try:
-        out = subprocess.run(
-            psql_cmd() + ["-t", "-A", "-c", sql],
-            capture_output=True, text=True, timeout=30).stdout.strip()
-    except Exception:
-        out = ""
     return int(out) if out.isdigit() else 0
+
+
+# 密钥必须声明「模型 → 候选渠道」路由（新模型下 allowed_models 必填非空）：
+# 路由里就是探针渠道，请求一定落在它上面，与后面按渠道 / 按密钥的断言一致。
+# KID 直接取这把刚建的密钥的 id —— 「能路由到探针渠道的密钥」就是它自己
+CID0 = probe_scope(MODEL)
+_, k = call("POST", "/keys", {"name": "filter-probe-key",
+                              "allowed_models": [MODEL],
+                              "model_channels": {MODEL: [CID0]}})
+tok = k["key"]
 
 
 def chat(model, expect_fail=False, user_agent=None, extra_headers=None):
@@ -294,41 +281,32 @@ chk("返回的确实是该 trace",
     str([r["trace_id"] for r in bytrace.get("items", [])])[:80])
 
 print()
-print("=== 按分组 / 按渠道筛选（界面工具栏上的两个下拉）===")
-CID, GID = probe_scope(MODEL)
-print("  探针：渠道 %d，所属分组 %d" % (CID, GID))
-if CID and GID:
-    _, bygroup = call("GET", "/logs?page_size=200&group_id=%d" % GID)
-    chk("按分组筛：返回的行都属于该分组",
-        len(bygroup.get("items", [])) > 0 and all(r["group_id"] == GID for r in bygroup["items"]),
-        "共 %d 条" % len(bygroup.get("items", [])))
+print("=== 按密钥 / 按渠道筛选（界面工具栏上的下拉）===")
+CID = probe_scope(MODEL)
+# KID 就是本次建的那把探针密钥：request_logs.api_key_id 记录的是真正发请求的密钥，
+# 而本脚本里只有这一把密钥在发请求
+KID = k["id"]
+print("  探针：渠道 %d，命中它的密钥 id %d" % (CID, KID))
+if CID and KID:
+    _, bykey = call("GET", "/logs?page_size=200&key_id=%d" % KID)
+    chk("按密钥筛：返回的行都属于该密钥",
+        len(bykey.get("items", [])) > 0 and all(r["api_key_id"] == KID for r in bykey["items"]),
+        "共 %d 条" % len(bykey.get("items", [])))
 
     _, bychan = call("GET", "/logs?page_size=200&channel_id=%d" % CID)
     chk("按渠道筛：返回的行都属于该渠道",
         len(bychan.get("items", [])) > 0 and all(r["channel_id"] == CID for r in bychan["items"]),
         "共 %d 条" % len(bychan.get("items", [])))
-    # 渠道是分组的子集：按渠道筛出来的条数不可能多于它所属分组
-    chk("按渠道的条数不超过按分组的条数",
-        bychan.get("total", 0) <= bygroup.get("total", 0),
-        "渠道 %s 条，分组 %s 条" % (bychan.get("total"), bygroup.get("total")))
 
-    other = channel_outside(GID)
-    if other:
-        _, cross = call("GET", "/logs?group_id=%d&channel_id=%d" % (GID, other))
-        chk("分组 + 别的分组的渠道 = 0（是 AND 不是 OR）",
-            cross.get("total", -1) == 0, "实际 %s 条" % cross.get("total"))
-    else:
-        print("  只有一个分组，跳过 AND 那条断言")
+    _, none = call("GET", "/logs?key_id=9999999")
+    chk("不存在的密钥：0 条", none.get("total", -1) == 0, "实际 %s 条" % none.get("total"))
 
-    _, none = call("GET", "/logs?group_id=9999999")
-    chk("不存在的分组：0 条", none.get("total", -1) == 0, "实际 %s 条" % none.get("total"))
-
-    st, body = call("GET", "/logs?group_id=abc")
-    chk("非法 group_id 报 400 且点名参数",
-        st == 400 and "group_id" in json.dumps(body, ensure_ascii=False),
+    st, body = call("GET", "/logs?key_id=abc")
+    chk("非法 key_id 报 400 且点名参数",
+        st == 400 and "key_id" in json.dumps(body, ensure_ascii=False),
         "HTTP %s %s" % (st, json.dumps(body, ensure_ascii=False)[:90]))
-    st, _ = call("GET", "/logs?group_id=0")
-    chk("group_id=0 也拒绝（0 会让人以为等于「全部」）", st == 400, "HTTP %s" % st)
+    st, _ = call("GET", "/logs?key_id=0")
+    chk("key_id=0 也拒绝（0 会让人以为等于「全部」）", st == 400, "HTTP %s" % st)
 
     # 导出与列表共用一套条件，新参数也必须跟着走
     try:
@@ -343,7 +321,7 @@ if CID and GID:
         chk("按渠道导出可用", False, str(e)[:120])
 else:
     # 环境里取不到探针渠道（例如渠道刚好被删），这一节跳过而不是判失败
-    print("  取不到探针渠道与分组，跳过按分组 / 按渠道的断言")
+    print("  取不到探针渠道与密钥，跳过按密钥 / 按渠道的断言")
 
 print()
 print("=== 时间必须带时区（原来路由页用 to_char 抹掉时区，同一请求差 8 小时）===")

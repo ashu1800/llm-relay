@@ -6,7 +6,19 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
 
 BASE="http://127.0.0.1:8888"
-SK=$(curl -s -X POST "$BASE/api/admin/keys" -H 'Content-Type: application/json' -d '{"name":"payload-test"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['key'])")
+
+# 密钥的每模型路由（2026-10-26 分组下线）：allowed_models 必填非空。
+# 探针模型走白名单里没有的鬼名字（第 2 节本来就要发失败请求），
+# 但 allowed_models 还是得非空 —— 那正是第 2 节要验的「失败请求也留存」
+MODEL=$(db_psql -t -A -c "SELECT m.public_name FROM channel_models m JOIN channels c ON c.id = m.channel_id AND c.enabled = true WHERE m.enabled = true ORDER BY m.id LIMIT 1")
+CID=$(db_psql -t -A -c "SELECT m.channel_id FROM channel_models m JOIN channels c ON c.id = m.channel_id AND c.enabled = true WHERE public_name='$MODEL' AND m.enabled = true ORDER BY m.id LIMIT 1")
+if [ -z "$MODEL" ] || [ -z "$CID" ]; then
+  echo "!! 没有任何启用的渠道模型白名单，无法建探针密钥（先给渠道配一个模型）"
+  exit 1
+fi
+SK=$(curl -s -X POST "$BASE/api/admin/keys" -H 'Content-Type: application/json' \
+  -d "{\"name\":\"payload-test\",\"allowed_models\":[\"$MODEL\"],\"model_channels\":{\"$MODEL\":[$CID]}}" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['key'])")
 
 MODE=$(curl -s "$BASE/api/admin/settings" | python3 -c "import sys,json;print(json.load(sys.stdin)['runtime']['payload_storage_mode'])")
 echo "当前留存模式: $MODE"
@@ -14,7 +26,7 @@ echo "当前留存模式: $MODE"
 echo
 echo "=== 1. 成功请求（errors 模式下不应留存）==="
 curl -s -m 60 "$BASE/v1/chat/completions" -H "Authorization: Bearer $SK" -H 'Content-Type: application/json' \
-  -d '{"model":"deepseek-v4-flash","max_tokens":10,"messages":[{"role":"user","content":"说:好"}]}' -o /dev/null -w "  HTTP %{http_code}\n"
+  -d "{\"model\":\"$MODEL\",\"max_tokens\":10,\"messages\":[{\"role\":\"user\",\"content\":\"说:好\"}]}" -o /dev/null -w "  HTTP %{http_code}\n"
 
 echo "=== 2. 失败请求（应留存）==="
 curl -s -m 30 "$BASE/v1/chat/completions" -H "Authorization: Bearer $SK" -H 'Content-Type: application/json' \

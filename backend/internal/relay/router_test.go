@@ -9,13 +9,13 @@ import (
 	"llm-relay/internal/secure"
 )
 
-// cands 按给定顺序造候选，weight 与 id 各自递增，用来验证「顺序由 weight 决定」
+// cands 按给定顺序造候选（id 即渠道 ID），用来验证「顺序由密钥路由决定」
 // 而不是由 id 决定。
 func cands(ids ...uint) []Candidate {
 	out := make([]Candidate, 0, len(ids))
-	for i, id := range ids {
+	for _, id := range ids {
 		out = append(out, Candidate{
-			Channel:   model.Channel{ID: id, GroupID: 7, Weight: i + 1},
+			Channel:   model.Channel{ID: id},
 			Available: true,
 		})
 	}
@@ -42,129 +42,73 @@ func equalIDs(a, b []uint) bool {
 	return true
 }
 
-// failover 必须严格保持候选顺序 —— 那已经是 weight 升序（见 Router.Candidates
-// 的 Order），第一个就是首选。
-func TestSortCandidatesFailoverKeepsWeightOrder(t *testing.T) {
-	r := &Router{state: NewChannelState(), rrCursor: map[uint]int{}}
-	// 故意让 id 顺序与 weight 顺序相反：旧实现按 id 排，会把它倒过来
-	cs := cands(90, 50, 10)
-	sortCandidates(cs, model.StrategyFailover, r)
+// sortOrderOf 是密钥顺序的取值函数：列表内取下标，列表外垫底。
+func TestSortOrderOf(t *testing.T) {
+	order := []uint{90, 50, 10}
+	for id, want := range map[uint]int{90: 0, 50: 1, 10: 2, 99: 3, 7: 3} {
+		if got := sortOrderOf(order, id); got != want {
+			t.Errorf("sortOrderOf(%d) = %d，期望 %d", id, got, want)
+		}
+	}
+	// 空列表：所有渠道都垫底，值一致（顺序退化为稳定排序的原序）
+	if sortOrderOf(nil, 10) != 0 || sortOrderOf(nil, 99) != 0 {
+		t.Error("空列表应统一返回 0")
+	}
+}
+
+// 路由顺序完全由密钥的 model_channels 列表决定，与渠道 id 无关。
+func TestSortCandidatesFollowsKeyOrder(t *testing.T) {
+	// 故意让 id 顺序与密钥顺序相反：按 id 排会把链路倒过来
+	cs := cands(10, 50, 90)
+	sortCandidates(cs, []uint{90, 50, 10})
 	if got := ids(cs); !equalIDs(got, []uint{90, 50, 10}) {
-		t.Fatalf("failover 应保持权重顺序 [90 50 10]，实际 %v", got)
+		t.Fatalf("应按密钥顺序 [90 50 10]，实际 %v", got)
+	}
+
+	// 密钥没列出的渠道垫底（理论上不该出现，SQL 已按 IN 过滤；
+	// 这里钉的是 sortOrderOf 的兜底行为）
+	cs2 := cands(10, 99)
+	sortCandidates(cs2, []uint{10})
+	if got := ids(cs2); !equalIDs(got, []uint{10, 99}) {
+		t.Fatalf("列表外的渠道应垫底，实际 %v", got)
 	}
 }
 
-// 未知策略（含已下线的 weighted）走 default 分支：保持权重顺序，不抽签。
-func TestSortCandidatesUnknownStrategyKeepsWeightOrder(t *testing.T) {
-	r := &Router{state: NewChannelState(), rrCursor: map[uint]int{}}
-	for _, strategy := range []string{"weighted", "", "no-such-strategy"} {
-		cs := cands(90, 50, 10)
-		sortCandidates(cs, strategy, r)
-		if got := ids(cs); !equalIDs(got, []uint{90, 50, 10}) {
-			t.Fatalf("策略 %q 应保持权重顺序，实际 %v", strategy, got)
-		}
-	}
-}
-
-// 轮询：起点逐次前进，一轮走完回到开头。
-//
-// 这条钉住的是一个真实缺陷：原来的 rotate() 不读游标，每次都把首个挪到末尾，
-// 于是每个请求都从「第二优先」开始，而 rrCursor 声明了从未被使用。
-func TestSortCandidatesRoundRobinAdvancesCursor(t *testing.T) {
-	r := &Router{state: NewChannelState(), rrCursor: map[uint]int{}}
-	want := [][]uint{{10, 20, 30}, {20, 30, 10}, {30, 10, 20}, {10, 20, 30}}
-	for i, exp := range want {
-		cs := cands(10, 20, 30)
-		sortCandidates(cs, model.StrategyRoundRobin, r)
-		if got := ids(cs); !equalIDs(got, exp) {
-			t.Fatalf("第 %d 次轮询应为 %v，实际 %v", i+1, exp, got)
-		}
-	}
-}
-
-// 轮询游标按分组独立：一个分组的轮转不该推着另一个分组一起走。
-func TestRoundRobinCursorIsPerGroup(t *testing.T) {
-	r := &Router{state: NewChannelState(), rrCursor: map[uint]int{}}
-
-	groupA := func() []Candidate {
-		cs := cands(10, 20, 30)
-		for i := range cs {
-			cs[i].Channel.GroupID = 1
-		}
-		return cs
-	}
-	groupB := func() []Candidate {
-		cs := cands(40, 50, 60)
-		for i := range cs {
-			cs[i].Channel.GroupID = 2
-		}
-		return cs
-	}
-
-	sortCandidates(groupA(), model.StrategyRoundRobin, r) // A 游标 -> 1
-	csB := groupB()
-	sortCandidates(csB, model.StrategyRoundRobin, r) // B 首次应从首位开始
-	if got := ids(csB); !equalIDs(got, []uint{40, 50, 60}) {
-		t.Fatalf("另一个分组的首次轮询应从首位开始，实际 %v", got)
-	}
-	csA := groupA()
-	sortCandidates(csA, model.StrategyRoundRobin, r) // A 应继续走到第二个
-	if got := ids(csA); !equalIDs(got, []uint{20, 30, 10}) {
-		t.Fatalf("A 分组的游标应独立前进，实际 %v", got)
-	}
-}
-
-// 不可用（不在时段内 / 已饱和）的渠道要排到后面，但不能因为优先级高就压过
+// 不可用（不在时段内 / 已饱和）的渠道要排到后面，但不能因为密钥顺序靠前就压过
 // 「当前不可用」这个事实 —— 否则请求会先撞一条明知道用不了的渠道。
+//
+// 顺序与可用性冲突时可用性赢：到点才可用的渠道被提前，是既有语义
+// （原先它与 weight 的关系也是这样）。
 func TestSortCandidatesPutsUnavailableLast(t *testing.T) {
-	r := &Router{state: NewChannelState(), rrCursor: map[uint]int{}}
 	cs := []Candidate{
-		{Channel: model.Channel{ID: 10, GroupID: 7, Weight: 1}, Available: false},
-		{Channel: model.Channel{ID: 20, GroupID: 7, Weight: 2}, Available: true},
-		{Channel: model.Channel{ID: 30, GroupID: 7, Weight: 3}, Available: true, Saturated: true},
+		{Channel: model.Channel{ID: 10}, Available: false},
+		{Channel: model.Channel{ID: 20}, Available: true},
+		{Channel: model.Channel{ID: 30}, Available: true, Saturated: true},
 	}
-	sortCandidates(cs, model.StrategyFailover, r)
+	// 密钥顺序是 10 → 20 → 30
+	sortCandidates(cs, []uint{10, 20, 30})
 	if got := ids(cs); !equalIDs(got, []uint{20, 30, 10}) {
 		t.Fatalf("可用的应排前面（饱和的次之，不可用的最后），实际 %v", got)
 	}
 }
 
-// 最低延迟：按观测延迟升序，没有观测值的排最后。
-func TestSortCandidatesLeastLatency(t *testing.T) {
-	st := NewChannelState()
-	st.RecordLatency(10, 300)
-	st.RecordLatency(20, 100)
-	r := &Router{state: st, rrCursor: map[uint]int{}}
-	// 30 没有任何观测值
-	cs := cands(10, 20, 30)
-	sortCandidates(cs, model.StrategyLeastLatency, r)
-	if got := ids(cs); !equalIDs(got, []uint{20, 10, 30}) {
-		t.Fatalf("应最快的在前、无观测值的最后 [20 10 30]，实际 %v", got)
+// 同一可用档内才按密钥顺序：可用性优先分区，顺序在区内生效。
+func TestSortCandidatesKeyOrderWithinAvailabilityTier(t *testing.T) {
+	cs := []Candidate{
+		{Channel: model.Channel{ID: 10}, Available: true},
+		{Channel: model.Channel{ID: 20}, Available: false},
+		{Channel: model.Channel{ID: 30}, Available: true},
+	}
+	sortCandidates(cs, []uint{30, 20, 10})
+	if got := ids(cs); !equalIDs(got, []uint{30, 10, 20}) {
+		t.Fatalf("可用档内按密钥顺序 [30 10]，不可用的 20 垫底，实际 %v", got)
 	}
 }
 
-func TestRotateOffset(t *testing.T) {
-	cs := cands(1, 2, 3, 4)
-	rotate(cs, 2)
-	if got := ids(cs); !equalIDs(got, []uint{3, 4, 1, 2}) {
-		t.Fatalf("左移 2 位应为 [3 4 1 2]，实际 %v", got)
-	}
-	// offset 为 0 或越界不该改动顺序
-	cs2 := cands(1, 2, 3)
-	rotate(cs2, 0)
-	if got := ids(cs2); !equalIDs(got, []uint{1, 2, 3}) {
-		t.Fatalf("offset=0 不应改动顺序，实际 %v", got)
-	}
-	rotate(cs2, 3)
-	if got := ids(cs2); !equalIDs(got, []uint{1, 2, 3}) {
-		t.Fatalf("offset 等于长度时不应改动顺序，实际 %v", got)
-	}
-}
-
-// fbCand 造一个候选，指定渠道 ID、优先级与是否为兜底（默认可用）。
-func fbCand(id uint, weight int, fallback bool) Candidate {
+// fbCand 造一个候选，指定渠道 ID 与是否为兜底（默认可用）。
+func fbCand(id uint, fallback bool) Candidate {
 	return Candidate{
-		Channel:   model.Channel{ID: id, GroupID: 7, Weight: weight},
+		Channel:   model.Channel{ID: id},
 		Available: true,
 		Fallback:  fallback,
 	}
@@ -179,73 +123,16 @@ func fbCand(id uint, weight int, fallback bool) Candidate {
 //
 // 这条用例故意把最容易被插队的组合摆出来：精确的那条不可用，兜底的那条可用。
 func TestSortCandidatesFallbackAlwaysLast(t *testing.T) {
-	r := &Router{state: NewChannelState(), rrCursor: map[uint]int{}}
-	precise := fbCand(10, 1, false)
+	precise := fbCand(10, false)
 	precise.Available = false // 精确但当前不可用
 	cs := []Candidate{
 		precise,
-		fbCand(20, 2, true),
-		fbCand(30, 3, true),
+		fbCand(20, true),
+		fbCand(30, true),
 	}
-	sortCandidates(cs, model.StrategyFailover, r)
+	sortCandidates(cs, []uint{10, 20, 30})
 	if got := ids(cs); !equalIDs(got, []uint{10, 20, 30}) {
 		t.Fatalf("精确候选必须排在兜底之前（哪怕它当前不可用），实际 %v", got)
-	}
-}
-
-// 轮询只轮转精确命中的渠道，不碰兜底段。
-//
-// 轮询回答的是「精确命中的几条渠道怎么轮流」。把兜底纳入轮转会让精确渠道
-// 被无谓跳过，而兜底是容错通道，不该参与「公平分配」—— 它只在精确的都不行时顶上。
-//
-// 这条同时钉住游标的模数：必须是精确段的长度，而不是候选总数。
-// 模数取错的话，加一条开了兜底的渠道就会改变精确渠道的轮转周期。
-func TestSortCandidatesRoundRobinSkipsFallback(t *testing.T) {
-	r := &Router{state: NewChannelState(), rrCursor: map[uint]int{}}
-	// 每轮都重新造候选：sortCandidates 会就地重排，复用切片会互相污染
-	build := func() []Candidate {
-		return []Candidate{
-			fbCand(10, 1, false),
-			fbCand(20, 2, false),
-			fbCand(30, 3, false),
-			fbCand(99, 4, true), // 兜底，应始终在尾
-		}
-	}
-	want := [][]uint{
-		{10, 20, 30, 99},
-		{20, 30, 10, 99},
-		{30, 10, 20, 99},
-		{10, 20, 30, 99}, // 走完一轮回到开头
-	}
-	for i, exp := range want {
-		cs := build()
-		sortCandidates(cs, model.StrategyRoundRobin, r)
-		if got := ids(cs); !equalIDs(got, exp) {
-			t.Fatalf("第 %d 次轮询应为 %v（兜底 99 始终在尾），实际 %v", i+1, exp, got)
-		}
-	}
-}
-
-// 最低延迟策略也不能把兜底提前。
-//
-// 兜底渠道如果恰好是全组观测延迟最低的那条（刚上线、只跑过几次探测），
-// 纯按延迟排会把它顶到队首 —— 于是每次请求都先走兜底，精确命中的渠道
-// 形同虚设。延迟只在段内比较。
-func TestSortCandidatesLeastLatencyKeepsFallbackLast(t *testing.T) {
-	st := NewChannelState()
-	st.RecordLatency(10, 300)
-	st.RecordLatency(20, 100)
-	st.RecordLatency(99, 1) // 兜底渠道延迟最低
-	r := &Router{state: st, rrCursor: map[uint]int{}}
-	cs := []Candidate{
-		fbCand(10, 1, false),
-		fbCand(20, 2, false),
-		fbCand(99, 3, true),
-	}
-	sortCandidates(cs, model.StrategyLeastLatency, r)
-	// 精确段按延迟升序 [20 10]，兜底 99 尽管最快也只能在最后
-	if got := ids(cs); !equalIDs(got, []uint{20, 10, 99}) {
-		t.Fatalf("应 [20 10 99]（兜底 99 不参与段内比快），实际 %v", got)
 	}
 }
 
@@ -255,14 +142,13 @@ func TestSortCandidatesLeastLatencyKeepsFallbackLast(t *testing.T) {
 // 于是「超出可用时段」的兜底渠道会排在「此刻可用」的兜底渠道前面 ——
 // 请求先撞一条明知道用不了的渠道。
 func TestSortCandidatesFallbackSegmentKeepsAvailabilityOrder(t *testing.T) {
-	r := &Router{state: NewChannelState(), rrCursor: map[uint]int{}}
-	unavailable := fbCand(98, 1, true)
+	unavailable := fbCand(98, true)
 	unavailable.Available = false
 	cs := []Candidate{
-		unavailable,     // 兜底但不可用，优先级最高
-		fbCand(99, 2, true), // 兜底且可用
+		unavailable,      // 兜底但不可用
+		fbCand(99, true), // 兜底且可用
 	}
-	sortCandidates(cs, model.StrategyFailover, r)
+	sortCandidates(cs, []uint{98, 99})
 	if got := ids(cs); !equalIDs(got, []uint{99, 98}) {
 		t.Fatalf("兜底段内可用的应排前面，实际 %v", got)
 	}
@@ -276,15 +162,15 @@ func TestSortCandidatesFallbackSegmentKeepsAvailabilityOrder(t *testing.T) {
 // tried 记下渠道 ID，第二次被 filterTried 跳过 —— 白耗一个重试轮次，
 // 而 maxAttempts 是有限的，等于凭空少了一次故障转移的机会。
 //
-// 保留精确那条的理由不只是「先来后到」：精确那条带着它自己的 upst.name
+// 保留精确那条的理由不只是「先来后到」：精确那条带着它自己的 upstream_name
 // 与计费键，是用户明确为这个模型配置的行；兜底那条的 Binding 指向的是
 // 默认模型行，用它计费会算到别的模型头上。
 func TestMergeCandidatesDedupesExactWins(t *testing.T) {
-	precise := fbCand(10, 1, false)
+	precise := fbCand(10, false)
 	precise.Binding = model.ChannelModel{PublicName: "claude-opus-4-7", UpstreamName: "claude-opus-4-7"}
-	fallbackSameChannel := fbCand(10, 1, true)
+	fallbackSameChannel := fbCand(10, true)
 	fallbackSameChannel.Binding = model.ChannelModel{PublicName: "deepseek-chat", UpstreamName: "deepseek-chat"}
-	fallbackOther := fbCand(20, 2, true)
+	fallbackOther := fbCand(20, true)
 	fallbackOther.Binding = model.ChannelModel{PublicName: "deepseek-chat", UpstreamName: "deepseek-chat"}
 
 	got := mergeCandidates([]Candidate{precise}, []Candidate{fallbackSameChannel, fallbackOther})
@@ -316,7 +202,7 @@ func TestBuildLogMarksFallback(t *testing.T) {
 	res := &RelayResult{
 		TraceID: "t1",
 		Candidate: Candidate{
-			Channel:  model.Channel{ID: 7, Name: "DeepSeek", GroupID: 1},
+			Channel:  model.Channel{ID: 7, Name: "DeepSeek"},
 			Binding:  model.ChannelModel{PublicName: "deepseek-chat", UpstreamName: "deepseek-chat"},
 			Fallback: true,
 		},
@@ -343,7 +229,7 @@ func TestBuildLogDoesNotMarkExactMatchAsFallback(t *testing.T) {
 	res := &RelayResult{
 		TraceID: "t2",
 		Candidate: Candidate{
-			Channel: model.Channel{ID: 7, Name: "DeepSeek", GroupID: 1},
+			Channel: model.Channel{ID: 7, Name: "DeepSeek"},
 			Binding: model.ChannelModel{PublicName: "deepseek-chat", UpstreamName: "deepseek-chat"},
 			// Fallback: false —— 精确命中
 		},
@@ -367,7 +253,7 @@ func TestBuildCandidatesExactMatchNotMisjudgedAsFallback(t *testing.T) {
 	r := mustRouter(t)
 	rows := []candidateRow{{
 		Channel: model.Channel{
-			ID: 7, Name: "DeepSeek", GroupID: 1,
+			ID: 7, Name: "DeepSeek",
 			ExtraConfig: model.JSONMap{"default_model_enabled": true, "default_model": "deepseek-chat"},
 		},
 		PublicName:   "deepseek-chat",
@@ -399,7 +285,7 @@ func TestBuildCandidatesFallbackUsesDefaultModelAsBinding(t *testing.T) {
 	r := mustRouter(t)
 	rows := []candidateRow{{
 		Channel: model.Channel{
-			ID: 7, Name: "DeepSeek", GroupID: 1,
+			ID: 7, Name: "DeepSeek",
 			ExtraConfig: model.JSONMap{"default_model_enabled": true, "default_model": "deepseek-chat"},
 		},
 		PublicName:   "deepseek-chat",
@@ -437,7 +323,7 @@ func TestBuildCandidatesSkipsFallbackWhenSwitchOff(t *testing.T) {
 	r := mustRouter(t)
 	rows := []candidateRow{{
 		Channel: model.Channel{
-			ID: 7, Name: "DeepSeek", GroupID: 1,
+			ID: 7, Name: "DeepSeek",
 			// 只有模型名、开关是 false
 			ExtraConfig: model.JSONMap{"default_model_enabled": false, "default_model": "deepseek-chat"},
 		},
@@ -461,9 +347,9 @@ func mustRouter(t *testing.T) *Router {
 	if err != nil {
 		t.Fatalf("构造测试用 cipher 失败: %v", err)
 	}
-	return &Router{cipher: c, state: NewChannelState(), rrCursor: map[uint]int{}, logger: slog.Default()}
+	return &Router{cipher: c, state: NewChannelState(), logger: slog.Default()}
 }
-//
+
 // 价格是「渠道 × 模型」维度的（见 pricing.Engine），所以计费必须用
 // 真正走的那条白名单行的对外名：
 //   - 精确命中时它恰好等于请求名（候选查询的条件就是 public_name = 请求名），

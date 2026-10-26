@@ -8,12 +8,13 @@
 // 抄，并且每次导航后核对实际落点。
 const pages = [
   ['渠道管理', '/console/channels'],
-  ['分组管理', '/console/groups'],
   ['密钥信息', '/console/keys'],
   ['代理管理', '/console/proxies'],
   ['系统设置', '/console/system'],
   ['请求日志（看板页）', '/console/dashboard']
 ]
+// 「分组管理」一行已删（2026-10-26 分组下线）：/console/groups 重定向到渠道页，
+// 量的是渠道表却上报成分组表 —— 与上面 2026-09-23 记的同一条失败模式。
 const ver = await (await fetch('http://127.0.0.1:9222/json/version')).json()
 const ws = new WebSocket(ver.webSocketDebuggerUrl)
 await new Promise((r, j) => { ws.onopen = r; ws.onerror = j })

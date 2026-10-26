@@ -41,7 +41,6 @@ snap_get() { python3 -c "import sys,json;print(json.loads(sys.argv[1]).get(sys.a
 
 bash "$(dirname "$0")/ensure-mock-upstream.sh" || exit 1
 
-GNAME="__rule-probe-group"
 CNAME="__rule-probe-ch"
 KNAME="__rule-probe-key"
 MODEL="__rule-probe-model"
@@ -53,7 +52,6 @@ purge() {
   for kid in $(P "SELECT id FROM api_keys WHERE name='$KNAME'"); do
     curl -s -X DELETE "$API/keys/$kid" >/dev/null
   done
-  P "DELETE FROM channel_groups WHERE name='$GNAME'" >/dev/null
   P "DELETE FROM request_payloads WHERE log_id IN (SELECT id FROM request_logs WHERE api_key_name='$KNAME' OR model_requested='$MODEL')" >/dev/null
   P "DELETE FROM request_logs WHERE api_key_name='$KNAME' OR model_requested='$MODEL'" >/dev/null
 }
@@ -85,15 +83,14 @@ snap_of() { echo "$1" | cut -f2-; }
 purge
 
 echo "=== 0. 准备：临时渠道（上游 mock 的用量固定 10 进 5 出）+ 密钥 ==="
-GID=$(curl -s -X POST "$API/groups" -H 'Content-Type: application/json' -d "{\"name\":\"$GNAME\"}" | jqg "d['id']")
 CID=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
-  \"name\": \"$CNAME\", \"group_id\": $GID, \"protocol\": \"openai-chat\",
-  \"base_url\": \"http://127.0.0.1:9997\", \"api_key\": \"mock-key\", \"weight\": 1,
+  \"name\": \"$CNAME\", \"protocol\": \"openai-chat\",
+  \"base_url\": \"http://127.0.0.1:9997\", \"api_key\": \"mock-key\",
   \"models\": [{\"public_name\": \"$MODEL\", \"upstream_name\": \"$MODEL\"}]
 }" | jqg "d['id']")
 SK=$(curl -s -X POST "$API/keys" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"$KNAME\",\"allowed_groups\":[\"$GNAME\"]}" | jqg "d['key']")
-echo "  渠道 id=$CID 分组=$GID"
+  -d "{\"name\":\"$KNAME\",\"allowed_models\":[\"$MODEL\"],\"model_channels\":{\"$MODEL\":[$CID]}}" | jqg "d['key']")
+echo "  渠道 id=$CID"
 echo "  服务器本地时间: $(APP +'%F %T') （星期 $(APP +%u)）"
 # 原价：(1×10 + 2×5)/1e6 = 0.00002；倍率把结果变成 0.00003 / 0.00004 / 0.00001
 chk "密钥已签发" "yes" "$(case "$SK" in sk-*) echo yes ;; *) echo no ;; esac)"
@@ -245,7 +242,7 @@ chk "被调用过的渠道有最近调用时间" "yes" \
 # 反例：新建但没调用过的渠道必须为空 —— 否则这一列就成了「不管有没有
 # 调用都显示点东西」，看不出渠道到底是死的还是活的
 UNUSED=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
-  \"name\": \"${CNAME}-unused\", \"group_id\": $GID, \"protocol\": \"openai-chat\",
+  \"name\": \"${CNAME}-unused\", \"protocol\": \"openai-chat\",
   \"base_url\": \"http://127.0.0.1:9997\", \"api_key\": \"mock-key\"
 }" | jqg "d['id']")
 chk "没被调用过的渠道没有最近调用时间" "" "$(last_used_of "$UNUSED")"
@@ -268,7 +265,6 @@ done
 purge
 rm -f /tmp/__rule-err.json
 chk "探测渠道已删除" "0" "$(P "SELECT count(*) FROM channels WHERE name='$CNAME'")"
-chk "探测分组已删除" "0" "$(P "SELECT count(*) FROM channel_groups WHERE name='$GNAME'")"
 chk "探测密钥已删除" "0" "$(P "SELECT count(*) FROM api_keys WHERE name='$KNAME'")"
 chk "探测白名单已删除" "0" "$(P "SELECT count(*) FROM channel_models WHERE public_name='$MODEL'")"
 chk "探测日志已删除" "0" "$(P "SELECT count(*) FROM request_logs WHERE api_key_name='$KNAME' OR model_requested='$MODEL'")"

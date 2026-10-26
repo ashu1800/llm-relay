@@ -87,12 +87,16 @@ fi
 
 echo
 echo "=== 渠道仍可调用 ==="
-SK=$(curl -s -X POST http://127.0.0.1:8888/api/admin/keys -H 'Content-Type: application/json' \
-  -d '{"name":"coldstart","rate_limit_rpm":-1}' | python3 -c "import sys,json;print(json.load(sys.stdin)['key'])")
+# 密钥的每模型路由（2026-10-26 分组下线）：allowed_models 必填非空，
+# 探针密钥只路由到取到的那个模型所在的渠道
 MODEL=$(P "SELECT m.public_name FROM channel_models m JOIN channels c ON c.id=m.channel_id AND c.enabled=true WHERE m.enabled=true ORDER BY m.id LIMIT 1")
 if [ -z "$MODEL" ]; then
   echo "  库里没有可用渠道模型，跳过真实调用（数据完好性已在上面验证）"
 else
+  MCID=$(P "SELECT m.channel_id FROM channel_models m JOIN channels c ON c.id = m.channel_id AND c.enabled = true WHERE public_name='$MODEL' AND m.enabled = true ORDER BY m.id LIMIT 1")
+  SK=$(curl -s -X POST http://127.0.0.1:8888/api/admin/keys -H 'Content-Type: application/json' \
+    -d "{\"name\":\"coldstart\",\"rate_limit_rpm\":-1,\"allowed_models\":[\"$MODEL\"],\"model_channels\":{\"$MODEL\":[$MCID]}}" \
+    | python3 -c "import sys,json;print(json.load(sys.stdin)['key'])")
   code=$(curl -s -o /tmp/cs.json -w "%{http_code}" -m 60 http://127.0.0.1:8888/v1/chat/completions \
     -H "Authorization: Bearer $SK" -H 'Content-Type: application/json' \
     -d "{\"model\":\"$MODEL\",\"max_tokens\":5,\"messages\":[{\"role\":\"user\",\"content\":\"说一个字\"}]}")

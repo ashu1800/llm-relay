@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 
 # 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
@@ -17,17 +18,41 @@ echo "===== 2. summary 内容 ====="
 curl -s "$BASE/api/admin/stats/summary?range=7d" | python3 -m json.tool | head -22
 echo
 echo "===== 3. 制造流量（双渠道各若干次）====="
-SK=$(curl -s -X POST "$BASE/api/admin/keys" -H 'Content-Type: application/json' -d '{"name":"dash-seed"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['key'])")
+# 密钥的每模型路由（2026-10-26 分组下线）：allowed_models 必填非空。
+# 两个模型各取一条承载渠道；某个模型不存在时跳过对应那段，而不是让整条脚本挂掉
+DS_MODEL=$(db_psql -t -A -c "SELECT channel_id FROM channel_models WHERE public_name='deepseek-v4-flash' AND enabled = true ORDER BY id LIMIT 1")
+GPT_MODEL=$(db_psql -t -A -c "SELECT channel_id FROM channel_models WHERE public_name='gpt-5.6-sol' AND enabled = true ORDER BY id LIMIT 1")
+KEY_MODELS=""
+KEY_ROUTES="{"
+add_route() { # add_route <模型名> <渠道id>
+  [ -n "$KEY_MODELS" ] && KEY_MODELS="$KEY_MODELS," && KEY_ROUTES="$KEY_ROUTES,"
+  KEY_MODELS="$KEY_MODELS\"$1\""
+  KEY_ROUTES="$KEY_ROUTES\"$1\":[$2]"
+}
+[ -n "$DS_MODEL" ] && add_route "deepseek-v4-flash" "$DS_MODEL"
+[ -n "$GPT_MODEL" ] && add_route "gpt-5.6-sol" "$GPT_MODEL"
+KEY_ROUTES="$KEY_ROUTES}"
+if [ -z "$KEY_MODELS" ]; then
+  echo "  !! 库里没有 deepseek-v4-flash / gpt-5.6-sol 的启用白名单，无法建探针密钥"
+  exit 1
+fi
+SK=$(curl -s -X POST "$BASE/api/admin/keys" -H 'Content-Type: application/json' \
+  -d "{\"name\":\"dash-seed\",\"allowed_models\":[$KEY_MODELS],\"model_channels\":$KEY_ROUTES}" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['key'])")
+if [ -n "$DS_MODEL" ]; then
 for i in 1 2 3; do
   curl -s -m 60 -o /dev/null "$BASE/v1/chat/completions" -H "Authorization: Bearer $SK" -H 'Content-Type: application/json' \
     -d "{\"model\":\"deepseek-v4-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"第 $i 次：说一句话\"}],\"max_tokens\":30}"
   echo "  deepseek 第 $i 次完成"
 done
+fi
+if [ -n "$GPT_MODEL" ]; then
 for i in 1 2; do
   curl -s -m 120 -o /dev/null "$BASE/v1/chat/completions" -H "Authorization: Bearer $SK" -H 'Content-Type: application/json' \
     -d "{\"model\":\"gpt-5.6-sol\",\"messages\":[{\"role\":\"user\",\"content\":\"round $i: say hi\"}],\"max_tokens\":20}"
   echo "  gpt-5.6-sol 第 $i 次完成"
 done
+fi
 sleep 2
 echo
 echo "===== 4. 聚合结果复查 ====="

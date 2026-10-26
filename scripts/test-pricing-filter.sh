@@ -26,7 +26,6 @@ chk() {
 }
 
 # 测试数据一律 __ 前缀，清理按精确名字（不用 LIKE '__%'：下划线是通配符）
-GNAME="__price-filter-group"
 CA="__price-filter-ch-a"
 CB="__price-filter-ch-b"
 MA1="__price-filter-a-priced"
@@ -40,7 +39,6 @@ purge() {
       curl -s -X DELETE "$API/channels/$cid" >/dev/null
     done
   done
-  P "DELETE FROM channel_groups WHERE name='$GNAME'" >/dev/null
   P "DELETE FROM request_payloads WHERE log_id IN (SELECT id FROM request_logs WHERE model_requested IN ('$MA1','$MA2','$MB1','$MB2'))" >/dev/null
   P "DELETE FROM request_logs WHERE model_requested IN ('$MA1','$MA2','$MB1','$MB2')" >/dev/null
 }
@@ -71,20 +69,19 @@ print(','.join(sorted(r['public_name'] for r in rows)))
 purge
 
 echo "=== 1. 建两条渠道：A 一条有价一条没价，B 两条都没价 ==="
-GID=$(curl -s -X POST "$API/groups" -H 'Content-Type: application/json' -d "{\"name\":\"$GNAME\"}" | jqg "d['id']")
 # 上游地址不会被拨到：本用例只读列表，不发请求
 CIDA=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
-  \"name\": \"$CA\", \"group_id\": $GID, \"protocol\": \"openai-chat\",
-  \"base_url\": \"http://127.0.0.1:1\", \"api_key\": \"probe\", \"weight\": 1,
+  \"name\": \"$CA\", \"protocol\": \"openai-chat\",
+  \"base_url\": \"http://127.0.0.1:1\", \"api_key\": \"probe\",
   \"models\": [
     {\"public_name\": \"$MA1\", \"input_per_1m\": \"1\", \"output_per_1m\": \"2\"},
     {\"public_name\": \"$MA2\"}
   ]}" | jqg "d['id']")
 CIDB=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
-  \"name\": \"$CB\", \"group_id\": $GID, \"protocol\": \"openai-chat\",
-  \"base_url\": \"http://127.0.0.1:1\", \"api_key\": \"probe\", \"weight\": 1,
+  \"name\": \"$CB\", \"protocol\": \"openai-chat\",
+  \"base_url\": \"http://127.0.0.1:1\", \"api_key\": \"probe\",
   \"models\": [{\"public_name\": \"$MB1\"}, {\"public_name\": \"$MB2\"}]}" | jqg "d['id']")
-echo "  A id=$CIDA  B id=$CIDB 分组=$GID"
+echo "  A id=$CIDA  B id=$CIDB"
 # 摘要按模型名排序输出，所以这里的期望值也按字典序写
 chk "A 的白名单是两条" "$MA2,$MA1" "$(models_of "$CIDA")"
 chk "B 的白名单是两条" "$MB1,$MB2" "$(models_of "$CIDB")"
@@ -121,7 +118,6 @@ curl -s -X DELETE "$API/channels/$CIDA" >/dev/null
 curl -s -X DELETE "$API/channels/$CIDB" >/dev/null
 purge
 chk "探测渠道已删除" "0" "$(P "SELECT count(*) FROM channels WHERE name IN ('$CA','$CB')")"
-chk "探测分组已删除" "0" "$(P "SELECT count(*) FROM channel_groups WHERE name='$GNAME'")"
 chk "探测白名单已删除" "0" "$(P "SELECT count(*) FROM channel_models WHERE public_name IN ('$MA1','$MA2','$MB1','$MB2')")"
 
 echo

@@ -95,7 +95,10 @@ echo "慢速上游就绪"
 echo
 
 # python 用例：统一以 ALL_PASS 作为通过标志
-for s in test-group-update.py test-key-whitelist.py test-key-group-refs.py test-delete-semantics.py \
+# （test-group-update.py / test-key-group-refs.py 已随分组功能移除；
+#   test-key-whitelist.py 已改名 test-key-routes.py；
+#   test-stats-filters.py 已改为 key_id 口径）
+for s in test-key-routes.py test-delete-semantics.py \
          test-accept-encoding.py test-log-filters.py test-stats-filters.py test-csrf.py \
          test-retry-delay.py; do
   echo "########## $s ##########"
@@ -109,16 +112,14 @@ done
 # 依赖 mock 上游的用例自己会拉起它（test-pricing-rules.sh → slow-upstream，
 # test-cost.sh → proto-upstream，test-retry-delay.py → flaky-upstream）。
 #
-# test-default-group.sh 曾在这份名单里，但它已随 Docker 部署路径退役
-# （fe2da29）被删除。pass_or_fail 拿到空输出即判失败，所以死引用会让
-# 这一轮同样以「有验证未通过」收尾；想验「启动时种子默认分组」请用
-# test-default-model.sh（它自带 9 组端到端断言，但以进程退出码收尾、
-# 不打印 ALL_PASS，直接由 `bash scripts/test-default-model.sh` 跑）。
-# test-legacy-column-add.sh 会删价格列并跑 install.sh 重新部署（几分钟不可用），放在最后跑
+# test-group-quota.sh 已随分组功能移除；test-default-model.sh 不在名单、
+# 以退出码收尾（要真调 mock 上游），手动 `bash scripts/test-default-model.sh` 跑。
+# test-legacy-column-add.sh 会删价格列并
+# 跑 install.sh 重新部署（几分钟不可用），放在最后跑
 # verify-update-config.sh 只读写更新设置（会临时存一个假 token 再清除），
 # 不碰数据、不重启服务，所以位置不敏感
 for s in test-model-whitelist.sh test-upstream-protocol.sh test-upstream-gemini.sh test-thinking-map.sh test-pricing.sh test-pricing-rules.sh test-pricing-backup.sh test-pricing-filter.sh \
-         test-group-quota.sh test-proxies.sh test-egress-proxy.sh test-live.sh test-purge-scope.sh test-cost.sh test-legacy-column-add.sh \
+         test-proxies.sh test-egress-proxy.sh test-live.sh test-purge-scope.sh test-cost.sh test-legacy-column-add.sh \
          verify-update-config.sh; do
   echo "########## $s ##########"
   out=$(bash "scripts/$s" 2>&1)

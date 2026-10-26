@@ -50,11 +50,11 @@ import { usePopoverA11y } from '@/composables/usePopoverA11y'
 import { message } from '@/utils/feedback'
 // 金额一律走 utils/money.ts：符号与小数位数只此一份（见那里的说明）
 import { currencyKeys, moneyText, primaryCurrency, symbolOf } from '@/utils/money'
-import type { Channel, ChannelGroup } from '@/api/types'
+import type { Channel, APIKey } from '@/api/types'
 import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
 // 复制当前视角链接走与密钥页同一个降级实现（http 非 localhost 也能复制）
 import { writeClipboard } from '@/utils/clipboard'
-import { groupedChannelOptions } from '@/utils/channelOption'
+import { channelOption } from '@/utils/channelOption'
 import ChannelOption from '@/components/ChannelOption.vue'
 
 // ---- 请求日志表的列显隐（2026-10-10）----
@@ -115,18 +115,20 @@ const ranges = [
   { key: '7d', label: '近7天' },
   { key: '30d', label: '近30天' }
 ]
-// ---- 筛选条件（时间范围 / 渠道 / 模型）全部持久化 ----
+// ---- 筛选条件（时间范围 / 密钥 / 渠道 / 模型）全部持久化 ----
 //
 // 为什么要持久化：「只看某个渠道」是常态视角，每次打开页面、或从别的页面
 // 切回来都要重选一遍，是纯粹的重复劳动。与渠道列表页的筛选同一套做法
 // （见 utils/persistedChoice.ts）。
 //
-// 这三个条件是**整页**的：上面的卡片与下面的列表都按它们取数。
-// 合并之前列表页自己记了一套 logs-* 键、看板记了一套 dashboard-*：
-// 同一页面上出现两套视角，是这次合并要消灭的东西之一。
+// 这四个条件是**整页**的：上面的卡片与下面的请求日志列表都按它们取数
+//（2026-10-26 站主要求列表纳入筛选，撤销 2026-09-16 的「列表恒定全量」决定，
+// 契约脚本同步反转 —— 列表与卡片说的是同一批请求，才不会有「卡片筛了、
+// 列表没筛」的两套口径）。
 const RANGE_KEY = 'dashboard-range'
 const CHANNEL_KEY = 'dashboard-channel'
 const MODEL_KEY = 'dashboard-model'
+const KEY_KEY = 'dashboard-key'
 // 词元卡片的数字格式：完整千分位 / 紧凑缩写（一律带 M/B 单位）。
 // 阅读习惯跟着人走，与上面那组筛选共用同一套持久化机制，默认完整。
 const TOKEN_FMT_KEY = 'dashboard-token-fmt'
@@ -146,6 +148,9 @@ function toggleTokenFmt() {
 const range = ref('today')
 const channelFilter = ref<string>(ALL)
 const modelFilter = ref<string>(ALL)
+// 密钥筛选（2026-10-26 加，分组筛选的接位者）：「这把密钥这段时间跑了多少」
+// 是排查客户端问题的第一入口。卡片与日志列表同时吃它。
+const keyFilter = ref<string>(ALL)
 // 排障深链带来的两个临时条件（?trace_id=… / ?status_class=error）。
 // 它们不持久化：下次打开还被它们筛着，会看到一张恒为 0 条的列表，
 // 而且不记得自己什么时候套上的。
@@ -205,18 +210,22 @@ usePopoverA11y({
 const logPanel = ref<{ reload: () => void; exportQuery: () => string } | null>(null)
 // 筛选下拉的候选：来自管理接口，不是统计接口 —— 统计接口只回有流量的渠道，
 // 而「筛一条今天还没被用过的渠道」是合理需求（结果就是 0）。
-// filterGroups 不喂任何筛选（分组筛选 2026-09-26 移除），但渠道选项的
-// 分组头与请求日志面板的分组标签渲染还靠它
-const filterGroups = ref<ChannelGroup[]>([])
 const filterChannels = ref<Channel[]>([])
+const filterKeys = ref<APIKey[]>([])
 
-// 渠道选项：图标 + 名字，按分组归堆（分组名做组头，渠道不带「· 分组名」
-// 后缀）。分组信息不能完全不显示 —— 渠道名没有唯一约束，跨分组的两个
-// 「D1」只有靠分组才分得清 —— 但平铺时它摊在每一行上，挤掉的正是渠道名
-// （见 utils/channelOption.ts，请求日志面板用的是同一个组件）
+// 渠道选项：图标 + 名字，平铺（分组已移除，组头随之消失）。
 const channelOptions = computed(() => [
   { value: ALL, label: '全部渠道' },
-  ...groupedChannelOptions(filterChannels.value, filterGroups.value)
+  ...filterChannels.value.map(channelOption)
+])
+
+// 密钥选项：全部密钥（含停用的 —— 停用密钥的历史日志仍要能筛出来看）。
+const keyOptions = computed(() => [
+  { value: ALL, label: '全部密钥' },
+  ...filterKeys.value.map((k) => ({
+    value: String(k.id),
+    label: k.name + (k.enabled ? '' : '（已停用）')
+  }))
 ])
 
 // 模型候选取渠道白名单（/channels 的 models）：它是系统当前认识的模型全集。
@@ -251,9 +260,10 @@ function persistFilters() {
   writeStoredChoice(RANGE_KEY, range.value)
   writeStoredChoice(CHANNEL_KEY, channelFilter.value)
   writeStoredChoice(MODEL_KEY, modelFilter.value)
+  writeStoredChoice(KEY_KEY, keyFilter.value)
 }
 
-// 存下来的筛选值可能指向已经删掉的渠道 / 模型。那种状态的表现是
+// 存下来的筛选值可能指向已经删掉的渠道 / 模型 / 密钥。那种状态的表现是
 // 「所有数字都是 0」或「列表恒为 0 条」，从界面上完全看不出原因 ——
 // 所以列表到手后校验一次，不合法就退回「全部」（与渠道列表页的
 // applyStoredGroupFilter 同一套做法）。
@@ -261,12 +271,25 @@ function persistFilters() {
 // 历史遗留：dashboard-group 这个键是分组筛选（2026-09-26 移除）留下的，
 // 不会被读取也不会被清理 —— 孤儿键无害，不值得写迁移代码。
 //
-// 从 URL 带着 trace_id / status_class 进来的那一次**不恢复**本地筛选：
-// 那种链接是要发给别人、或以后自己再打开的，同一个链接应该在哪台机器上、
-// 隔多久打开都显示同一批记录。若再与收件人自己记着的渠道筛选相交，
-// 链接会显示成一张空表 —— 看起来像日志丢了，而且两个人看到的还不一样。
+// 从 URL 带着条件进来的那一次**不恢复**本地筛选（条件由 applyStoredFilters
+// 里的早退判据清点）：那种链接是要发给别人、或以后自己再打开的，同一个链接
+// 应该在哪台机器上、隔多久打开都显示同一批记录。若再与收件人自己记着的
+// 渠道筛选相交，链接会显示成一张空表 —— 看起来像日志丢了，而且两个人看到
+// 的还不一样。
 // 这里只是「这一次不套用」，不写回存储：用户并没有改自己的视角。
 function applyStoredFilters() {
+  // URL 带了任何条件（深链或视角）就整段不跑：applyUrlFilters 已经把这些
+  // 值写进各筛选了，本地存储（或空存储的默认值）再来一遍会把链接带来的
+  // 视角整体覆盖掉 —— copyViewLink 宣称「收链接的人第一屏就是当前视角」，
+  // 覆盖发生的表现正是收件人看到自己的旧筛选（2026-10-26 评审 R1；HEAD 时
+  // 只影响卡片，列表纳入筛选后影响翻倍）。
+  const q = route.query
+  if (
+    q.trace_id || q.status_class || q.log ||
+    q.range || q.channel || q.model || q.key
+  ) {
+    return
+  }
   if (traceId.value || statusClass.value) return
   range.value = readStoredChoice(RANGE_KEY, ranges.map((r) => r.key), 'today')
   channelFilter.value = readStoredChoice(
@@ -275,17 +298,22 @@ function applyStoredFilters() {
     ALL
   )
   modelFilter.value = readStoredChoice(MODEL_KEY, [ALL, ...visibleModels.value], ALL)
+  keyFilter.value = readStoredChoice(
+    KEY_KEY,
+    [ALL, ...filterKeys.value.map((k) => String(k.id))],
+    ALL
+  )
   persistFilters()
 }
 
 async function loadFilters() {
   try {
-    const [g, c] = await Promise.all([
-      api.get<{ items: ChannelGroup[] }>('/groups'),
-      api.get<{ items: Channel[] }>('/channels')
+    const [c, k] = await Promise.all([
+      api.get<{ items: Channel[] }>('/channels'),
+      api.get<{ items: APIKey[] }>('/keys')
     ])
-    filterGroups.value = g.items || []
     filterChannels.value = c.items || []
+    filterKeys.value = k.items || []
   } catch {
     // 拉不到就只剩「全部」一个选项，看板本身照常取数 ——
     // 一个筛选框不该让整页打不开
@@ -306,7 +334,10 @@ async function loadFilters() {
 //      不写地址栏**（见 syncUrl 的说明：那会让返回键变成「上一个筛选」），
 //      但「复制当前视角链接」会显式带上它们，所以这里必须读 ——
 //      否则复制出去的链接打开后是另一个视角，而收链接的人无从察觉。
-//      `range` 的合法性交给后端（认不出就退回「今天」），这里不复制一份白名单。
+//      「复制当前视角链接」的注释见 copyViewLink —— 谁负责交接谁负责读回。
+//      `range` 在这里做四档白名单再入库：/stats 与 /logs 对坏值的处理口径
+//      不同（前者静默回「今天」，后者 400），同一页打开坏链接会「卡片正常、
+//      列表报错且重试无解」；前端校掉坏值后两半同口径（2026-10-26 评审 R5）。
 function applyUrlFilters() {
   const tid = String(route.query.trace_id || '').trim()
   if (tid) traceId.value = tid
@@ -317,18 +348,20 @@ function applyUrlFilters() {
   const lid = Number(String(route.query.log || '').trim())
   if (Number.isInteger(lid) && lid > 0) logId.value = lid
   const rg = String(route.query.range || '').trim()
-  if (rg) range.value = rg
+  if (rg && ranges.some((r) => r.key === rg)) range.value = rg
   const ch = String(route.query.channel || '').trim()
   if (ch) channelFilter.value = ch
   const md = String(route.query.model || '').trim()
   if (md) modelFilter.value = md
+  const ky = String(route.query.key || '').trim()
+  if (ky) keyFilter.value = ky
 }
 
 /**
  * 把「当前视角」写回地址栏（2026-10-11）。
  *
  * 只写三类东西：**排障深链**（trace_id / status_class / 打开的 log）。
- * 工具栏那几个筛选（时间范围 / 分组 / 模型）仍然不进 URL ——
+ * 工具栏那几个筛选（时间 / 密钥 / 渠道 / 模型）仍然不进 URL ——
  * 它们记在本地、是「下次打开还是这个视角」的长期偏好，每变一次就写 URL
  * 会让历史记录变成一串筛选状态，返回键再也不是「上一个页面」。
  *
@@ -354,13 +387,9 @@ function syncUrl() {
 // 查询串成了 ?range=[object Object]，后端认不出、退回「今天」，
 // 存储里也写进 "[object Object]" —— 界面上筛选项看着是选中的，数据却是今天的。
 //
-// 这三个处理函数只重取**统计**（卡片）。列表不吃这三个条件，所以这里不该顺手调
-// logPanel.reload()：那会让一次「只看 glm」的筛选白刷一遍列表，而它的内容按定义
-// 不会变。
-// （历史上这里还踩过一个坑：那时列表跟着 props 重取，而父组件的事件处理函数是同步
-// 跑的 —— 调 reload 时子组件读到的还是旧 props，于是多发一次旧条件的查询。旧查询
-// （deepseek 的 5562 条）比新查询（glm 的 0 条）慢，回来把新结果盖掉，界面成了
-// 「卡片 0、列表 5562」。两者解耦之后这个坑不存在了，但「改筛选不动列表」依然成立。）
+// 这几个处理函数只重取**统计**（卡片）。列表吃同一组条件，
+// 但它靠 props 的 watch 自己重取（面板内部回第一页），这里不该顺手调
+// logPanel.reload()：那会让列表丢掉「回第一页」的语义，还会多发一次查询。
 // 只有一个「刷新」按钮例外：它的语义就是两块都刷（见 reloadAll）。
 function reloadStats() {
   load()
@@ -378,7 +407,13 @@ function onChannelChange(v: string) {
   reloadStats()
 }
 
-// 两个下拉都用 @change + v-model：a-select 的 change 传的是**值**
+function onKeyChange(v: string) {
+  keyFilter.value = v
+  persistFilters()
+  reloadStats()
+}
+
+// 三个下拉都用 @change + v-model：a-select 的 change 传的是**值**
 // （a-radio-group 传的是事件对象，上面踩过），这里仍显式赋值一次 ——
 // 不依赖 v-model 与 change 的先后顺序。
 function onModelChange(v: string) {
@@ -419,10 +454,12 @@ async function copyViewLink() {
   if (statusClass.value) q.set('status_class', statusClass.value)
   if (logId.value != null) q.set('log', String(logId.value))
   // 时间范围是「这些数字算的是哪一段」，它决定了卡片的口径，必须带上；
-  // 分组 / 模型同理（它们只影响卡片，但收链接的人看到的第一屏就是卡片）
+  // 渠道 / 密钥 / 模型同理 —— 列表与卡片吃同一组条件，
+  // 收链接的人看到的第一屏（卡片与列表）就都是这个视角
   if (range.value !== 'today') q.set('range', range.value)
   if (channelFilter.value !== ALL) q.set('channel', channelFilter.value)
   if (modelFilter.value !== ALL) q.set('model', modelFilter.value)
+  if (keyFilter.value !== ALL) q.set('key', keyFilter.value)
   const qs = q.toString()
   const url = location.origin + route.path + (qs ? '?' + qs : '')
   if (!(await writeClipboard(url))) {
@@ -466,9 +503,10 @@ function reloadAll() {
   logPanel.value?.reload()
 }
 
-// 渠道 / 模型不选时不带参数（后端把「不传」当作不筛选）
+// 渠道 / 模型 / 密钥不选时不带参数（后端把「不传」当作不筛选）
 function statsQuery() {
   let s = '?range=' + range.value
+  if (keyFilter.value !== ALL) s += '&key_id=' + keyFilter.value
   if (channelFilter.value !== ALL) s += '&channel_id=' + channelFilter.value
   if (modelFilter.value !== ALL) s += '&model=' + encodeURIComponent(modelFilter.value)
   return s
@@ -660,46 +698,26 @@ watch(
   }
 )
 
-// ---- 预算热度：消耗卡的体温 ----
-//
-// 后端只在分组预算跨过 80%/100% 档位时推一次 budget_alert（每天每档一次）。
-// 看板消耗卡是全站视角，跟单条分组预算没有严格对应，但「有分组烧到警戒线」
-// 对站主来说就是「钱包在发热」—— 卡片进入对应的温度档，当天不退烧
-// （sessionStorage 按天存档，跨天自然冷却）。refresh 后热度也还在。
-const costHeat = ref<'warm' | 'hot' | null>(null)
-const HEAT_KEY = 'llm-relay-cost-heat'
-try {
-  const raw = JSON.parse(sessionStorage.getItem(HEAT_KEY) || 'null') as { day: string; level: 'warm' | 'hot' } | null
-  if (raw && raw.day === new Date().toDateString()) costHeat.value = raw.level
-} catch {
-  // 存档坏了就当没有：热度只是氛围，不值得为它报错
-}
-onLive('budget_alert', (a: { level: '80' | '100' }) => {
-  const level = a.level === '100' ? 'hot' : 'warm'
-  if (costHeat.value === 'hot') return // 已经烧红了不会再降温
-  costHeat.value = level
-  try {
-    sessionStorage.setItem(HEAT_KEY, JSON.stringify({ day: new Date().toDateString(), level }))
-  } catch {
-    // 存不下就不存：本轮会话里热度仍然生效
-  }
-})
-
 onLive('stats', (data: Record<string, unknown>) => {
   // 首屏还没加载完时忽略推送：那一份由 load() 负责，
   // 提前合并会得到一个缺字段的 summary
   if (!summary.value) return
   // 推送来的那份是「今天 + 全站」，只有当前正好是这个视角才能直接合并。
-  // 渠道 / 模型筛选也算别的视角：不判它们的话，筛着某个渠道或模型时收到的
+  // 渠道 / 模型 / 密钥筛选也算别的视角：不判它们的话，筛着某个维度时收到的
   // 全站数字会把卡片顶掉（比不刷新更糟 —— 它看起来像是刷新了）
-  if (range.value !== 'today' || channelFilter.value !== ALL || modelFilter.value !== ALL) {
+  if (
+    range.value !== 'today' ||
+    channelFilter.value !== ALL ||
+    modelFilter.value !== ALL ||
+    keyFilter.value !== ALL
+  ) {
     statsReloader.request()
     return
   }
   summary.value = { ...summary.value, ...(data as object) } as Summary
 })
 
-// 顺序不能反：先把分组 / 渠道列表拿到、把存下来的筛选值校验过，再去取统计。
+// 顺序不能反：先把渠道 / 密钥列表拿到、把存下来的筛选值校验过，再去取统计。
 // 反过来的话会先用旧值查一遍、再用校验后的值查一遍，
 // 中间那一帧的数字（以及可能的「筛选框显示 A、数字是全部」）都是错的。
 //
@@ -717,20 +735,15 @@ onMounted(async () => {
 
 <template>
   <div class="dashboard">
-    <!-- 工具栏：只服务上面的概览卡 —— 时间范围 + 渠道 / 模型 + 刷新。
-         下面的日志列表不吃这三个条件（它恒定全量最新，理由见下）。
-         （分组筛选 2026-09-26 应站主要求移除，看板只留渠道 / 模型两个
-         「往下钻」的维度。）
+    <!-- 工具栏：时间范围 + 密钥 / 渠道 / 模型 + 刷新。
+         卡片与下面的日志列表吃**同一组**条件（2026-10-26 站主要求列表纳入筛选，
+         撤销 2026-09-16 的「列表恒定全量」决定；契约脚本已同步反转）。
 
          这里曾经放过一句说明筛选作用范围的提示，2026-09-17 应站主要求**移除**
          （提交 c56354b）。所以别再往这里加提示 ——
          `frontend/scripts/check-contracts.mjs` 已把当初的契约反转成禁止式，
-         断言工具栏**不得**出现该文案；那条断言存在的意义正是防止有人
-         （包括只读了旧注释的 AI）从旧分支或旧文档里把它带回来。
-         这个文件里连那句话的原文都不写 —— 契约是整文件正则匹配，
-         注释里带上同样会把检查弄红。
-         别处若还写着「按钮区有这句提示」，那是过期描述，以本注释与契约脚本为准。
-         行为本身未变：列表恒定全量最新，只受 trace_id / status_class 两个深链约束。 -->
+         断言工具栏**不得**出现该文案。这个文件里连那句话的原文都不写 ——
+         契约是整文件正则匹配，注释里带上同样会把检查弄红。 -->
     <PageToolbar label="时间范围">
       <!-- 用 a-radio-group 而不是手写 <button>：
            这里原来写的是 class="pill-btn"，但那个类在项目里从未定义过，
@@ -740,11 +753,15 @@ onMounted(async () => {
       <a-radio-group v-model:value="range" button-style="solid" @change="onRangeChange">
         <a-radio-button v-for="r in ranges" :key="r.key" :value="r.key">{{ r.label }}</a-radio-button>
       </a-radio-group>
-      <!-- 渠道 / 模型紧跟在时间范围右边：它们回答的是同一类问题
+      <!-- 密钥排在渠道前面：排查「某个客户端在干什么」时它是第一入口 -->
+      <a-select
+        v-model:value="keyFilter"
+        :options="keyOptions"
+        style="width: 180px"
+        @change="onKeyChange"
+      />
+      <!-- 渠道 / 模型紧跟在密钥右边：它们回答的是同一类问题
            （「下面这些数字算的是哪一部分」），放在一起才读得成一句话 -->
-      <!-- 240px 是按「图标 + 渠道名 · 分组名」的旧选项量出的：选项改成按分组
-           归堆后最长项短了一截，这个宽度只多不少；再长也有省略号兜底
-           （ChannelOption 的 .chan-opt-text），与请求日志列表同一个宽度 -->
       <a-select
         v-model:value="channelFilter"
         :options="channelOptions"
@@ -825,7 +842,7 @@ onMounted(async () => {
         <!-- 请求日志表的列显隐（2026-10-10）。按钮放在这里而不是表格面板里：
              那张面板 2026-09-26 特意去掉了 40px 标题栏（表体刚好能多放一整行），
              为一个设置按钮把它加回来等于把那次优化退回去；而工具栏本来就是
-             「这一页怎么看」的开关区（时间范围、分组、模型、主题都在这儿）。
+             「这一页怎么看」的开关区（时间范围、密钥、渠道、模型、主题都在这儿）。
              状态与 RequestLogPanel 共用同一份单例，见 logColumnVisibility.ts -->
         <!-- 行密度（2026-10-11）与列显隐同属「这张表怎么看」，所以放在同一个
              弹层里，而不是再加一枚工具栏按钮（工具栏已经 6 件东西了） -->
@@ -918,8 +935,6 @@ onMounted(async () => {
       tone="orange"
       :hint="costHint"
       :flash="costFlash"
-      :heat="costHeat ?? undefined"
-      :title="costHeat === 'hot' ? '有分组今日预算已超支' : costHeat === 'warm' ? '有分组今日消费已过预算 80%' : undefined"
     >
       <template #value>
         <AnimatedNumber :value="costValue" format="money" :currency="costCur" />
@@ -977,11 +992,9 @@ onMounted(async () => {
     <p class="sr-only" aria-live="polite">{{ liveText }}</p>
     </DataState>
 
-    <!-- 请求日志列表：**不**吃上面那组筛选 —— 它恒定显示全部最新请求
-         （2026-09-16 站主要求）。筛过之后列表就看不到刚进来的调用了，
-         而刚进来的几条恰恰是最该被看到的；筛选留给上面的概览卡，
-         「这一部分用了多少」才是那些条件要回答的问题。
-         两个排障深链（链路 / 仅失败）仍然生效：那是明确的排障动作，不是日常视角。
+    <!-- 请求日志列表：与上面的卡片吃**同一组**筛选（2026-10-26 站主要求，
+         撤销 2026-09-16 的「列表恒定全量」决定）。两个排障深链
+         （链路 / 仅失败）仍然生效：那是明确的排障动作，不是日常视角。
          面板自带外壳、表格、分页与详情抽屉（标题栏与导出按钮已去掉，见组件里的
          说明），失败时也有自己的错误态，不会把卡片那一排一起换成报错。 -->
     <RequestLogPanel
@@ -989,7 +1002,10 @@ onMounted(async () => {
       :trace-id="traceId"
       :status-class="statusClass"
       :log-id="logId"
-      :groups="filterGroups"
+      :range="range"
+      :channel-id="channelFilter"
+      :model="modelFilter"
+      :key-id="keyFilter"
       :channels="filterChannels"
       @update:trace-id="traceId = $event"
       @update:status-class="statusClass = $event"

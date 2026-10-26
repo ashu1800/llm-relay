@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -107,9 +106,6 @@ func registerChannelRoutes(g *gin.RouterGroup, s *Server) {
 	// 往渠道发一句 "hi" 看通不通。与真实转发走同一套代码，
 	// 所以它验证的是「中继实际会发出去的那个请求」，不是另拼一个
 	r.POST("/:id/test", s.testChannel)
-	// 整组重排优先级（拖动列表后提交）。放在 /:id 之前：gin 的路由树里
-	// 静态段与参数段不冲突，但把固定路径写在前面更好读
-	r.PUT("/order", s.reorderChannels)
 	// 图标：空 body 表示去上游抓一个，带 icon 表示设置成自定义值
 	r.POST("/:id/icon", s.channelIcon)
 }
@@ -147,7 +143,6 @@ type whitelistItem struct {
 // 于是「把最后一条删掉」会静默失效。
 type channelPayload struct {
 	Name     string `json:"name"`
-	GroupID  uint   `json:"group_id"`
 	Protocol string `json:"protocol"`
 	BaseURL  string `json:"base_url"`
 	// Currency 是这条渠道的记账币种（人民币渠道填 CNY）。它决定价格字段的
@@ -155,10 +150,6 @@ type channelPayload struct {
 	// 与数据列的默认值保持一致（见 model.Channel.Currency）
 	Currency string `json:"currency"`
 	APIKey   string `json:"api_key"`
-	// 这里刻意没有 weight：权重是**组内优先级序号**，由渠道在分组里的位置决定，
-	// 不再由客户端指定。新建的排到末尾；调整顺序走 PUT /channels/order。
-	// 旧脚本仍在 body 里带 weight —— Go 会忽略不认识的字段，所以不会解析失败，
-	// 只是那个值不再生效。
 	// ProxyID 走哪个出站代理；0 = 直连。
 	//
 	// 必须是指针：0 既是「直连」也是 uint 的零值，用值类型就分不出
@@ -472,11 +463,7 @@ type channelListItem struct {
 func (s *Server) listChannels(c *gin.Context) {
 	db := s.deps.Store.DB()
 	var channels []model.Channel
-	q := db.Order("id DESC")
-	if gid := c.Query("group_id"); gid != "" {
-		q = q.Where("group_id = ?", gid)
-	}
-	if err := q.Find(&channels).Error; err != nil {
+	if err := db.Order("id DESC").Find(&channels).Error; err != nil {
 		writeInternalError(c, err)
 		return
 	}
@@ -605,18 +592,6 @@ func (s *Server) createChannel(c *gin.Context) {
 		// 默认值一致，否则同一个渠道经界面创建和经脚本创建会是两种币种
 		currency = model.CurrencyUSD
 	}
-	if p.GroupID == 0 {
-		// 没传分组就落到默认分组。默认分组可能被用户删掉或不设（见 store.Seed），
-		// 那种情况下不能瞎指一个 id：写死 1 的通病是「要么外键报错、要么进错组」
-		gid, ok := defaultGroupID(s)
-		if !ok {
-			writeUpstreamError(c, http.StatusBadRequest,
-				"没有默认分组，请在请求里指定 group_id，或先在分组管理里把一个分组设为默认",
-				"invalid_request_error")
-			return
-		}
-		p.GroupID = gid
-	}
 	// 代理存在性在这里校验：填一个不存在的 id，转发时才发现的话，
 	// 表现是「渠道莫名其妙不通」，而配置看起来完全正常
 	proxyID := uint(0)
@@ -625,12 +600,6 @@ func (s *Server) createChannel(c *gin.Context) {
 	}
 	if err := checkProxyExists(s, proxyID); err != nil {
 		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
-		return
-	}
-	// 显式指定的分组同样预检：靠外键拒绝的话回的是 500，前端只能显示
-	// 「服务端处理失败」（与代理预检对称，都回 400 + 人话）
-	if err := checkGroupExists(s, p.GroupID); err != nil {
-		writeUpstreamError(c, http.StatusBadRequest, "分组有问题: "+err.Error(), "invalid_request_error")
 		return
 	}
 	// 白名单在这里就校验：等到写完渠道再报错，用户得重填一遍表单
@@ -660,7 +629,7 @@ func (s *Server) createChannel(c *gin.Context) {
 		enabled = *p.Enabled
 	}
 	ch := model.Channel{
-		Name: p.Name, GroupID: p.GroupID,
+		Name:     p.Name,
 		Protocol: p.Protocol, BaseURL: strings.TrimRight(strings.TrimSpace(p.BaseURL), "/"),
 		Currency:  currency,
 		APIKeyEnc: enc, APIKeyHint: secure.MaskKey(p.APIKey),
@@ -672,19 +641,11 @@ func (s *Server) createChannel(c *gin.Context) {
 		Icon:         strings.TrimSpace(derefString(p.Icon)),
 		HealthStatus: "unknown",
 	}
-	// 新渠道排在分组末尾，返回的 JSON 里也要带上它实际拿到的优先级，
-	// 否则界面拿到的是 0，与库里不一致。
-	//
 	// 白名单必须和渠道在**同一个事务**里写：
-	// 原来白名单写失败时渠道已经落库并占掉了 weight 序号，界面上报
-	// 「创建失败」，用户重试就多出一条同名渠道（channels.name 没有唯一索引），
-	// 而多出来的那条还会参与路由。updateChannel 早就是同一事务，这里补齐。
+	// 原来白名单写失败时渠道已经落库，界面上报「创建失败」，用户重试
+	// 就多出一条同名渠道（channels.name 没有唯一索引），而多出来的那条
+	// 还会参与路由。updateChannel 一直是同一事务，这里保持一致。
 	if err := s.deps.Store.DB().Transaction(func(tx *gorm.DB) error {
-		w, err := appendChannelToGroup(tx, ch.GroupID)
-		if err != nil {
-			return err
-		}
-		ch.Weight = w
 		if err := tx.Create(&ch).Error; err != nil {
 			return err
 		}
@@ -733,16 +694,6 @@ func (s *Server) updateChannel(c *gin.Context) {
 		// 不会因为这次改动被重新解释（也**不会**自动换算已有的价格）
 		updates["currency"] = currency
 	}
-	// 换分组不在这里写：它要连带算出新分组末尾的序号，且必须与 group_id
-	// 在同一条 UPDATE 里落库（见下面事务里的说明），所以单独处理
-	groupChange := uint(p.GroupID)
-	// 换组预检目标分组存在：靠外键拒绝只会得到 500（与代理预检对称）
-	if groupChange != 0 {
-		if err := checkGroupExists(s, groupChange); err != nil {
-			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
-			return
-		}
-	}
 	if p.ProxyID != nil {
 		if err := checkProxyExists(s, *p.ProxyID); err != nil {
 			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
@@ -775,8 +726,8 @@ func (s *Server) updateChannel(c *gin.Context) {
 		updates["api_key_enc"] = enc
 		updates["api_key_hint"] = secure.MaskKey(p.APIKey)
 	}
-	// 只改白名单（改完模型点保存）、只换分组都是合法请求，所以不能只看 updates 是否为空
-	if len(updates) == 0 && groupChange == 0 && p.Models == nil {
+	// 只改白名单（改完模型点保存）也是合法请求，所以不能只看 updates 是否为空
+	if len(updates) == 0 && p.Models == nil {
 		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
 		return
 	}
@@ -799,34 +750,7 @@ func (s *Server) updateChannel(c *gin.Context) {
 	// 渠道字段与白名单放同一个事务：白名单是整表替换，
 	// 中途失败留下「渠道改了、白名单没改」会让人以为保存没生效
 	err := s.deps.Store.DB().Transaction(func(tx *gorm.DB) error {
-		// 换分组要动两边的序号，所以先把原分组记下来
-		var before model.Channel
-		if err := tx.Select("id", "group_id").First(&before, id).Error; err != nil {
-			return err
-		}
-
-		if groupChange != 0 && groupChange != before.GroupID {
-			// 新分组末尾的序号，必须在**这条还没进去**的时候算：
-			// 先换组再算的话，它自己带过来的旧序号会被当成组内最大值，
-			// 新序号白白多跳一格，新分组里就留下一个空洞（实测踩过：
-			// 目标组只有序号 1 的一条，本该补到 2，结果补成了 3）
-			w, err := appendChannelToGroup(tx, groupChange)
-			if err != nil {
-				return err
-			}
-			// 换组与赋序号必须在同一条 UPDATE 里：分两步会短暂出现
-			// 「已经在新分组、却还带着旧序号」的中间状态，那个旧序号
-			// 可能正好撞上新分组里已有的序号，被唯一索引当场拒绝
-			updates["group_id"] = groupChange
-			updates["weight"] = w
-			if err := applyUpdates(tx, &model.Channel{}, id, updates); err != nil {
-				return err
-			}
-			// 最后给原分组补位（它空出了一格）
-			if err := renumberGroupChannels(tx, before.GroupID); err != nil {
-				return err
-			}
-		} else if len(updates) > 0 {
+		if len(updates) > 0 {
 			if err := applyUpdates(tx, &model.Channel{}, id, updates); err != nil {
 				return err
 			}
@@ -868,115 +792,57 @@ func modelAllowed(list model.StringList, name string) bool {
 	return false
 }
 
-// resolveGroupWhitelist 把密钥上的分组白名单解析成分组 ID。
+// KeyRoutesOf 解析密钥的每模型渠道路由（model_channels jsonb → map）。
 //
-// 白名单里写 ID 或分组名都认：纯数字按 ID，否则按名字查。
-// 一条都解析不出来时返回错误而不是放行 —— 放行等于「删掉那个分组就能绕过限制」，
-// 那这份白名单也就没有存在的意义了。调用方据此回 403 并说明原因。
+// 解析失败（坏 JSON、条目形状不对）按空路由处理：转发侧拿到空列表会
+// 如实报「没有可用渠道」，而不是带着错误的范围继续转发。回填与保存
+// 路径写出的都是规整形状，这里主要是对直接改库的兜底。
 //
-// 数字 ID 也要查库确认存在。原来只做 ParseUint 就收下，于是一个不存在的
-// 分组 ID（例如手滑多打一位）会被当成「解析成功」，len(ids) 非 0，下面那道
-// 「一条都没解析出来就报错」的保护就失效了。结果是白名单静默匹配不到任何渠道，
-// 请求全部 403，而界面上完全看不出原因 —— 排查时不会有人想到是白名单。
-func (s *Server) resolveGroupWhitelist(list model.StringList) ([]uint, error) {
-	if len(list) == 0 {
-		return nil, nil
+// 返回的 map 键是模型名，值是渠道 ID 列表（**保持存储顺序**，即优先级序）。
+func KeyRoutesOf(k *model.APIKey) map[string][]uint {
+	out := map[string][]uint{}
+	if k == nil || k.ModelRoutes == nil {
+		return out
 	}
-	db := s.deps.Store.DB()
-	ids := make([]uint, 0, len(list))
-	var unresolved []string
-	for _, raw := range list {
-		item := strings.TrimSpace(raw)
-		if item == "" {
+	for name, raw := range k.ModelRoutes {
+		arr, ok := raw.([]any)
+		if !ok {
 			continue
 		}
-		id, err := resolveGroupRef(db, item)
-		if err != nil {
-			// 带上原因（ID 不存在 / 名字查不到），两者的排查动作不同
-			unresolved = append(unresolved, err.Error())
-			continue
+		ids := make([]uint, 0, len(arr))
+		for _, item := range arr {
+			switch v := item.(type) {
+			case float64:
+				if v > 0 {
+					ids = append(ids, uint(v))
+				}
+			case string:
+				if n, err := strconv.ParseUint(strings.TrimSpace(v), 10, 32); err == nil && n > 0 {
+					ids = append(ids, uint(n))
+				}
+			}
 		}
-		ids = append(ids, id)
+		out[name] = ids
 	}
-	if len(ids) == 0 {
-		return nil, fmt.Errorf("密钥的分组白名单 %v 无法解析（分组可能已被删除或改名）", unresolved)
-	}
-	// 部分解析失败也要报出来：静默丢掉一项，用户会以为整份白名单都生效了
-	if len(unresolved) > 0 {
-		return nil, fmt.Errorf("密钥的分组白名单里有 %v 无法解析（分组可能已被删除或改名）", unresolved)
-	}
-	return ids, nil
+	return out
 }
 
-// resolveGroupRef 把一条分组引用解析成分组 ID：纯数字按 ID 查，否则按名字查。
-//
-// 「ID 优先、名字兜底」这条规则在本包有三处使用（写路径的 normalizeGroupRefs、
-// 读路径的 resolveGroupWhitelist），各处的**失败策略不同**（写路径 fail-fast、
-// 读路径要收集全部悬空项报给用户），所以只有这一层查表被共享 —— 循环与错误
-// 措辞仍归各调用方，避免为了统一而让某一处的报错质量变差。
-//
-// ID 形态也要查库确认存在：只做 ParseUint 就收下的话，一个手滑多打一位的
-// 不存在的 ID 会被当成「解析成功」，调用方那道「一条都没解析出来就报错」的
-// 保护随之失效 —— 白名单静默匹配不到任何渠道，请求全部 403 却看不出原因。
-func resolveGroupRef(db *gorm.DB, item string) (uint, error) {
-	var g model.ChannelGroup
-	if n, err := strconv.ParseUint(item, 10, 32); err == nil {
-		if err := db.First(&g, uint(n)).Error; err != nil {
-			return 0, fmt.Errorf("ID %s 不存在", item)
-		}
-		return g.ID, nil
-	}
-	if err := db.Where("name = ?", item).First(&g).Error; err != nil {
-		return 0, fmt.Errorf("「%s」不是现有分组（可能已被删除或改名）", item)
-	}
-	return g.ID, nil
-}
-
-// normalizeGroupRefs 把提交上来的密钥分组白名单归一化成**分组 ID 字符串**。
-//
-// 写入侧的统一出口。条目历史上存的是分组名（前端直接提交 g.name）：
-// 分组一改名，引用它的密钥就全体 403，界面上毫无征兆 —— 那正是这次改造
-// 要消灭的状态。从今往后库里只存 ID，与渠道的 group_id 同一待遇；
-// 名字条目仍被接受（老客户端、手工调用 API），但在保存前就换成 ID。
-//
-// 解析不了一条就报错而不是静默丢弃（与渠道接口的 checkGroupExists 对称）：
-// 保存时发现「分组不存在」，比调用时才发现 403 便宜得多。
-func (s *Server) normalizeGroupRefs(list model.StringList) (model.StringList, error) {
-	db := s.deps.Store.DB()
-	return normalizeGroupRefList(list, func(item string) (uint, error) {
-		id, err := resolveGroupRef(db, item)
-		if err != nil {
-			return 0, fmt.Errorf("分组白名单里的%s", err)
-		}
-		return id, nil
-	})
-}
-
-// normalizeGroupRefList 是归一化的纯函数核心（resolve 注入「条目 → 分组 ID」
-// 的解析，查库与测试替身各一份）。抽出来是因为本包测试没有 DB 环境，
-// 而这段规则（去空白、名字换 ID、去重、失败即报错）值得锁住不让人改漂。
-func normalizeGroupRefList(list model.StringList, resolve func(item string) (uint, error)) (model.StringList, error) {
-	if len(list) == 0 {
-		return list, nil
-	}
-	out := make(model.StringList, 0, len(list))
+// KeyChannelScope 返回路由结果里出现过的全部渠道 ID（去重）。
+// 供 /v1/models 之类的「这个密钥都能看到什么」查询收窄候选集。
+// 返回空切片表示「路由没有任何渠道」—— 调用方应据此直接回空结果。
+// 入参是 KeyRoutesOf 的产出（调用方多处复用同一次解析，见 /v1/models）。
+func KeyChannelScope(routes map[string][]uint) []uint {
 	seen := map[uint]bool{}
-	for _, raw := range list {
-		item := strings.TrimSpace(raw)
-		if item == "" {
-			continue
+	ids := make([]uint, 0, len(routes)*2)
+	for _, list := range routes {
+		for _, id := range list {
+			if !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
 		}
-		id, err := resolve(item)
-		if err != nil {
-			return nil, err
-		}
-		if seen[id] {
-			continue
-		}
-		seen[id] = true
-		out = append(out, strconv.FormatUint(uint64(id), 10))
 	}
-	return out, nil
+	return ids
 }
 
 // deleteByID 删除主表行，并按 RowsAffected 区分「删掉了」与「本来就没有」。
@@ -1017,62 +883,12 @@ func (s *Server) deleteChannel(c *gin.Context) {
 		if err := tx.Where("channel_id = ?", id).Delete(&model.ChannelModel{}).Error; err != nil {
 			return err
 		}
-		if err := tx.Delete(&model.Channel{}, id).Error; err != nil {
-			return err
-		}
-		// 删掉一条就把同组后面的序号补齐：留空洞的话，故障转移链上会多出
-		// 一个「不存在的优先级」，而序号本身也不再能表示「第几个被尝试」
-		return renumberGroupChannels(tx, ch.GroupID)
+		return tx.Delete(&model.Channel{}, id).Error
 	}); err != nil {
 		writeInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"id": id, "deleted": true})
-}
-
-// reorderChannels 按给定的顺序重排某个分组内渠道的优先级。
-//
-// 整组全量提交（而不是「把某条移到第 N 位」）：拖拽得到的本来就是一份完整顺序，
-// 全量提交是幂等的 —— 重复提交同一份顺序不会产生新变化，也不需要前端算差值。
-// 代价是必须与库里的成员完全对上，对不上就报错让前端刷新（见 orderValidationError）。
-func (s *Server) reorderChannels(c *gin.Context) {
-	var p struct {
-		GroupID uint   `json:"group_id"`
-		IDs     []uint `json:"ids"`
-	}
-	if err := c.ShouldBindJSON(&p); err != nil {
-		writeUpstreamError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
-		return
-	}
-	if p.GroupID == 0 {
-		writeUpstreamError(c, http.StatusBadRequest, "group_id 必填", "invalid_request_error")
-		return
-	}
-
-	db := s.deps.Store.DB()
-	if err := db.Transaction(func(tx *gorm.DB) error {
-		var groupChannels []model.Channel
-		if err := tx.Select("id").Where("group_id = ?", p.GroupID).Find(&groupChannels).Error; err != nil {
-			return err
-		}
-		if verr := orderValidationError(groupChannels, p.IDs); verr != nil {
-			// 校验放在事务里：读成员与写序号之间不能有别的写入插进来，
-			// 否则「校验时是全量、写的时候已经不是了」
-			return orderInvalidError{msg: verr.Error()}
-		}
-		return applyChannelOrder(tx, p.GroupID, p.IDs)
-	}); err != nil {
-		// 成员对不上是用户输入问题（多半是界面上的列表过期了），
-		// 与数据库故障要分开回，否则前端只会看到一句 500
-		var invalid orderInvalidError
-		if errors.As(err, &invalid) {
-			writeUpstreamError(c, http.StatusBadRequest, invalid.Error(), "invalid_request_error")
-			return
-		}
-		writeInternalError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"group_id": p.GroupID, "ordered": len(p.IDs)})
 }
 
 func (s *Server) listChannelModels(c *gin.Context) {
@@ -1349,382 +1165,6 @@ func whitelistAfterUnbind(rows []model.ChannelModel, bindingID uint) []model.Cha
 	return out
 }
 
-// ============================ 分组 ============================
-
-func registerGroupRoutes(g *gin.RouterGroup, s *Server) {
-	r := g.Group("/groups")
-	r.GET("", s.listGroups)
-	r.POST("", s.createGroup)
-	r.PUT("/:id", s.updateGroup)
-	r.DELETE("/:id", s.deleteGroup)
-}
-
-// groupListItem 是分组列表行：实体之外带「今日各币种花费」。
-type groupListItem struct {
-	model.ChannelGroup
-	// TodaySpent 是今日各币种已花费金额（与 daily_budget 同一口径逐币对照）。
-	// 只在分组配了预算时才算（一次聚合查询），没配预算的分组带 nil ——
-	// 没有预算的花费数字没有读者，白付一次聚合
-	TodaySpent map[string]float64 `json:"today_spent"`
-}
-
-func (s *Server) listGroups(c *gin.Context) {
-	var items []model.ChannelGroup
-	if err := s.deps.Store.DB().Order("id").Find(&items).Error; err != nil {
-		writeInternalError(c, err)
-		return
-	}
-
-	// 今日花费只对配了预算的分组聚合（同一口子：today + resolveRange）
-	budgeted := map[uint]bool{}
-	for _, g := range items {
-		if len(normalizeBudgetAmounts(g.DailyBudget)) > 0 {
-			budgeted[g.ID] = true
-		}
-	}
-	spentByGroup := map[uint]map[string]float64{}
-	if len(budgeted) > 0 {
-		start, end, _ := resolveRange("today")
-		var rows []struct {
-			GroupID      uint
-			CostCurrency string
-			Spent        float64
-		}
-		if err := s.deps.Store.DB().Model(&model.RequestLog{}).
-			Select("group_id, cost_currency, COALESCE(SUM(estimated_cost), 0) AS spent").
-			Where("created_at >= ? AND created_at <= ? AND group_id IN ?", start, end, mapKeys(budgeted)).
-			Group("group_id, cost_currency").
-			Scan(&rows).Error; err != nil {
-			writeInternalError(c, err)
-			return
-		}
-		for _, r := range rows {
-			if r.CostCurrency == "" {
-				continue
-			}
-			if spentByGroup[r.GroupID] == nil {
-				spentByGroup[r.GroupID] = map[string]float64{}
-			}
-			spentByGroup[r.GroupID][r.CostCurrency] = r.Spent
-		}
-	}
-
-	out := make([]groupListItem, 0, len(items))
-	for _, g := range items {
-		item := groupListItem{ChannelGroup: g}
-		if budgeted[g.ID] {
-			item.TodaySpent = spentByGroup[g.ID]
-			if item.TodaySpent == nil {
-				item.TodaySpent = map[string]float64{}
-			}
-		}
-		out = append(out, item)
-	}
-	c.JSON(http.StatusOK, gin.H{"items": out, "total": len(out)})
-}
-
-// mapKeys 把集合 map 转成切片（Go 没有内建的 keys 提取）。
-func mapKeys[V any](m map[uint]V) []uint {
-	ks := make([]uint, 0, len(m))
-	for k := range m {
-		ks = append(ks, k)
-	}
-	return ks
-}
-
-// groupCreatePayload 是新建分组的入参。
-//
-// 刻意不直接绑定实体：Enabled 用指针才能区分「没传」与「传 false」。
-// 以前「不传就启用」是靠数据库列默认值兜的（实体带 gorm default 时，
-// false 会被从 INSERT 里省掉，正好落成 true），而那个标签同时让
-// 「显式传 false」也存不进去 —— 见 model.ChannelModel.Enabled 的注释。
-// 去掉标签后两种语义必须在代码里分开，否则新建的分组会默认停用，
-// 而停用的分组不参与任何路由，现象是「刚建的分组怎么调都不通」。
-type groupCreatePayload struct {
-	Name      string `json:"name"`
-	Remark    string `json:"remark"`
-	Strategy  string `json:"strategy"`
-	IsDefault bool   `json:"is_default"`
-	Enabled   *bool  `json:"enabled"`
-	Color     string `json:"color"`
-	RPM       int    `json:"rpm"`
-	TPM       int    `json:"tpm"`
-	// DailyBudget 按币种的日预算（{"CNY": 50}）。创建时可选；
-	// 空表/缺省 = 不设预算（见 normalizeDailyBudget 的清除语义）
-	DailyBudget map[string]float64 `json:"daily_budget"`
-}
-
-// normalizeGroupColor 校验并归一化分组颜色。
-//
-// 只接受 #rgb / #rrggbb：这个值会被前端直接写进内联样式，
-// 放开格式就等于给「把任意字符串塞进 style」留了口子。
-// 空串是合法的，表示「按分组名派生一个颜色」。
-func normalizeGroupColor(raw string) (string, error) {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return "", nil
-	}
-	if !strings.HasPrefix(s, "#") {
-		return "", errors.New("颜色要写成 #rgb 或 #rrggbb")
-	}
-	hex := s[1:]
-	if len(hex) != 3 && len(hex) != 6 {
-		return "", errors.New("颜色要写成 #rgb 或 #rrggbb")
-	}
-	for _, c := range hex {
-		if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
-			return "", errors.New("颜色里只能出现 0-9 与 a-f")
-		}
-	}
-	return strings.ToLower(s), nil
-}
-
-// validateGroupQuota 校验分组的每分钟额度。0 表示不限制，负值没有意义。
-func validateGroupQuota(rpm, tpm int) error {
-	if rpm < 0 || tpm < 0 {
-		return errors.New("rpm / tpm 不能为负数（0 表示不限制）")
-	}
-	return nil
-}
-
-func (s *Server) createGroup(c *gin.Context) {
-	var p groupCreatePayload
-	if err := c.ShouldBindJSON(&p); err != nil {
-		writeUpstreamError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
-		return
-	}
-	if strings.TrimSpace(p.Name) == "" {
-		writeUpstreamError(c, http.StatusBadRequest, "name 必填", "invalid_request_error")
-		return
-	}
-	strategy := normalizeStrategy(p.Strategy)
-	enabled := true
-	if p.Enabled != nil {
-		enabled = *p.Enabled
-	}
-	color, err := normalizeGroupColor(p.Color)
-	if err != nil {
-		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
-		return
-	}
-	if err := validateGroupQuota(p.RPM, p.TPM); err != nil {
-		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
-		return
-	}
-	budget, err := normalizeDailyBudget(p.DailyBudget)
-	if err != nil {
-		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
-		return
-	}
-	gr := model.ChannelGroup{
-		Name: strings.TrimSpace(p.Name), Remark: p.Remark,
-		Strategy: strategy, IsDefault: p.IsDefault, Enabled: enabled,
-		Color: color, RPM: p.RPM, TPM: p.TPM, DailyBudget: budget,
-	}
-	db := s.deps.Store.DB()
-	// 默认分组只能有一个：strategyFor(0) 取的是第一条 is_default=true 的记录，
-	// 存在多个时选中哪个完全看返回顺序，行为不可预期。
-	err = db.Transaction(func(tx *gorm.DB) error {
-		if gr.IsDefault {
-			if err := tx.Model(&model.ChannelGroup{}).
-				Where("is_default = ?", true).
-				Update("is_default", false).Error; err != nil {
-				return err
-			}
-		}
-		return tx.Create(&gr).Error
-	})
-	if err != nil {
-		// 撞唯一名回 409 而不是 500，让前端能显示「分组名已存在」
-		// 而不是「服务端处理失败」
-		writeConflictOrInternal(c, err, "分组名已存在")
-		return
-	}
-	c.JSON(http.StatusOK, gr)
-}
-
-// groupUpdatePayload 是编辑分组的入参，所有字段可选。
-//
-// 不能像原来那样直接绑定实体再按「非零值」挑字段：布尔字段没有非零值可判，
-// 于是 is_default / enabled 永远进不了 updates —— 传了返回 200 却不落库，
-// 界面上开关拨过去又弹回来，看起来像「保存失败但没报错」。
-// 字符串字段同样有问题：remark 传空串清不掉。
-type groupUpdatePayload struct {
-	Name      *string `json:"name"`
-	Remark    *string `json:"remark"`
-	Strategy  *string `json:"strategy"`
-	IsDefault *bool   `json:"is_default"`
-	Enabled   *bool   `json:"enabled"`
-	// Color / RPM / TPM 同样必须是指针：0 与「没传」要能分开
-	// （把 RPM 从 10 改回 0 = 取消限制，是常见操作）
-	Color *string `json:"color"`
-	RPM   *int    `json:"rpm"`
-	TPM   *int    `json:"tpm"`
-	// DailyBudget 用指针区分「没传」（保持原值）与「传空对象」（清除预算）。
-	// 与 RPM 直接改成 0 不同，预算的「取消」在语义上就是空对象 ——
-	// 不用指针的话用户永远删不掉预算
-	DailyBudget *map[string]float64 `json:"daily_budget"`
-}
-
-func (s *Server) updateGroup(c *gin.Context) {
-	id, ok := parseID(c)
-	if !ok {
-		return
-	}
-	var p groupUpdatePayload
-	if err := c.ShouldBindJSON(&p); err != nil {
-		writeUpstreamError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
-		return
-	}
-	updates := map[string]any{}
-	if p.Name != nil {
-		name := strings.TrimSpace(*p.Name)
-		if name == "" {
-			writeUpstreamError(c, http.StatusBadRequest, "name 不能为空", "invalid_request_error")
-			return
-		}
-		updates["name"] = name
-	}
-	if p.Strategy != nil {
-		updates["strategy"] = normalizeStrategy(*p.Strategy)
-	}
-	if p.Remark != nil {
-		updates["remark"] = *p.Remark
-	}
-	if p.IsDefault != nil {
-		updates["is_default"] = *p.IsDefault
-	}
-	if p.Enabled != nil {
-		updates["enabled"] = *p.Enabled
-	}
-	if p.Color != nil {
-		color, err := normalizeGroupColor(*p.Color)
-		if err != nil {
-			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
-			return
-		}
-		// 显式传空串表示「恢复自动配色」，所以这里要能写进去
-		updates["color"] = color
-	}
-	if p.RPM != nil || p.TPM != nil {
-		// 只改其中一个时，另一个按当前值参与校验，免得单独改 TPM 被当成 rpm=0
-		var cur model.ChannelGroup
-		if err := s.deps.Store.DB().First(&cur, id).Error; err != nil {
-			writeUpstreamError(c, http.StatusNotFound, "分组不存在", "not_found_error")
-			return
-		}
-		rpm, tpm := cur.RPM, cur.TPM
-		if p.RPM != nil {
-			rpm = *p.RPM
-		}
-		if p.TPM != nil {
-			tpm = *p.TPM
-		}
-		if err := validateGroupQuota(rpm, tpm); err != nil {
-			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
-			return
-		}
-		updates["rpm"] = rpm
-		updates["tpm"] = tpm
-	}
-	if p.DailyBudget != nil {
-		budget, err := normalizeDailyBudget(*p.DailyBudget)
-		if err != nil {
-			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
-			return
-		}
-		if budget == nil {
-			// 空对象 = 清除预算：写成 SQL NULL，而不是空 jsonb
-			updates["daily_budget"] = gorm.Expr("NULL")
-		} else {
-			updates["daily_budget"] = budget
-		}
-	}
-	if len(updates) == 0 {
-		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
-		return
-	}
-	// 把「设为默认」与「清掉其它分组的默认标记」放进同一个事务，
-	// 否则中途失败会留下两个默认分组或零个默认分组
-	err := s.deps.Store.DB().Transaction(func(tx *gorm.DB) error {
-		if p.IsDefault != nil && *p.IsDefault {
-			if err := tx.Model(&model.ChannelGroup{}).
-				Where("id <> ?", id).
-				Update("is_default", false).Error; err != nil {
-				return err
-			}
-		}
-		return applyUpdates(tx, &model.ChannelGroup{}, id, updates)
-	})
-	if err != nil {
-		writeUpdateError(c, err)
-		return
-	}
-	s.invalidateKeyCache()
-	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates)})
-}
-
-func (s *Server) deleteGroup(c *gin.Context) {
-	id, ok := parseID(c)
-	if !ok {
-		return
-	}
-	db := s.deps.Store.DB()
-
-	// 先把分组行取出来：密钥引用检查要用它的名字（老数据的白名单里存的
-	// 是名字），顺带在删除前就区分「分组不存在」
-	var gr model.ChannelGroup
-	if err := db.First(&gr, id).Error; err != nil {
-		writeUpstreamError(c, http.StatusNotFound, "分组不存在", "not_found_error")
-		return
-	}
-
-	// 原来写的是 err == nil && count > 0：查询失败时条件为假，
-	// 于是「查不出来」被当成「没有渠道占用」，直接把一个仍在使用的分组删掉。
-	// 查不出来就不该往下删。
-	var count int64
-	if err := db.Model(&model.Channel{}).Where("group_id = ?", id).Count(&count).Error; err != nil {
-		writeInternalError(c, err)
-		return
-	}
-	if count > 0 {
-		writeUpstreamError(c, http.StatusConflict, "该分组下仍有渠道，请先迁移", "invalid_request_error")
-		return
-	}
-	// 密钥白名单里的引用同样要拦。曾经这里不查：删掉分组后，引用它的密钥
-	// 每次请求都 403（白名单解析失败），界面上却只显示「分组已删除」。
-	// 白名单条目现在统一存 ID，但老数据与导入的备份里可能还是名字，
-	// 两种形态都要匹配上 —— 漏掉名字形态的话，这个守卫对老库形同虚设。
-	//
-	// 用 jsonb 的 @> 而不是把整列读回内存过滤：名字里的引号由 json.Marshal
-	// 负责转义，参数化也顺带把 SQL 注入的路堵死。
-	var refKeys []model.APIKey
-	idJSON, _ := json.Marshal([]string{strconv.FormatUint(uint64(id), 10)})
-	nameJSON, _ := json.Marshal([]string{gr.Name})
-	if err := db.Where("allowed_groups @> ?::jsonb", string(idJSON)).
-		Or("allowed_groups @> ?::jsonb", string(nameJSON)).
-		Find(&refKeys).Error; err != nil {
-		writeInternalError(c, err)
-		return
-	}
-	if len(refKeys) > 0 {
-		names := make([]string, 0, len(refKeys))
-		for _, k := range refKeys {
-			names = append(names, k.Name)
-		}
-		writeUpstreamError(c, http.StatusConflict,
-			fmt.Sprintf("该分组仍被 %d 把密钥的分组白名单引用（%s），请先在「密钥信息」里清理",
-				len(refKeys), strings.Join(names, "、")), "invalid_request_error")
-		return
-	}
-	if s.deps.GroupLimit != nil {
-		// 连同限流窗口一起删掉：分组没了，它的每分钟计数没有任何意义，
-		// 留着只会在内存里慢慢堆积（而且 id 复用的话会把旧计数带给新分组）
-		s.deps.GroupLimit.Reset(id)
-	}
-	deleteByID(c, db, &model.ChannelGroup{}, id, "分组不存在")
-}
-
 // ============================ 密钥 ============================
 
 func registerKeyRoutes(g *gin.RouterGroup, s *Server) {
@@ -1748,12 +1188,124 @@ func (s *Server) listKeys(c *gin.Context) {
 }
 
 type keyPayload struct {
-	Name          string           `json:"name"`
-	Enabled       *bool            `json:"enabled"`
+	Name    string `json:"name"`
+	Enabled *bool  `json:"enabled"`
+	// AllowedModels 是该密钥可调用的模型集合，**必填非空**（创建与编辑都拦）：
+	// 新模型下路由完全由密钥决定，没有模型的密钥什么都调不了，允许创建
+	// 只会制造一把「看起来正常、一发请求就 502」的死钥匙。
 	AllowedModels model.StringList `json:"allowed_models"`
-	AllowedGroups model.StringList `json:"allowed_groups"`
+	// ModelChannels 是每个模型的候选渠道优先级：{"模型名": [渠道ID有序]}。
+	// 键集合必须与 AllowedModels 一致，且每条渠道都存在、白名单里有该模型
+	//（normalizeKeyRoutes 校验）。
+	ModelChannels map[string][]uint `json:"model_channels"`
 	// 用指针区分「没传」与「显式设为 0」
 	RateLimitRPM *int `json:"rate_limit_rpm"`
+}
+
+// normalizeKeyRoutes 校验并规整「每模型的候选渠道路由」。
+//
+// 规则（创建与更新共用这一个出口，漂移的表现是「界面存得进、调用时 403/502」）：
+//   - models 为空 → 报错（新模型下密钥必须至少声明一个模型）；
+//   - routes 缺某个模型、或该模型的列表为空 → 报错；
+//   - routes 里的渠道不存在 → 报错（保存时发现比调用时发现 403 便宜得多）；
+//   - 渠道存在但白名单里没有这个模型 → 报错（否则路由静默收窄，界面上看不出来）；
+//   - 渠道重复条目去重、保留首次出现的顺序；模型名去空白，与白名单同名对待。
+//
+// 返回规整后的 models（去空白、去重、与路由键对齐）与 routes。
+// 查库分两把：渠道存在性一次 IN 查全，白名单匹配一次 IN 查全 ——
+// 逐条查在几十个模型 × 几条渠道时是上百次往返，而这是每次保存密钥都走的路径。
+// db 由调用方传入：updateKey 传事务（校验与写入同一快照），createKey 传普通连接。
+func (s *Server) normalizeKeyRoutes(db *gorm.DB, models model.StringList, routes map[string][]uint) (model.StringList, model.JSONMap, error) {
+	// 先去空白、去重（保序）
+	cleanModels := make(model.StringList, 0, len(models))
+	seenModel := map[string]bool{}
+	for _, raw := range models {
+		name := strings.TrimSpace(raw)
+		if name == "" || seenModel[name] {
+			continue
+		}
+		seenModel[name] = true
+		cleanModels = append(cleanModels, name)
+	}
+	if len(cleanModels) == 0 {
+		return nil, nil, errors.New("至少要为密钥选择一个模型")
+	}
+
+	cleanRoutes := make(model.JSONMap, len(cleanModels))
+	for _, name := range cleanModels {
+		ids, ok := routes[name]
+		if !ok || len(ids) == 0 {
+			return nil, nil, fmt.Errorf("模型 %s 没有指定任何候选渠道", name)
+		}
+		seenCh := map[uint]bool{}
+		list := make([]uint, 0, len(ids))
+		for _, id := range ids {
+			if id == 0 || seenCh[id] {
+				continue
+			}
+			seenCh[id] = true
+			list = append(list, id)
+		}
+		if len(list) == 0 {
+			return nil, nil, fmt.Errorf("模型 %s 没有指定任何候选渠道", name)
+		}
+		cleanRoutes[name] = list
+	}
+	// 路由里多出来的键（models 没选它）：视为脏数据拦下，
+	// 否则「模型列表和路由各改了一半」会静默留下永远不生效的条目
+	for name := range routes {
+		if !seenModel[name] {
+			return nil, nil, fmt.Errorf("模型 %s 不在密钥的模型列表里，请重新保存", name)
+		}
+	}
+
+	// 渠道存在性：一次 IN 查全
+	chIDs := make([]uint, 0, len(cleanRoutes)*2)
+	for _, v := range cleanRoutes {
+		for _, id := range v.([]uint) {
+			chIDs = append(chIDs, id)
+		}
+	}
+	var existIDs []uint
+	if err := db.Model(&model.Channel{}).Where("id IN ?", chIDs).Pluck("id", &existIDs).Error; err != nil {
+		return nil, nil, err
+	}
+	exist := make(map[uint]bool, len(existIDs))
+	for _, id := range existIDs {
+		exist[id] = true
+	}
+	for name, v := range cleanRoutes {
+		for _, id := range v.([]uint) {
+			if !exist[id] {
+				return nil, nil, fmt.Errorf("模型 %s 的候选渠道 #%d 不存在（可能已被删除）", name, id)
+			}
+		}
+	}
+
+	// 白名单匹配：一次 JOIN 查全「(channel_id, public_name) 已启用」的行
+	var bindings []struct {
+		ChannelID  uint
+		PublicName string
+	}
+	if err := db.Model(&model.ChannelModel{}).
+		Select("channel_id, public_name").
+		Where("enabled = true AND channel_id IN ?", chIDs).
+		Scan(&bindings).Error; err != nil {
+		return nil, nil, err
+	}
+	hasModel := map[string]bool{}
+	for _, b := range bindings {
+		hasModel[strconv.FormatUint(uint64(b.ChannelID), 10)+"\x00"+b.PublicName] = true
+	}
+	for name, v := range cleanRoutes {
+		for _, id := range v.([]uint) {
+			key := strconv.FormatUint(uint64(id), 10) + "\x00" + name
+			if !hasModel[key] {
+				return nil, nil, fmt.Errorf("渠道 #%d 的模型白名单里没有 %s（或那一行已停用），不能作为它的候选渠道", id, name)
+			}
+		}
+	}
+	return cleanModels, cleanRoutes, nil
 }
 
 // createKey 创建密钥。明文随响应返回一份（方便立刻复制走），
@@ -1768,10 +1320,9 @@ func (s *Server) createKey(c *gin.Context) {
 		writeUpstreamError(c, http.StatusBadRequest, "name 必填", "invalid_request_error")
 		return
 	}
-	// 分组白名单在这里校验并归一化成 ID：这里不拦，打错的名字会静默入库，
-	// 直到某次调用 403 才暴露 —— 渠道接口的分组预检（checkGroupExists）
-	// 早就是这个待遇，密钥这边补齐
-	groupRefs, err := s.normalizeGroupRefs(p.AllowedGroups)
+	// 模型与路由在这里一并校验：不选模型不允许创建，每模型的候选渠道
+	// 必须真实存在且白名单覆盖 —— 这里不拦，调用时才会以 403/502 暴露。
+	models, routes, err := s.normalizeKeyRoutes(s.deps.Store.DB(), p.AllowedModels, p.ModelChannels)
 	if err != nil {
 		writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
@@ -1788,7 +1339,7 @@ func (s *Server) createKey(c *gin.Context) {
 	}
 	k := model.APIKey{
 		Name: p.Name, KeyHash: secure.HashKey(plain), KeyEnc: enc, KeyPrefix: plain[:11],
-		Enabled: true, AllowedModels: p.AllowedModels, AllowedGroups: groupRefs,
+		Enabled: true, AllowedModels: models, ModelRoutes: routes,
 	}
 	if p.Enabled != nil {
 		k.Enabled = *p.Enabled
@@ -1827,29 +1378,58 @@ func (s *Server) updateKey(c *gin.Context) {
 	if p.RateLimitRPM != nil {
 		updates["rate_limit_rpm"] = *p.RateLimitRPM
 	}
-	// 白名单此前只有创建路径会写，更新路径静默丢弃：
-	// 传 {enabled:true, allowed_models:[...]} 会返回 updated:1 但白名单纹丝不动。
-	// 用 nil 判断「没传」—— 空数组是有效值（表示清空白名单），不能当成没传。
-	if p.AllowedModels != nil {
-		updates["allowed_models"] = p.AllowedModels
-	}
-	if p.AllowedGroups != nil {
-		// 与创建同一条归一化路径：更新时换进来一个打错的名字，表现应该
-		// 与创建时一样当场被拦，而不是先收下、调用时再 403
-		groupRefs, err := s.normalizeGroupRefs(p.AllowedGroups)
+	// 白名单与路由是**一对**数据：更新时必须同时提交（模型集合与路由键
+	// 要对得上，单改一边必然产生「有模型没路由」或「路由里有幽灵模型」）。
+	// 用 nil 判断「没传」—— 编辑表单总是整份提交，单独改名字/限额的请求
+	// 不带这两个字段，不受影响。
+	if p.AllowedModels != nil || p.ModelChannels != nil {
+		// 只传了一边：取库里现有的另一边凑成整份再校验 —— 校验逻辑要求
+		// 两者一致，直接报错会逼着所有调用方一次带全（界面本来就是这么发的），
+		// 但脚本友好起见这里补齐后再走同一出口。
+		//
+		// 读另一边、校验、写，全在一个事务里：这几步不在同一事务的话，
+		// 并发的整份编辑可以交错出「请求 A 用 B 已改过的另一半补齐并写回」
+		// 的组合 —— 双方都没审过的配置落了库（2026-10-26 评审 O1）。
+		// 单管理员个人自用碰不上，事务没有额外代价，一并收口。
+		err := s.deps.Store.DB().Transaction(func(tx *gorm.DB) error {
+			models, routesIn := p.AllowedModels, p.ModelChannels
+			if models == nil {
+				var cur model.APIKey
+				if err := tx.Select("allowed_models").First(&cur, id).Error; err != nil {
+					return err
+				}
+				models = cur.AllowedModels
+			}
+			if routesIn == nil {
+				// 重建走 KeyRoutesOf —— 同一解析口径（字符串数字条目照样
+				// 认得），别在这里再手写一份只认 float64 的循环（CLAUDE.md 14）
+				var cur model.APIKey
+				if err := tx.Select("model_channels").First(&cur, id).Error; err != nil {
+					return err
+				}
+				routesIn = KeyRoutesOf(&cur)
+			}
+			cleanModels, cleanRoutes, nerr := s.normalizeKeyRoutes(tx, models, routesIn)
+			if nerr != nil {
+				return nerr
+			}
+			updates["allowed_models"] = cleanModels
+			updates["model_channels"] = cleanRoutes
+			return applyUpdates(tx, &model.APIKey{}, id, updates)
+		})
 		if err != nil {
-			writeUpstreamError(c, http.StatusBadRequest, err.Error(), "invalid_request_error")
+			writeUpdateError(c, err)
 			return
 		}
-		updates["allowed_groups"] = groupRefs
-	}
-	if len(updates) == 0 {
-		writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
-		return
-	}
-	if err := applyUpdates(s.deps.Store.DB(), &model.APIKey{}, id, updates); err != nil {
-		writeUpdateError(c, err)
-		return
+	} else {
+		if len(updates) == 0 {
+			writeUpstreamError(c, http.StatusBadRequest, "没有需要更新的字段", "invalid_request_error")
+			return
+		}
+		if err := applyUpdates(s.deps.Store.DB(), &model.APIKey{}, id, updates); err != nil {
+			writeUpdateError(c, err)
+			return
+		}
 	}
 	s.invalidateKeyCache()
 	c.JSON(http.StatusOK, gin.H{"id": id, "updated": len(updates)})
@@ -1910,16 +1490,7 @@ func (s *Server) logFilters(c *gin.Context) (*gorm.DB, bool) {
 	case "error":
 		q = q.Where("status_code >= 400")
 	}
-	// 分组筛选：界面上「按分组看」是常态视角。
-	// 不 join channels 取它现在的分组 —— 日志里的归属是当时那一刻的快照，
-	// 渠道后来换了分组不该把历史账挪到新分组去（与 cost_currency 同一个道理）。
-	if gid := strings.TrimSpace(c.Query("group_id")); gid != "" {
-		v, err := strconv.ParseUint(gid, 10, 64)
-		if err != nil || v == 0 {
-			return bad("group_id", gid)
-		}
-		q = q.Where("group_id = ?", v)
-	}
+	// 渠道筛选。日志里的归属是当时那一刻的快照。
 	if cid := strings.TrimSpace(c.Query("channel_id")); cid != "" {
 		v, err := strconv.ParseUint(cid, 10, 64)
 		if err != nil || v == 0 {
@@ -2215,7 +1786,7 @@ func orDefault(v, def string) string {
 }
 
 // checkRefExists 校验要被引用的记录存在（id 为 0 表示「不引用」，直接放行）；
-// 提前回 400，不把外键拒绝伪装成 500。分组与代理两个引用方共用一份。
+// 提前回 400，不把外键拒绝伪装成 500。代理与密钥路由的引用方共用一份。
 func checkRefExists(s *Server, id uint, m any, label string) error {
 	if id == 0 {
 		return nil
@@ -2228,23 +1799,4 @@ func checkRefExists(s *Server, id uint, m any, label string) error {
 		return errors.New("指定的" + label + "不存在")
 	}
 	return nil
-}
-
-func checkGroupExists(s *Server, id uint) error {
-	return checkRefExists(s, id, &model.ChannelGroup{}, "分组")
-}
-
-// defaultGroupID 取被标为默认分组的 id。
-//
-// 取不到时返回 ok=false，不再退到写死的 1。以前能这么退，是因为 Seed
-// 每次启动都会把「默认分组」建回来，这里几乎总是查得到；现在默认分组是
-// 用户可以不设、也可以删掉的（见 store.Seed），再返回 1 就可能落到一个
-// 不存在的分组上（外键拒绝，渠道建不出来），或者另一个不相干的分组上
-// （渠道静默进了错组）。取不到时由调用方决定怎么办，别在这里猜。
-func defaultGroupID(s *Server) (uint, bool) {
-	var g model.ChannelGroup
-	if err := s.deps.Store.DB().Where("is_default = ?", true).First(&g).Error; err != nil {
-		return 0, false
-	}
-	return g.ID, true
 }

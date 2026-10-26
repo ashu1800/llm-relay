@@ -18,6 +18,10 @@ deploy/data/
 *.test
 *.out
 
+# ===== Python（validate 脚本跑 py_compile 会留 __pycache__）=====
+__pycache__/
+*.pyc
+
 # ===== 前端 =====
 node_modules/
 frontend/dist/

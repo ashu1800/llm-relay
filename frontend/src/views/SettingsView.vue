@@ -290,8 +290,7 @@ const countCards = [
   { key: 'priced', label: '已定价模型' },
   { key: 'channels', label: '渠道' },
   { key: 'models', label: '模型' },
-  { key: 'keys', label: '密钥' },
-  { key: 'groups', label: '分组' }
+  { key: 'keys', label: '密钥' }
 ]
 
 function fmtBool(v: any) {

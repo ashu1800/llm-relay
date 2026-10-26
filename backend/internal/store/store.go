@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"strings"
 	"time"
 
@@ -84,17 +83,7 @@ func (s *Store) Migrate() error {
 	if err := s.migrateLegacySchema(); err != nil {
 		return err
 	}
-	// 权重回填必须排在 AutoMigrate **之前**：这一版给 (group_id, weight) 加了
-	// 唯一索引，而老数据里同分组重名次的渠道是存在的（同一分组下多条渠道
-	// 都还是默认的 weight=1），先建索引会直接失败、应用起不来。
-	if err := s.normalizeChannelWeights(); err != nil {
-		return err
-	}
-	if err := s.normalizeGroupStrategies(); err != nil {
-		return err
-	}
 	if err := s.db.AutoMigrate(
-		&model.ChannelGroup{},
 		&model.Channel{},
 		&model.ChannelModel{},
 		&model.APIKey{},
@@ -105,12 +94,6 @@ func (s *Store) Migrate() error {
 		&model.ClientAlias{},
 	); err != nil {
 		return fmt.Errorf("数据库迁移失败: %w", err)
-	}
-	// 密钥的分组白名单从「存名字」收敛成「存 ID」：必须在 AutoMigrate 之后
-	// （keys 表得先存在），放在这里而不是 Seed 里，因为它是一次性的数据
-	// 修复，与种子数据无关
-	if err := s.normalizeKeyGroupRefs(); err != nil {
-		return err
 	}
 	// 客户端显示映射的启动回填：日志列上线早于映射表，历史行没经过
 	// 写路径的自动登记，这里按 DISTINCT 一次性补齐（同样必须在
@@ -297,7 +280,6 @@ func (s *Store) migrateLegacySchema() error {
 	for _, t := range []struct{ table, column string }{
 		{"channel_models", "model_id"},
 		{"channels", "provider_id"},
-		{"channel_groups", "provider_id"},
 		{"request_logs", "provider_id"},
 	} {
 		if !s.hasTable(t.table) {
@@ -323,99 +305,173 @@ func (s *Store) migrateLegacySchema() error {
 			return fmt.Errorf("删除模型商结构失败（%s）: %w", stmt, err)
 		}
 	}
-	return nil
-}
 
-// normalizeChannelWeights 把每个分组内的渠道权重重排成 1..N 连续序号。
-//
-// 背景：weight 原来是「加权随机」的抽签份额，同一分组下多条渠道都是默认值 1
-// 是常态（现有数据里就有）。现在 weight 是组内优先级序号，必须连续唯一，
-// 否则故障转移顺序没有定义。
-//
-// 排序键 (weight ASC, enabled DESC, id ASC)：
-//   - weight 优先，尽量保留用户原本表达的先后意图
-//   - 同权重时**启用的排前面** —— 停用的渠道不参与路由，让在用的渠道占链头
-//     更符合预期（只按 id 排的话，一条早就停用的老渠道会占住第一位）
-//
-// 只更新与目标值不同的行：这个函数每次启动都会跑，无条件写一遍会把全部渠道的
-// updated_at 都刷新掉，用户看到「所有渠道刚刚都被改过」。
-func (s *Store) normalizeChannelWeights() error {
-	if !s.hasTable("channels") {
-		return nil
-	}
-	var rows []struct {
-		ID      uint
-		GroupID uint
-		Weight  int
-	}
-	if err := s.db.Raw("SELECT id, group_id, weight FROM channels ORDER BY group_id, weight, enabled DESC, id").
-		Scan(&rows).Error; err != nil {
-		return fmt.Errorf("读取渠道权重失败: %w", err)
-	}
-	if len(rows) == 0 {
-		return nil
-	}
-
-	next := map[uint]int{} // 分组 ID -> 下一个序号
-	type fixRow struct {
-		id   uint
-		want int
-	}
-	var pending []fixRow
-	for _, r := range rows {
-		next[r.GroupID]++
-		if want := next[r.GroupID]; r.Weight != want {
-			pending = append(pending, fixRow{id: r.ID, want: want})
+	// 分组整体退场（2026-10-26 破坏性重构，不做旧版本兼容）。
+	//
+	// 路由顺序改由密钥的每模型渠道列表决定，渠道的 group_id / weight、
+	// 分组表与路由策略全部失去存在意义。唯一的回填是密钥路由：
+	// 存量密钥按「白名单 → 拥有该模型的启用渠道（weight 序）」生成
+	// model_channels，让老配置在新模型下保持原有的转移顺序。
+	// **回填必须在删 weight 列之前做**，否则原优先级无从还原。
+	//
+	// 而且必须在回填之前给 api_keys 补上路由列：真实老库上 AutoMigrate 还没跑
+	// （migrateLegacySchema 排在它前面），此时 api_keys 既没有 model_channels
+	// 也没有 model_routes —— 回填里的 UPDATE SET model_channels 会以
+	// 「column does not exist」失败，Migrate 失败，应用永远起不来。
+	// （2026-10-26 评审发现：老库形状的测试从已 AutoMigrate 的新表装回老列
+	// 构造，恰好掩盖了这条路径，见 store_test 的真实老库用例。）
+	// 此处带 hasTable 守卫，与下面 DROP 循环同一套规则。
+	if s.hasTable("api_keys") && !s.hasColumn("api_keys", "model_channels") {
+		if err := s.db.Exec("ALTER TABLE api_keys ADD COLUMN model_channels jsonb").Error; err != nil {
+			return fmt.Errorf("补密钥路由列失败: %w", err)
 		}
 	}
-	if len(pending) == 0 {
-		return nil
+	if s.hasTable("channels") && s.hasColumn("channels", "group_id") {
+		if err := s.backfillKeyModelRoutes(); err != nil {
+			return err
+		}
 	}
-	// 「先改负、后翻正」必须在一个事务里：中途崩溃会留下负权重，
-	// 而 weight ASC 排序时负值排最前 —— 组内优先级被静默重排。
-	fixed := 0
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		for _, f := range pending {
-			// 唯一索引已存在时会中途撞车（把 1 改成 2，而 2 还没让位），
-			// 负数不会与任何正序号冲突
-			if err := tx.Exec("UPDATE channels SET weight = ? WHERE id = ?", -f.want, f.id).Error; err != nil {
-				return fmt.Errorf("重排渠道权重失败（id=%d）: %w", f.id, err)
+	// DROP COLUMN 必须逐张表判断在不在（与上面删 provider 结构同一条坑：
+	// 全新库里这些表还没建，直接跑会以 relation does not exist 失败）。
+	// 表存在性对整个循环体成立（循环体不建表也不删表），下面的各分支
+	// 不再各自重复 hasTable 判断。
+	for _, t := range []struct{ table, column string }{
+		{"channels", "group_id"},
+		{"channels", "weight"},
+		{"request_logs", "group_id"},
+		{"api_keys", "allowed_groups"},
+	} {
+		if !s.hasTable(t.table) {
+			continue
+		}
+		// 唯一索引 idx_group_weight 引着 weight 列，删列前先摘掉；
+		// 外键 fk_channels_group 同理（RESTRICT 指着 channel_groups）。
+		if t.column == "weight" {
+			if err := s.db.Exec("DROP INDEX IF EXISTS idx_group_weight").Error; err != nil {
+				return fmt.Errorf("删除分组权重索引失败: %w", err)
 			}
-			fixed++
 		}
-		if err := tx.Exec("UPDATE channels SET weight = -weight WHERE weight < 0").Error; err != nil {
-			return fmt.Errorf("渠道权重翻正失败: %w", err)
+		if t.column == "group_id" {
+			if err := s.db.Exec("ALTER TABLE channels DROP CONSTRAINT IF EXISTS fk_channels_group").Error; err != nil {
+				return fmt.Errorf("删除分组外键失败: %w", err)
+			}
 		}
-		return nil
-	})
-	if err != nil {
-		return err
+		if t.column == "allowed_groups" {
+			// 补路由列已统一提前到回填调用点之前（上面的 ADD COLUMN 块）——
+			// 走到这里该列必然已存在，这里不再重复补。
+			// model_routes 是早期实现按 Go 字段名建的列（实体没显式声明
+			// column 时，ModelRoutes → model_routes），与写路径用的
+			// model_channels 是两列并存 —— 读路径绑在它上面，表现为
+			// 「保存成功、列表永远回旧顺序」（2026-10-26 实测踩过）。
+			// 实体已显式 column:model_channels，这里把残留列删掉。
+			if s.hasColumn("api_keys", "model_routes") {
+				if err := s.db.Exec("ALTER TABLE api_keys DROP COLUMN IF EXISTS model_routes").Error; err != nil {
+					return fmt.Errorf("删除密钥路由残留列失败: %w", err)
+				}
+				slog.Info("api_keys.model_routes 残留列已删除（路由列统一为 model_channels）")
+			}
+		}
+		stmt := "ALTER TABLE " + t.table + " DROP COLUMN IF EXISTS " + t.column
+		if err := s.db.Exec(stmt).Error; err != nil {
+			return fmt.Errorf("删除分组结构失败（%s）: %w", stmt, err)
+		}
 	}
-	slog.Info("渠道权重已重排为组内优先级序号", "调整条数", fixed)
+	if s.hasTable("channel_groups") {
+		if err := s.db.Exec("DROP TABLE IF EXISTS channel_groups").Error; err != nil {
+			return fmt.Errorf("删除分组表失败: %w", err)
+		}
+		slog.Info("分组功能已移除：channel_groups 表已删除")
+	}
 	return nil
 }
 
-// normalizeGroupStrategies 把已下线的路由策略收敛到 failover。
+// backfillKeyModelRoutes 把存量密钥的分组白名单一次性转换成每模型渠道路由。
 //
-// 「加权随机」（weighted）随 weight 改语义一起下线：它把权重当抽签份额，
-// 权重越大越容易被抽中，与「越小越优先」正好相反。留着这个值的话，
-// 分组表单的下拉里没有它、界面显示空白，而路由又会走一条已废弃的分支。
+// 规则（2026-10-26，破坏性重构的一次性回填）：
+//   - allowed_models 为空的密钥 → 填入全库 DISTINCT public_name
+//     （原语义「不限」，新模型要求非空，等价展开是唯一不丢调用的选择）；
+//   - 每个模型的候选渠道 = 白名单含该模型的**启用**渠道，按 (weight, id) 升序
+//     —— weight 是当时的组内优先级，这样恢复出的转移顺序与分组时代一致；
+//   - 路由键与 allowed_models 对齐：模型没有任何渠道能跑时也保留键（空列表），
+//     让请求失败时报错能如实说「这个模型当前没有可用渠道」。
 //
-// 不认识的取值也一并收敛：与其让一个拼错的值静默落到某个默认分支，
-// 不如落到一个语义明确的策略上。
-func (s *Store) normalizeGroupStrategies() error {
-	if !s.hasTable("channel_groups") {
+// 用 settings 标记做幂等（与 client_alias_backfill_v1 同一套做法），
+// 成功后写标记；失败不写，下次启动重试。必须在 weight 列还在时调用
+// （调用点见 migrateLegacySchema 末尾）。
+func (s *Store) backfillKeyModelRoutes() error {
+	const markerKey = "key_model_routes_backfill_v1"
+	var marker model.Setting
+	err := s.db.Where("key = ?", markerKey).First(&marker).Error
+	if err == nil {
 		return nil
 	}
-	res := s.db.Exec(`UPDATE channel_groups SET strategy = ?
-		WHERE COALESCE(strategy, '') NOT IN (?, ?, ?)`,
-		model.StrategyFailover, model.StrategyRoundRobin, model.StrategyLeastLatency, model.StrategyFailover)
-	if res.Error != nil {
-		return fmt.Errorf("迁移分组路由策略失败: %w", res.Error)
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return fmt.Errorf("读取密钥路由回填标记失败: %w", err)
 	}
-	if res.RowsAffected > 0 {
-		slog.Info("分组路由策略已从「加权随机」迁移为「顺序故障转移」", "分组数", res.RowsAffected)
+
+	// 模型 → 渠道 ID（weight 序）。一次 JOIN 查全，内存里归堆。
+	var rows []struct {
+		PublicName string
+		ChannelID  uint
+		Weight     int
 	}
+	if err := s.db.Raw(`SELECT cm.public_name AS public_name, cm.channel_id AS channel_id,
+			COALESCE(ch.weight, 0) AS weight
+		FROM channel_models cm JOIN channels ch ON ch.id = cm.channel_id
+		WHERE cm.enabled = true AND ch.enabled = true
+		ORDER BY cm.public_name, ch.weight, ch.id`).Scan(&rows).Error; err != nil {
+		return fmt.Errorf("读取渠道模型白名单失败: %w", err)
+	}
+	channelsOf := map[string][]uint{}
+	for _, r := range rows {
+		channelsOf[r.PublicName] = append(channelsOf[r.PublicName], r.ChannelID)
+	}
+	var allNames []string
+	if err := s.db.Raw(`SELECT DISTINCT public_name FROM channel_models WHERE enabled = true
+		ORDER BY public_name`).Scan(&allNames).Error; err != nil {
+		return fmt.Errorf("读取全量模型名失败: %w", err)
+	}
+
+	var keys []model.APIKey
+	if err := s.db.Find(&keys).Error; err != nil {
+		return fmt.Errorf("读取密钥失败: %w", err)
+	}
+	updated := 0
+	for _, k := range keys {
+		models := []string(k.AllowedModels)
+		if len(models) == 0 {
+			models = allNames // 原「不限」展开成全量
+		}
+		routes := model.JSONMap{}
+		cleanModels := make(model.StringList, 0, len(models))
+		for _, name := range models {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			cleanModels = append(cleanModels, name)
+			ids, ok := channelsOf[name]
+			if !ok {
+				ids = []uint{}
+			}
+			routes[name] = ids
+		}
+		updates := map[string]any{"model_channels": routes}
+		if len(k.AllowedModels) == 0 {
+			updates["allowed_models"] = cleanModels
+		}
+		if err := s.db.Model(&model.APIKey{}).Where("id = ?", k.ID).Updates(updates).Error; err != nil {
+			return fmt.Errorf("回填密钥 %d 的模型路由失败: %w", k.ID, err)
+		}
+		updated++
+	}
+	if err := s.db.Create(&model.Setting{
+		Key:   markerKey,
+		Value: model.JSONMap{"value": true},
+	}).Error; err != nil {
+		return fmt.Errorf("写入密钥路由回填标记失败: %w", err)
+	}
+	slog.Info("存量密钥已按渠道优先级回填模型路由", "密钥数", updated)
 	return nil
 }
 
@@ -478,112 +534,11 @@ func (s *Store) backfillClientAliases() error {
 	return nil
 }
 
-// normalizeKeyGroupRefs 把密钥分组白名单里的**名字**条目归一化成分组 ID。
-//
-// 老版本的密钥白名单存分组名（前端直接提交 g.name）：分组一改名，引用它的
-// 密钥全体 403，界面上毫无征兆。写入侧现在统一走 api.normalizeGroupRefs
-// 只存 ID，这段一次性迁移把库里还剩的名字条目换成 ID —— 幂等：条目全是
-// 数字时什么都不做，跑多少遍都安全。
-//
-// 解析不了的名字（分组已删）**保留原样**：把它删掉等于静默放宽该密钥的
-// 权限（白名单少了一条限制），运行期 resolveGroupWhitelist 会继续把这种
-// 悬空引用如实报成 403。只留一条 Warn 日志，让问题在日志里可见。
-func (s *Store) normalizeKeyGroupRefs() error {
-	var keys []model.APIKey
-	if err := s.db.Find(&keys).Error; err != nil {
-		return fmt.Errorf("读取密钥失败: %w", err)
-	}
-	// 先把分组建一次内存索引，再逐条解析：这段迁移在每次进程启动时都会跑，
-	// 逐条 WHERE name = ? 会让启动付出 O(密钥数 × 条目数) 次查询 ——
-	// 而分组表很小，一次读全 + map 查找是两次查询的事。
-	// 同名分组取 id 最小的一个，与原来 First()（默认按主键升序）一致。
-	byName := map[string]uint{}
-	var groups []model.ChannelGroup
-	if err := s.db.Select("id", "name").Order("id").Find(&groups).Error; err != nil {
-		return fmt.Errorf("读取分组失败: %w", err)
-	}
-	for _, g := range groups {
-		if _, ok := byName[g.Name]; !ok {
-			byName[g.Name] = g.ID
-		}
-	}
-
-	for _, k := range keys {
-		if len(k.AllowedGroups) == 0 {
-			continue
-		}
-		changed := false
-		out := make(model.StringList, 0, len(k.AllowedGroups))
-		seen := map[string]bool{}
-		keep := func(item string) {
-			if !seen[item] {
-				seen[item] = true
-				out = append(out, item)
-			}
-		}
-		for _, raw := range k.AllowedGroups {
-			item := strings.TrimSpace(raw)
-			if item == "" {
-				changed = true // 空条目顺手清掉
-				continue
-			}
-			// 已是 ID 形态：原样保留，存在性交给运行期解析去查
-			// （这里再查一遍库只会让启动多 N 次 SELECT，换不来新信息）
-			if _, err := strconv.ParseUint(item, 10, 32); err == nil {
-				keep(item)
-				continue
-			}
-			id, ok := byName[item]
-			if !ok {
-				slog.Warn("密钥分组白名单里的名字解析不了，保留原样（分组可能已删除或改名）",
-					"key_id", k.ID, "key", k.Name, "ref", item)
-				keep(item)
-				continue
-			}
-			changed = true
-			keep(strconv.FormatUint(uint64(id), 10))
-		}
-		if !changed {
-			continue
-		}
-		if err := s.db.Model(&model.APIKey{}).Where("id = ?", k.ID).
-			Update("allowed_groups", out).Error; err != nil {
-			return fmt.Errorf("归一化密钥 %d 的分组白名单失败: %w", k.ID, err)
-		}
-		slog.Info("密钥分组白名单已归一化为分组 ID", "key_id", k.ID, "key", k.Name, "refs", out)
-	}
-	return nil
-}
-
 // Seed 写入首次启动所需的基线数据，可重复执行。
 //
-// 默认分组只在「一个分组都没有」时创建，也就是全新安装那一次。
-//
-// 原来写的是 Where(Name: "默认分组").FirstOrCreate(...)：判断依据是**名字**，
-// 于是用户在界面上把这个分组改名或删掉之后，下次重启又会凭空冒出一个同名分组、
-// 并被设成默认 —— 现象是「我明明删掉了，重启它又回来了」。
-// 分组只要存在过，怎么增删都归用户管，这里不再插手。
-//
-// 唯一的例外是把分组删到一个不剩：那种库与全新安装没有区别（渠道必须挂在分组下，
-// 有渠道就不可能一个分组都没有），按全新安装处理。
+// 分组已移除，这里只剩系统设置：首次启动写入报文留存与日志保留的默认值，
+// 已存在的键不覆盖。
 func (s *Store) Seed() error {
-	var groupCount int64
-	if err := s.db.Model(&model.ChannelGroup{}).Count(&groupCount).Error; err != nil {
-		return fmt.Errorf("统计分组数量失败: %w", err)
-	}
-	if groupCount == 0 {
-		g := model.ChannelGroup{
-			Name:      "默认分组",
-			Strategy:  model.StrategyFailover,
-			IsDefault: true,
-			Enabled:   true,
-		}
-		if err := s.db.Create(&g).Error; err != nil {
-			return fmt.Errorf("初始化默认分组失败: %w", err)
-		}
-		slog.Info("全新安装：已创建默认分组", "id", g.ID)
-	}
-
 	defaults := []model.Setting{
 		{Key: "payload_storage_mode", Value: model.JSONMap{"value": model.PayloadStoreErrors}},
 		{Key: "log_retention_days", Value: model.JSONMap{"value": 30}},
@@ -601,48 +556,24 @@ func (s *Store) Seed() error {
 	return nil
 }
 
-// EnsureForeignKeys 补齐数据库层面的外键约束，并修复加约束前必须先修好的数据。
+// EnsureForeignKeys 补齐数据库层面的外键约束。
 //
 // 为什么会缺这些关系：它们原本只靠应用代码维护，全库零外键。
-// 应用代码一旦漏掉一处（例如备份导入时分组映射失败却保留了旧 ID），
+// 应用代码一旦漏掉一处（例如备份导入时引用映射失败却保留了旧 ID），
 // 库里就会留下指向不存在行的引用，而且没有任何东西会报错 ——
 // 往后的表现是「渠道莫名其妙不参与路由」这类查不到原因的问题。
 //
 // 必须在 AutoMigrate 之后调用：表得先建出来。
-// （这里的顺序注记曾经是「必须在 Seed 之后，因为要回填模板分组」——
-// 回填语句随模板管理下线一起删掉了，见下面的注释，别再照着它排顺序。）
 //
 // 用原生 SQL 而不是 GORM 的 association tag：后者要求给实体加关联字段，
 // 会改变实体的 JSON 形状，还会让 AutoMigrate 的行为取决于字段定义；
 // 直接把要建的约束写清楚更好读。每条都是 DROP IF EXISTS 后重建，可重复执行。
 func (s *Store) EnsureForeignKeys() error {
-	// 一个分组都没有时先不加：这时也不会有渠道（渠道必须挂在分组下），
-	// 加了拦不住什么，反而可能让「库里存着指向旧分组的渠道」这种历史数据
-	// 直接把启动卡死。等有分组了，下次启动自然会建上。
-	var grp model.ChannelGroup
-	if err := s.db.Order("is_default DESC, id").First(&grp).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		return fmt.Errorf("查找分组失败: %w", err)
-	}
-
-	// 注意：这里曾经有一段「回填 channel_templates.group_id」的语句
-	// （种子数据里的内置模板没写分组，留下 7 行 group_id=0，加外键前要先归到默认分组）。
-	// 模板管理下线、表被 DROP 之后，它变成了对已删表的 UPDATE —— 实测直接让
-	// 应用启动失败：relation "channel_templates" does not exist。
-	// 删功能时要把引用它的地方一起找干净，包括这种「只在迁移里出现一次」的语句。
-
-	// ON DELETE 的选择：
-	//   channel_models 是纯关联表，宿主没了就该跟着走 —— CASCADE
-	//   分组被删要拦住而不是连带删除渠道 —— RESTRICT（应用层已有守卫，这里兜底）
+	// channel_models 是纯关联表，宿主渠道没了就该跟着走 —— CASCADE
 	stmts := []string{
 		"ALTER TABLE channel_models DROP CONSTRAINT IF EXISTS fk_channel_models_channel",
 		`ALTER TABLE channel_models ADD CONSTRAINT fk_channel_models_channel
 			FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE`,
-		"ALTER TABLE channels DROP CONSTRAINT IF EXISTS fk_channels_group",
-		`ALTER TABLE channels ADD CONSTRAINT fk_channels_group
-			FOREIGN KEY (group_id) REFERENCES channel_groups(id) ON DELETE RESTRICT`,
 	}
 	for _, stmt := range stmts {
 		if err := s.db.Exec(stmt).Error; err != nil {

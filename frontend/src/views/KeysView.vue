@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { message, modal } from '@/utils/feedback'
 import { modalWidth } from '@/utils/modalWidth'
 import {
@@ -13,7 +13,10 @@ import {
   DashboardOutlined,
   StopOutlined,
   PlayCircleOutlined,
-  SearchOutlined
+  SearchOutlined,
+  ArrowUpOutlined,
+  ArrowDownOutlined,
+  CloseOutlined
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import { useFormValidate } from '@/composables/useFormValidate'
@@ -27,7 +30,7 @@ import { useBatchToggle } from '@/composables/useBatchToggle'
 import { focusRowAction } from '@/utils/focusRow'
 import DataState from '@/components/DataState.vue'
 import EmptyState from '@/components/EmptyState.vue'
-import GroupTag from '@/components/GroupTag.vue'
+import ModelTag from '@/components/ModelTag.vue'
 import { writeClipboard } from '@/utils/clipboard'
 import { fmtTime } from '@/utils/fmtTime'
 
@@ -35,13 +38,13 @@ import { fmtTime } from '@/utils/fmtTime'
 // 弹窗里失焦没有任何反应，填漏了只得到顶部一句 message
 import type { FormInstance, Rule } from 'ant-design-vue/es/form'
 
-import type { APIKey, ChannelGroup } from '@/api/types'
+import type { APIKey, Channel } from '@/api/types'
 
 const loading = ref(false)
 const rows = ref<APIKey[]>([])
 // 本地搜索 + 客户端分页（2026-10-11）：接口一次返回全量，所以两件事都在前端做。
-// 可搜索的字段 = 这一页所有能一眼看到的文本列（名称、密钥前缀）+ 两个白名单
-// （它们列在表里，用户会照着它们搜「哪些密钥能用 glm」）
+// 可搜索的字段 = 这一页所有能一眼看到的文本列（名称、密钥前缀、模型白名单）
+// + 模型路由里出现的渠道名（用户会照着「哪些密钥在用某条渠道」来搜）
 const {
   q,
   rows: pagedRows,
@@ -50,8 +53,12 @@ const {
   filtered: filteredKeys
 } = useTableTools(rows, {
   storageKey: 'keys-page-size',
-  searchText: (k) =>
-    [k.name, k.key_prefix, (k.allowed_models || []).join(' '), (k.allowed_groups || []).join(' ')].join(' ')
+  searchText: (k) => {
+    const routeNames = Object.values(k.model_channels || {})
+      .map((ids) => ids.map((id) => channelLabelOf(id)).join(' '))
+      .join(' ')
+    return [k.name, k.key_prefix, (k.allowed_models || []).join(' '), routeNames].join(' ')
+  }
 })
 
 // 批量启停（2026-10-11）：作用在**当前筛选结果**上，与渠道页同一套
@@ -94,20 +101,103 @@ function confirmBatchDisable() {
 }
 // 表格容器的 ref：行级操作（启停 / 删除）之后焦点往哪儿去的落点（见 utils/focusRow）
 const tableWrap = ref<HTMLElement | null>(null)
-const groups = ref<ChannelGroup[]>([])
 const modalOpen = ref(false)
 const saving = ref(false)
 const createdKey = ref('')
 const editing = ref<APIKey | null>(null)
 
+// 表单里的一个「模型 → 渠道优先级」条目。channels 是**有序**的渠道 ID
+//（数字），排前面的先被尝试 —— 它就是这个表单存在的意义。
+interface ModelRouteEntry {
+  model: string
+  channels: number[]
+}
+
 const form = reactive({
   name: '',
   rate_limit_rpm: 0,
   enabled: true,
-  // 白名单为空数组表示不限制，与后端 StringList 的语义一致
+  // 模型集合（必填非空）：键与 model_entries 一一对应
   allowed_models: [] as string[],
-  allowed_groups: [] as string[]
+  // 每模型的候选渠道（有序）。条目顺序跟随 allowed_models，
+  // 由下面的 watch 同步，不单独维护
+  model_entries: [] as ModelRouteEntry[]
 })
+
+// ---- 渠道候选数据（模型与渠道选项的唯一来源）----
+//
+// 列表接口自带每条渠道的 models 白名单，一次请求就能同时推出
+// 「可选哪些模型」与「该模型能选哪些渠道」，不需要再加接口。
+const channels = ref<Channel[]>([])
+const channelsLoading = ref(false)
+
+async function loadChannels() {
+  channelsLoading.value = true
+  try {
+    const res = await api.get<{ items: Channel[] }>('/channels')
+    channels.value = res.items || []
+  } catch (e: any) {
+    message.error('渠道候选加载失败：' + e.message)
+  } finally {
+    channelsLoading.value = false
+  }
+}
+
+/** 渠道名查找（列表列与路由编辑器共用；渠道被删时如实显示占位） */
+function channelLabelOf(id: number): string {
+  const ch = channels.value.find((c) => c.id === id)
+  return ch ? ch.name : '已删除的渠道 #' + id
+}
+
+/** 全部启用渠道的模型并集（去重升序）：模型下拉的选项 */
+const modelOptions = computed(() => {
+  const set = new Set<string>()
+  for (const ch of channels.value) {
+    if (!ch.enabled) continue
+    for (const m of ch.models || []) set.add(m)
+  }
+  return Array.from(set).sort()
+})
+
+/** 指定模型的候选渠道（启用的、白名单里有它的），按名称排序稳定展示 */
+function channelOptionsFor(model: string) {
+  return channels.value
+    .filter((ch) => ch.enabled && (ch.models || []).includes(model))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((ch) => ({ value: ch.id, label: ch.name }))
+}
+
+// allowed_models 变化时同步路由条目：新选的模型追加一个空条目，
+// 取消选择的模型连条目一起删掉。条目顺序 = 选择顺序，编辑器里不单独排序。
+watch(
+  () => [...form.allowed_models],
+  (models) => {
+    const set = new Set(models)
+    form.model_entries = form.model_entries.filter((e) => set.has(e.model))
+    for (const m of models) {
+      if (!form.model_entries.some((e) => e.model === m)) {
+        form.model_entries.push({ model: m, channels: [] })
+      }
+    }
+  }
+)
+
+function addChannel(entry: ModelRouteEntry, id: unknown) {
+  const cid = Number(id)
+  if (!cid || entry.channels.includes(cid)) return
+  entry.channels.push(cid)
+}
+function removeChannel(entry: ModelRouteEntry, idx: number) {
+  entry.channels.splice(idx, 1)
+}
+function moveChannel(entry: ModelRouteEntry, idx: number, dir: -1 | 1) {
+  const j = idx + dir
+  if (j < 0 || j >= entry.channels.length) return
+  const next = [...entry.channels]
+  const [moved] = next.splice(idx, 1)
+  next.splice(j, 0, moved)
+  entry.channels = next
+}
 
 const title = computed(() => (editing.value ? '编辑密钥' : '新建密钥'))
 
@@ -121,7 +211,7 @@ const formRef = ref<FormInstance>()
 
 const formRules: Record<string, Rule[]> = {
   name: [
-    { required: true, message: '给这把密钥起个名字：它在列表与分组统计里标识调用方', trigger: 'blur' },
+    { required: true, message: '给这把密钥起个名字：它在列表与日志里标识调用方', trigger: 'blur' },
     { max: 64, message: '名字最长 64 个字符', trigger: 'blur' }
   ]
 }
@@ -146,29 +236,6 @@ async function load() {
   } finally {
     loading.value = false
   }
-}
-
-// 分组白名单条目的解析：条目统一是分组 ID（保存时后端归一化），但老数据、
-// 导入的备份里可能还是名字 —— 数字先按 ID 找，找不到再按名字找一次，
-// 都找不到的就是悬空引用（分组已删），界面上要能看出来而不是显示一个裸 ID
-interface GroupRefInfo {
-  ref: string
-  id?: number
-  label: string
-  color?: string
-  missing: boolean
-}
-function groupRefInfo(ref: string): GroupRefInfo {
-  const g =
-    groups.value.find((x) => String(x.id) === ref) ?? groups.value.find((x) => x.name === ref)
-  if (g) return { ref, id: g.id, label: g.name, color: g.color, missing: false }
-  return { ref, label: ref, missing: true }
-}
-
-// 列表渲染用：一次解析整条记录的分组引用。
-// 不要在模板里对同一个 ref 反复调 groupRefInfo —— 每次调用都要扫两遍 groups
-function resolvedGroups(refs: string[] | null): GroupRefInfo[] {
-  return (refs || []).map(groupRefInfo)
 }
 
 // 密钥明文：按需从后端解密，取到后缓存在内存里。
@@ -299,22 +366,13 @@ async function copyBaseUrl() {
   else message.warning('复制失败，请手动选择复制')
 }
 
-async function loadGroups() {
-  try {
-    const res = await api.get<{ items: ChannelGroup[] }>('/groups')
-    groups.value = res.items || []
-  } catch (e: any) {
-    message.error('分组候选加载失败：' + e.message)
-  }
-}
-
 // 空白表单：新建、以及放弃改动后复位时共用同一份定义
 function blankForm() {
   form.name = ''
   form.rate_limit_rpm = 0
   form.enabled = true
   form.allowed_models = []
-  form.allowed_groups = []
+  form.model_entries = []
 }
 
 // 防误关：遮罩不再能关掉弹窗，有改动时按 X / Esc 要先确认（见 composable 顶部）
@@ -342,12 +400,14 @@ function openEdit(row: APIKey) {
   form.rate_limit_rpm = row.rate_limit_rpm
   form.enabled = row.enabled
   form.allowed_models = [...(row.allowed_models || [])]
-  // 白名单条目换成分组 ID（受控多选的值）：库里老条目可能是名字，
-  // 能解析就换，解析不了的（悬空引用）原样带着 —— 保存时后端会报错指出它
-  form.allowed_groups = (row.allowed_groups || []).map((ref) => {
-    const info = groupRefInfo(ref)
-    return info.id !== undefined ? String(info.id) : ref
-  })
+  // 路由条目按 allowed_models 的顺序重建（channels 是数字 ID 的有序数组）。
+  // model_channels 里可能有 allowed_models 之外的孤儿键（老数据 / 直接改库），
+  // 不进表单 —— 保存时会按表单的键集合整份覆盖掉
+  const routes = row.model_channels || {}
+  form.model_entries = (row.allowed_models || []).map((m) => ({
+    model: m,
+    channels: [...(routes[m] || [])]
+  }))
   createdKey.value = ''
   modalOpen.value = true
   dirty.markClean()
@@ -360,17 +420,14 @@ function limitText(v: number) {
   return v + ' 次/分钟'
 }
 
-// 白名单展示：空表示不限制
-function whitelistText(v: string[] | null) {
-  if (!v || v.length === 0) return '不限'
-  return v.join('、')
+/** 列表「模型路由」列的一行摘要：模型 → 渠道A > 渠道B（序即优先级） */
+function routeSummary(record: APIKey): { model: string; channels: number[] }[] {
+  const routes = record.model_channels || {}
+  return (record.allowed_models || []).map((m) => ({ model: m, channels: routes[m] || [] }))
 }
 
-// 模型白名单是 tags 模式，可以自由输入，提交前去空白、去重
-//（分组白名单是 multiple 模式，值只能来自选项、且是分组 ID，无需这一步）
-function cleanList(v: string[]) {
-  return Array.from(new Set((v || []).map((s) => String(s).trim()).filter(Boolean)))
-}
+// 模型白名单的候选只能来自渠道（选项下发），无需去空白去重，
+// cleanList 已随自由输入的 tags 模式一起退场。
 
 // onCancel 处理「取消 / 再建一把」：已经看到明文时，这个按钮的语义是
 // 「再建一把」—— 清掉明文并重置表单，弹窗留着；其余情况就是普通关闭。
@@ -403,14 +460,33 @@ async function save() {
     return
   }
   if (!(await validateForm())) return
+  // 模型与路由的前端预检：不选模型、或某模型一个渠道都没配，都过不去
+  //（后端 normalizeKeyRoutes 是最终守门，这里提前拦是为了少一次往返）。
+  //
+  // 错误用 message.warning 发出而不是字段下方 help：这两条是**跨字段**的
+  // 集合级校验（「每个被选模型都要有渠道」），单字段 help 放哪一个输入
+  // 控件上都不准确；顶部轻提示配 OK 文案，与 limit 那格「字段级错误进
+  // 字段」的分工是刻意的。
+  if (form.allowed_models.length === 0) {
+    message.warning('至少要为这把密钥选择一个模型')
+    return
+  }
+  const emptyModel = form.model_entries.find((e) => e.channels.length === 0)
+  if (emptyModel) {
+    message.warning('模型「' + emptyModel.model + '」还没有配置任何候选渠道')
+    return
+  }
   saving.value = true
   try {
-    // 白名单始终显式发送：空数组是有效值（表示清空），不传则后端保持原值
+    // 模型与路由始终整份发送：后端把两者当成一对数据校验（键要一致），
+    // 单发一边反而会被拒绝
     const body = {
       name: form.name.trim(),
       rate_limit_rpm: form.rate_limit_rpm,
-      allowed_models: cleanList(form.allowed_models),
-      allowed_groups: form.allowed_groups
+      allowed_models: [...form.allowed_models],
+      model_channels: Object.fromEntries(
+        form.model_entries.map((e) => [e.model, e.channels])
+      )
     }
     if (editing.value) {
       await api.put('/keys/' + editing.value.id, { ...body, enabled: form.enabled })
@@ -445,7 +521,7 @@ async function copyKey() {
 //      未处理的 Promise 拒绝。返回一个永不 settle 的 promise 更糟：按钮会
 //      永远转圈（loading 只在 then/catch 里复位）。
 //   2. 服务端返回的校验错误没地方放，只能弹一条顶部 message，用户看不出
-//      是哪一格错了 —— 与别的表单（渠道、分组、密钥新建）的处理方式也不一致。
+//      是哪一格错了 —— 与别的表单（渠道、密钥新建）的处理方式也不一致。
 //
 // 换成 a-form 之后：规则写在 rules 里、错误显示在输入框正下方、提交前先
 // validate()、服务端错误挂到同一个字段上（:help）。
@@ -572,10 +648,10 @@ function fmt(t: string | null) {
 }
 
 onMounted(() => {
-  // 两个请求互不依赖（写 rows 与写 groups 各自独立、各有各的错误处理），
+  // 两个请求互不依赖（写 rows 与写 channels 各自独立、各有各的错误处理），
   // 串行 await 会让密钥页首屏白白多等一个 RTT。ChannelsView 的 load()
   // 对三个端点就是这么并发的，这里跟上同一口径。
-  void Promise.all([load(), loadGroups()])
+  void Promise.all([load(), loadChannels()])
   document.addEventListener('visibilitychange', onVisibilityDrop)
 })
 
@@ -655,13 +731,12 @@ onUnmounted(() => {
         title="密钥列表加载失败"
         @retry="load"
       >
-      <!-- scroll.x 必须不小于各列宽度之和（名称 150 + 密钥 170 + 模型白名单 160
-           + 分组白名单 180 + 最后使用 150 + 限流 130 + 状态 90 + 操作 132 = 1162）：
+      <!-- scroll.x 必须不小于各列宽度之和（名称 150 + 密钥 170 + 模型路由 340
+           + 最后使用 150 + 限流 130 + 状态 90 + 操作 132 = 1162）：
            声明偏小时右侧固定的「操作」列会盖住左边最后一列，
            表现为表头被截断、单元格内容被压住，而且不报错。
-           原来写的是 1170、少了 60（那是四列宽度还没跟着改的时候）。
-           操作 200 -> 132 是图标按钮那一次，见下方操作列上方的注释。
-           核对脚本：scripts/check-table-widths.mjs -->
+           （原「模型白名单 160 + 分组白名单 180」合并成「模型路由 340」，
+           总宽不变。）操作 200 -> 132 是图标按钮那一次，见操作列上方的注释。 -->
       <!-- 表格外层只为一件事存在：给「删掉一行之后焦点往哪儿去」一个落点。
            tabindex="-1" 让它可被程序化聚焦但不进 Tab 序 —— 没有它的话，
            焦点会掉回 body，键盘用户要从页面顶部重新 Tab 一遍（见 utils/focusRow）。 -->
@@ -710,26 +785,26 @@ onUnmounted(() => {
             </a-tooltip>
           </template>
         </a-table-column>
-        <a-table-column title="模型白名单" :width="160" ellipsis>
+        <a-table-column title="模型路由" :width="340" ellipsis>
           <template #default="{ record }">
-            <span v-if="whitelistText(record.allowed_models) === '不限'" class="muted">不限</span>
-            <span v-else>{{ whitelistText(record.allowed_models) }}</span>
-          </template>
-        </a-table-column>
-        <a-table-column title="分组白名单" :width="180" ellipsis>
-          <template #default="{ record }">
-            <span v-if="!(record.allowed_groups || []).length" class="muted">不限</span>
-            <span v-else class="group-tag-list">
-              <!-- 条目是分组 ID（颜色与名字去分组表里解析），与分组管理、
-                   渠道列表用的是同一份颜色。悬空引用（分组已删）单独标出来：
-                   那种条目会让这把密钥调用时 403，不能只显示一个裸 ID -->
-              <template v-for="info in resolvedGroups(record.allowed_groups)" :key="info.ref">
-                <GroupTag v-if="!info.missing" :name="info.label" :color="info.color" />
-                <a-tooltip v-else :key="info.ref + '-missing'" :title="'引用的分组已不存在：' + info.ref + '（这会让该密钥调用时被拒，请编辑密钥清掉它）'">
-                  <span class="group-ref-missing">{{ info.ref }}</span>
-                </a-tooltip>
-              </template>
-            </span>
+            <!-- 每个模型一行：模型胶囊 + 有序渠道名（序即优先级）。
+                 渠道名解析失败（渠道被删）显示红色占位 —— 那条路由
+                 已失效，这把密钥调该模型时会被跳过它 -->
+            <div class="route-summary">
+              <div v-for="entry in routeSummary(record)" :key="entry.model" class="route-line">
+                <ModelTag :name="entry.model" />
+                <span class="route-arrow">→</span>
+                <span v-if="!entry.channels.length" class="route-missing">未配置渠道</span>
+                <template v-else>
+                  <span
+                    v-for="(cid, i) in entry.channels"
+                    :key="cid"
+                    class="route-channel"
+                    :class="{ 'is-missing': !channels.some((c) => c.id === cid) }"
+                  >{{ i > 0 ? '›' : '' }}{{ i > 0 ? ' ' : '' }}{{ channelLabelOf(cid) }}</span>
+                </template>
+              </div>
+            </div>
           </template>
         </a-table-column>
         <a-table-column title="最后使用" :width="150">
@@ -817,7 +892,7 @@ onUnmounted(() => {
       v-model:open="modalOpen"
       :title="title"
       :confirm-loading="saving"
-      :width="modalWidth(600)"
+      :width="modalWidth(720)"
       :ok-text="createdKey ? '完成' : '确定'"
       :cancel-text="createdKey ? '再建一把' : '取消'"
       centered
@@ -833,27 +908,80 @@ onUnmounted(() => {
           <a-input-number v-model:value="form.rate_limit_rpm" :min="-1" :max="1000000" style="width: 100%" />
           <div class="field-hint">0 表示跟随全局默认；负数表示这把密钥完全不限流。</div>
         </a-form-item>
-        <a-form-item label="允许调用的模型">
+        <a-form-item label="可调用的模型" required>
+          <!-- 受控多选而不是自由输入的 tags：值只能来自渠道白名单里真实存在的
+               模型 —— 自由输入一个任何渠道都没有的模型名，保存后这把密钥
+               一调用就 403/502，界面上还看不出原因 -->
           <a-select
             v-model:value="form.allowed_models"
-            mode="tags"
-            :token-separators="[',', '，']"
-            placeholder="输入模型名后回车，可填多个"
-          />
-          <div class="field-hint">留空表示不限制；填了则只有列表内的模型可以被这把密钥调用。</div>
-        </a-form-item>
-        <a-form-item label="允许使用的分组">
-          <!-- 受控多选而不是自由输入的 tags：值是分组 ID，选项就是现有分组。
-               以前存名字 + 允许任意输入，打错的名字静默入库，分组一改名
-               还会把引用它的密钥全体打断 —— 现在保存前就在这份选项里选 -->
-          <a-select
-            v-model:value="form.allowed_groups"
             mode="multiple"
-            placeholder="选择允许使用的分组"
-          >
-            <a-select-option v-for="g in groups" :key="g.id" :value="String(g.id)">{{ g.name }}</a-select-option>
-          </a-select>
-          <div class="field-hint">留空表示不限制。按分组记录、不受分组改名影响；引用的分组被删除时调用会被拒绝并提示。</div>
+            :loading="channelsLoading"
+            placeholder="从渠道白名单中选择（可多选）"
+            :options="modelOptions.map((m) => ({ value: m, label: m }))"
+          />
+          <div class="field-hint">不选模型无法创建密钥；只有这里选中的模型可以被这把密钥调用。</div>
+        </a-form-item>
+        <a-form-item v-if="form.model_entries.length" label="每模型的渠道优先级" required>
+          <!-- 每个选中的模型一个编辑块：上方是有序候选渠道（1 起编，
+               排前面的先被尝试），下方从候选池里追加渠道。
+               用「单选添加 + 上移/下移」而不是 multiple select：优先级是
+               这个表单的核心语义，antd multiple 的值序依赖组件内部的
+               选择顺序维护，不显式 —— 显式按钮排序让顺序永远看得见、改得动 -->
+          <div class="route-editor">
+            <div v-for="entry in form.model_entries" :key="entry.model" class="route-entry">
+              <div class="route-head">
+                <ModelTag :name="entry.model" />
+                <span class="route-count">{{ entry.channels.length }} 个候选渠道</span>
+              </div>
+              <div class="route-list" role="list" :aria-label="entry.model + ' 的渠道优先级'">
+                <div
+                  v-for="(cid, idx) in entry.channels"
+                  :key="cid"
+                  class="route-item"
+                  role="listitem"
+                >
+                  <span class="route-idx" aria-hidden="true">{{ idx + 1 }}</span>
+                  <span class="route-name">{{ channelLabelOf(cid) }}</span>
+                  <a-space :size="0">
+                    <a-button
+                      type="text"
+                      size="small"
+                      :disabled="idx === 0"
+                      :aria-label="'上移 ' + channelLabelOf(cid)"
+                      @click="moveChannel(entry, idx, -1)"
+                    ><ArrowUpOutlined /></a-button>
+                    <a-button
+                      type="text"
+                      size="small"
+                      :disabled="idx === entry.channels.length - 1"
+                      :aria-label="'下移 ' + channelLabelOf(cid)"
+                      @click="moveChannel(entry, idx, 1)"
+                    ><ArrowDownOutlined /></a-button>
+                    <a-button
+                      type="text"
+                      size="small"
+                      danger
+                      :aria-label="'移除 ' + channelLabelOf(cid)"
+                      @click="removeChannel(entry, idx)"
+                    ><CloseOutlined /></a-button>
+                  </a-space>
+                </div>
+                <div v-if="!entry.channels.length" class="route-empty">
+                  还没有候选渠道 —— 该模型将被这条密钥调用时直接报「没有可用渠道」
+                </div>
+              </div>
+              <a-select
+                :value="null"
+                show-search
+                option-filter-prop="label"
+                placeholder="添加候选渠道"
+                style="width: 100%; margin-top: 6px"
+                :options="channelOptionsFor(entry.model).filter((o) => !entry.channels.includes(o.value))"
+                @change="(v: any) => { addChannel(entry, v) }"
+              />
+            </div>
+          </div>
+          <div class="field-hint">渠道按顺序依次尝试，前面的失败自动换下一条；候选只列白名单里有该模型的启用渠道。</div>
         </a-form-item>
         <a-form-item label="启用">
           <a-switch v-model:checked="form.enabled" />
@@ -965,7 +1093,7 @@ onUnmounted(() => {
 }
 .btn-copy-ok { color: var(--text-green); animation: copy-pop 0.22s cubic-bezier(0.2, 0, 0, 1); }
 .muted { color: var(--color-text-secondary); }
-/* 密钥胶囊：与分组胶囊同一套视觉语言（浅底 + 圆角 + 同色文字），
+/* 密钥胶囊：与渠道胶囊同一套视觉语言（浅底 + 圆角 + 同色文字），
    但用等宽字体 —— 密钥是代码类内容，逐字符比对时等宽好读得多。
    它是 <button>（键盘可达，见模板注释）：边框/字体/文字色显式写回，
    取值就是原来 <span> 时的那些，观感一字未变。 */
@@ -1000,24 +1128,64 @@ onUnmounted(() => {
   .key-copy { opacity: 0.75; }
 }
 
-.group-tag-list { display: inline-flex; flex-wrap: wrap; gap: 4px; }
-/* 悬空的分组引用：分组已删、条目还在。用红字虚线框与正常胶囊区分 ——
-   它不是一种正常的白名单状态，留着它这把密钥调用时会被整体拒绝。
-
-   文字色用 --text-red（5.44:1）而不是 --color-red：#ea4343 压白卡只有
-   3.90:1，12px 正文不达 AA。虚线框仍用 --color-red（边框属非文本，
-   3.90:1 过 1.4.11 的 3:1），顺带去掉了 antd 旧红兜底值 —— 本站
-   所有主题块都定义了 --color-red，兜底只会让人以为它可以不存在。 */
-.group-ref-missing {
-  display: inline-block;
-  padding: 1px 8px;
-  border: 1px dashed var(--color-red);
-  border-radius: var(--radius-control);
+/* ---- 模型路由：列表摘要列 ----
+   每个模型一行：模型胶囊 + 「→」+ 有序渠道名（› 分隔）。 */
+.route-summary { display: flex; flex-direction: column; gap: 3px; }
+.route-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.route-arrow { color: var(--color-text-secondary); font-size: var(--font-size-sm); }
+.route-channel { font-size: var(--font-size-sm); color: var(--color-text-secondary); }
+/* 渠道已删的占位：引用失效会让该模型的候选少一条，必须能看出来 */
+.route-channel.is-missing, .route-missing {
   color: var(--text-red);
   font-size: var(--font-size-sm);
-  line-height: 20px;
-  cursor: help;
 }
+
+/* ---- 模型路由编辑器（弹窗内）----
+   每个模型一个块：头部（模型 + 计数）、有序列表、追加下拉。
+   序号章是该行的核心信息 —— 它就是故障转移顺序。 */
+.route-editor { display: flex; flex-direction: column; gap: 10px; }
+.route-entry {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  padding: 8px 10px;
+}
+.route-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.route-count { color: var(--color-text-secondary); font-size: var(--font-size-sm); }
+.route-list { display: flex; flex-direction: column; gap: 2px; }
+.route-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px;
+  border-radius: var(--radius-control);
+}
+.route-item:hover { background: var(--color-icon-hover-bg); }
+/* 序号章：等宽固定宽，多位数也对齐 */
+.route-idx {
+  flex: none;
+  width: 20px;
+  text-align: center;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary-ink);
+  background: color-mix(in oklab, var(--color-primary) 13%, transparent);
+  border-radius: var(--radius-pill);
+}
+.route-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+.route-empty {
+  padding: 4px;
+  font-size: var(--font-size-sm);
+  color: var(--text-red);
+}
+
 .key-box {
   display: flex;
   align-items: center;

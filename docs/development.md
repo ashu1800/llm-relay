@@ -31,13 +31,14 @@ rm -rf backend/internal/web/dist && cp -r frontend/dist backend/internal/web/dis
 
 - 界面上的「导出」按钮已去掉（2026-09-16），接口 `GET /api/admin/logs/export`
   仍在，需要时直接调它，参数与列表接口完全一致。
-- 列表就在**数据看板**页（四张概览卡下面）。它**不吃**上面那组筛选，
-  恒定显示**全部最新请求**（2026-09-16 起）—— 列表的用处是盯着最新发生了什么，
-  筛过之后反而看不到刚进来的调用，而刚进来的几条恰恰最该被看到。
-  筛选用在上面那四张概览卡上：时间范围 / 渠道 / 模型，这三个会**记在本地**，
-  刷新或下次打开还是同一个视角，存下来的渠道 / 模型若已被删掉则自动退回「全部」。
+- 列表就在**数据看板**页（四张概览卡下面），与卡片吃**同一组**筛选
+  （2026-10-26 站主要求，撤销 2026-09-16 的「列表恒定全量」决定；契约脚本
+  `check-contracts.mjs` 同步反转）。时间范围 / 密钥 / 渠道 / 模型四个条件
+  **记在本地**，刷新或下次打开还是同一个视角，存下来的渠道 / 模型 / 密钥
+  若已被删掉则自动退回「全部」。
 - 工具栏上**没有**「筛选只作用于上方卡片」这类作用范围提示（2026-09-17 应站主要求
-  移除）—— 列表不吃筛选这件事由契约检查钉住，不再靠界面文案说明。
+  移除；2026-10-26 列表纳入筛选后，这句话也从「过期」变成了「错误」，
+  契约检查继续禁止它出现）。
 - trace_id 与「只看失败」这两个排障入口**仍然作用于列表**，但只走 URL：
   `?trace_id=…`（或在日志详情里点「只看这条链路」）与 `?status_class=error`；
   激活时看板工具栏上会出现一个可关闭的小标签。列表顶部的「仅失败」切换按钮
@@ -293,17 +294,17 @@ URL 由**看板**持有（与 `trace_id` / `status_class` 同类），面板通�
 
 ### 分享一个「视角」而不只是地址（2026-10-11）
 
-工具栏筛选项（时间范围 / 分组 / 模型）**变化时不写地址栏**：每变一次就往历史里
+工具栏筛选项（时间范围 / 密钥 / 渠道 / 模型）**变化时不写地址栏**：每变一次就往历史里
 塞一条，返回键会变成「上一个筛选」而不是「上一个页面」。但「复制当前视角链接」
 会显式把它们带上，所以 `applyUrlFilters` 必须读它们 —— 否则复制出去的链接打开后
 是另一个视角，而收链接的人无从察觉。两条规则不矛盾：
 
 - 自动写入（`syncUrl`）：只有排障深链（trace_id / status_class / log）；
-- 显式分享（`copyViewLink`）：深链 + 三个筛选，**并且**读取端支持。
+- 显式分享（`copyViewLink`）：深链 + 四个筛选，**并且**读取端支持。
 
 ### 四张管理表的本地搜索与分页（2026-10-11）
 
-`/channels`、`/keys`、`/groups`、`/proxies` 四个列表接口都是**一次返回全量**
+`/channels`、`/keys`、`/proxies` 三个列表接口都是**一次返回全量**
 （没有 page / page_size，密钥那条接口的 total 就是 `len(items)`）。这是有意的：
 数据量级是几十到几百条，后端加了分页也不会让任何一次请求变快（一次全表扫描
 vs 一次带 offset 的全表扫描）。但界面上不处理的话，一屏几十行仍要滚，
@@ -456,7 +457,7 @@ vs 一次带 offset 的全表扫描）。但界面上不处理的话，一屏几
 |---|---|
 | `/` | 聚焦当前页的搜索框 |
 | `r` | 刷新当前页（合成一次点击，与手点完全同一条路径） |
-| `g` 然后 `d/k/c/f/p/s` | 看板 / 密钥 / 渠道 / 分组 / 代理 / 系统设置 |
+| `g` 然后 `d/k/c/p/s` | 看板 / 密钥 / 渠道 / 代理 / 系统设置（`f`=分组 随分组移除） |
 
 三条约束，每一条都是「不做会出事」的：
 
@@ -496,7 +497,7 @@ vs 一次带 offset 的全表扫描）。但界面上不处理的话，一屏几
 - **`has-data` 用未筛选的行数**：原来传的是 `visibleRows.length`，
   于是「筛到一个空分组」被 `DataState` 当成「一条数据都没有」，
   给出的是它自己的空态面板，而不是表格自带的（更准确的）
-  「这个分组下还没有渠道，可以切换分组筛选看看」。筛选是**视图**，
+  而不是表格自带的空态。筛选是**视图**，
   不是数据有没有来；这两件事必须分开。
 
 ### 日志表的行密度（2026-10-11）
@@ -598,12 +599,12 @@ composable 里也补了聚焦失败后的兜底。
 ### 破坏性确认默认不聚焦危险按钮（2026-10-11）
 
 antd 的 `autoFocusButton` 默认是 `'ok'`（见 `es/modal/ConfirmDialog.js`），
-而全站 7 处 `modal.confirm` 全是破坏性动作（删渠道/密钥/分组/代理、清空单价、
-放弃未保存改动）。焦点落在危险按钮上意味着：键盘用户「回车触发行内删除图标 →
+而全站 6 处 `modal.confirm` 全是破坏性动作（删渠道/密钥/代理、清空单价、
+放弃未保存改动；删分组那一处已随 2026-10-26 分组下线移除）。焦点落在危险按钮上意味着：键盘用户「回车触发行内删除图标 →
 再一次回车」就完成了删除，按住回车也会直接删掉。
 
 在 `utils/feedback.ts` 的 `modal.confirm` 里统一注入默认
-`autoFocusButton: 'cancel'` —— 该文件已是全站唯一出口，一处改动覆盖 7 个调用点。
+`autoFocusButton: 'cancel'` —— 该文件已是全站唯一出口，一处改动覆盖全部调用点。
 调用方显式传值时不覆盖：密钥页的「修改每分钟上限」弹窗传 `null`
 （它的目的是填一个数字，焦点该在输入框里）。
 
@@ -834,16 +835,28 @@ MCP 工具名以纯文本列在 system prompt 里。模型先调客户端侧的 
 在 `relay/convert` 包里，tygo 只生成 `internal/model`，没法自然共享）。
 回归：`convert/thinking_map_test.go`、`relay/thinking_test.go`、
 `api/model_efforts_test.go`（后者的 `/v1/models` 用例连库，钉住「空能力回 []
-而不是 null」与停用行/渠道/分组的过滤）。
+而不是 null」与停用行/渠道的过滤）。
 
-### 密钥 → 分组的强一致引用
+### 密钥的每模型渠道路由（2026-10-26 分组移除后的新模型）
 
-密钥白名单里存**分组 ID**（与渠道的 `group_id` 同一待遇），保存时逐条校验
-存在性 —— 分组改名不再打断任何密钥（曾经白名单存分组名，改名即全体 403，
-界面上毫无征兆）；删除分组前检查密钥引用，仍被引用时 409 并点名密钥。
-`/v1/models` 同时按密钥的**模型白名单**过滤 —— 客户端探测到的就是它能调的，
-不会选一个就被 403 一次。老数据在启动时自动迁移（名字条目换算成 ID，幂等；
-解析不了的保留原样并在日志里点名）。
+分组（ChannelGroup）整体移除后的访问控制与路由模型：
+
+- **存储**：`api_keys.allowed_models`（模型集合，必填非空）与
+  `api_keys.model_channels`（jsonb，`{"模型名": [渠道ID按优先级升序]}`）。
+  创建/编辑时由 `api.normalizeKeyRoutes` 统一校验：模型非空、键集合与白名单一致、
+  每条候选渠道存在且白名单里有该模型 —— 校验只有一个出口，界面存得进的东西
+  调用时不会 403/502。
+- **解析**：`api.KeyRoutesOf` / `api.KeyChannelScope` 是热路径入口
+  （转发与 `/v1/models` 每个请求都要用），坏形状按空路由处理并如实报
+  「没有可用渠道」，不会带着错误范围继续转发。
+- **转发**：候选链 = 「白名单含该模型的启用渠道 ∩ 密钥该模型的候选列表」，
+  按**密钥列表顺序**稳定排序（`relay.sortCandidates`：可用时段优先分区、
+  区内按密钥顺序）；渠道自己不再有 weight。
+- **老数据**：升级时 `store.backfillKeyModelRoutes` 一次性回填（settings 标记
+  `key_model_routes_backfill_v1`）：「不限模型」展开成全量，每个模型取
+  「拥有它的启用渠道，按当时 weight 排序」，转移顺序与分组时代一致。
+  之后删除 `channel_groups` 表与 `channels.group_id/weight`、
+  `request_logs.group_id`、`api_keys.allowed_groups` 各列（破坏性，不回滚）。
 
 ### 客户端映射缓存与 client_id（2026-10-22 事故）
 
@@ -1047,19 +1060,18 @@ ETag/Last-Modified，缓存只能靠 URL 判断），以及 `npm run check` 里�
 > 查库类断言统一走 `scripts/lib/testdb.sh`（bash）与 `scripts/lib/testdb.py`
 > （python）：原生 psql over TCP，连接参数取自 `deploy/.env`（可用
 > `RELAY_TEST_DB_*` 环境变量覆盖），不再依赖任何容器。依赖 mock 上游的
-> 用例（分组路由、流式截断、重试退避……）以**宿主 node 进程**跑 mock
+> 用例（每模型路由、流式截断、重试退避……）以**宿主 node 进程**跑 mock
 > （≥18 即可，`bash scripts/ensure-mock-upstream.sh` 自动拉起）。
 
 | 脚本 | 验证内容 |
 |---|---|
 | `test-regression.sh` | 全部管理接口 + 四种协议端点连通性 |
 | `test-ratelimit.sh` | 密钥级 RPM 放行/拒绝、`Retry-After` |
-| `test-key-group-refs.py` | 密钥分组白名单存 ID、不存在引用创建即 400、`/v1/models` 按模型白名单过滤、删分组检查密钥引用 |
+| `test-key-routes.py` | 密钥的每模型渠道路由：不选模型创建被拒、候选渠道不存在/不含该模型被拒、`/v1/models` 按路由过滤、转发按密钥顺序故障转移 |
 | `test-payload.sh` | 报文留存三档模式与凭据脱敏 |
 | `test-pricing-filter.sh` | 渠道列表的「未定价」计数 |
 | `test-pricing-rules.sh` | 时段倍率优先于固定倍率、跨午夜窗口、最后一条生效 |
 | `test-multiplier-precision.py` | 倍率四位小数端到端往返：设 0.1875 → API 读回 → **直接查 Postgres 列**确认 0.1875 未被截断；边界值 0.0001 / 1.2345 / 0.1234 / 0.5；并如实记录 5 位小数打 API 时库会按 `numeric(10,4)` 截断（前端两处已拦） |
-| `test-group-quota.sh` | 分组 RPM / TPM 配额放行与拒绝 |
 | `test-proxies.sh` | 代理 CRUD、连通性与延迟测试、被引用时禁止删除 |
 | `test-egress-proxy.sh` | **请求确实经代理出网**（假域名 + 代理改写证明） |
 | `test-live.sh` | WebSocket 握手、统计快照、新请求的日志推送 |
@@ -1073,10 +1085,12 @@ ETag/Last-Modified，缓存只能靠 URL 判断），以及 `npm run check` 里�
 | `check-secrets.sh` | 扫描仓库与提交历史中的明文凭据 |
 | `purge-test-logs.sh` | 清掉验证脚本产生的请求日志（否则会污染看板的今日统计） |
 
-另有一批 python 用例（`test-group-update.py`、`test-key-whitelist.py`、
-`test-key-group-refs.py`、`test-delete-semantics.py`、`test-accept-encoding.py`、
-`test-log-filters.py`、`test-csrf.py`），覆盖分组更新、密钥白名单（分组引用
-形态与模型过滤）、删除语义、压缩协商、日志筛选与同源校验。
+另有一批 python 用例（`test-key-routes.py`、
+`test-delete-semantics.py`、`test-accept-encoding.py`、
+`test-log-filters.py`、`test-csrf.py`），覆盖密钥路由（每模型候选
+与模型过滤）、删除语义、压缩协商、日志筛选与同源校验。
+（原 `test-group-update.py` / `test-key-group-refs.py` / `test-group-quota.sh`
+随分组功能移除；`test-key-whitelist.py` 已改名 `test-key-routes.py`。）
 
 `scripts/verify-all.sh` 会按顺序跑完可离线执行的用例并汇总，最后打印
 `ALL_PASS`；日常改完代码跑它一次就够。（`test-coldstart.sh` 要重跑
@@ -1253,7 +1267,7 @@ node .shots/verify-col-adaptive.mjs         # 列宽是否跟着内容走（ui-s
                                             # 模型名探针，模型列应 194 → 254 → 300（软上限），
                                             # 删掉探针行后回落 —— 走的是实时推送那条重算路径
 node .shots/verify-reliability.mjs          # 可靠性三件套端到端：日志队列丢弃告警、渠道运行态、
-                                            # 日预算告警（会临时设一个必超支的预算，跑完自动清除）
+                                            # 服务自恢复（分组日预算告警已随 2026-10-26 分组下线）
 node .shots/verify-delight.mjs              # 观感增强端到端：脉搏条、页签心跳、昨日战报、
                                             # 里程碑彩带、渠道生命灯、主题扩散
 node .shots/verify-failonly.mjs             # 仅失败深链：?status_class=error 进来时列表只出现
@@ -1285,10 +1299,11 @@ node .shots/verify-log-sort.mjs             # 排序与快速跳页：三列可�
                                             # 耗时升/降真的按大小排、费用按币种分组后再排
                                             # （升序首页全是「-」，降序首页是真实金额）、
                                             # 第三次点击回默认、快速跳页能直达第 37 页
-node .shots/verify-page-title.mjs           # 页面标题：六个管理页各是「页面名 · LLM Relay」
+node .shots/verify-page-title.mjs           # 页面标题：五个管理页各是「页面名 · LLM Relay」
                                             # 且互不相同、页面名在站点名前（标签栏从右往左
                                             # 截断）、站内跳转后跟着变。鉴权开启的部署会先
                                             # 用 RELAY_ADMIN_KEY 换会话再走查
+                                            # （/console/groups 已随分组下线重定向到渠道页）
 node .shots/verify-multiplier-precision.mjs # 倍率四位小数（界面侧）：进渠道编辑 → 模型行的
                                             # 定价胶囊 → 固定倍率框键入 0.1875 → **失焦**
                                             # 后仍是 0.1875（老代码在这里被舍成 0.19）

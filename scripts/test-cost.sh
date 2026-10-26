@@ -38,19 +38,17 @@ run_checks() {
 
 bash "$(dirname "$0")/ensure-proto-upstream.sh" || exit 1
 
-GNAME="__cost-probe-group"
 CNAME="__cost-probe-ch"
 KNAME="__cost-probe-key"
 MODEL="__cost-probe-model"
 
 purge() {
-  for cid in $(P "SELECT id FROM channels WHERE name='$CNAME'"); do
-    curl -s -X DELETE "$API/channels/$cid" >/dev/null
-  done
   for kid in $(P "SELECT id FROM api_keys WHERE name='$KNAME'"); do
     curl -s -X DELETE "$API/keys/$kid" >/dev/null
   done
-  P "DELETE FROM channel_groups WHERE name='$GNAME'" >/dev/null
+  for cid in $(P "SELECT id FROM channels WHERE name='$CNAME'"); do
+    curl -s -X DELETE "$API/channels/$cid" >/dev/null
+  done
   P "DELETE FROM request_payloads WHERE log_id IN (SELECT id FROM request_logs WHERE api_key_name='$KNAME' OR model_requested='$MODEL')" >/dev/null
   P "DELETE FROM request_logs WHERE api_key_name='$KNAME' OR model_requested='$MODEL'" >/dev/null
 }
@@ -58,10 +56,9 @@ purge() {
 purge
 
 echo "=== 1. 建临时渠道并配价：输入 1 / 输出 2 / 缓存读 0.5 / 缓存写 1 ==="
-GID=$(curl -s -X POST "$API/groups" -H 'Content-Type: application/json' -d "{\"name\":\"$GNAME\"}" | jqg "d['id']")
 CID=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
-  \"name\": \"$CNAME\", \"group_id\": $GID, \"protocol\": \"anthropic-messages\",
-  \"base_url\": \"http://127.0.0.1:9998\", \"api_key\": \"mock-anthropic-key\", \"weight\": 1,
+  \"name\": \"$CNAME\", \"protocol\": \"anthropic-messages\",
+  \"base_url\": \"http://127.0.0.1:9998\", \"api_key\": \"mock-anthropic-key\",
   \"models\": [{
     \"public_name\": \"$MODEL\", \"upstream_name\": \"claude-mock\",
     \"input_per_1m\": \"1\", \"output_per_1m\": \"2\",
@@ -75,8 +72,8 @@ r = json.load(sys.stdin)['items'][0]
 d = lambda v: str(Decimal(str(v)).normalize())
 print('|'.join(d(r[k]) for k in ('input_per_1m','output_per_1m','cache_read_per_1m','cache_write_per_1m')))
 ")"
-SK=$(curl -s -X POST "$API/keys" -H 'Content-Type: application/json'   -d "{\"name\":\"$KNAME\",\"allowed_groups\":[\"$GNAME\"]}" | jqg "d['key']")
-echo "  渠道 id=$CID 分组=$GID 密钥长度=${#SK}"
+SK=$(curl -s -X POST "$API/keys" -H 'Content-Type: application/json' -d "{\"name\":\"$KNAME\",\"allowed_models\":[\"$MODEL\"],\"model_channels\":{\"$MODEL\":[$CID]}}" | jqg "d['key']")
+echo "  渠道 id=$CID 密钥长度=${#SK}"
 
 echo
 echo "=== 2. 发一次真实请求，把上游回报的 usage 存下来 ==="
@@ -172,7 +169,7 @@ purge
 rm -f /tmp/__cost-resp.json /tmp/__cost-log.json
 chk "探测密钥已删除" "0" "$(P "SELECT count(*) FROM api_keys WHERE name='$KNAME'")"
 chk "探测渠道已删除" "0" "$(P "SELECT count(*) FROM channels WHERE name='$CNAME'")"
-chk "探测分组已删除" "0" "$(P "SELECT count(*) FROM channel_groups WHERE name='$GNAME'")"
+
 chk "探测日志已删除" "0" "$(P "SELECT count(*) FROM request_logs WHERE api_key_name='$KNAME' OR model_requested='$MODEL'")"
 
 echo

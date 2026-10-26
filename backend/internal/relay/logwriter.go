@@ -460,7 +460,6 @@ func BuildLog(req *RelayRequest, res *RelayResult, usage Usage, status int, errM
 		if res.Candidate.Channel.ID != 0 {
 			entry.ChannelID = res.Candidate.Channel.ID
 			entry.ChannelName = res.Candidate.Channel.Name
-			entry.GroupID = res.Candidate.Channel.GroupID
 		}
 	}
 	return entry

@@ -4,10 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -33,10 +31,9 @@ type Candidate struct {
 	// 注意 Binding 已被改写成默认模型那一行：PublicName 是计费键
 	// （计价引擎按白名单行的对外名查价），UpstreamName 是真正发给上游的名字。
 	Fallback bool
-	// GroupRPM / GroupTPM 是所属分组的每分钟额度（0 = 不限制）。
-	// 路由时一并取出来，省得为每个候选再查一次分组表。
-	GroupRPM int
-	GroupTPM int
+	// keyOrder 是这条候选在密钥路由列表里的下标（越小越优先）。
+	// 不在列表里的候选取一个排它之后的大值（见 sortOrderOf）。
+	keyOrder int
 }
 
 // EgressProxyID 返回这次请求该走哪个代理：模型条目上的设置优先于渠道级，
@@ -48,15 +45,12 @@ func (c Candidate) EgressProxyID() uint {
 	return c.Channel.ProxyID
 }
 
-// Router 负责按分组与模型挑选渠道，并给出故障转移顺序。
+// Router 负责按密钥的模型渠道路由挑选候选渠道，并给出故障转移顺序。
 type Router struct {
 	db     *gorm.DB
 	cipher *secure.Cipher
 	// logger 用于记录「渠道密钥解不开被剔除」这类需要人看见的异常
 	logger *slog.Logger
-
-	mu       sync.Mutex
-	rrCursor map[uint]int // 分组 ID -> 轮询游标
 
 	// state 为运行期渠道状态，可为空（未接入时限流能力自动关闭）
 	state *ChannelState
@@ -74,19 +68,16 @@ func (r *Router) SetLogger(l *slog.Logger) {
 
 // NewRouter 构造路由器。logger 默认 slog.Default()，main 里可换成全局那一份。
 func NewRouter(db *gorm.DB, cipher *secure.Cipher) *Router {
-	return &Router{db: db, cipher: cipher, logger: slog.Default(), rrCursor: make(map[uint]int)}
+	return &Router{db: db, cipher: cipher, logger: slog.Default()}
 }
 
 // CandidateQuery 是一次候选渠道查询的条件。
 type CandidateQuery struct {
 	PublicModel string
-	// GroupID > 0 时只在该分组内选择，分组策略也取它的。
-	// 注意：生产链路（service.Relay）目前只传白名单、不传分组 ——
-	// 这个条件当前只有测试在用，保留它是 router 作为查询引擎的 API
-	// 完整性；真要暴露「请求级指定分组」，从 service 层把参数接进来。
-	GroupID uint
-	// AllowedGroups 非空时只在这些分组内选择（来自密钥白名单）
-	AllowedGroups []uint
+	// AllowedChannels 是密钥为该模型配置的候选渠道（有序，越小越优先）。
+	// 空表示不按密钥限制（探测、部分测试路径）——候选取全部能跑这个模型的渠道。
+	// 非空时只在列表内的渠道中选，且排序以列表顺序为第一优先（见 sortCandidates）。
+	AllowedChannels []uint
 	// Exclude 里的渠道 ID 会被跳过，用于重试时避免再次命中同一渠道
 	Exclude []uint
 }
@@ -99,8 +90,6 @@ type candidateRow struct {
 	BindingID    uint
 	// BindingProxyID 是该模型条目自己的代理（0 = 跟随渠道）
 	BindingProxyID uint
-	GroupRPM       int
-	GroupTPM       int
 	// DefaultModel 是渠道配置的默认模型名（用 COALESCE 取，没配则为空串）。
 	// 两轮查询都会带上它，但它**不能**用来判断这一行从哪一轮来 ——
 	// 见 buildCandidates 的 fromFallbackQuery。
@@ -113,7 +102,7 @@ type candidateRow struct {
 	fromFallbackQuery bool
 }
 
-// Candidates 返回按策略排好序的候选渠道。
+// Candidates 返回按密钥路由顺序排好序的候选渠道。
 //
 // 候选有两个来源，合并后兜底段永远排在后面：
 //  1. 精确命中 —— 渠道白名单里写了客户端请求的这个对外名；
@@ -140,38 +129,23 @@ func (r *Router) Candidates(ctx context.Context, q CandidateQuery) ([]Candidate,
 	exact := r.buildCandidates(exactRows, q, now, false)
 	fallback := r.buildCandidates(fallbackRows, q, now, true)
 	cands := mergeCandidates(exact, fallback)
-
-	// 策略归属：显式分组优先；密钥只限定了一个分组时用那个分组的策略；
-	// 否则回落到默认分组。不加这一段的话，被白名单限定到某个分组的请求
-	// 仍然按默认分组的策略排序，分组上配的策略形同虚设。
-	strategyGroup := q.GroupID
-	if strategyGroup == 0 && len(q.AllowedGroups) == 1 {
-		strategyGroup = q.AllowedGroups[0]
-	}
-	sortCandidates(cands, r.strategyFor(ctx, strategyGroup), r)
+	sortCandidates(cands, q.AllowedChannels)
 	return cands, nil
 }
 
 // queryCandidates 取一轮候选行。fallback 为真时查「开了默认模型映射的渠道」，
 // 否则查「白名单里写了这个模型名的渠道」。
 //
-// 两轮的渠道侧条件（启用、分组、分组启用、排序、密钥/分组白名单）完全一致，
-// 共用一份构造逻辑 —— 分开写迟早会漂移，而漂移的表现是兜底候选绕过了
-// 「渠道已停用」这类本该拦住的限制。
+// 两轮的渠道侧条件（启用、排序、密钥路由）完全一致，共用一份构造逻辑 ——
+// 分开写迟早会漂移，而漂移的表现是兜底候选绕过了「渠道已停用」这类本该拦住的限制。
 func (r *Router) queryCandidates(ctx context.Context, q CandidateQuery, fallback bool) ([]candidateRow, error) {
 	var rows []candidateRow
 	query := r.db.WithContext(ctx).
 		Table("channels").
-		Select("channels.*, channel_models.public_name AS public_name, channel_models.upstream_name AS upstream_name, channel_models.id AS binding_id, channel_models.proxy_id AS binding_proxy_id, channel_groups.rpm AS group_rpm, channel_groups.tpm AS group_tpm, COALESCE(channels.extra_config->>'default_model', '') AS default_model").
+		Select("channels.*, channel_models.public_name AS public_name, channel_models.upstream_name AS upstream_name, channel_models.id AS binding_id, channel_models.proxy_id AS binding_proxy_id, COALESCE(channels.extra_config->>'default_model', '') AS default_model").
 		Joins("JOIN channel_models ON channel_models.channel_id = channels.id AND channel_models.enabled = true").
-		Joins("JOIN channel_groups ON channel_groups.id = channels.group_id").
 		Where("channels.enabled = true").
-		// 停用的分组连同它的渠道一起退出候选，否则「停用分组」这个开关毫无作用
-		Where("channel_groups.enabled = true").
-		// weight 是组内优先级序号（越小越优先），按它升序取出来，
-		// 排在最前的就是首选渠道，后面的依次是故障转移链。
-		// id 只是同序号时的兜底（正常情况下组内序号唯一，用不上）
-		Order("channels.weight ASC, channels.id ASC")
+		Order("channels.id ASC")
 
 	if fallback {
 		// 兜底的判定 = 「白名单里正好有渠道配置的那个默认模型名」。
@@ -195,13 +169,10 @@ func (r *Router) queryCandidates(ctx context.Context, q CandidateQuery, fallback
 		query = query.Where("channel_models.public_name = ?", q.PublicModel)
 	}
 
-	if q.GroupID > 0 {
-		query = query.Where("channels.group_id = ?", q.GroupID)
-	}
-	// 密钥白名单：分组之外的渠道一律不参选。
-	// 空切片与 nil 都表示不限制 —— 白名单没配就不该影响路由。
-	if len(q.AllowedGroups) > 0 {
-		query = query.Where("channels.group_id IN ?", q.AllowedGroups)
+	// 密钥路由：只在该密钥为这个模型指定的渠道中选。
+	// 空切片与 nil 都表示不限制 —— 不带密钥上下文的调用方不该被影响。
+	if len(q.AllowedChannels) > 0 {
+		query = query.Where("channels.id IN ?", q.AllowedChannels)
 	}
 	if err := query.Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("查询候选渠道失败: %w", err)
@@ -263,8 +234,6 @@ func (r *Router) buildCandidates(rows []candidateRow, q CandidateQuery, now time
 			Fallback:  fallback,
 			Available: SlotAvailable(rw.Slots, now),
 			Saturated: maxConc > 0 && r.state.Inflight(rw.ID) >= maxConc,
-			GroupRPM:  rw.GroupRPM,
-			GroupTPM:  rw.GroupTPM,
 		}
 		plain, err := r.cipher.Decrypt(rw.APIKeyEnc)
 		if err != nil {
@@ -307,20 +276,15 @@ func mergeCandidates(exact, fallback []Candidate) []Candidate {
 	return out
 }
 
-// strategyFor 取分组的路由策略，取不到则回退到顺序故障转移。
-func (r *Router) strategyFor(ctx context.Context, groupID uint) string {
-	if groupID == 0 {
-		var g model.ChannelGroup
-		if err := r.db.WithContext(ctx).Where("is_default = true").First(&g).Error; err == nil {
-			return g.Strategy
+// sortOrderOf 返回 id 在 order（密钥路由列表）里的下标；不在列表里时返回
+// len(order) —— 排在所有已配置条目之后。抽成纯函数便于单测。
+func sortOrderOf(order []uint, id uint) int {
+	for i, v := range order {
+		if v == id {
+			return i
 		}
-		return model.StrategyFailover
 	}
-	var g model.ChannelGroup
-	if err := r.db.WithContext(ctx).First(&g, groupID).Error; err != nil {
-		return model.StrategyFailover
-	}
-	return g.Strategy
+	return len(order)
 }
 
 // filterTried 在已排序的候选里跳过本次已试过的与刚进入冷却的渠道，保持相对顺序。
@@ -347,29 +311,32 @@ func (r *Router) filterTried(cands []Candidate, tried []uint) []Candidate {
 	return out
 }
 
-// sortCandidates 依据策略重排候选，第一个即首选渠道。
+// sortCandidates 依据密钥的路由顺序重排候选，第一个即首选渠道。
 //
-// 进到这里时候选已按 weight 升序（见 Candidates 的 Order）—— 那就是优先级序。
-// 各策略的差别只在于「谁排到最前」：
-//   - failover：不动，严格照优先级来
-//   - round_robin：从游标处起轮转
-//   - least_latency：按观测到的首包延迟重排
+// 进到这里时候选已按渠道 id 升序（见 Candidates 的查询）—— 那只是确定性的
+// 兜底序，真正的优先级来自密钥的 model_channels 列表。
 //
-// **兜底候选（Fallback）永远排在精确命中的候选之后，且不参与策略。**
-// 这是「白名单精确命中优先」的落地点，必须在分区**之前**分成两段来排：
-// 三种策略都会主动把任意候选挪到最前（RR 是整段左移、least_latency 按延迟重排），
-// 排在最后再分区是来不及的。所以这里先稳定分区，只对精确段套用策略，
-// 兜底段只按可用性排序后原样接在尾部。
-func sortCandidates(cands []Candidate, strategy string, r *Router) {
+// 排序分两层，顺序是刻意的：
+//  1. 先按可用性分区（可用时段内且未达并发上限的优先）—— 一条到点才可用的
+//     渠道，不该因为列表序号靠后就被一条当前不可用的渠道挡在前面；
+//  2. 同一可用档内按密钥列表顺序稳定排列（sortOrderOf，未列入的垫底）。
+//
+// **兜底候选（Fallback）永远排在精确命中的候选之后，且不吃密钥顺序。**
+// 必须在分区**之前**分成两段来排：可用性分区是稳定排序的前提，
+// 混在一起排会让兜底渠道挤进精确段。
+func sortCandidates(cands []Candidate, keyOrder []uint) {
+	// 先把每条候选在密钥列表里的下标算好（不在列表里的垫底），再分层排序。
+	for i := range cands {
+		cands[i].keyOrder = sortOrderOf(keyOrder, cands[i].Channel.ID)
+	}
 	exact, fallback := splitFallback(cands)
-	sortByAvailability(exact)
-	sortByAvailability(fallback)
-	applyStrategy(exact, strategy, r)
+	sortByAvailabilityAndKeyOrder(exact)
+	sortByAvailabilityAndKeyOrder(fallback)
 	copy(cands, exact)
 	copy(cands[len(exact):], fallback)
 }
 
-// splitFallback 按是否兜底稳定分区：两段各自保持原相对顺序（即 weight 序）。
+// splitFallback 按是否兜底稳定分区：两段各自保持原相对顺序（即渠道 id 序）。
 func splitFallback(cands []Candidate) (exact, fallback []Candidate) {
 	exact = make([]Candidate, 0, len(cands))
 	fallback = make([]Candidate, 0, len(cands))
@@ -383,77 +350,21 @@ func splitFallback(cands []Candidate) (exact, fallback []Candidate) {
 	return exact, fallback
 }
 
-// sortByAvailability 可用时段内且未达并发上限的渠道优先。
+// sortByAvailabilityAndKeyOrder 可用时段内且未达并发上限的渠道优先；
+// 同档之内按密钥路由顺序（keyOrder，已在 sortCandidates 里算好）升序。
 //
-// 注意这一步会把「优先级」暂时压到次要位置：一条到点才可用的渠道，
-// 不该因为序号靠后就被一条当前不可用的渠道挡在前面。
-func sortByAvailability(cands []Candidate) {
+// 判定抽成纯函数方便单测：它决定「用户配的顺序」与「当下可用性」谁先谁后 ——
+// 答案是可用性先分区、顺序在同区内生效。
+func sortByAvailabilityAndKeyOrder(cands []Candidate) {
 	sort.SliceStable(cands, func(i, j int) bool {
 		if cands[i].Available != cands[j].Available {
 			return cands[i].Available
 		}
-		return !cands[i].Saturated && cands[j].Saturated
-	})
-}
-
-// applyStrategy 对**同一段内**的候选套用分组策略，把该段的首选挪到最前。
-func applyStrategy(cands []Candidate, strategy string, r *Router) {
-	if len(cands) == 0 {
-		return
-	}
-	switch strategy {
-	case model.StrategyRoundRobin:
-		rotate(cands, r.nextCursor(cands))
-	case model.StrategyLeastLatency:
-		// 按最近成功响应的首包延迟（EWMA，见 ChannelState.RecordLatency）升序。
-		// 没有观测值的渠道排最后但不出局 —— 否则新渠道永远得不到第一次机会。
-		lat := func(id uint) float64 {
-			if v := r.state.Latency(id); v > 0 {
-				return v
-			}
-			return math.Inf(1)
+		if cands[i].Saturated != cands[j].Saturated {
+			return !cands[i].Saturated
 		}
-		sort.SliceStable(cands, func(i, j int) bool {
-			return lat(cands[i].Channel.ID) < lat(cands[j].Channel.ID)
-		})
-	default:
-		// failover（以及任何未知取值）：候选已按 weight 升序，
-		// 什么都不用做 —— 顺序本身就是故障转移顺序
-	}
-}
-
-// nextCursor 取轮询起点并推进游标。
-//
-// 游标按分组记：不同分组的轮转互不干扰，各按键自己的节奏走。
-//
-// 这里曾经是坏的：rotate() 不读游标，每个请求都「把首个挪到末尾」，
-// 于是每次挑中的都是第二优先的渠道，而 rrCursor 声明了却从未被使用。
-// 轮询的语义是「依次轮着来」，起点必须逐次前进。
-func (r *Router) nextCursor(cands []Candidate) int {
-	if len(cands) == 0 {
-		return 0
-	}
-	groupID := cands[0].Channel.GroupID
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	start := r.rrCursor[groupID] % len(cands)
-	r.rrCursor[groupID] = (start + 1) % len(cands)
-	return start
-}
-
-// rotate 把候选整体左移 offset：offset 处的那条成为首选，其余保持相对顺序。
-func rotate(cands []Candidate, offset int) {
-	if len(cands) <= 1 || offset <= 0 {
-		return
-	}
-	offset %= len(cands)
-	if offset == 0 {
-		return
-	}
-	rotated := make([]Candidate, 0, len(cands))
-	rotated = append(rotated, cands[offset:]...)
-	rotated = append(rotated, cands[:offset]...)
-	copy(cands, rotated)
+		return cands[i].keyOrder < cands[j].keyOrder
+	})
 }
 
 // SlotAvailable 判断当前时刻是否落在渠道声明的可用时段内。

@@ -72,31 +72,9 @@ def psql(sql):
         return "ERR:" + str(e)
 
 
-def pick_group():
-    """取一个已启用的分组 id。
-
-    必须在请求里显式带 group_id：这个库里可能一个默认分组都没设
-    （实测就是如此），不带的话建渠道直接 400。取的是「现有」分组 ——
-    探针渠道只是借用它，用完连同渠道一起删，不改分组的任何设置。
-    """
-    out = psql("SELECT id FROM channel_groups WHERE enabled = true ORDER BY id LIMIT 1")
-    if out and not out.startswith("ERR:") and out.isdigit():
-        return int(out)
-    # 库里没有启用分组时退到 API：分组列表带 enabled 字段
-    for g in (call("GET", "/groups")[1].get("items") or []):
-        if g.get("enabled"):
-            return g.get("id")
-    return None
-
-
-GROUP_ID = pick_group()
-if not GROUP_ID:
-    print("库里没有可用分组，无法建探针渠道")
-    sys.exit(1)
-print("借用分组 id=%s（不改它的任何设置）" % GROUP_ID)
-
-
 # ---- 建一条探针渠道（带一个模型），拿到 channel_id ----
+# （2026-10-26 分组移除：原来的 pick_group 借分组建渠道那段随之删除，
+#   渠道现在不挂在任何分组下。）
 PROBE = "probe-mult-precision"
 # 先清掉上次残留（同名渠道）
 for c in (call("GET", "/channels")[1].get("items") or call("GET", "/channels")[1].get("data") or []):
@@ -104,7 +82,7 @@ for c in (call("GET", "/channels")[1].get("items") or call("GET", "/channels")[1
         call("DELETE", "/channels/%s" % c.get("id"))
 
 st, created = call("POST", "/channels", {
-    "name": PROBE, "group_id": GROUP_ID,
+    "name": PROBE,
     "base_url": "http://127.0.0.1:9999",
     "api_key": "sk-probe",
     "upstream_protocol": "openai",
@@ -136,7 +114,7 @@ print("探针渠道 id=%s" % cid)
 def set_multiplier(v):
     """把渠道的唯一模型倍率设为 v，返回 (status, body)。"""
     return call("PUT", "/channels/%s" % cid, {
-        "name": PROBE, "group_id": GROUP_ID,
+        "name": PROBE,
         "base_url": "http://127.0.0.1:9999",
         "api_key": "sk-probe",
         "upstream_protocol": "openai",

@@ -14,7 +14,7 @@ import json
 b = json.load(open('/tmp/backup.json'))
 print('  版本:', b['version'], '| 应用:', b['app'])
 print('  主密钥指纹:', b['secret_fingerprint'])
-for k in ['channel_groups','channels','channel_models',
+for k in ['channels','channel_models',
           'api_keys','pricings']:
     print('    %-18s %d' % (k, len(b.get(k) or [])))
 PY
@@ -51,12 +51,18 @@ PY
 echo "  渠道数: $(curl -s "$BASE/channels" | python3 -c "import sys,json;print(json.load(sys.stdin)['total'])")"
 
 echo
-echo "=== 4. 备份里不应再有已下线功能的残留 ==="
+echo "=== 4. 备份里不应再有已下线功能的残留，密钥路由必须是对象形状 ==="
 python3 -c "
 import json
 b = json.load(open('/tmp/backup.json'))
-gone = [k for k in ('channel_templates',) if k in b]
+gone = [k for k in ('channel_templates', 'channel_groups') if k in b]
 print('  已下线字段仍在备份里:', gone or '(无)')
+# 密钥的每模型路由（2026-10-26 分组下线）：model_channels 必须是
+# {\"模型名\": [渠道ID有序数组]} 的对象 —— 反序列化按 map 解，
+# 备份里形状跑偏会在导入时静默丢路由
+bad_shapes = [k.get('name') for k in b.get('api_keys') or []
+              if not isinstance(k.get('model_channels'), dict)]
+print('  model_channels 不是对象的密钥:', bad_shapes or '(无)')
 "
 
 echo

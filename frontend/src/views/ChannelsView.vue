@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, h, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { message, modal } from '@/utils/feedback'
-import Sortable from 'sortablejs'
 import {
   PlusOutlined,
   ReloadOutlined,
@@ -11,11 +10,9 @@ import {
   LinkOutlined,
   ThunderboltOutlined,
   CloudDownloadOutlined,
-  HolderOutlined,
   WarningOutlined,
   InfoCircleOutlined,
   SearchOutlined,
-  LockOutlined,
   // 批量启停那两枚（2026-10-11）：图标是逐文件引入的，没有全局注册 ——
   // 漏了 import 的表现是「控制台一条 Failed to resolve component 警告 +
   // 按钮上只剩文字」，而 vue-tsc 与几个守卫脚本都抓不到它
@@ -34,14 +31,12 @@ import EmptyState from '@/components/EmptyState.vue'
 import ModelWhitelistEditor, { type WhitelistRow } from '@/components/ModelWhitelistEditor.vue'
 // Proxy 只用于代理下拉的选项类型
 import type { Proxy } from '@/api/types'
-import GroupTag from '@/components/GroupTag.vue'
 import ChannelIcon from '@/components/ChannelIcon.vue'
 import ChannelLifeDot from '@/components/ChannelLifeDot.vue'
-import { PROTOCOLS, type Channel, type ChannelGroup, type ChannelBinding } from '@/api/types'
+import { PROTOCOLS, type Channel, type ChannelBinding } from '@/api/types'
 import { symbolOf } from '@/utils/money'
 import { fmtTime, pad2 } from '@/utils/fmtTime'
 import { emptyPrice, pickPrice } from '@/components/ModelPricingEditor.vue'
-import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
 // 本地搜索 + 客户端分页（四张管理表共用，判据在 components/tableTools.ts 有单测）
 import { useTableTools } from '@/composables/useTableTools'
 // 批量启停（与密钥页共用：顺序执行、失败不中断、汇报失败名单）
@@ -69,79 +64,28 @@ type ChannelRow = Channel & {
 
 const loading = ref(false)
 const rows = ref<ChannelRow[]>([])
-const groups = ref<ChannelGroup[]>([])
 
-// ---- 按分组筛选 ----
-//
-// 值是**字符串**而不是数字：'all' 要能与分组 id 共处一个字段，
-// 而 '' 又和「未选择」的语义纠缠不清。统一成字符串后，落到 localStorage 里
-// 也天然是原样存取，不需要在读写两头来回转换。
-const GROUP_FILTER_KEY = 'channels-group-filter'
-const ALL_GROUPS = 'all'
-
-// 初值先给 'all'，等分组表拉回来后再用持久化的值覆盖（见 load）：
-// 此刻还不知道有哪些分组，没法校验存下来的 id 是否仍然合法
-const groupFilter = ref<string>(ALL_GROUPS)
-
-const groupFilterOptions = computed(() => [
-  { value: ALL_GROUPS, label: '全部分组' },
-  ...groups.value.map((g) => ({ value: String(g.id), label: g.name }))
-])
-
-// 分组可能被删除，而存下来的筛选值还指着它。这时的表现会是「列表永远是空的」，
-// 从界面上完全看不出原因 —— 所以在分组表到达后做一次校验，不合法就退回「全部」。
-function applyStoredGroupFilter() {
-  const allowed = [ALL_GROUPS, ...groups.value.map((g) => String(g.id))]
-  groupFilter.value = readStoredChoice(GROUP_FILTER_KEY, allowed, ALL_GROUPS)
-}
-
-function onGroupFilterChange(v: string) {
-  groupFilter.value = v
-  writeStoredChoice(GROUP_FILTER_KEY, v)
-}
-
-// 筛选只作用于**显示**：rows 仍然是完整列表，右上的「共 N 个渠道」
-// 因此可以说清「筛出来几个 / 一共几个」，不必让用户怀疑是不是渠道丢了。
-// 拖拽排序也要用到完整列表（提交的是整个分组的顺序），所以不能就地过滤掉。
-//
-// 显示顺序 = 优先级顺序：组内按 weight 升序（weight 是组内优先级序号，
-// 越小越优先，也就是故障转移时第几个被尝试）。
-//
-// 排序键里带上 group_id 是为了让「全部分组」视图下同一个分组的渠道连成一块：
-// 序号是**组内**编号，只按 weight 排会让两个分组的 1、2、3 交错在一起，
-// 看不出任何一条链的顺序。id 只是同序号时的兜底。
-const visibleRows = computed(() => {
-  const list = groupFilter.value === ALL_GROUPS
-    ? rows.value
-    : rows.value.filter((r) => String(r.group_id) === groupFilter.value)
-  return [...list].sort(
-    (a, b) =>
-      a.group_id - b.group_id ||
-      (a.weight ?? 0) - (b.weight ?? 0) ||
-      a.id - b.id
-  )
-})
+// 显示顺序按 id 升序（建渠道顺序）—— 分组与 weight 已随 2026-10-26 的
+// 重构移除：转发顺序不再由渠道决定，而由每把密钥的「模型 → 渠道优先级」
+// 配置决定（见密钥页），所以这里只剩一个稳定的展示序。
+const visibleRows = computed(() => [...rows.value].sort((a, b) => a.id - b.id))
 
 // 本地搜索 + 客户端分页（2026-10-11）：接口一次返回全量渠道，几十上百个之后
-// 「按名字找那条链」只能靠眼睛扫。搜索叠在分组筛选**之后**（见下面的 filteredRows），
-// 两个条件同时生效。
+// 「按名字找那条渠道」只能靠眼睛扫。
 //
 // searchText 覆盖这一页能看到的全部文本：名称、模型（白名单里的模型名 ——
-// 「哪个渠道能用 glm」是最常问的）、分组名（按 id 查回来）、代理名。
-// 分组/代理名是查出来的，所以这里调那几个现成的查表函数，不留第二份状态。
+// 「哪个渠道能用 glm」是最常问的）、代理名。代理名是查出来的，
+// 所以这里调那个现成的查表函数，不留第二份状态。
 const {
   q,
   rows: pagedRows,
   pagination,
   total: matchCount,
-  filtered: filteredRows,
-  isSplit: viewSplit
+  filtered: filteredRows
 } = useTableTools(visibleRows, {
   storageKey: 'channels-page-size',
   searchText: (r) =>
-    [r.name, (r.models || []).join(' '), groupOf(r.group_id)?.name || '', proxyName(r.proxy_id)]
-      .filter(Boolean)
-      .join(' ')
+    [r.name, (r.models || []).join(' '), proxyName(r.proxy_id)].filter(Boolean).join(' ')
 })
 
 const route = useRoute()
@@ -152,11 +96,6 @@ watch(
   },
   { immediate: true }
 )
-
-// 搜索或分页把视图切开了 → 不许拖拽/键盘调序（理由见模板里那一列上方的注释）。
-// 用 isSplit 而不是自己拼「有搜索词 || 有多页」：这条判断关系到数据完整性，
-// 只能有一个出处。
-const dragDisabled = computed(() => viewSplit.value)
 
 // 批量启停（2026-10-11）：作用在**当前筛选结果**上，而不是勾选框 ——
 // 理由（尤其是宽度那一条）见 composables/useBatchToggle.ts 的文件头。
@@ -177,10 +116,7 @@ const batch = useBatchToggle<ChannelRow>({
 const batchScopeText = computed(() => {
   const parts: string[] = []
   if (q.value.trim()) parts.push('搜索「' + q.value.trim() + '」')
-  if (groupFilter.value !== ALL_GROUPS) {
-    parts.push('分组「' + (groups.value.find((g) => String(g.id) === groupFilter.value)?.name ?? groupFilter.value) + '」')
-  }
-  return parts.length ? parts.join(' + ') : '全部分组、无搜索条件'
+  return parts.length ? parts.join(' + ') : '无搜索条件'
 })
 
 /** 停用是不可逆的高影响动作（正在用的客户端会立刻失败），所以先确认一次 */
@@ -201,7 +137,7 @@ function confirmBatchDisable() {
     content:
       '作用范围：' + batchScopeText.value + '。' +
       (already > 0 ? '其中 ' + already + ' 个本来就是停用状态，会被跳过。' : '') +
-      '停用后这些渠道立即不再承接请求，正在使用它们的客户端会改用同分组的下一条渠道。',
+      '停用后这些渠道立即不再承接请求，使用它们的密钥会改用候选列表里的下一条渠道。',
     okText: '停用这 ' + willChange + ' 个',
     cancelText: '取消',
     okType: 'danger',
@@ -245,7 +181,6 @@ const form = reactive({
   base_url: '',
   currency: 'CNY',
   api_key: '',
-  group_id: 0,
   enabled: true,
   // 出站代理：0 = 直连。模型条目上还能单独覆盖（见白名单里的「代理」列）
   proxy_id: 0,
@@ -319,11 +254,6 @@ const { validateForm } = useFormValidate(formRef)
 // 表格紧接着显示「暂无数据」，用户会以为本来就没有渠道
 const loadError = ref('')
 
-/** 按分组 ID 取分组对象，用于渲染分组胶囊（颜色随分组配置） */
-function groupOf(id: number) {
-  return groups.value.find((g) => g.id === id)
-}
-
 /** 代理名；直连（0）或代理已被删掉时返回空，列表里就不显示这一行 */
 function proxyName(id: number) {
   if (!id) return ''
@@ -334,21 +264,12 @@ async function load() {
   loading.value = true
   loadError.value = ''
   try {
-    const [c, g, px] = await Promise.all([
+    const [c, px] = await Promise.all([
       api.get<{ items: ChannelRow[] }>('/channels'),
-      api.get<{ items: ChannelGroup[] }>('/groups'),
       api.get<{ items: Proxy[] }>('/proxies')
     ])
     rows.value = c.items || []
-    groups.value = g.items || []
     proxies.value = px.items || []
-    // 分组表到手后才能校验存下来的筛选值是否还指向一个存在的分组
-    applyStoredGroupFilter()
-    if (!form.group_id && groups.value.length) {
-      // groups.value[0] 要带 ?.：默认分组是用户可以删掉的（见后端 store.Seed），
-      // 而「一个分组都没有」时这一行会直接 TypeError
-      form.group_id = groups.value.find((x) => x.is_default)?.id ?? groups.value[0]?.id ?? 0
-    }
   } catch (e: any) {
     loadError.value = e.message || '加载失败'
     message.error(e.message)
@@ -376,7 +297,6 @@ function blankForm() {
     base_url: '',
     currency: 'CNY',
     api_key: '',
-    group_id: groups.value.find((x) => x.is_default)?.id ?? groups.value[0]?.id ?? 0,
     proxy_id: 0,
     icon: '',
     max_concurrency: 10,
@@ -460,7 +380,6 @@ async function openEdit(row: ChannelRow) {
     // 老渠道（加列前建的）读回来是 USD：那正是它们价格数字的口径
     currency: row.currency || 'USD',
     api_key: '',
-    group_id: row.group_id,
     enabled: row.enabled,
     proxy_id: row.proxy_id || 0,
     icon: row.icon || '',
@@ -642,7 +561,6 @@ async function save() {
       base_url: form.base_url.trim(),
       // 币种总是跟着提交：漏了它，改一次渠道就会把币种打回默认值
       currency: form.currency,
-      group_id: form.group_id,
       enabled: form.enabled,
       proxy_id: form.proxy_id || 0,
       // 总是带上：空字符串的语义是「清空图标，回到默认」，
@@ -1013,183 +931,10 @@ function protocolLabel(value: string) {
   return PROTOCOLS.find((p) => p.value === value)?.label ?? value
 }
 
-// ---- 拖动调整优先级 ----
-//
-// 列表顺序就是故障转移顺序，所以拖动一行等于改它的优先级序号。
-// 序号由后端统一重排（整组全量提交），前端只负责算出「新的顺序是什么」。
+// 表格容器的 ref：行级操作（删除）之后焦点往哪儿去的落点（见 utils/focusRow）。
+// （渠道的拖拽排序已随分组一起移除：转发顺序由密钥的每模型渠道配置决定，
+//  渠道本身不再有优先级序号。）
 const tableWrap = ref<HTMLElement | null>(null)
-let sortable: Sortable | null = null
-
-// 读当前 DOM 里的行顺序，取渠道 id。
-//
-// 以 data-row-key（antd 写在 tr 上的渠道 id）为准，**不**用 sortablejs 给的
-// oldIndex/newIndex：那两个下标是按 DOM 子元素个数数的，而 antd 会在 tbody 里
-// 多渲染一个 .ant-table-measure-row（列宽测量用，没有 data-row-key），
-// 于是下标整体偏一位 —— 按下标去查列表会查到隔壁那条，
-// 跨组判断和提交的顺序都会错。实测确认过这个测量行的存在。
-function tbodyEl(): HTMLElement | null {
-  return tableWrap.value?.querySelector('.ant-table-tbody') ?? null
-}
-
-function domOrderedIds(): number[] {
-  const tbody = tbodyEl()
-  if (!tbody) return []
-  return [...tbody.querySelectorAll('tr[data-row-key]')]
-    .map((tr) => Number(tr.getAttribute('data-row-key')))
-    .filter((n) => Number.isFinite(n) && n > 0)
-}
-
-// 拖动开始时的行元素顺序，仅用于「跨组拖动」时把 DOM 摆回去。
-let preDragRows: HTMLElement[] = []
-
-function onDragStart() {
-  const tbody = tbodyEl()
-  preDragRows = tbody
-    ? Array.from(tbody.querySelectorAll<HTMLElement>('tr[data-row-key]'))
-    : []
-}
-
-// 把行按拖动前的顺序摆回 DOM。
-//
-// 不能靠「把 rows 换成新数组」来触发回弹：数据顺序和拖动前**完全一样**，
-// Vue 的 diff 会认为没有变化、一个 DOM 节点都不动，而 sortablejs 已经把行
-// 挪走了 —— 结果是后端没改（对），页面上却停在一个错误的顺序上（实测踩过：
-// 跨组拖动后页面显示 33,358,359，而后端仍是 359,33）。所以这里直接把
-// 节点搬回去，让 DOM 与数据重新一致。
-function restoreDomOrder() {
-  const tbody = tbodyEl()
-  if (!tbody || !preDragRows.length) return
-  // 数据行要插在测量行之后：以它为锚点逐条插入，插入顺序即拖动前的顺序
-  const measure = tbody.querySelector('tr.ant-table-measure-row')
-  let anchor: Node | null = measure ? measure.nextSibling : tbody.firstChild
-  for (const tr of preDragRows) {
-    tbody.insertBefore(tr, anchor)
-    anchor = tr.nextSibling
-  }
-}
-
-// 某个分组的渠道在新顺序里是否连成一块。
-//
-// 用「连不连续」判断有没有跨组拖动，而不是「落点邻居是不是同组」：
-// 后者会误杀「把本组第一条拖到本组末尾」—— 那种情况下它的下一个邻居
-// 正是邻组的第一条，但这次拖动完全合法。
-function isContiguousBlock(order: number[], gid: number): boolean {
-  const idxs: number[] = []
-  order.forEach((id, i) => {
-    if (rows.value.find((r) => r.id === id)?.group_id === gid) idxs.push(i)
-  })
-  if (idxs.length <= 1) return true
-  return idxs[idxs.length - 1] - idxs[0] === idxs.length - 1
-}
-
-// 提交新的组内顺序。传整个分组的 id 列表：接口是整组全量提交的，
-// 幂等且不需要前端算差值。
-async function submitOrder(groupID: number, orderedIds: number[]) {
-  try {
-    await api.put('/channels/order', { group_id: groupID, ids: orderedIds })
-    message.success('顺序已更新')
-  } catch (e: any) {
-    message.error(e.message)
-  } finally {
-    // 无论成败都重新拉一次：成功要拿到后端重排后的真实序号，
-    // 失败要把界面上那份已经和服务端不一致的顺序纠正回来 ——
-    // 停在错误的顺序上比报错更糟，用户会以为改成功了
-    await load()
-  }
-}
-
-// ---- 键盘调整优先级（2026-10-11）----
-//
-// 拖拽只对鼠标可用，而这一列的顺序就是故障转移顺序 —— 纯键盘与读屏用户
-// 原来完全没有调整入口（WCAG 2.1.1）。这里给手柄按钮接上 ↑ / ↓，
-// 提交走与拖拽**完全相同**的 submitOrder 链路，后端零改动。
-//
-// 组内顺序按 (weight, id) 排 —— 与 visibleRows 的排序键逐字一致
-// （少了 id 那一档时，两条 weight 相同的渠道会得到不确定的次序，
-//  上移/下移于是可能"移不动"或跳两格）。
-const movingId = ref(0)
-
-function groupSiblings(row: ChannelRow): ChannelRow[] {
-  return rows.value
-    .filter((r) => r.group_id === row.group_id)
-    .slice()
-    .sort((a, b) => (a.weight ?? 0) - (b.weight ?? 0) || a.id - b.id)
-}
-
-/**
- * 把一行在**它所属分组内**上移/下移一格。
- *
- * 为什么只在组内移动：跨组的相对位置没有意义（weight 是组内编号），
- * 后端也按整组提交 —— 拖拽路径同样拒绝跨组（见 onDragEnd 的 isContiguousBlock）。
- * 组内的第一条再上移、最后一条再下移都是 no-op，不报错（用户按到边界了）。
- */
-async function moveChannel(row: ChannelRow, dir: -1 | 1) {
-  if (movingId.value) return
-  // 键盘路径本身是安全的（它从 rows 取整组），但手柄在切开的视图里不渲染，
-  // 真到了这里说明有别的触发路径 —— 与 onDragEnd 同一道闸，保持一致
-  if (dragDisabled.value) return
-  const sibs = groupSiblings(row)
-  const i = sibs.findIndex((r) => r.id === row.id)
-  const j = i + dir
-  if (i < 0 || j < 0 || j >= sibs.length) return
-
-  const next = sibs.slice()
-  const [moved] = next.splice(i, 1)
-  next.splice(j, 0, moved)
-  const orderedIds = next.map((r) => r.id)
-
-  // 乐观更新本地序号：界面立刻反映新顺序（与拖拽同一套做法），
-  // submitOrder 结束时会再拉一次校准
-  orderedIds.forEach((id, k) => {
-    const r = rows.value.find((x) => x.id === id)
-    if (r) r.weight = k + 1
-  })
-
-  movingId.value = row.id
-  try {
-    await submitOrder(row.group_id, orderedIds)
-  } finally {
-    movingId.value = 0
-    // 重排之后那一行换了位置，焦点要跟过去（否则掉回 body，用户得重新找）
-    await nextTick()
-    focusRowAction(tableWrap.value, row.id, '调整 ' + row.name + ' 的优先级')
-  }
-}
-
-function onDragEnd(evt: { item?: HTMLElement }) {
-  const movedId = Number(evt.item?.getAttribute('data-row-key'))
-  if (!movedId) return
-  const moved = rows.value.find((r) => r.id === movedId)
-  if (!moved) return
-
-  // 第二道闸（第一道是「手柄压根不渲染」）：搜索或分页生效时，
-  // domOrderedIds() 拿到的是**子集**顺序，提交上去会把没显示的行留在旧序号上，
-  // 整组顺序被静默改坏。真到了这里说明有别的路径触发了拖拽，一律回弹。
-  if (dragDisabled.value) {
-    restoreDomOrder()
-    return
-  }
-
-  const order = domOrderedIds()
-  if (order.length < 2) return
-
-  if (!isContiguousBlock(order, moved.group_id)) {
-    message.warning('只能在同一分组内调整顺序')
-    // 跨组拖动：后端一点不动，页面也要回到原样
-    restoreDomOrder()
-    return
-  }
-
-  const group = (id: number) => rows.value.find((r) => r.id === id)?.group_id
-  const orderedIds = order.filter((id) => group(id) === moved.group_id)
-
-  // 乐观更新：先把本地序号改掉，界面立刻反映新顺序；submitOrder 会再拉一次校准
-  orderedIds.forEach((id, i) => {
-    const row = rows.value.find((r) => r.id === id)
-    if (row) row.weight = i + 1
-  })
-  void submitOrder(moved.group_id, orderedIds)
-}
 
 // ---- 渠道健康事件的实时推送 ----
 //
@@ -1236,26 +981,6 @@ onLive('channel_health', (data: ChannelHealthEvent) => {
 
 onMounted(async () => {
   await load()
-  // 绑在 tbody 上，不是外层容器：sortablejs 移动的是行本身。
-  // 初始化放在 load() 之后，此时行已经渲染出来
-  const tbody = tableWrap.value?.querySelector('.ant-table-tbody')
-  if (tbody) {
-    sortable = Sortable.create(tbody as HTMLElement, {
-      // 只认手柄：整行可拖会让「点测试/编辑」变成一次误拖
-      handle: '.drag-handle',
-      animation: 180,
-      ghostClass: 'row-ghost',
-      chosenClass: 'row-chosen',
-      dragClass: 'row-drag',
-      onStart: onDragStart,
-      onEnd: onDragEnd
-    })
-  }
-})
-
-onBeforeUnmount(() => {
-  sortable?.destroy()
-  sortable = null
 })
 </script>
 
@@ -1264,16 +989,8 @@ onBeforeUnmount(() => {
     <section class="panel manage-panel">
       <div class="manage-toolbar">
         <div class="toolbar-left">
-          <!-- 分组筛选放在「新建渠道」左边：它描述的是「下面这张表显示什么」，
-               与新建动作无关，但比新建更常用（渠道一多就是常态视角） -->
-          <a-select
-            v-model:value="groupFilter"
-            :options="groupFilterOptions"
-            style="width: 170px"
-            @change="onGroupFilterChange"
-          />
           <a-button type="primary" @click="openCreate"><PlusOutlined /> 新建渠道</a-button>
-          <!-- 图标化与看板/分组/代理三页的工具栏统一：位置固定后图标即可辨认 -->
+          <!-- 图标化与看板/代理页的工具栏统一：位置固定后图标即可辨认 -->
           <a-button :loading="loading" title="刷新（快捷键 R）" aria-label="刷新" aria-keyshortcuts="r" @click="load">
             <ReloadOutlined />
           </a-button>
@@ -1305,12 +1022,11 @@ onBeforeUnmount(() => {
           </span>
         </template>
         <!-- 本地搜索（2026-10-11）：渠道是最容易变多的一张表，
-             而「哪个渠道能用 glm」「哪条链里有 1.2.3.4」都靠它。
-             搜索与分组筛选、与拖拽排序叠在一起时的行为见 script 里的说明 -->
+             而「哪个渠道能用 glm」「哪条渠道里有 1.2.3.4」都靠它。 -->
         <a-input
           v-model:value="q"
           class="toolbar-search"
-          placeholder="搜索渠道名 / 模型 / 分组 / 代理"
+          placeholder="搜索渠道名 / 模型 / 代理"
           allow-clear
           aria-label="搜索渠道"
           aria-keyshortcuts="/"
@@ -1319,17 +1035,14 @@ onBeforeUnmount(() => {
         </a-input>
         <span class="toolbar-hint">
           <template v-if="q.trim()">找到 {{ matchCount }} 个 / 共 {{ rows.length }} 个</template>
-          <template v-else>
-            共 {{ rows.length }} 个渠道<template v-if="groupFilter !== ALL_GROUPS">
-              ，当前显示 {{ visibleRows.length }} 个</template>
-          </template>
+          <template v-else>共 {{ rows.length }} 个渠道</template>
         </span>
       </div>
 
       <!-- has-data 用**未筛选**的 rows.length（2026-10-11 修）：原来传的是
-           visibleRows.length，于是「筛到一个空分组」会被 DataState 当成
+           visibleRows.length，于是「筛到无结果」会被 DataState 当成
            「一条数据都没有」—— 它会给一块「还没有渠道」的空态面板，
-           而不是表格自带的（更准确的）「这个分组下还没有渠道，可以切换分组筛选看看」。
+           而不是表格自带的（更准确的）空态。
            筛选是**视图**，不是数据有没有来；这两件事必须分开。 -->
       <DataState
         :error="loadError"
@@ -1338,89 +1051,42 @@ onBeforeUnmount(() => {
         title="渠道列表加载失败"
         @retry="load"
       >
-      <!-- 表格外层：sortablejs 需要拿到 tbody 元素（见 onMounted），
-           而 a-table 自身不提供这个 ref。
-           tabindex="-1" 是给焦点兜底用的：删掉一行之后那一行的按钮没了，
-           焦点交给这个容器（否则会掉回 body，用户要从页面顶部重新 Tab）——
-           见 utils/focusRow。它不进 Tab 序，只是可被程序化聚焦。 -->
+      <!-- 表格外层只为一件事存在：给「删掉一行之后焦点往哪儿去」一个落点。
+           tabindex="-1" 让它可被程序化聚焦但不进 Tab 序 —— 没有它的话，
+           焦点会掉回 body，键盘用户要从页面顶部重新 Tab 一遍（见 utils/focusRow）。 -->
       <div ref="tableWrap" tabindex="-1">
       <!-- scroll.x 必须不小于各列宽度之和：声明偏小时，固定在右侧的
            「操作」列会盖住左边最后一列，表现为表头被截断、内容被压住。
            反过来偏大也不行 —— antd 会把多出来的宽度摊到各列上，
            于是「声明值」和实际渲染宽度对不上，量出来的数就没法用来核对。
-           1177 = 各列宽度之和（顺序 44 + 名称 210 + 模型 200 + 上游协议 125
-           + 最近调用 174 + 分组 110 + 币种 86 + 启用 78 + 操作 150）。
+           1023 = 各列宽度之和（名称 210 + 模型 200 + 上游协议 125
+           + 最近调用 174 + 币种 86 + 启用 78 + 操作 150）。
            名称 170 -> 210 是因为名称后面加了「代理」胶囊：胶囊约 42px，
            原来那 170 减去图标与两处间距只剩 126px，长一点的渠道名会被挤成省略号。
            「最近调用」占的就是原来「地址」那 174。
-           「权重」列已去掉（顺序由列表本身表达，不再显示数字），
-           换成 44px 的拖拽手柄列。
+           原来的「顺序 44（拖拽手柄）」与「分组 110」两列随分组功能一起移除：
+           转发顺序由密钥的每模型渠道配置决定，渠道不再有优先级序号。
            操作列 240 -> 150 是这一版：四个动作从「图标 + 文字」改成纯图标按钮，
            每个 28px、间距 4px，连同单元格内边距一共只要 140px。
            原来那 240 仍不足以装下四个带文字的按钮，而**固定列装不下时不会换行、
            也不会自己被截断**，多出来的部分直接溢出到表格右边界之外 ——
            用户看到的就是「删除」飘在列外。缩短到实际需要之后，
-           表格总宽 1177 也回到 1440 视口下的容器宽度（1182）以内，横向滚动消失。
-           改完实测（scripts/measure-tables.mjs，1440 视口） -->
+           表格总宽回到 1440 视口下的容器宽度（1182）以内，横向滚动消失。 -->
       <a-table
         :data-source="pagedRows"
         :loading="loading"
         :pagination="pagination"
         row-key="id"
         size="small"
-        :scroll="{ x: 1177 }"
+        :scroll="{ x: 1023 }"
       >
         <template #emptyText>
-          <!-- 搜索无结果优先于分组筛空的文案（2026-10-11）：两个条件叠在一起时，
-               说「这个分组下还没有渠道」是错的 —— 分组里可能有，只是不匹配搜索词 -->
-          <EmptyState v-if="q.trim()" size="sm" text="没有匹配的渠道">
-            <template #action>
-              <a-button size="small" @click="q = ''">清空搜索</a-button>
-            </template>
-          </EmptyState>
-          <!-- 筛了分组时不给「新建」按钮：那会把「这个分组下没有」误导成
-               「一条渠道都没有」，而此刻的下一步是切回全部分组 -->
-          <EmptyState v-else-if="groupFilter === ALL_GROUPS" size="sm" text="还没有渠道">
+          <EmptyState size="sm" text="还没有渠道">
             <template #action>
               <a-button type="primary" @click="openCreate"><PlusOutlined /> 新建渠道</a-button>
             </template>
           </EmptyState>
-          <EmptyState v-else size="sm" text="这个分组下还没有渠道，可以切换分组筛选看看" />
         </template>
-        <!-- 拖拽手柄列。这一列没有数字：顺序本身就是优先级，
-             也就是故障转移时第几个被尝试 —— 数字是多余的，
-             而且要让人工维护的序号和显示的数字始终一致，本身就容易出错。
-
-             手柄是 <button> 而不是 <span>（2026-10-11）：拖拽只对鼠标可用，
-             而列表顺序就是故障转移顺序 —— 纯键盘与读屏用户原来完全没有调整
-             入口（WCAG 2.1.1 键盘可达性）。现在 Tab 能聚焦、聚焦后按 ↑ / ↓
-             即可调序，提交走与拖拽**完全相同**的 submitOrder 链路，后端零改动。
-             SortableJS 认的是 .drag-handle 这个类名，换成 button 不影响拖拽。 -->
-        <a-table-column title="顺序" :width="44">
-          <template #default="{ record }">
-            <!-- 搜索或分页生效时**不出手柄**（2026-10-11）：
-                 这一列的顺序是提交给后端的**整组顺序**，而拖拽路径是从 DOM
-                 读出来的（见 onDragEnd 的 domOrderedIds）。屏幕上只有一部分行时
-                 提交上去的就是一个子集 —— 后端把这几条重排成 1..N，没显示的那些
-                 还留着旧序号，整组顺序乱掉且**没有任何报错**。这是数据损坏。
-                 键盘路径本身安全（它从 rows 取整组），但它就挂在这个手柄上，
-                 所以两者一起关掉，并在原位说明原因。 -->
-            <a-tooltip v-if="dragDisabled" title="搜索或分页生效时不能调整顺序：提交的整组顺序会漏掉没显示的行。清空搜索、或把每页条数调到装得下全部渠道即可恢复">
-              <span class="drag-locked"><LockOutlined aria-hidden="true" /><span class="sr-only">顺序已锁定：搜索或分页生效</span></span>
-            </a-tooltip>
-            <button
-              v-else
-              type="button"
-              class="drag-handle"
-              :title="'拖动调整优先级（越靠上越优先）；键盘：聚焦后按 ↑ / ↓'"
-              :aria-label="'调整 ' + record.name + ' 的优先级，按方向键上或下'"
-              @keydown.up.prevent="moveChannel(record, -1)"
-              @keydown.down.prevent="moveChannel(record, 1)"
-            >
-              <HolderOutlined aria-hidden="true" />
-            </button>
-          </template>
-        </a-table-column>
         <a-table-column title="名称" :width="210">
           <template #default="{ record }">
             <div class="chan-title">
@@ -1515,16 +1181,6 @@ onBeforeUnmount(() => {
               </template>
               <span class="last-used none">无记录</span>
             </a-tooltip>
-          </template>
-        </a-table-column>
-        <a-table-column title="分组" :width="110">
-          <template #default="{ record }">
-            <!-- 分组名用全站统一的胶囊：颜色与分组管理里配的一致，
-                 这样「渠道属于哪个分组」在列表里一眼能认出来 -->
-            <GroupTag
-              :name="groupOf(record.group_id)?.name ?? String(record.group_id)"
-              :color="groupOf(record.group_id)?.color"
-            />
           </template>
         </a-table-column>
         <a-table-column title="币种" :width="86">
@@ -1746,29 +1402,12 @@ onBeforeUnmount(() => {
              的原因，而用户改币种的那一刻不会去悬停一个图标 -->
         <div class="form-note">不同币种之间不做任何换算、也不相加；改了币种之后，已填的单价需要自己重填。</div>
 
-        <a-row :gutter="12">
-          <a-col :span="10">
-            <a-form-item>
-              <template #label>
-                所属分组
-                <a-tooltip title="分组决定路由与权限范围；这条渠道能跑哪些模型由下面的白名单决定。">
-                  <InfoCircleOutlined class="label-hint" />
-                </a-tooltip>
-              </template>
-              <a-select v-model:value="form.group_id">
-                <a-select-option v-for="g in groups" :key="g.id" :value="g.id">{{ g.name }}</a-select-option>
-              </a-select>
-            </a-form-item>
-          </a-col>
-          <a-col :span="14">
-            <a-form-item label="启用">
-              <div class="switch-row">
-                <a-switch v-model:checked="form.enabled" />
-                <span class="switch-hint">停用的渠道不参与路由</span>
-              </div>
-            </a-form-item>
-          </a-col>
-        </a-row>
+        <a-form-item label="启用">
+          <div class="switch-row">
+            <a-switch v-model:checked="form.enabled" />
+            <span class="switch-hint">停用的渠道不参与任何路由</span>
+          </div>
+        </a-form-item>
 
         <a-form-item>
           <template #label>
@@ -1869,8 +1508,10 @@ onBeforeUnmount(() => {
           <ModelWhitelistEditor v-model:items="form.models" :proxies="proxies" :currency="form.currency" />
         </a-form-item>
 
+        <!-- 转发顺序的说明留在表单末尾：新模型下它由密钥决定，
+             这里只告诉用户「白名单是渠道侧的唯一开关」 -->
         <div class="form-note">
-          优先级：{{ editing ? '在列表里拖动这一行即可调整，越靠上越优先。' : '新渠道会排在所属分组的最后。' }}
+          渠道能跑哪些模型由上面的白名单决定；某把密钥调用时按它自己配置的「模型 → 渠道优先级」在此处候选中依次尝试。
         </div>
       </a-form>
     </a-modal>
@@ -2022,8 +1663,7 @@ onBeforeUnmount(() => {
 .chan-title { display: flex; align-items: center; gap: 6px; }
 .icon-row { display: flex; align-items: center; gap: 8px; }
 .chan-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 「代理」胶囊：中性配色，与分组胶囊（GroupTag）同一套尺寸，
-   但不参与分组配色 —— 它表达的是「出口」，与属于哪个分组无关。
+/* 「代理」胶囊：中性配色的小胶囊，与密钥页的 BaseURL 胶囊同一套尺寸。
    flex: 0 0 auto 让它不被压缩：被压的应该是渠道名。 */
 .proxy-tag {
   flex: 0 0 auto;
@@ -2101,7 +1741,6 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 .muted { color: var(--color-text-secondary); }
-.disabled { color: var(--color-text-secondary); cursor: not-allowed; }
 /* 开关与异常图标同一行：图标紧跟在开关右侧，间距小一点才像「附属提示」 */
 .enable-cell { display: inline-flex; align-items: center; gap: 6px; }
 /* 异常提示用橙色，与「未定价」那类待办同色系；只在探测失败时出现 */
@@ -2115,71 +1754,11 @@ onBeforeUnmount(() => {
    antd 自己的内边距规则带 4 个类（.ant-table-wrapper .ant-table
    .ant-table-small .ant-table-thead），写短了会被它压住、改了等于没改
    （实测：短选择器下内边距仍是 8px、表头仍是 61px） */
-:deep(.ant-table-wrapper .ant-table .ant-table-thead > tr > th:first-child) {
-  padding-left: 4px;
-  padding-right: 4px;
-}
-/* 拖拽手柄：平时低调，悬停才明显 —— 它是个辅助操作，
-   不该和「测试/编辑」那些动作抢注意力。grab 光标是唯一的可拖拽提示。
-   它是 <button>（键盘可达，见模板注释），所以浏览器默认的边框/底色/内边距
-   与字体要显式清掉，否则会出现一块灰色小方框，与原来那个 span 长得不一样。 */
-.drag-handle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--color-text-secondary);
-  font: inherit;
-  cursor: grab;
-}
-/* 拖拽把手是图标（非文本，阈值 3:1），但 --color-primary 在浅色下
-   对白卡片 3.32:1 只是刚过线、在深色下 3.98:1 也偏弱；
-   --text-primary-ink 是主色的可读版，两套主题下都很清楚。 */
-.drag-handle:hover { color: var(--text-primary-ink); }
-.drag-handle:active { cursor: grabbing; }
 /* 批量处理进度：与提示条同高的小字，走 --color-text-secondary ——
    它是一个过程状态，不该抢走表格的注意力（role=status 让读屏也听得到） */
 .batch-progress {
   color: var(--color-text-secondary);
   font-size: var(--font-size-sm);
-}
-
-/* 拖拽排序的物理悬浮与平滑吸附反馈（SortableJS 状态类） */
-:deep(.row-ghost) {
-  opacity: 0.35;
-  background: color-mix(in oklab, var(--color-primary) 12%, transparent) !important;
-  outline: 1px dashed var(--color-primary) !important;
-  outline-offset: -1px;
-}
-:deep(.row-chosen .drag-handle) {
-  color: var(--text-primary-ink);
-  cursor: grabbing !important;
-}
-:deep(.row-drag) {
-  opacity: 0.96;
-  transform: scale(1.008) rotate(0.3deg);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.08);
-  background: var(--color-fg) !important;
-  cursor: grabbing !important;
-  z-index: 1000;
-  transition: transform 0.08s ease, box-shadow 0.1s ease;
-}
-
-/* 锁定态的顺序列（搜索/分页生效时不给出拖动入口，见模板里的说明）。
-   占位高度与手柄一致，行高不变；颜色比手柄更淡 —— 它不是一个控件，
-   只是「这里本来有个手柄，现在为什么没有」。explanation 在 tooltip 里。 */
-.drag-locked {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  color: var(--color-text-secondary);
-  opacity: 0.45;
-  font-size: var(--font-size-sm);
-  cursor: help;
 }
 </style>
 

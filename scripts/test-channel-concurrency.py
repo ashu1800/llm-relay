@@ -58,12 +58,14 @@ print("=== 准备：渠道 max_concurrency=1，绑定测试模型 ===")
 _, ch = call("POST", "/channels", {
     "name": CHANNEL, "protocol": "openai-chat",
     "base_url": "http://127.0.0.1:9997/v1",
-    "api_key": "test-key", "group_id": 1, "weight": 100,
+    "api_key": "test-key",
     "extra_config": {"max_concurrency": 1},
 })
 cid = ch["id"]
 call("POST", "/channels/%d/models" % cid, {"public_name": MODEL, "upstream_name": MODEL})
-_, key = call("POST", "/keys", {"name": "slow-concurrency-key"})
+_, key = call("POST", "/keys", {"name": "slow-concurrency-key",
+                                "allowed_models": [MODEL],
+                                "model_channels": {MODEL: [cid]}})
 token = key["key"]
 print("  渠道 id=%d" % cid)
 

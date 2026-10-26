@@ -119,15 +119,32 @@ chk("同源 Origin -> 200", st == 200, "实际 %d" % st)
 st, _ = req("GET", ADMIN + "/channels", origin="http://localhost:8888")
 chk("同源但写成 localhost -> 放行或拒绝都合理", st in (200, 403), "实际 %d" % st)
 
-# 用 JSON 正常建一把密钥再删掉，确认写操作没被误伤
-st, body = req("POST", ADMIN + "/keys", json.dumps({"name": "csrf-ok-probe"}).encode(),
-               ctype="application/json", origin=SELF)
-chk("同源 JSON 写入 -> 200", st == 200, "%d %s" % (st, body[:80]))
-kid = None
-if st == 200:
-    kid = json.loads(body).get("id")
-    st2, _ = req("DELETE", ADMIN + "/keys/%d" % kid, origin=SELF)
-    chk("同源删除 -> 200", st2 == 200, "实际 %d" % st2)
+# 用 JSON 正常建一把密钥再删掉，确认写操作没被误伤。
+# 新模型下密钥必须带每模型路由（allowed_models 非空 + model_channels 键一致）：
+# 从渠道列表借一个真实存在的白名单模型满足校验；一个模型都没有时
+# 跳过这条（环境没配渠道不是 CSRF 的问题，硬跑只会报一个无关的 400）
+st, chans_body = req("GET", ADMIN + "/channels")
+model, cid = "", 0
+try:
+    for ch in json.loads(chans_body).get("items", []):
+        if ch.get("models"):
+            model = ch["models"][0]
+            cid = ch["id"]
+            break
+except Exception:
+    pass
+if model:
+    key_payload = {"name": "csrf-ok-probe", "allowed_models": [model],
+                   "model_channels": {model: [cid]}}
+    st, body = req("POST", ADMIN + "/keys", json.dumps(key_payload).encode(),
+                   ctype="application/json", origin=SELF)
+    chk("同源 JSON 写入 -> 200", st == 200, "%d %s" % (st, body[:80]))
+    if st == 200:
+        kid = json.loads(body).get("id")
+        st2, _ = req("DELETE", ADMIN + "/keys/%d" % kid, origin=SELF)
+        chk("同源删除 -> 200", st2 == 200, "实际 %d" % st2)
+else:
+    print("  （库里没有带白名单的渠道，跳过同源写入/删除用例）")
 
 print()
 print("=== 4. 中继接口不受影响（中间件只挂在管理组上）===")

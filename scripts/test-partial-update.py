@@ -1,12 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""验证模板与密钥的局部更新：没传的字段不得被清掉。"""
+"""验证模板与密钥的局部更新：没传的字段不得被清掉。
+
+模板管理整个功能已下线（菜单、接口、表都删了）；密钥侧在 2026-10-26
+分组下线后语义变了：白名单（allowed_models）与每模型渠道路由
+（model_channels）是**一对**数据，且不允许清空 —— 没有模型的密钥什么都
+调不了。所以这里的用例围绕新语义：
+  1. 整份提交（白名单 + 路由）能改；
+  2. 只改名字不动白名单；
+  3. 只传一边时后端拿库里现有的另一边凑整份再校验（脚本友好）；
+  4. 清空白名单被 400 当场拦下（旧行为是允许清空，新模型下是死钥匙）。
+"""
 import json
+import urllib.error
 import urllib.request
 
 BASE = "http://127.0.0.1:8888/api/admin"
 ok = 0
 bad = 0
+
+MODEL = "partial-update-model"
+CHANNEL = "partial-update-channel"
+KEYNAME = "audit-key-partial"
+
 
 def call(method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
@@ -17,7 +33,11 @@ def call(method, path, body=None):
         with urllib.request.urlopen(req, timeout=30) as r:
             return r.status, json.loads(r.read().decode() or "{}")
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read().decode() or "{}")
+        try:
+            return e.code, json.loads(e.read().decode() or "{}")
+        except Exception:
+            return e.code, {}
+
 
 def chk(name, want, got):
     global ok, bad
@@ -28,44 +48,78 @@ def chk(name, want, got):
         bad += 1
         print("  [失败] %-40s 期望 %s 实际 %s" % (name, want, got))
 
-# 模板管理整个功能已下线（菜单、接口、表都删了），
-# 原本这里的「模板部分更新」用例随之删除；同样的语义由下面的密钥用例覆盖。
-# 需要渠道维度的部分更新用例时可参照 test-payload.sh 的写法另加。
+
+def cleanup():
+    _, ks = call("GET", "/keys")
+    for k in ks.get("items", []):
+        if k["name"].startswith(KEYNAME):
+            call("DELETE", "/keys/%d" % k["id"])
+    _, cs = call("GET", "/channels")
+    for c in cs.get("items", []):
+        if c["name"] == CHANNEL:
+            call("DELETE", "/channels/%d" % c["id"])
+
+
+def key_row(kid):
+    _, kl = call("GET", "/keys")
+    return [k for k in kl["items"] if k["id"] == kid][0]
+
+
+cleanup()
 
 print()
-print("=== 密钥：白名单必须能改 ===")
-_, kl = call("GET", "/keys")
-for k in kl.get("items", []):
-    if k["name"] == "audit-key-partial":
-        call("DELETE", "/keys/%d" % k["id"])
-code, key = call("POST", "/keys", {"name": "audit-key-partial"})
-chk("创建密钥", 200, code)
+print("=== 准备：探针渠道 + 密钥（白名单与路由整份提交）===")
+_, ch = call("POST", "/channels", {
+    "name": CHANNEL, "protocol": "openai-chat",
+    "base_url": "http://127.0.0.1:9997/v1", "api_key": "k",
+    "models": [{"public_name": MODEL, "upstream_name": MODEL}],
+})
+cid = ch["id"]
+code, key = call("POST", "/keys", {"name": KEYNAME, "allowed_models": [MODEL],
+                                   "model_channels": {MODEL: [cid]}})
+chk("创建密钥（带白名单与路由）", 200, code)
 kid = key["id"]
-# 创建接口返回的是含明文密钥的特殊结构，白名单要从列表接口读
-_, kl0 = call("GET", "/keys")
-row0 = [k for k in kl0["items"] if k["id"] == kid][0]
-chk("初始白名单为空", [], row0["allowed_models"])
+row0 = key_row(kid)
+chk("初始白名单", [MODEL], row0["allowed_models"])
 
-code, _ = call("PUT", "/keys/%d" % kid, {"allowed_models": ["deepseek-v4-flash", "gpt-5.6-sol"]})
-chk("设置白名单", 200, code)
-_, kl2 = call("GET", "/keys")
-row = [k for k in kl2["items"] if k["id"] == kid][0]
-chk("白名单已写入", ["deepseek-v4-flash", "gpt-5.6-sol"], row["allowed_models"])
+print()
+print("=== 1. 白名单与路由整份更新 ===")
+code, _ = call("PUT", "/keys/%d" % kid, {"allowed_models": [MODEL],
+                                         "model_channels": {MODEL: [cid]}})
+chk("整份提交被接受", 200, code)
+chk("白名单不变", [MODEL], key_row(kid)["allowed_models"])
+chk("路由不变", {MODEL: [cid]}, key_row(kid)["model_channels"])
 
-code, _ = call("PUT", "/keys/%d" % kid, {"name": "audit-key-partial-2"})
+print()
+print("=== 2. 只改名字：白名单与路由不得被清掉 ===")
+code, _ = call("PUT", "/keys/%d" % kid, {"name": KEYNAME + "-2"})
 chk("只改名字", 200, code)
-_, kl3 = call("GET", "/keys")
-row3 = [k for k in kl3["items"] if k["id"] == kid][0]
-chk("名字已改", "audit-key-partial-2", row3["name"])
-chk("白名单未被清掉", ["deepseek-v4-flash", "gpt-5.6-sol"], row3["allowed_models"])
+row3 = key_row(kid)
+chk("名字已改", KEYNAME + "-2", row3["name"])
+chk("白名单未被清掉", [MODEL], row3["allowed_models"])
+chk("路由未被清掉", {MODEL: [cid]}, row3["model_channels"])
 
-code, _ = call("PUT", "/keys/%d" % kid, {"allowed_models": []})
-chk("清空白名单", 200, code)
-_, kl4 = call("GET", "/keys")
-row4 = [k for k in kl4["items"] if k["id"] == kid][0]
-chk("白名单已清空", [], row4["allowed_models"])
+print()
+print("=== 3. 只传一边：后端取库里现有的另一边凑整份 ===")
+code, _ = call("PUT", "/keys/%d" % kid, {"allowed_models": [MODEL]})
+chk("只传白名单", 200, code)
+chk("路由从库里补齐", {MODEL: [cid]}, key_row(kid)["model_channels"])
+code, _ = call("PUT", "/keys/%d" % kid, {"model_channels": {MODEL: [cid]}})
+chk("只传路由", 200, code)
+chk("白名单从库里补齐", [MODEL], key_row(kid)["allowed_models"])
+
+print()
+print("=== 4. 清空白名单：新模型下必须被 400 拦下 ===")
+# 没有模型的密钥什么都调不了，允许清空只会制造「看起来正常、一发请求
+# 就 502」的死钥匙 —— 创建与更新同一个出口（normalizeKeyRoutes）
+code, body = call("PUT", "/keys/%d" % kid, {"allowed_models": [],
+                                            "model_channels": {}})
+chk("清空白名单被拒绝", 400, code)
+print("       说明: %s" % body.get("error", {}).get("message", body))
+chk("拒绝后白名单原样", [MODEL], key_row(kid)["allowed_models"])
 
 call("DELETE", "/keys/%d" % kid)
+call("DELETE", "/channels/%d" % cid)
 
 print()
 print("通过 %d 项，失败 %d 项" % (ok, bad))

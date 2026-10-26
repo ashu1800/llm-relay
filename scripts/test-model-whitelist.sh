@@ -5,7 +5,7 @@
 # 因此这条链路必须整条通：建渠道时写白名单 -> 列表能看到 -> /v1/models 汇总 ->
 # 路由按白名单命中 -> 白名单外的模型报错时给出「现在能调什么」。
 #
-# 全程使用独立的探测分组 + 探测密钥，不动真实渠道，也不依赖真实上游：
+# 全程使用独立的探测渠道 + 探测密钥，不动真实渠道，也不依赖真实上游：
 # 探测渠道指向一个不存在的端口，用「报错内容」区分「命中渠道」与「根本没路由」。
 set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
@@ -40,33 +40,25 @@ chkcontains() {
 }
 jqg() { python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
 
-GNAME="wl-probe-group"
 CNAME="wl-probe-channel"
 KNAME="wl-probe-key"
 
 purge_probes() {
-  for cid in $(P "SELECT id FROM channels WHERE name='$CNAME'"); do
-    curl -s -X DELETE "$API/channels/$cid" >/dev/null
-  done
   for kid in $(P "SELECT id FROM api_keys WHERE name='$KNAME'"); do
     curl -s -X DELETE "$API/keys/$kid" >/dev/null
   done
-  P "DELETE FROM channel_groups WHERE name='$GNAME'" >/dev/null
+  for cid in $(P "SELECT id FROM channels WHERE name='$CNAME'"); do
+    curl -s -X DELETE "$API/channels/$cid" >/dev/null
+  done
 }
 purge_probes
 
-echo "=== 1. 建探测分组与渠道（白名单 3 条，其中一条上游名留空）==="
-GID=$(curl -s -X POST "$API/groups" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"$GNAME\",\"enabled\":true}" | jqg "d['id']")
-chkcontains "分组已建立" "$GID" "$GID"
-
+echo "=== 1. 建探测渠道（白名单 3 条，其中一条上游名留空）==="
 CH=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
   \"name\": \"$CNAME\",
-  \"group_id\": $GID,
   \"protocol\": \"openai-chat\",
   \"base_url\": \"http://127.0.0.1:9/v1\",
   \"api_key\": \"probe-key\",
-  \"weight\": 1,
   \"models\": [
     {\"public_name\": \"wl-probe-a\"},
     {\"public_name\": \"wl-probe-b\", \"upstream_name\": \"upstream-b-real\"},
@@ -85,7 +77,7 @@ chk "库里确实有停用条目" "1" "$(P "SELECT count(*) FROM channel_models 
 
 echo
 echo "=== 2. 渠道列表要带上白名单摘要 ==="
-LIST=$(curl -s "$API/channels?group_id=$GID")
+LIST=$(curl -s "$API/channels")
 chk "列表里该渠道的 model_count" "3" "$(echo "$LIST" | jqg "[c for c in d['items'] if c['id']==$CID][0]['model_count']")"
 chk "列表里带出模型名" "wl-probe-a" "$(echo "$LIST" | jqg "[c for c in d['items'] if c['id']==$CID][0]['models'][0]")"
 
@@ -101,11 +93,11 @@ print('  按对外名排序:', [i['public_name'] for i in items])
 echo
 echo "=== 4. 非法白名单必须当场被拒 ==="
 code=$(curl -s -o $TMP/wl.json -w '%{http_code}' -X POST "$API/channels" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"wl-dup\",\"group_id\":$GID,\"base_url\":\"http://127.0.0.1:9\",\"models\":[{\"public_name\":\"x\"},{\"public_name\":\"x\"}]}")
+  -d "{\"name\":\"wl-dup\",\"base_url\":\"http://127.0.0.1:9\",\"models\":[{\"public_name\":\"x\"},{\"public_name\":\"x\"}]}")
 chk "重复对外名 -> 400" "400" "$code"
 chkcontains "报错说明是重复" "$(cat $TMP/wl.json)" "重复"
 code=$(curl -s -o $TMP/wl.json -w '%{http_code}' -X POST "$API/channels" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"wl-empty-name\",\"group_id\":$GID,\"base_url\":\"http://127.0.0.1:9\",\"models\":[{\"public_name\":\"  \"}]}")
+  -d "{\"name\":\"wl-empty-name\",\"base_url\":\"http://127.0.0.1:9\",\"models\":[{\"public_name\":\"  \"}]}")
 chk "空对外名 -> 400" "400" "$code"
 code=$(curl -s -o $TMP/wl.json -w '%{http_code}' -X PUT "$API/channels/999999/models" -H 'Content-Type: application/json' \
   -d '{"items":[{"public_name":"ghost"}]}')
@@ -117,13 +109,10 @@ curl -s -X PUT "$API/channels/$CID" -H 'Content-Type: application/json' \
   -d '{"models":[{"public_name":"wl-probe-d"}]}' -o $TMP/wl.json
 chk "整表替换后条数" "1" "$(P "SELECT count(*) FROM channel_models WHERE channel_id=$CID")"
 chk "替换后只剩新条目" "wl-probe-d" "$(P "SELECT public_name FROM channel_models WHERE channel_id=$CID")"
-# weight 现在由「渠道在分组内的位置」决定（组内优先级序号，见 README 的说明），
-# 客户端传它应当被忽略。这里顺便把这个语义钉住：旧脚本仍会带 weight，
-# 要是哪天它又能被客户端改掉，组内序号就不再唯一、故障转移顺序也没有定义了
-BEFORE_W=$(P "SELECT weight FROM channels WHERE id=$CID")
+# 渠道已没有 weight（2026-10-26 分组下线）：顺带钉住「未知字段被忽略、
+# 白名单不因一次不带 models 的 PUT 而丢」。
 curl -s -X PUT "$API/channels/$CID" -H 'Content-Type: application/json' -d '{"weight":7}' -o $TMP/wl.json
 chk "PUT 不带 models 时白名单不动" "wl-probe-d" "$(P "SELECT public_name FROM channel_models WHERE channel_id=$CID")"
-chk "客户端传的 weight 被忽略" "$BEFORE_W" "$(P "SELECT weight FROM channels WHERE id=$CID")"
 # 还原成 3 条，供后面的路由用例使用
 curl -s -X PUT "$API/channels/$CID/models" -H 'Content-Type: application/json' \
   -d '{"items":[{"public_name":"wl-probe-a"},{"public_name":"wl-probe-b","upstream_name":"upstream-b-real"},{"public_name":"wl-probe-c","enabled":false}]}' -o /dev/null
@@ -141,8 +130,10 @@ chk "再 POST 一次能重新启用" "t" "$(P "SELECT enabled FROM channel_model
 
 echo
 echo "=== 6. /v1/models 汇总白名单（去重、只列启用的）==="
+# 密钥的每模型路由（2026-10-26）：两个启用中的模型都指到探测渠道。
+# wl-probe-c 是停用条目、本就不参与路由，不必进 allowed_models。
 SK=$(curl -s -X POST "$API/keys" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"$KNAME\",\"allowed_groups\":[\"$GNAME\"]}" | jqg "d['key']")
+  -d "{\"name\":\"$KNAME\",\"allowed_models\":[\"wl-probe-a\",\"wl-probe-b\"],\"model_channels\":{\"wl-probe-a\":[$CID],\"wl-probe-b\":[$CID]}}" | jqg "d['key']")
 MODELS=$(curl -s "$BASE/v1/models" -H "Authorization: Bearer $SK")
 echo "  返回: $(echo "$MODELS" | jqg "[m['id'] for m in d['data']]")"
 chkcontains "含 wl-probe-a" "$MODELS" "wl-probe-a"
@@ -204,13 +195,15 @@ else
 fi
 
 echo
-echo "=== 8. 白名单外的模型：报错必须列出当前可用的模型 ==="
+echo "=== 8. 白名单外的模型：创建密钥时拦不住（不在路由里），调用时必须 403 ==="
+# 分组时代的语义是「报错列出当前可用的模型」；新模型下模型不在密钥的
+# allowed_models 里，请求在路由解析之前就被 403 拦下 —— 访问控制要在
+# 请求计数之前生效，报错也必须点名是密钥限制，而不是伪装成上游故障
 curl -s -o $TMP/wl_miss.json -w '%{http_code}' -m 30 "$BASE/v1/chat/completions" \
   -H "Authorization: Bearer $SK" -H 'Content-Type: application/json' \
   -d '{"model":"wl-probe-nope","messages":[{"role":"user","content":"hi"}],"max_tokens":5}' > $TMP/wl_miss_code
-chk "白名单外的模型 -> 502" "502" "$(cat $TMP/wl_miss_code)"
-chkcontains "报错说明没有可用渠道" "$(cat $TMP/wl_miss.json)" "没有可用的渠道"
-chkcontains "报错列出可用模型 wl-probe-a" "$(cat $TMP/wl_miss.json)" "wl-probe-a"
+chk "白名单外的模型 -> 403" "403" "$(cat $TMP/wl_miss_code)"
+chkcontains "报错说明是密钥限制" "$(cat $TMP/wl_miss.json)" "不允许调用模型"
 
 echo
 echo "=== 9. 停用渠道后它的模型不再可用 ==="
@@ -233,7 +226,6 @@ echo "=== 10. 清理探测数据 ==="
 purge_probes
 chk "探测渠道已删除" "0" "$(P "SELECT count(*) FROM channels WHERE name='$CNAME'")"
 chk "探测白名单已级联清除" "0" "$(P "SELECT count(*) FROM channel_models WHERE public_name LIKE 'wl-probe-%'")"
-chk "探测分组已删除" "0" "$(P "SELECT count(*) FROM channel_groups WHERE name='$GNAME'")"
 chk "探测密钥已删除" "0" "$(P "SELECT count(*) FROM api_keys WHERE name='$KNAME'")"
 
 echo

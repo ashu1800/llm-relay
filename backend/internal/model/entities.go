@@ -16,68 +16,12 @@ const (
 	ProtocolCustom          = "custom"
 )
 
-// 分组路由策略。
-//
-// 曾经还有一个 StrategyWeighted（"weighted"，加权随机）：那时 weight 是抽签
-// 份额，权重越大越容易被抽中。现在 weight 改为**组内优先级序号**（1..N 连续
-// 唯一，越小越优先，见 Channel.Weight），抽签语义与「越靠前越优先」正好相反，
-// 已经去掉。老库里 strategy='weighted' 的行由迁移改成 failover。
-const (
-	StrategyRoundRobin   = "round_robin"
-	StrategyLeastLatency = "least_latency"
-	StrategyFailover     = "failover"
-)
-
-// LegacyStrategyWeighted 是已废弃的策略值，只用于识别老数据。
-// 迁移会把它改成 failover；normalizeStrategy 也会把任何不认识的值收敛到
-// failover —— 否则库里留着一个前端下拉里没有的值，分组表单会显示空白。
-const LegacyStrategyWeighted = "weighted"
-
 // 报文留存策略。
 const (
 	PayloadStoreAll    = "all"
 	PayloadStoreErrors = "errors"
 	PayloadStoreNone   = "none"
 )
-
-// ChannelGroup 渠道分组：一组渠道的路由与权限范围。
-//
-// 「这个分组能用哪些模型」不由分组自己声明，而由组内渠道的模型白名单决定
-// （见 ChannelModel）。分组只回答「走哪批渠道、按什么策略排序、密钥能不能用它」。
-type ChannelGroup struct {
-	ID        uint   `gorm:"primaryKey" json:"id"`
-	Name      string `gorm:"size:64;uniqueIndex;not null" json:"name"`
-	Remark    string `gorm:"size:255" json:"remark"`
-	Strategy  string `gorm:"size:32;not null;default:weighted" json:"strategy"`
-	IsDefault bool   `gorm:"not null;default:false" json:"is_default"`
-	Enabled   bool   `gorm:"not null" json:"enabled"`
-	// Color 是分组在界面上的胶囊颜色（#rgb / #rrggbb）。
-	// 空值表示按分组名派生一个稳定颜色（见前端 utils/groupStyle.ts）——
-	// 不强制每个人都去挑颜色，但挑过就必须全站一致地用它。
-	Color string `gorm:"size:32" json:"color"`
-	// RPM / TPM 是这个分组整体的每分钟请求数 / token 数上限，0 表示不限制。
-	// 语义见 relay.GroupLimiter：RPM 统计发往上游的请求（含重试），
-	// TPM 统计上游回报的实际 token 数。
-	//
-	// 这两个列有 default 标签，AutoMigrate 给已有数据的表加列时会带上
-	// DEFAULT 0，因此不会像 multiplier 那样在升级时把应用卡死。
-	RPM int `gorm:"not null;default:0" json:"rpm"`
-	TPM int `gorm:"not null;default:0" json:"tpm"`
-	// DailyBudget 是分组每日花费预算，按币种分别设额：
-	// {"CNY": 50, "USD": 10}。空 / 缺币种 = 该币种不限。
-	//
-	// 预算直接作为分组的属性而不是独立的一张表：分组本来就是计费的
-	// 自然边界（渠道价格按渠道币种记账，渠道挂在分组下），而且这样
-	// 编辑走分组现有的表单与接口，不需要一整套 CRUD。
-	//
-	// 金额**不做跨币种折算**（与看板金额同一铁律：人民币和美元之间
-	// 没有汇率就不该有相加），超支判定逐币种独立进行。目前它只是
-	// 一个提醒（80% / 100% 时经 live 推送各喊一次，每天每档一次），
-	// 不拦截请求 —— 预算配错一刀切断会全站瘫痪，还会腰斩流式响应。
-	DailyBudget JSONMap   `gorm:"type:jsonb" json:"daily_budget"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-}
 
 // Channel 上游渠道。APIKeyEnc 存放 AES-GCM 密文，不随 JSON 输出。
 //
@@ -89,24 +33,10 @@ type ChannelGroup struct {
 type Channel struct {
 	ID         uint   `gorm:"primaryKey" json:"id"`
 	Name       string `gorm:"size:128;not null" json:"name"`
-	GroupID    uint   `gorm:"index;not null;default:1;uniqueIndex:idx_group_weight,priority:1" json:"group_id"`
 	Protocol   string `gorm:"size:32;not null;default:openai-chat" json:"protocol"`
 	BaseURL    string `gorm:"size:512;not null" json:"base_url"`
 	APIKeyEnc  string `gorm:"size:2048" json:"-"`
 	APIKeyHint string `gorm:"size:32" json:"api_key_hint"`
-	// Weight 是**组内优先级序号**：1..N 连续且唯一，值越小越优先。
-	//
-	// 它不再是「加权随机」的抽签份额（那个策略已下线），而是故障转移顺序：
-	// 转发时每轮取候选链首个（见 relay.Service.Relay），候选按本列升序排列，
-	// 于是 weight=1 先试、失败换 weight=2，依此类推。
-	//
-	// 由此产生两条不变量，不要绕过它们直接写这一列：
-	//   - 同一分组内 weight 唯一且连续 —— 由 idx_group_weight 这个唯一索引
-	//     在数据库层兜底（AutoMigrate 创建，回填见 store.normalizeChannelWeights）
-	//   - 增删渠道、换分组之后要重排，别留空洞。统一走
-	//     api.renumberGroupChannels / api.applyChannelOrder，它们在事务里
-	//     先整体错位再赋 1..N，避免唯一索引在中途瞬时冲突
-	Weight int `gorm:"not null;default:1;uniqueIndex:idx_group_weight,priority:2" json:"weight"`
 	// Currency 是这家上游给用户开账单用的币种（见 model.NormalizeCurrency）。
 	// 价格、日志金额、看板金额都按它计量 —— 同一个模型名在人民币渠道与
 	// 美元渠道上本来就是两笔不同的钱，不能合成一个数。
@@ -264,11 +194,26 @@ type APIKey struct {
 	Enabled       bool       `gorm:"not null" json:"enabled"`
 	AllowedModels StringList `gorm:"type:jsonb" json:"allowed_models"`
 	// RateLimitRPM 是该密钥每分钟允许的请求数；0 表示用全局默认值，负值表示不限
-	RateLimitRPM  int        `gorm:"not null;default:0" json:"rate_limit_rpm"`
-	AllowedGroups StringList `gorm:"type:jsonb" json:"allowed_groups"`
-	LastUsedAt    *time.Time `json:"last_used_at"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	RateLimitRPM int `gorm:"not null;default:0" json:"rate_limit_rpm"`
+	// ModelRoutes 是每个模型的候选渠道优先级：{"模型名": [渠道ID按优先级升序]}。
+	//
+	// 分组已移除（2026-10-26 破坏性重构）：转发时在「白名单含该模型的启用渠道」
+	// 与本表条目的交集内、按列表顺序做故障转移 —— 顺序完全由密钥自己决定，
+	// 渠道不再有全局 weight。与 AllowedModels 的约束：
+	//   - AllowedModels 非空（创建密钥时强制），且本表的键集合与它一致；
+	//   - 列表里的渠道必须存在且白名单里有该模型（api.normalizeKeyRoutes 校验），
+	//     之后渠道被删 / 白名单被改导致条目失效时，路由侧静默跳过该条目 ——
+	//     剩余条目为空即「无可用渠道」，报错里会点名去密钥页修改。
+	// 老库升级由 store 的一次性回填生成（按当时的渠道 weight 顺序）。
+	// column:model_channels 必须显式声明：Go 字段名 ModelRoutes 的默认列名是
+	// model_routes，而写路径（Updates(map)）与前端契约用的都是 model_channels。
+	// 没有这个声明时 AutoMigrate 会把 model_routes 旧列保留/重建，读路径绑到
+	// 旧列 → 「界面上怎么保存都是旧顺序」（2026-10-26 实测踩过：GET 回的
+	// model_channels 永远是回填时的旧值，psql 直查却是新值）。
+	ModelRoutes JSONMap    `gorm:"column:model_channels;type:jsonb" json:"model_channels"`
+	LastUsedAt  *time.Time `json:"last_used_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 // RequestLog 单次调用明细。金额只做成本感知，不参与任何扣减。
@@ -279,7 +224,6 @@ type RequestLog struct {
 	APIKeyName     string `gorm:"size:64" json:"api_key_name"`
 	ChannelID      uint   `gorm:"index" json:"channel_id"`
 	ChannelName    string `gorm:"size:128" json:"channel_name"`
-	GroupID        uint   `gorm:"index" json:"group_id"`
 	InboundProto   string `gorm:"size:32" json:"inbound_protocol"`
 	UpstreamProto  string `gorm:"size:32" json:"upstream_protocol"`
 	ModelRequested string `gorm:"size:128;index" json:"model_requested"`

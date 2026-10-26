@@ -210,7 +210,10 @@ type ChannelState struct {
 	inflight map[uint]int
 	rejected int64
 	// latency 是各渠道最近成功响应的首包延迟（EWMA，毫秒），
-	// 供 least_latency 策略排序。只记成功：失败渠道该被冷却，而不是参与比快。
+	// 外发到渠道运行期快照（Snapshot → LatencyMS），渠道页的运行状态
+	// tooltip 显示它。只记成功：失败渠道该被冷却，而不是参与比快。
+	// （least_latency 排序策略已随 2026-10-26 分组重构移除——数据现在
+	// 只服务健康展示，不再是路由输入。）
 	latency map[uint]float64
 	// failStreak 是各渠道的连续失败计数，供「温和熔断」用：
 	// 连续失败达到阈值的渠道自动冷却一段时间（见 Service.markChannelFailure），
@@ -334,16 +337,6 @@ func (s *ChannelState) RecordLatency(id uint, ms int) {
 	} else {
 		s.latency[id] = float64(ms)
 	}
-}
-
-// Latency 返回该渠道的平滑首包延迟；没有观测值时返回 0。
-func (s *ChannelState) Latency(id uint) float64 {
-	if s == nil {
-		return 0
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.latency[id]
 }
 
 // NoteFailure 把渠道的连续失败计数加一，返回加一后的连击数。

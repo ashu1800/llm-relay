@@ -6,8 +6,18 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
 
 BASE=http://127.0.0.1:8888
-SK=$(curl -s -X POST "$BASE/api/admin/keys" -H 'Content-Type: application/json' \
-  -d '{"name":"post-rotate","rate_limit_rpm":-1}' | python3 -c "import sys,json;print(json.load(sys.stdin)['key'])")
+# 密钥的每模型路由（2026-10-26 分组下线）：allowed_models 必填非空。
+# 只要有任意渠道承载 deepseek-v4-flash 就能验「逐渠道真实调用」；
+# 没有的话跳过（这个脚本本来就是手动排障用的探针）
+MCID=$(db_psql -t -A -c "SELECT channel_id FROM channel_models WHERE public_name='deepseek-v4-flash' AND enabled = true ORDER BY id LIMIT 1" 2>/dev/null)
+if [ -n "$MCID" ]; then
+  SK=$(curl -s -X POST "$BASE/api/admin/keys" -H 'Content-Type: application/json' \
+    -d "{\"name\":\"post-rotate\",\"rate_limit_rpm\":-1,\"allowed_models\":[\"deepseek-v4-flash\"],\"model_channels\":{\"deepseek-v4-flash\":[$MCID]}}" \
+    | python3 -c "import sys,json;print(json.load(sys.stdin)['key'])")
+else
+  echo "  !! 渠道白名单里没有 deepseek-v4-flash，无法建探针密钥"
+  exit 1
+fi
 
 echo "=== 轮换后逐渠道真实调用 ==="
 for cid in $(db_psql -t -A -c "SELECT id FROM channels ORDER BY id"); do

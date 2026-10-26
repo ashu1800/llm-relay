@@ -138,7 +138,7 @@ console.log('=== 主题令牌定义完整性 ===')
 const theme = readFileSync(join(SRC, 'styles/theme.css'), 'utf8')
 // 收集所有 --x 定义。来源有两类：
 //   1. CSS 里写的 `--x: ...`
-//   2. JS 里通过 :style 绑定的（例如 groupStyle.ts 返回 { '--gt-h': ... }）
+//   2. JS 里通过 :style 绑定的（例如 modelStyle.ts / groupStyle.ts 返回 { '--mt-h': ... }）
 // 两类都要算，否则会把合理用法误报成「未定义」。
 const defined = new Set([...theme.matchAll(/^\s*(--[\w-]+)\s*:/gm)].map((m) => m[1]))
 const referenced = new Set()
@@ -660,72 +660,71 @@ console.log('=== 多排数值的列左缘对齐契约 ===')
   )
 }
 
-// 列表与工具栏筛选解耦（2026-09-16 站主要求）。
+// 列表与工具栏筛选**共用**（2026-10-26 站主要求，反转 2026-09-16 的决定）。
 //
-// 为什么值得钉住：合并进看板时这两者本来是共用一套条件的（同一个工具栏同时喂
-// 卡片与列表，理由是「卡片按 A 算、列表按 B 查」看不出来）。站主后来说
-// 「请求日志列表不再使用筛选条件显示了，默认显示所有最新的请求」——
-// 因为列表的用处是盯着最新发生了什么，筛过之后反而看不到刚进来的调用。
-// 这是个**反向**的约定（原来是「必须共用」，现在是「不许共用」），
-// 最容易在下次改工具栏时被顺手加回来，所以两边都钉：组件不许再声明这四个 prop、
-// 看板不许再传，查询串里也不许再出现它们。
+// 历史：2026-09-16 起列表恒定全量最新（「盯着最新发生了什么」），
+// 契约当时钉的是「不许共用」；2026-10-26 站主要求把请求日志纳入筛选 ——
+// 同一页上「卡片筛了 A、列表显示 B」的两套口径才是真正要消灭的东西。
+// 「盯最新」的用途由默认视角承担（今天 + 全部，即未筛选时的行为）。
+//
+// 两条都钉：面板必须声明这四个筛选 prop 并进查询串（漏了任何一个是静默失效 ——
+// 卡片在筛、列表没筛，数字对不上还看不出原因）；「筛选只作用于上方卡片」
+// 的旧提示仍然禁止出现（列表也在筛了，那句话已经变成错误描述）。
 console.log('')
-console.log('=== 请求日志列表不吃筛选条件 ===')
+console.log('=== 请求日志列表与工具栏共用筛选 ===')
 {
   const panelPath = join(SRC, 'components/RequestLogPanel.vue')
   const panel = readFileSync(panelPath, 'utf8')
   const dash = readFileSync(join(SRC, 'views/DashboardView.vue'), 'utf8')
   const panelProps = declaredProps(panelPath)
 
-  const filterProps = ['range', 'groupId', 'channelId', 'model']
+  const filterProps = ['range', 'channelId', 'model', 'keyId']
   const declared = filterProps.filter((p) => panelProps.has(p))
   check(
-    '面板不再声明筛选类 props（时间范围 / 分组 / 渠道 / 模型）',
-    declared.length === 0,
-    `又加回来了: ${declared.join(', ')} —— 列表会重新跟着工具栏走`,
+    '面板声明全部四个筛选 props（时间范围 / 渠道 / 模型 / 密钥）',
+    declared.length === filterProps.length,
+    `缺少: ${filterProps.filter((p) => !panelProps.has(p)).join(', ')}`,
   )
-  const referenced = filterProps.filter((p) => new RegExp(`props\\.${p}\\b`).test(panel))
-  check('面板里没有残留的 props.<筛选> 引用', referenced.length === 0, referenced.join(', '))
+  const referenced = filterProps.filter((p) => !new RegExp(`props\\.${p}\\b`).test(panel))
+  check('面板里四个筛选 props 都被引用（进了 buildParams 或 watch）', referenced.length === 0, referenced.join(', '))
 
-  // 查询串只该有分页、两个排障深链与排序。用参数名而不是「有没有 if」来判：
-  // 少传一个 range 但改成别的方式塞进去（比如拼在 URL 上）同样要拦住。
+  // 查询串必须带上四个筛选 + 分页 + 两个排障深链 + 排序。用参数名而不是
+  // 「有没有 if」来判：少传一个但换成别的方式塞进去（比如拼在 URL 上）同样要拦住。
   //
-  // 2026-09-24：白名单加入 sort（P1-9 的服务端排序）。它进查询串是有意的 ——
-  // 排序必须由服务端做，前端只能排当前页那 50 条，而「最贵的一单」
-  // 显然不在当前页。这条断言的用意仍然成立：**别的一律不许出现**
-  //（尤其是时间范围 / 分组 / 渠道 / 模型那四个，见下面两条）。
+  // 2026-09-24：sort 进白名单（P1-9 的服务端排序）。排序必须由服务端做，
+  // 前端只能排当前页那 50 条。2026-10-26：channel_id / key_id / model / range
+  // 进白名单（列表纳入筛选）。这条断言的用意是**别的一律不许出现**。
   const bpStart = panel.indexOf('function buildParams')
   const bp = panel.slice(bpStart, panel.indexOf('\n}', bpStart))
   const sent = [...bp.matchAll(/params\.set\(\s*'([\w-]+)'/g)].map((m) => m[1]).sort()
   check(
-    '查询串只剩分页、两个排障深链与排序',
-    sent.join(',') === 'page,page_size,sort,status_class,trace_id',
+    '查询串 = 分页 + 四个筛选 + 两个排障深链 + 排序',
+    sent.join(',') === 'channel_id,key_id,model,page,page_size,range,sort,status_class,trace_id',
     `实际发出: ${sent.join(', ')}`,
   )
 
-  // 反过来也要钉：两个深链必须留着 —— 「点日志行看整条链路」与「只看失败」
+  // 两个深链必须留着 —— 「点日志行看整条链路」与「只看失败」
   // 的入口靠它，删掉的话排障深链会静默失效（页面上看不出来）
   check(
     '两个排障深链仍然进查询串（trace_id / status_class）',
     /params\.set\('trace_id'/.test(bp) && /params\.set\('status_class'/.test(bp),
   )
 
-  // 看板那边也不许再传：组件不声明时传下去只会被当成透传属性，
+  // 看板那边必须把四个条件传下去：面板声明了却不传，只会被当成透传属性，
   // 既不报错也不生效，是最难发现的一种「改了没反应」
   const tagStart = dash.indexOf('<RequestLogPanel')
   const tag = dash.slice(tagStart, dash.indexOf('/>', tagStart))
   const passed = filterProps.filter((p) =>
-    new RegExp(`:${p.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase())}=`).test(tag),
+    !new RegExp(`:${p.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase())}=`).test(tag),
   )
-  check('看板不再把这四个条件传给列表', passed.length === 0, `仍在传: ${passed.join(', ')}`)
+  check('看板把四个筛选条件传给列表', passed.length === 0, `缺少: ${passed.join(', ')}`)
 
-  // 作用范围提示已于 2026-09-17 应站主要求移除。当初「必须写这句话」的
-  // 契约一并反转成禁止式：钉住它不再出现 —— 从旧分支或旧文档里把标签
-  // 带回来不会报任何错，而那已经不是当前的产品决定
+  // 旧提示（「筛选只作用于上方卡片」）仍然禁止：列表现在也在吃筛选，
+  // 那句话从「过期描述」变成了「错误描述」。
   check(
-    '工具栏不再带「筛选只作用于上方卡片」提示',
+    '工具栏不得出现「筛选只作用于上方卡片」提示',
     !/筛选只作用于上方卡片/.test(dash),
-    '2026-09-17 站主移除了该标签；若要恢复请连同本契约一起改',
+    '列表已纳入筛选，该提示是错的；若要改回「列表不吃筛选」，请连同本契约一起反转',
   )
 }
 

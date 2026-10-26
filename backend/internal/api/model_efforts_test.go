@@ -74,29 +74,15 @@ func probeEffortData(t *testing.T, db *gorm.DB) {
 	cleanup := func() {
 		db.Exec(`DELETE FROM channel_models WHERE public_name LIKE 'eff-probe-%'`)
 		db.Exec(`DELETE FROM channels WHERE name LIKE 'eff-probe-%'`)
-		db.Exec(`DELETE FROM channel_groups WHERE name LIKE 'eff-probe-%'`)
 	}
 	cleanup()
 	t.Cleanup(cleanup)
 
-	grp := model.ChannelGroup{Name: "eff-probe-group", Enabled: true}
-	if err := db.Create(&grp).Error; err != nil {
-		t.Fatalf("建分组失败: %v", err)
-	}
-	off := model.ChannelGroup{Name: "eff-probe-group-off", Enabled: false}
-	if err := db.Create(&off).Error; err != nil {
-		t.Fatalf("建停用分组失败: %v", err)
-	}
-
 	var modelRows []model.ChannelModel
-	// weight 是组内优先级序号，库上有 (group_id, weight) 唯一索引 ——
-	// 同一个分组里逐条递增，别全写 1
-	nextWeight := map[uint]int{}
-	mkChannel := func(name, protocol string, groupID uint, enabled bool, bindings []model.ChannelModel) {
-		nextWeight[groupID]++
+	mkChannel := func(name, protocol string, enabled bool, bindings []model.ChannelModel) {
 		ch := model.Channel{
-			Name: name, GroupID: groupID, Protocol: protocol,
-			BaseURL: "http://127.0.0.1:9/v1", Enabled: enabled, Weight: nextWeight[groupID],
+			Name: name, Protocol: protocol,
+			BaseURL: "http://127.0.0.1:9/v1", Enabled: enabled,
 		}
 		if err := db.Create(&ch).Error; err != nil {
 			t.Fatalf("建渠道 %s 失败: %v", name, err)
@@ -116,9 +102,9 @@ func probeEffortData(t *testing.T, db *gorm.DB) {
 	}
 
 	// 同名模型挂在两条不同协议的渠道上：档位要取并集
-	mkChannel("eff-probe-anthropic", model.ProtocolAnthropic, grp.ID, true,
+	mkChannel("eff-probe-anthropic", model.ProtocolAnthropic, true,
 		[]model.ChannelModel{b("eff-probe-shared", true)})
-	mkChannel("eff-probe-openai", model.ProtocolOpenAIChat, grp.ID, true,
+	mkChannel("eff-probe-openai", model.ProtocolOpenAIChat, true,
 		[]model.ChannelModel{
 			b("eff-probe-shared", true),
 			// 显式声明压在协议推导之上（openai-chat 推导只有五档）
@@ -126,13 +112,11 @@ func probeEffortData(t *testing.T, db *gorm.DB) {
 			// 停用的行不出现在列表里
 			b("eff-probe-disabled", false),
 		})
-	// 停用渠道、停用分组里的模型同理
-	mkChannel("eff-probe-off-channel", model.ProtocolAnthropic, grp.ID, false,
+	// 停用渠道里的模型同理
+	mkChannel("eff-probe-off-channel", model.ProtocolAnthropic, false,
 		[]model.ChannelModel{b("eff-probe-off-channel-model", true)})
-	mkChannel("eff-probe-off-group", model.ProtocolAnthropic, off.ID, true,
-		[]model.ChannelModel{b("eff-probe-off-group-model", true)})
 	// embeddings 渠道没有思考概念：声明为空数组（不是 null）
-	mkChannel("eff-probe-embed", model.ProtocolEmbeddings, grp.ID, true,
+	mkChannel("eff-probe-embed", model.ProtocolEmbeddings, true,
 		[]model.ChannelModel{b("eff-probe-embeddings", true)})
 
 	if err := db.Create(&modelRows).Error; err != nil {
@@ -158,7 +142,7 @@ func TestListModelsSupportedEfforts(t *testing.T) {
 			_ = sqlDB.Close()
 		}
 	})
-	if err := db.AutoMigrate(&model.ChannelGroup{}, &model.Channel{}, &model.ChannelModel{}); err != nil {
+	if err := db.AutoMigrate(&model.Channel{}, &model.ChannelModel{}); err != nil {
 		t.Fatalf("建表失败: %v", err)
 	}
 	probeEffortData(t, db)
@@ -228,9 +212,9 @@ func TestListModelsSupportedEfforts(t *testing.T) {
 	// 没有思考概念的协议：空数组
 	eq("eff-probe-embeddings", []string{})
 
-	for _, hidden := range []string{"eff-probe-disabled", "eff-probe-off-channel-model", "eff-probe-off-group-model"} {
+	for _, hidden := range []string{"eff-probe-disabled", "eff-probe-off-channel-model"} {
 		if _, ok := byID[hidden]; ok {
-			t.Errorf("%s 不该出现在列表里（停用行 / 停用渠道 / 停用分组）", hidden)
+			t.Errorf("%s 不该出现在列表里（停用行 / 停用渠道）", hidden)
 		}
 	}
 	// created / owned_by 这些 OpenAI 兼容字段必须还在：客户端靠它们解析

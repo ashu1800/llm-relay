@@ -68,12 +68,13 @@ type backupBundle struct {
 	ExportedAt time.Time `json:"exported_at"`
 	// SecretFingerprint 是加密主密钥的短指纹。渠道密钥在备份里始终是密文，
 	// 只有同一把 RELAY_SECRET 才能解出原文；靠这个指纹可以提前判断能否恢复。
-	SecretFingerprint string               `json:"secret_fingerprint"`
-	Groups            []model.ChannelGroup `json:"channel_groups"`
-	Channels          []channelExport      `json:"channels"`
+	SecretFingerprint string          `json:"secret_fingerprint"`
+	Channels          []channelExport `json:"channels"`
 	// Bindings 就是渠道的模型白名单。老备份里还带着 models/providers 两个数组，
 	// 结构体里已经没有了 —— Go 解析时会忽略不认识的字段，所以旧备份仍能导入，
 	// 只是其中的 models 不会再生效（绑定的 public_name 已经随白名单落库）。
+	// 老备份里的 channel_groups 数组同理：分组功能已移除（2026-10-26），
+	// 字段随之消失，旧文件里的那份会被 Go 静默忽略。
 	Bindings []model.ChannelModel `json:"channel_models"`
 	// Templates 字段随模板管理一起下线。旧备份里仍然带着 channel_templates 数组，
 	// Go 解析时会忽略不认识的字段：旧备份照样能导入，只是其中的模板不再生效
@@ -124,15 +125,12 @@ func (s *Server) exportConfig(c *gin.Context) {
 		name string
 		run  func() error
 	}{
-		{"分组", func() error { return db.Order("id").Find(&b.Groups).Error }},
 		{
 			"渠道", func() error {
 				var rows []model.Channel
-				// 按 (分组, 优先级序号) 导出：weight 是组内的故障转移顺序，
-				// 导入时按文件顺序依次追加就能还原同一套顺序。
-				// 只按 id 排会让备份→恢复把优先级顺序打乱（顺序是拿拖拽调出来的，
-				// 丢了没法从 id 推回去）
-				if err := db.Order("group_id, weight, id").Find(&rows).Error; err != nil {
+				// 按 id 导出：渠道已没有全局优先级（路由顺序归密钥的
+				// model_channels 管），id 升序就是建渠道顺序，足够稳定。
+				if err := db.Order("id").Find(&rows).Error; err != nil {
 					return err
 				}
 				for _, ch := range rows {
@@ -229,31 +227,11 @@ func (s *Server) importConfig(c *gin.Context) {
 				"），渠道密钥无法解密，导入后需要重新填写上游密钥")
 	}
 
-	// 按自然键合并：已存在的不覆盖，避免把本机正在用的配置改掉
-	groupIDMap := map[uint]uint{}
-	for i := range b.Groups {
-		gr := b.Groups[i]
-		oldID := gr.ID
-		var exist model.ChannelGroup
-		if err := db.Where("name = ?", gr.Name).First(&exist).Error; err == nil {
-			groupIDMap[oldID] = exist.ID
-			report.Skipped["分组"]++
-			continue
-		}
-		gr.ID = 0
-		// 策略也要收敛：备份可能是「加权随机」还在的时候导出的，直接落库会
-		// 让分组表单显示空白（下拉里已经没有这一项了）。启动时的迁移虽然也
-		// 会收拾它，但那要等到下次重启，中间这段时间界面上是坏的
-		gr.Strategy = normalizeStrategy(gr.Strategy)
-		if err := db.Create(&gr).Error; err != nil {
-			report.Warnings = append(report.Warnings, "分组 "+gr.Name+" 导入失败: "+err.Error())
-			continue
-		}
-		groupIDMap[oldID] = gr.ID
-		report.Created["分组"]++
-	}
+	// 按自然键合并：已存在的不覆盖，避免把本机正在用的配置改掉。
+	// 分组已随 2026-10-26 重构移除，老备份里的 channel_groups 数组由
+	// Go 的未知字段忽略语义静默跳过，无需（也没法）在这里合并。
 
-	// 代理同样按名字合并。渠道要引用代理，所以这张映射表先建好
+	// 代理按名字合并。渠道要引用代理，所以这张映射表先建好
 	proxyIDMap := map[uint]uint{}
 	for i := range b.Proxies {
 		px := b.Proxies[i].Proxy
@@ -310,30 +288,7 @@ func (s *Server) importConfig(c *gin.Context) {
 			continue
 		}
 		ch.ID = 0
-		// 映射不到就落到本机默认分组。
-		// 原来是「映射不到就保留旧 ID」—— 那个 ID 在本机可能指向另一个分组，
-		// 或者根本不存在，渠道会因此静默地不参与路由。
-		// 本机也可能压根没有默认分组（用户把它删了，见 store.Seed）：
-		// 那就落到 id 最小的分组，但**落到哪个分组必须写进报告** ——
-		// 悄悄改变归属正是这段代码一开始要避免的事
-		if mapped, ok := groupIDMap[ch.GroupID]; ok {
-			ch.GroupID = mapped
-		} else if gid, ok := defaultGroupID(s); ok {
-			ch.GroupID = gid
-			report.Warnings = append(report.Warnings,
-				"渠道 "+ch.Name+" 的原始分组在本机不存在，已归入默认分组")
-		} else {
-			var fallback model.ChannelGroup
-			if err := db.Order("id").First(&fallback).Error; err != nil {
-				report.Warnings = append(report.Warnings,
-					"渠道 "+ch.Name+" 的原始分组在本机不存在，本机也没有任何分组，该渠道已跳过")
-				continue
-			}
-			ch.GroupID = fallback.ID
-			report.Warnings = append(report.Warnings,
-				"渠道 "+ch.Name+" 的原始分组在本机不存在，本机也没有默认分组，已归入「"+fallback.Name+"」")
-		}
-		// 代理同样要重新映射。不映射的话，备份里指向代理 #2 的渠道
+		// 代理要重新映射。不映射的话，备份里指向代理 #2 的渠道
 		// 恢复后会指向本机的 #2 —— 那是另一条线路，流量会从非预期的出口出去，
 		// 而界面上只显示一个代理名，看不出问题；映射不到就置 0（直连）并报警，
 		// 因为「直连」至少是可见的
@@ -346,19 +301,9 @@ func (s *Server) importConfig(c *gin.Context) {
 					"渠道 "+ch.Name+" 的出站代理在本机不存在，已改为直连")
 			}
 		}
-		// 权重不能照抄文件里的值：它是组内优先级序号，且库上有
-		// (group_id, weight) 唯一索引。备份是逐条 Create 的，文件里若有多条
-		// 同序号（老备份一定有，那时同分组同权重是常态），第二条就会撞索引、
-		// 整条渠道导入失败。改为逐条排到目标分组末尾 —— 导出时已按
-		// (group_id, weight) 排序，所以文件顺序天然还原出原来的优先级顺序。
-		if err := db.Transaction(func(tx *gorm.DB) error {
-			w, err := appendChannelToGroup(tx, ch.GroupID)
-			if err != nil {
-				return err
-			}
-			ch.Weight = w
-			return tx.Create(&ch).Error
-		}); err != nil {
+		// 渠道已没有全局 weight（路由顺序归密钥的 model_channels 管），
+		// 文件里的 weight 字段（老备份）由 Go 的未知字段语义忽略。
+		if err := db.Create(&ch).Error; err != nil {
 			report.Warnings = append(report.Warnings, "渠道 "+ch.Name+" 导入失败: "+err.Error())
 			continue
 		}
@@ -440,40 +385,65 @@ func (s *Server) importConfig(c *gin.Context) {
 				"密钥 "+k.Name+" 缺少哈希无法恢复，需要重新签发")
 			continue
 		}
-		// 分组白名单必须跟着映射：条目存的是**备份库**的分组 ID（更老的备份
-		// 里是名字），与本机同名分组的 ID 几乎一定不同 —— 不映射的话，
-		// 恢复出来的白名单会指向本机的另一个分组（静默指错，比悬空更糟：
-		// 限制还在、限的是别人）或不存在的分组（一调用就 403）。
-		// 数字条目只认 groupIDMap：备份里的 ID 3 在本机往往是别的分组，
-		// 拿它直接查本库等于主动指错。名字条目（老备份）按名字查。
-		// 都映射不到的条目丢弃并写进报告 —— 限制虽然变宽，但报告点名了它，
-		// 比「看起来恢复成功、一调用就 403」可见得多。
-		if len(k.AllowedGroups) > 0 {
-			refs := model.StringList{}
-			for _, raw := range k.AllowedGroups {
-				item := strings.TrimSpace(raw)
-				if item == "" {
-					continue
-				}
-				mapped := false
-				if n, err := strconv.ParseUint(item, 10, 32); err == nil {
-					if nid, ok := groupIDMap[uint(n)]; ok {
-						refs = append(refs, strconv.FormatUint(uint64(nid), 10))
-						mapped = true
-					}
-				} else {
-					var g model.ChannelGroup
-					if err := db.Where("name = ?", item).First(&g).Error; err == nil {
-						refs = append(refs, strconv.FormatUint(uint64(g.ID), 10))
-						mapped = true
+		// 渠道 ID 要跟着映射：路由条目存的是**备份库**的渠道 ID，与本机
+		// 同名渠道的 ID 几乎一定不同 —— 不映射的话，恢复出来的路由会指向
+		// 本机的另一条渠道（静默指错，比悬空更糟）或不存在的渠道（一调用
+		// 就「没有可用渠道」）。映射不到的条目丢弃并写进报告。
+		//
+		// 老备份（分组时代）没有 model_channels 字段：按 allowed_models
+		// 重建，候选取「本机拥有该模型的启用渠道」（建完白名单之后跑这段，
+		// 所以查得到）。模型一条渠道都没有时保留空列表并点名 —— 请求会
+		// 如实报「没有可用渠道」，比静默删掉模型限制可见得多。
+		parsedRoutes := KeyRoutesOf(&k)
+		rebuilt := model.JSONMap{}
+		rebuiltFromLegacy := false
+		if len(parsedRoutes) > 0 {
+			for name, ids := range parsedRoutes {
+				list := make([]uint, 0, len(ids))
+				for _, id := range ids {
+					if nid, ok := channelIDMap[id]; ok {
+						list = append(list, nid)
+					} else {
+						report.Warnings = append(report.Warnings,
+							"密钥 "+k.Name+" 的模型 "+name+" 路由引用的渠道 #"+strconv.FormatUint(uint64(id), 10)+" 在本机没有对应渠道，该条目已移除")
 					}
 				}
-				if !mapped {
-					report.Warnings = append(report.Warnings,
-						"密钥 "+k.Name+" 的分组白名单条目「"+item+"」在本机没有对应分组，该条限制已移除")
+				rebuilt[name] = list
+			}
+		} else {
+			rebuiltFromLegacy = true
+			names := make([]string, 0, len(k.AllowedModels))
+			for _, raw := range k.AllowedModels {
+				name := strings.TrimSpace(raw)
+				if name != "" {
+					names = append(names, name)
 				}
 			}
-			k.AllowedGroups = refs
+			if len(names) == 0 {
+				// 老语义「不限模型」：展开成全量模型（与启动回填同一规则），
+				// 否则这把密钥在新模型下一调用就被 403。
+				db.Model(&model.ChannelModel{}).Where("enabled = true").
+					Distinct("public_name").Order("public_name").Pluck("public_name", &names)
+			}
+			for _, name := range names {
+				var ids []uint
+				if err := db.Model(&model.ChannelModel{}).
+					Joins("JOIN channels ON channels.id = channel_models.channel_id").
+					Where("channel_models.enabled = true AND channels.enabled = true AND channel_models.public_name = ?", name).
+					Order("channel_models.channel_id").
+					Pluck("channel_models.channel_id", &ids).Error; err != nil || len(ids) == 0 {
+					report.Warnings = append(report.Warnings,
+						"密钥 "+k.Name+" 的模型 "+name+" 在本机没有任何渠道能跑，路由已置空")
+					ids = []uint{}
+				}
+				rebuilt[name] = ids
+			}
+			k.AllowedModels = names
+		}
+		k.ModelRoutes = rebuilt
+		if rebuiltFromLegacy {
+			report.Warnings = append(report.Warnings,
+				"密钥 "+k.Name+" 来自旧版备份（分组时代），已按现有渠道自动生成模型路由，请到「密钥信息」核对顺序")
 		}
 		var exist model.APIKey
 		if err := db.Where("key_hash = ?", k.KeyHash).First(&exist).Error; err == nil {

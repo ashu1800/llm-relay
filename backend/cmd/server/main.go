@@ -206,11 +206,6 @@ func run(ctx context.Context) error {
 		InjectStreamUsage:      true,
 	}, logger)
 	svc.SetChannelState(state)
-	// 分组级每分钟额度：分组上配的 RPM / TPM 由它生效。
-	// 与密钥级限流（RateLimiter）是两套独立的口子：前者保护上游，
-	// 后者约束单把密钥，两者都不配就是不限制。
-	groupLimit := relay.NewGroupLimiter()
-	svc.SetGroupLimiter(groupLimit)
 	// 出站代理：渠道（或某个模型）指定走哪个代理时，由它按 id 取配置。
 	// 停用的代理在这里被判为不可用 —— 转发器收到「不可用」会直接让请求失败，
 	// 而不是回退直连：用户配代理往往就是为了不让请求从本机 IP 出去。
@@ -278,7 +273,6 @@ func run(ctx context.Context) error {
 
 		RateLimiter: rateLimiter,
 		Gate:        gate,
-		GroupLimit:  groupLimit,
 		Live:        live,
 		Logger:      logger,
 
@@ -333,11 +327,10 @@ func run(ctx context.Context) error {
 	srv.StartLive(ctx)
 
 	// 密钥限流窗口的定期回收 + 日志保留期的自动清理，都跟着进程生命周期走；
-	// 渠道状态（冷却条目）与分组限流窗口同样挂上回收 —— 它们的 map
-	// 都只在被动访问时清理，删除的渠道/分组会留永久残余
+	// 渠道状态（冷却条目）同样挂上回收 —— 它的 map 只在被动访问时清理，
+	// 删除的渠道会留永久残余
 	rateLimiter.StartSweeper(ctx, 10*time.Minute)
 	state.StartSweeper(ctx, 10*time.Minute)
-	groupLimit.StartSweeper(ctx, 10*time.Minute)
 	srv.StartRetentionLoop(ctx)
 
 	// 版本检测同理：服务端每 5 分钟自己查一次发布源，结果写进更新服务的缓存。

@@ -40,8 +40,6 @@ type Deps struct {
 	// 限流与并发控制
 	RateLimiter *relay.RateLimiter
 	Gate        *relay.ConcurrencyGate
-	// GroupLimit 是分组级的每分钟额度，与密钥级限流是两套独立的口子
-	GroupLimit *relay.GroupLimiter
 
 	// Update 是版本更新服务（检测 / 下载 / 替换 / 回滚）。
 	// 为 nil 时更新相关的接口回 501，而 /system/version 仍然可用 ——
@@ -159,7 +157,6 @@ func (s *Server) registerAdminRoutes(r *gin.Engine) {
 		admin.GET("/system/info", s.systemInfo)
 		registerSystemRoutes(admin, s)
 		registerChannelRoutes(admin, s)
-		registerGroupRoutes(admin, s)
 		registerKeyRoutes(admin, s)
 		registerLogRoutes(admin, s)
 		registerClientAliasRoutes(admin, s)

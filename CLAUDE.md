@@ -1,8 +1,12 @@
 # CLAUDE.md
 
-个人自用优先的大模型 API 网关：多协议入站 → 分组多渠道故障转移 → 按「渠道 × 模型」计价。
+个人自用优先的大模型 API 网关：多协议入站 → 密钥级「模型 → 渠道优先级」故障转移 → 按「渠道 × 模型」计价。
 Go 1.25 + Gin + GORM/PostgreSQL 后端，Vue 3 + Vite + Ant Design Vue 4 前端；前端产物
 `//go:embed` 进二进制，交付形态是「单个裸二进制 + systemd」。
+
+> 2026-10-26 破坏性重构：分组（ChannelGroup）整体移除。路由顺序由每把密钥的
+> 「模型 → 有序候选渠道」决定；轮询 / 最低延迟策略、分组 RPM/TPM、分组日预算
+> 随之删除。旧库升级由 store 的一次性回填迁移（密钥按当时渠道权重生成路由）。
 
 ## 常用命令
 
@@ -37,8 +41,8 @@ make build-embed             # 先构建前端、拷贝到 backend/internal/web/
 
 ```
 入站协议 → 归一成 OpenAI Chat（通用语，api/protocols.go）
-  → 密钥鉴权 + 模型/分组白名单（api/middleware.go）
-  → 全局并发闸门 → relay.Service.Relay（选渠道 + 故障转移）
+  → 密钥鉴权 + 模型白名单 + 每模型渠道路由解析（api/middleware.go、api/admin.go 的 KeyRoutesOf）
+  → 全局并发闸门 → relay.Service.Relay（候选链 = 密钥指定的有序渠道 + 故障转移）
   → convert.UpstreamRequest 按渠道 protocol 转上游格式 → 上游
   → 响应经 Translator 转回入站协议 → 写回客户端
   → finalizeLog（定价快照 + 报文留存 + 异步落库）
@@ -49,15 +53,15 @@ make build-embed             # 先构建前端、拷贝到 backend/internal/web/
 | `backend/cmd/server/main.go` | 依赖装配、后台循环、优雅关闭（退出预算 3s+1.5s+0.5s） |
 | `backend/internal/api/` | 路由与中间件、管理接口、WebSocket 实时推送、静态资源 |
 | `backend/internal/relay/service.go` | 故障转移编排：候选循环、冷却、失败记账、共识豁免 |
-| `backend/internal/relay/router.go` | 候选查询、兜底候选合并、策略排序（failover/RR/least_latency） |
+| `backend/internal/relay/router.go` | 候选查询（按密钥路由的渠道集）、兜底候选合并、可用性优先排序 |
 | `backend/internal/relay/forward.go` | 单次上游调用：协议转换、鉴权头、代理选择、超时 |
 | `backend/internal/relay/convert/` | 四协议双向编解码，SSE 逐事件改写 |
-| `backend/internal/relay/limit.go` / `grouplimit.go` | 密钥级 RPM / 分组级 RPM·TPM |
+| `backend/internal/relay/limit.go` | 密钥级 RPM（分组级 RPM/TPM 已随分组移除） |
 | `backend/internal/relay/logwriter.go` | 异步日志队列（容量 2048，队列满丢弃并计数） |
 | `backend/internal/pricing/engine.go` | 渠道×模型单价、时段倍率、定价快照 |
 | `backend/internal/netguard/` | 出站 SSRF 防护（图标抓取、代理测试） |
 | `backend/internal/update/` | 版本检测、下载校验、原子自替换、回滚 |
-| `frontend/src/views/` | 六个管理页；看板页含请求日志列表 |
+| `frontend/src/views/` | 五个管理页；看板页含请求日志列表（与概览卡共用筛选） |
 | `frontend/src/components/RequestLogPanel.vue` | 日志表（列宽测量、实时插行、键盘模型） |
 | `frontend/src/composables/useLive.ts` | 全局单条 WebSocket、断线重连、连接状态判定 |
 

@@ -11,12 +11,11 @@ PSQL="db_psql -t -A"
 q() { $PSQL -c "$1"; }
 
 echo "=== 1. 建一个带真实密钥的测试渠道并写入模型白名单 ==="
-GID=$(q "SELECT id FROM channel_groups WHERE is_default=true LIMIT 1")
 # 密钥一律从环境变量取，脚本里不留明文凭据
 : "${DS_KEY:?请先 export DS_KEY 与 DS_BASE}"
 : "${DS_BASE:?请先 export DS_KEY 与 DS_BASE}"
 CH=$(curl -s -X POST "$BASE/channels" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"backup-roundtrip\",\"group_id\":$GID,\"protocol\":\"openai-chat\",\"base_url\":\"$DS_BASE\",\"api_key\":\"$DS_KEY\",\"weight\":1}")
+  -d "{\"name\":\"backup-roundtrip\",\"protocol\":\"openai-chat\",\"base_url\":\"$DS_BASE\",\"api_key\":\"$DS_KEY\"}")
 CHID=$(echo "$CH" | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
 echo "  渠道 id=$CHID"
 BIND=$(curl -s -X POST "$BASE/channels/$CHID/models" -H 'Content-Type: application/json' \
@@ -29,7 +28,10 @@ echo "  恢复前密文: ${ENC_BEFORE:0:32}... (长度 ${#ENC_BEFORE})"
 
 echo
 echo "=== 2. 先验证这个渠道真的能打通 ==="
-SK=$(curl -s -X POST "$BASE/keys" -H 'Content-Type: application/json' -d '{"name":"restore-probe","rate_limit_rpm":-1}' | python3 -c "import sys,json;print(json.load(sys.stdin)['key'])")
+# 密钥的每模型路由指向测试渠道（恢复后 model_channels 由导入按渠道 id 重映射）
+SK=$(curl -s -X POST "$BASE/keys" -H 'Content-Type: application/json' \
+  -d "{\"name\":\"restore-probe\",\"rate_limit_rpm\":-1,\"allowed_models\":[\"deepseek-v4-flash\"],\"model_channels\":{\"deepseek-v4-flash\":[$CHID]}}" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['key'])")
 # 临时停掉另外两个渠道，确保请求走到测试渠道
 q "UPDATE channels SET enabled=false WHERE id<>$CHID" > /dev/null
 code=$(curl -s -o /tmp/probe.json -w "%{http_code}" -m 60 "http://127.0.0.1:8888/v1/chat/completions" \

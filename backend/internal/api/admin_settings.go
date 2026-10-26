@@ -32,7 +32,6 @@ func (s *Server) getSettings(c *gin.Context) {
 		Channels int64 `json:"channels"`
 		Models   int64 `json:"models"`
 		Keys     int64 `json:"keys"`
-		Groups   int64 `json:"groups"`
 	}
 	if err := db.Raw(`SELECT
 		(SELECT COUNT(*) FROM request_logs)::bigint AS logs,
@@ -42,8 +41,7 @@ func (s *Server) getSettings(c *gin.Context) {
 			   OR cache_read_per1_m <> 0 OR cache_write_per1_m <> 0)::bigint AS priced,
 		(SELECT COUNT(*) FROM channels)::bigint AS channels,
 		(SELECT COUNT(DISTINCT public_name) FROM channel_models WHERE enabled = true)::bigint AS models,
-		(SELECT COUNT(*) FROM api_keys)::bigint AS keys,
-		(SELECT COUNT(*) FROM channel_groups)::bigint AS groups`).Scan(&counts).Error; err != nil {
+		(SELECT COUNT(*) FROM api_keys)::bigint AS keys`).Scan(&counts).Error; err != nil {
 		writeInternalError(c, err)
 		return
 	}
@@ -88,7 +86,7 @@ func (s *Server) getSettings(c *gin.Context) {
 		"counts": gin.H{
 			"logs": counts.Logs, "payloads": counts.Payloads, "priced": counts.Priced,
 			"channels": counts.Channels, "models": counts.Models,
-			"keys": counts.Keys, "groups": counts.Groups,
+			"keys": counts.Keys,
 		},
 		"log_span": gin.H{"earliest": span.Earliest, "latest": span.Latest},
 		// env_keys 是「每个运行时字段由哪个环境变量决定」的唯一事实来源。

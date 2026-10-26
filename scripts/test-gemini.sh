@@ -1,17 +1,29 @@
 #!/usr/bin/env bash
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/testdb.sh"
 
 # 管理接口已上登录鉴权：自动登录并给后续 curl 注入会话 Cookie（鉴权关闭时静默跳过）
 source "$(dirname "${BASH_SOURCE[0]}")/admin-auth.sh" && admin_auth_setup
 
 BASE="http://127.0.0.1:8888"
 
-SK=$(curl -s -X POST "$BASE/api/admin/keys" -H 'Content-Type: application/json' -d '{"name":"gemini-test"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['key'])")
-echo "对外密钥已创建"
+# 密钥的每模型路由（2026-10-26 分组下线）：allowed_models 必填非空。
+# 模型与承载渠道从库里现取：渠道白名单是用户随时会改的，写死必挂
+MODEL=$(db_psql -t -A -c "SELECT m.public_name FROM channel_models m JOIN channels c ON c.id = m.channel_id AND c.enabled = true WHERE m.enabled = true ORDER BY m.id LIMIT 1")
+CID=$(db_psql -t -A -c "SELECT m.channel_id FROM channel_models m JOIN channels c ON c.id = m.channel_id AND c.enabled = true WHERE public_name='$MODEL' AND m.enabled = true ORDER BY m.id LIMIT 1")
+if [ -z "$MODEL" ] || [ -z "$CID" ]; then
+  echo "!! 没有任何启用的渠道模型白名单，无法建探针密钥（先给渠道配一个模型）"
+  exit 1
+fi
+
+SK=$(curl -s -X POST "$BASE/api/admin/keys" -H 'Content-Type: application/json' \
+  -d "{\"name\":\"gemini-test\",\"allowed_models\":[\"$MODEL\"],\"model_channels\":{\"$MODEL\":[$CID]}}" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['key'])")
+echo "对外密钥已创建（模型 $MODEL）"
 
 echo
 echo "===== 1. Gemini 非流式 ====="
-curl -s -m 90 "$BASE/v1beta/models/deepseek-v4-flash:generateContent" \
+curl -s -m 90 "$BASE/v1beta/models/$MODEL:generateContent" \
   -H "x-goog-api-key: $SK" -H 'Content-Type: application/json' \
   -d '{"systemInstruction":{"parts":[{"text":"回答要极简"}]},"contents":[{"role":"user","parts":[{"text":"只回复:OK"}]}],"generationConfig":{"maxOutputTokens":40}}' \
   -o /tmp/g1.json -w "  HTTP %{http_code}\n"
@@ -33,7 +45,7 @@ PY
 
 echo
 echo "===== 2. Gemini 流式 ====="
-curl -s -m 90 -N "$BASE/v1beta/models/deepseek-v4-flash:streamGenerateContent" \
+curl -s -m 90 -N "$BASE/v1beta/models/$MODEL:streamGenerateContent" \
   -H "x-goog-api-key: $SK" -H 'Content-Type: application/json' \
   -d '{"contents":[{"role":"user","parts":[{"text":"数到3"}]}],"generationConfig":{"maxOutputTokens":30}}' \
   -o /tmp/g2.sse -w "  HTTP %{http_code}\n"
@@ -44,7 +56,7 @@ echo
 echo
 
 echo "===== 3. 不支持的 Gemini 方法 ====="
-curl -s -m 20 -X POST "$BASE/v1beta/models/deepseek-v4-flash:countTokens" \
+curl -s -m 20 -X POST "$BASE/v1beta/models/$MODEL:countTokens" \
   -H "x-goog-api-key: $SK" -H 'Content-Type: application/json' -d '{}' -w "  HTTP %{http_code}\n"
 echo
 

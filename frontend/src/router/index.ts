@@ -38,7 +38,12 @@ const routes: RouteRecordRaw[] = [
       },
       { path: 'keys', name: 'keys', component: () => import('@/views/KeysView.vue'), meta: { title: '密钥信息' } },
       { path: 'channels', name: 'channels', component: () => import('@/views/ChannelsView.vue'), meta: { title: '渠道管理' } },
-      { path: 'groups', name: 'groups', component: () => import('@/views/GroupsView.vue'), meta: { title: '分组管理' } },
+      // 分组管理已随分组功能一起移除（2026-10-26）。旧地址保留为跳转：
+      // 收藏与历史记录里可能还指着 /console/groups，落到渠道管理是最近的去处
+      {
+        path: 'groups',
+        redirect: () => ({ path: '/console/channels' })
+      },
       { path: 'proxies', name: 'proxies', component: () => import('@/views/ProxiesView.vue'), meta: { title: '代理管理' } },
       { path: 'system', name: 'system', component: () => import('@/views/SettingsView.vue'), meta: { title: '系统设置' } }
     ]

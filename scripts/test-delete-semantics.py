@@ -5,6 +5,7 @@
 原来六个删除接口里有五个对不存在的 ID 返回 {"deleted":true}，
 调用方（含前端）分不清「删除成功」和「这个 ID 根本不存在」：
 幂等重试、并发删除、传错 ID 全被当成成功，问题被静默吞掉。
+（分组删除接口已随分组功能移除，清单里不再有它。）
 """
 import json
 import urllib.error
@@ -50,11 +51,10 @@ def chk(name, want, got):
         print("  [失败] %-46s 期望 %s 实际 %s" % (name, want, got))
 
 
-print("=== 1. 对不存在的 ID，六个删除接口都必须报 404 ===")
+print("=== 1. 对不存在的 ID，删除接口都必须报 404 ===")
 GHOST = 999999
 for path, label in [
     ("/channels/%d" % GHOST, "渠道"),
-    ("/groups/%d" % GHOST, "分组"),
     ("/keys/%d" % GHOST, "密钥"),
     ("/pricing/%d" % GHOST, "定价"),
 ]:
@@ -64,8 +64,24 @@ for path, label in [
         print("       返回体: %s" % body)
 
 print()
+print("=== 1b. 已移除的分组接口必须 404（防止悄悄复活）===")
+code, _ = call("DELETE", "/groups/%d" % GHOST)
+chk("分组接口已删除（DELETE 报 404）", 404, code)
+code, _ = call("GET", "/groups")
+chk("分组接口已删除（GET 报 404）", 404, code)
+
+print()
 print("=== 2. 真删一次应当成功，再删一次应当 404 ===")
-_, k = call("POST", "/keys", {"name": "delete-semantics-key"})
+# 密钥创建现在是强校验（每个模型至少一条候选渠道），先建渠道和白名单
+_, ch = call("POST", "/channels", {
+    "name": "delete-semantics-chan", "protocol": "openai-chat",
+    "base_url": "http://127.0.0.1:9997/v1", "api_key": "k",
+})
+cid = ch["id"]
+call("POST", "/channels/%d/models" % cid, {"public_name": "delete-semantics-model"})
+_, k = call("POST", "/keys", {"name": "delete-semantics-key",
+                              "allowed_models": ["delete-semantics-model"],
+                              "model_channels": {"delete-semantics-model": [cid]}})
 kid = k["id"]
 code, body = call("DELETE", "/keys/%d" % kid)
 chk("第一次删除", 200, code)
@@ -74,41 +90,7 @@ code, _ = call("DELETE", "/keys/%d" % kid)
 chk("第二次删除（幂等重试不该报成功）", 404, code)
 
 print()
-print("=== 3. 分组占用守卫 ===")
-_, chans = call("GET", "/channels")
-occupied = None
-for c in chans.get("items", []):
-    if c.get("group_id"):
-        occupied = c["group_id"]
-        break
-if occupied is None:
-    print("  [跳过] 没有带分组的渠道，无法验证")
-else:
-    code, body = call("DELETE", "/groups/%d" % occupied)
-    chk("删除仍有渠道的分组（期望 409）", 409, code)
-    print("       提示: %s" % body.get("error", {}).get("message", body))
-
-print()
-print("=== 4. 删渠道要一并清掉模型白名单，且不能留下悬挂 ===")
-# 分组 id 必须现取：写死 1 曾经能过，但分组可以被删掉重建（备份恢复、
-# 分组用例都会重排 id）。写死的话这条请求会因外键失败返回 500，
-# 报出来的是 KeyError: 'id' —— 完全指错方向的错误
-# （同样的坑在 test-foreign-keys.sh 里已经踩过一次）
-_, groups = call("GET", "/groups")
-items = groups.get("items", groups if isinstance(groups, list) else [])
-default_gid = next((g["id"] for g in items if g.get("is_default")), None) or (items[0]["id"] if items else None)
-if default_gid is None:
-    print("没有可用的分组，跳过第 4 节")
-    print()
-    print("通过 %d 项，失败 %d 项" % (ok, bad))
-    raise SystemExit(0 if bad == 0 else 1)
-_, ch = call("POST", "/channels", {
-    "name": "delete-semantics-chan", "protocol": "openai-chat",
-    "base_url": "http://127.0.0.1:9997/v1", "api_key": "k",
-    "group_id": default_gid,
-})
-cid = ch["id"]
-call("POST", "/channels/%d/models" % cid, {"public_name": "delete-semantics-model"})
+print("=== 3. 删渠道要一并清掉模型白名单，且不能留下悬挂 ===")
 _, bindings = call("GET", "/channels/%d/models" % cid)
 chk("白名单已建立", 1, len(bindings.get("items", [])))
 code, _ = call("DELETE", "/channels/%d" % cid)

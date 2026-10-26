@@ -25,7 +25,6 @@ ADMIN = "http://127.0.0.1:8888/api/admin"
 RELAY = "http://127.0.0.1:8888/v1/chat/completions"
 FLAKY = "http://127.0.0.1:9996"
 MODEL = "retry-delay-probe"
-GROUP = "retry-delay-probe-group"
 KEY = "retry-delay-probe-key"
 
 # 同上游场景的期望区间：默认 500ms ± 25% 抖动 = [375, 625]，
@@ -75,9 +74,7 @@ def ensure_mocks():
 
 
 def cleanup():
-    # 顺序有讲究：分组被密钥引用时删除会 409（这是刻意的保护，
-    # 见「密钥分组引用」改造），所以必须先删密钥、再删渠道、最后删分组。
-    # 渠道也要在分组之前删 —— 它同样引用分组。
+    # 先删密钥、再删渠道（渠道的白名单与密钥的 model_channels 都引用渠道 id）
     _, ks = call("GET", "/keys")
     for k in ks.get("items", []):
         if k["name"] == KEY:
@@ -86,29 +83,24 @@ def cleanup():
     for c in cs.get("items", []):
         if c["name"].startswith("rd-probe-"):
             call("DELETE", "/channels/%d" % c["id"])
-    _, gs = call("GET", "/groups")
-    for g in gs.get("items", []):
-        if g["name"] == GROUP:
-            call("DELETE", "/groups/%d" % g["id"])
 
 
-def make_group():
-    _, g = call("POST", "/groups", {"name": GROUP, "strategy": "failover"})
-    return g["id"]
-
-
-def make_channel(gid, name, base_url, weight):
+def make_channel(name, base_url):
     _, ch = call("POST", "/channels", {
         "name": name, "protocol": "openai-chat", "base_url": base_url,
-        "api_key": "test-key", "group_id": gid, "weight": weight,
+        "api_key": "test-key",
     })
     cid = ch["id"]
     call("POST", "/channels/%d/models" % cid, {"public_name": MODEL, "upstream_name": MODEL})
     return cid
 
 
-def make_key():
-    _, k = call("POST", "/keys", {"name": KEY})
+def make_key(cids):
+    _, k = call("POST", "/keys", {
+        "name": KEY,
+        "allowed_models": [MODEL],
+        "model_channels": {MODEL: cids},
+    })
     return k["key"]
 
 
@@ -140,10 +132,9 @@ def scenario(name, channels, fail_body, lo, hi, expect_success, expect_hits):
     """
     print("=== %s ===" % name)
     cleanup()
-    gid = make_group()
-    for i, base in enumerate(channels):
-        make_channel(gid, "rd-probe-c%d" % (i + 1), base, i + 1)
-    token = make_key()
+    # 候选顺序 = 密钥 model_channels 列表顺序（第 i 条渠道排第 i 位）
+    cids = [make_channel("rd-probe-c%d" % (i + 1), base) for i, base in enumerate(channels)]
+    token = make_key(cids)
 
     post_flaky("/reset")
     post_flaky("/fail", fail_body)

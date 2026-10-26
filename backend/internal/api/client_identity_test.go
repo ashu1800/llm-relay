@@ -50,7 +50,7 @@ func TestRequestLogClientIdentity(t *testing.T) {
 		}
 	})
 	if err := db.AutoMigrate(&model.RequestLog{}, &model.ClientAlias{},
-		&model.ChannelGroup{}, &model.Channel{}, &model.ChannelModel{}); err != nil {
+		&model.Channel{}, &model.ChannelModel{}); err != nil {
 		t.Fatalf("建表失败: %v", err)
 	}
 
@@ -168,7 +168,7 @@ func keysOf(m map[string]model.RequestLog) []string {
 }
 
 // TestClientAliasBackfillIdempotent 顺带验证：修复后 client_id 不再为空，
-// 回填 SQL 的口径（COALESCE(NULLIF(client_id,''), NULLIF(client_name,''))）
+// 回填 SQL 的口径（COALESCE(NULLIF(client_id,”), NULLIF(client_name,”))）
 // 对「id 与 name 同值」的行仍然产出同一个键 —— 不会因为这次改动多出重复行。
 func TestClientAliasBackfillIdempotent(t *testing.T) {
 	dsn := os.Getenv("LLMRELAY_TEST_DSN")

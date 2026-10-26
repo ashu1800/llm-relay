@@ -32,39 +32,33 @@ jqg() { python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
 
 bash "$(dirname "$0")/ensure-proto-upstream.sh" || exit 1
 
-GNAME="proto-upstream-group"
 CNAME="proto-anthropic-channel"
 KNAME="proto-upstream-key"
 MODEL="proto-chat-model"
 ERR_MODEL="proto-error-model"
 
 purge() {
-  for cid in $(P "SELECT id FROM channels WHERE name='$CNAME'"); do curl -s -X DELETE "$API/channels/$cid" >/dev/null; done
   for kid in $(P "SELECT id FROM api_keys WHERE name='$KNAME'"); do curl -s -X DELETE "$API/keys/$kid" >/dev/null; done
-  P "DELETE FROM channel_groups WHERE name='$GNAME'" >/dev/null
+  for cid in $(P "SELECT id FROM channels WHERE name='$CNAME'"); do curl -s -X DELETE "$API/channels/$cid" >/dev/null; done
 }
 purge
 curl -s "$MOCK/reset" >/dev/null
 
 echo "=== 准备：一个上游协议为 anthropic-messages 的渠道 ==="
-GID=$(curl -s -X POST "$API/groups" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"$GNAME\"}" | jqg "d['id']")
 CH=$(curl -s -X POST "$API/channels" -H 'Content-Type: application/json' -d "{
   \"name\": \"$CNAME\",
-  \"group_id\": $GID,
   \"protocol\": \"anthropic-messages\",
   \"base_url\": \"http://127.0.0.1:9998\",
   \"api_key\": \"mock-anthropic-key\",
-  \"weight\": 1,
   \"models\": [
     {\"public_name\": \"$MODEL\", \"upstream_name\": \"claude-mock-1\"},
     {\"public_name\": \"$ERR_MODEL\", \"upstream_name\": \"trigger-error\"}
   ]
 }")
 CID=$(echo "$CH" | jqg "d['id']")
-echo "  渠道 id=$CID 分组=$GID"
+echo "  渠道 id=$CID"
 SK=$(curl -s -X POST "$API/keys" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"$KNAME\",\"allowed_groups\":[\"$GNAME\"]}" | jqg "d['key']")
+  -d "{\"name\":\"$KNAME\",\"allowed_models\":[\"$MODEL\",\"$ERR_MODEL\"],\"model_channels\":{\"$MODEL\":[$CID],\"$ERR_MODEL\":[$CID]}}" | jqg "d['key']")
 chkcontains "密钥已签发" "sk-" "$SK"
 
 echo
@@ -217,7 +211,6 @@ echo
 echo "=== 8. 清理探测数据 ==="
 purge
 chk "探测渠道已删除" "0" "$(P "SELECT count(*) FROM channels WHERE name='$CNAME'")"
-chk "探测分组已删除" "0" "$(P "SELECT count(*) FROM channel_groups WHERE name='$GNAME'")"
 chk "探测密钥已删除" "0" "$(P "SELECT count(*) FROM api_keys WHERE name='$KNAME'")"
 
 echo

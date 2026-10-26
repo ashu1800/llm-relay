@@ -124,7 +124,9 @@ const PROBE = `(() => {
   // .chan-name 在 2026-09-26 就换成了 .chan-text（flex 子项被压扁，量不到
   // 真实内容宽），这里一直没跟着改；客户端列（2026-10-15 加）原来完全
   // 不在名单里 —— 那条列被量窄、锚点失效或被截断时，这套守卫会静默全绿。
-  const anchors = ['.model-cell', '.chan-text', '.tk-line', '.dur-line', '.txt-cell', '.spd-cell', '.group-tag', '.cli-text']
+  // .group-tag 已更名 .key-tag（2026-10-26 分组下线，胶囊回落为按名字派色；
+  // GroupTag 组件与 .key-tag 类名保留），这里同步改锚点名。
+  const anchors = ['.model-cell', '.chan-text', '.tk-line', '.dur-line', '.txt-cell', '.spd-cell', '.key-tag', '.cli-text']
   const overflow = []
   for (const sel of anchors) {
     for (const el of wrap.querySelectorAll('.ant-table-tbody ' + sel)) {

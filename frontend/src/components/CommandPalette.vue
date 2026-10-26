@@ -6,7 +6,6 @@ import {
   DashboardOutlined,
   KeyOutlined,
   ApiOutlined,
-  ClusterOutlined,
   GlobalOutlined,
   SettingOutlined,
   BgColorsOutlined,
@@ -81,7 +80,7 @@ const baseCommands = computed<CommandItem[]>(() => {
       id: 'nav-keys',
       category: 'nav',
       title: '密钥信息',
-      subtitle: 'API Key 与分组/模型调用权限配置',
+      subtitle: 'API Key 与模型渠道路由配置',
       keywords: ['keys', 'token', 'miyao', 'auth'],
       action: () => router.push('/console/keys')
     },
@@ -92,14 +91,6 @@ const baseCommands = computed<CommandItem[]>(() => {
       subtitle: '上游端点、协议、白名单与健康检测',
       keywords: ['channels', 'qudao', 'upstream', 'provider'],
       action: () => router.push('/console/channels')
-    },
-    {
-      id: 'nav-groups',
-      category: 'nav',
-      title: '分组管理',
-      subtitle: '多渠道调度策略、配额与预算',
-      keywords: ['groups', 'fenzu', 'strategy', 'quota'],
-      action: () => router.push('/console/groups')
     },
     {
       id: 'nav-proxies',
@@ -269,7 +260,6 @@ function scrollToActive() {
               <DashboardOutlined v-if="item.id === 'nav-dashboard'" />
               <KeyOutlined v-else-if="item.id === 'nav-keys'" />
               <ApiOutlined v-else-if="item.id === 'nav-channels' || item.category === 'model'" />
-              <ClusterOutlined v-else-if="item.id === 'nav-groups'" />
               <GlobalOutlined v-else-if="item.id === 'nav-proxies'" />
               <SettingOutlined v-else-if="item.id === 'nav-settings'" />
               <BgColorsOutlined v-else-if="item.category === 'theme'" />
