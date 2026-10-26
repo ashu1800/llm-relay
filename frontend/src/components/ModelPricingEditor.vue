@@ -206,9 +206,9 @@ export function validatePeakRules(rules: RateRule[], idx?: number): string | nul
 </script>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { symbolOf } from '@/utils/money'
-import { writeClipboard } from '@/utils/clipboard'
+import { readClipboard, writeClipboard } from '@/utils/clipboard'
 import { modalWidth } from '@/utils/modalWidth'
 import { useDirtyClose } from '@/composables/useDirtyClose'
 import { message, modal } from '@/utils/feedback'
@@ -352,16 +352,39 @@ const importDirty = useDirtyClose({
   }
 })
 
-function openImport() {
+// 点「导入」：先直接读剪贴板，读到就一步导入；读不到才开弹窗让用户手贴。
+//
+// ---- 为什么不干脆只有剪贴板这条路（2026-10-23）----
+//
+// 读剪贴板是受权限保护的 API：不在 https/localhost 下不可用、Firefox 默认
+// 关闭、部分浏览器弹授权框。而且没有「读」的降级路径（execCommand('paste')
+// 对网页禁用）。所以弹窗不能删，只能从「必经之路」降级成「退路」。
+//
+// 剪贴板里有内容但不是合法 JSON 时**不打开弹窗**：那是用户剪贴板里本来就
+// 存着别的东西，弹窗打开、框里却是空的，会让人以为刚复制的内容丢了。
+// 这时直接报错，下一步由用户自己决定 —— 他要么重新复制，要么去见退路。
+const importAutoRef = ref<{ focus?: () => void } | null>(null)
+
+async function openImport() {
+  const text = await readClipboard()
+  if (text !== null && text.trim() !== '') {
+    applyImport(text)
+    return
+  }
+  // text === null：读不到（权限/平台），走手贴退路
+  // text === ''：剪贴板空着，也走手贴退路（提示语不同，见弹窗开头）
   importText.value = ''
   importOpen.value = true
   importDirty.markClean()
+  // 弹窗打开后把焦点放进输入框：用户按 Ctrl+V 就能贴，不必再找鼠标
+  await nextTick()
+  importAutoRef.value?.focus?.()
 }
 
-function applyImport() {
+function applyImport(source: string) {
   let raw: any
   try {
-    raw = JSON.parse(importText.value)
+    raw = JSON.parse(source)
   } catch {
     message.error('不是合法 JSON')
     return
@@ -467,7 +490,13 @@ function applyImport() {
   }
 
   form.value = out
-  importOpen.value = false
+  // 只有弹窗开着时才需要关。剪贴板那条路弹窗本来就没开，
+  // 赋 false 是无害的，但连同清空输入框一起做会让「导入后又撤销」
+  // 这种场景的退路内容丢失 —— 所以清空放在关闭之后单独做。
+  if (importOpen.value) {
+    importOpen.value = false
+    importText.value = ''
+  }
   if (kept.length) {
     message.success('已导入；' + kept.join('、') + ' 不在导入内容里，已保留原值，请核对后保存')
   } else {
@@ -628,8 +657,8 @@ function doSave() {
               <CopyOutlined />
             </a-button>
           </a-tooltip>
-          <a-tooltip title="粘贴定价参数 JSON 回填表单（导入后需自己点保存）">
-            <a-button class="table-icon-btn" type="text" size="small" aria-label="导入定价参数" @click="openImport">
+          <a-tooltip title="从剪贴板读取定价参数 JSON 并回填表单（导入后需自己点保存）">
+            <a-button class="table-icon-btn" type="text" size="small" aria-label="从剪贴板导入定价参数" @click="openImport">
               <ImportOutlined />
             </a-button>
           </a-tooltip>
@@ -643,19 +672,27 @@ function doSave() {
     </template>
   </a-modal>
 
-  <!-- 导入弹窗：形态参照白名单编辑器的「批量粘贴」（项目里 a-textarea 的先例） -->
+  <!-- 手贴退路：只在浏览器不让读剪贴板时才出现。
+       正常路径是点导入图标 → 直接读剪贴板 → 一步回填，不经这里。
+       保留它而不是删掉，是因为 readText 需要安全上下文与授权，
+       Firefox 默认关闭、http 下不可用，且没有可用的读取降级方案。 -->
   <a-modal
     v-model:open="importOpen"
-    title="导入定价参数"
+    title="手动粘贴定价参数"
     :width="modalWidth(560)"
     centered
     :mask-closable="false"
     @cancel="importDirty.guardCancel"
     ok-text="导入"
     cancel-text="取消"
-    @ok="applyImport"
+    @ok="applyImport(importText)"
   >
+    <div class="field-hint import-hint" style="margin-bottom: 8px">
+      这个浏览器不允许直接读取剪贴板。请点进下面的框，按 Ctrl+V 粘贴，
+      再点「导入」。
+    </div>
     <a-textarea
+      ref="importAutoRef"
       v-model:value="importText"
       :rows="8"
       placeholder="粘贴「复制」按钮导出的定价 JSON，例如：{&quot;input_per_1m&quot;:&quot;0.15&quot;,&quot;output_per_1m&quot;:&quot;0.6&quot;}"
