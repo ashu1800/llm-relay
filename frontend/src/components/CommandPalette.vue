@@ -19,6 +19,7 @@ import { modalWidth } from '@/utils/modalWidth'
 import { THEMES } from '@/utils/themes'
 import { useThemeStore } from '@/stores/theme'
 import { api } from '@/api/client'
+import type { Channel } from '@/api/types'
 import {
   CATEGORY_LABELS,
   filterCommands,
@@ -49,11 +50,12 @@ let modelsLoadedAt = 0
 async function loadModelsIfNeeded() {
   if (Date.now() - modelsLoadedAt < 60000 && cachedModels.value.length > 0) return
   try {
-    const res = await api.listChannels()
+    const res = await api.get<Channel[]>('/channels')
     const set = new Set<string>()
     for (const ch of res || []) {
-      for (const m of ch.models || []) {
-        if (m.public_name) set.add(m.public_name)
+      for (const m of ((ch as any).models || [])) {
+        if (typeof m === 'string') set.add(m)
+        else if (m && typeof m === 'object' && m.public_name) set.add(m.public_name)
       }
     }
     cachedModels.value = Array.from(set).sort()
@@ -143,7 +145,11 @@ const baseCommands = computed<CommandItem[]>(() => {
       title: `切换为 ${t.name} 主题`,
       subtitle: `${t.tone === 'dark' ? '深色' : '浅色'} · ${t.desc}`,
       keywords: ['theme', 'zhuti', t.id, t.name, t.upstream],
-      action: () => themeStore.setTheme(t.id)
+      action: () =>
+        themeStore.setTheme(t.id, {
+          x: window.innerWidth / 2,
+          y: window.innerHeight / 2
+        })
     })
   }
 

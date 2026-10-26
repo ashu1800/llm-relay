@@ -7,7 +7,7 @@ export interface CommandItem {
   subtitle?: string
   keywords?: string[]
   icon?: string
-  action: () => void | Promise<void>
+  action: () => unknown
 }
 
 export const CATEGORY_LABELS: Record<CommandCategory, string> = {
