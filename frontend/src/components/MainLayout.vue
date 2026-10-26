@@ -966,6 +966,11 @@ onUnmounted(() => {
   flex: 1;
   min-width: 0;
   background: var(--color-bg);
+  background-image: radial-gradient(
+    color-mix(in oklab, var(--color-text) 3.5%, transparent) 1px,
+    transparent 1px
+  );
+  background-size: 24px 24px;
   /* 侧栏固定、只有这一块滚 —— 上面 .main-layout 锁了 100vh 之后，
      这条才真正生效（以前整个文档在滚，它是摆设） */
   overflow: auto;
