@@ -961,7 +961,7 @@ async function copyCurl() {
     origin: window.location.origin,
     protocol: current.value.inbound_protocol || 'openai-chat',
     model: current.value.model_requested || '',
-    body: (current.value as any).inbound_body || (current.value as any).raw_request || ''
+    body: ''
   })
   if (await writeClipboard(cmd)) {
     markCopied('curl')

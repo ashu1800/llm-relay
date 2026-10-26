@@ -84,7 +84,6 @@ const CURVE_H = 22
 
 const dual = computed(() => dualBandwidthPoints(points.value, CURVE_W, CURVE_H, curveCeiling(points.value)))
 const line = computed(() => dual.value.rxLine || dual.value.txLine)
-const area = computed(() => dual.value.rxArea)
 
 // ---- 展开明细 ----
 const expanded = ref(false)

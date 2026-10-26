@@ -148,9 +148,7 @@ const route = useRoute()
 watch(
   () => route.query.q,
   (queryQ) => {
-    if (queryQ != null) {
-      q.value = String(queryQ)
-    }
+    q.value = queryQ ? String(queryQ) : ''
   },
   { immediate: true }
 )

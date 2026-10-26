@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   SearchOutlined,
@@ -198,7 +198,7 @@ function execute(item: CommandItem) {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  if (!props.open) return
+  if (!props.open || e.isComposing) return
   const len = filteredItems.value.length
   if (e.key === 'ArrowDown') {
     e.preventDefault()

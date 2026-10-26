@@ -92,8 +92,11 @@ export function latencyTicks(totalMs: number): LatencyTick[] {
     ]
   }
   const ratios = [0, 0.25, 0.5, 0.75, 1]
-  return ratios.map((r) => ({
-    ratio: r,
-    label: r === 0 ? '0ms' : fmtMs(Math.round(totalMs * r))
-  }))
+  return ratios.map((r) => {
+    const val = Math.round(totalMs * r)
+    return {
+      ratio: r,
+      label: r === 0 || val === 0 ? '0ms' : fmtMs(val)
+    }
+  })
 }

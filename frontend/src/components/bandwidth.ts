@@ -131,12 +131,6 @@ export function curveCeiling(points: BandwidthPoint[]): number {
 }
 
 /**
- * 把一串读数映射成 SVG 折线坐标（y 轴向上为 0，与 SVG 的坐标系相反）。
- *
- * 点数不足以画线（0 或 1 个点）时返回空串，让调用方渲染占位而不是一条
- * 「贴边的一条线」—— 后者看起来像「一直满速」。
- */
-/**
  * 把一串读数按指定的提取器映射成 SVG 折线坐标（y 轴向上为 0，与 SVG 坐标系相反）。
  */
 export function polylinePointsFor(

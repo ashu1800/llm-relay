@@ -3,7 +3,6 @@ export type CurlBuildOptions = {
   protocol: string
   model: string
   body?: string | null
-  thinkingLevel?: string | null
 }
 
 /**
