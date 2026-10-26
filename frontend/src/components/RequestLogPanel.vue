@@ -2026,7 +2026,7 @@ onMounted(() => {
                  （当初还有一条理由「按分组看整批请求时，工具栏的分组筛选更好用」，
                  它随列表不再吃筛选而失效 —— 现在列表只回答「最新发生了什么」。） -->
             <span class="model-cell">
-              <GroupTag :name="record.model_requested" v-bind="tagColorOf(record.group_id)" />
+              <GroupTag is-model :name="record.model_requested" v-bind="tagColorOf(record.group_id)" />
               <!-- 思考胶囊：档位色由 CSS 变量 --pill-color 注入（一套底/字/边框
                    规则覆盖全部档位），分层样式与动效见 .think-pill 的注释。
                    没带思考参数的请求不渲染胶囊 —— 「没有」不需要占位。 -->
@@ -2339,10 +2339,10 @@ onMounted(() => {
           </a-button>
         </a-descriptions-item>
         <a-descriptions-item label="请求模型">
-          <GroupTag :name="current.model_requested" v-bind="tagColorOf(current.group_id)" />
+          <GroupTag is-model :name="current.model_requested" v-bind="tagColorOf(current.group_id)" />
         </a-descriptions-item>
         <a-descriptions-item label="上游模型">
-          <GroupTag v-if="current.model_upstream" :name="current.model_upstream" v-bind="tagColorOf(current.group_id)" />
+          <GroupTag is-model v-if="current.model_upstream" :name="current.model_upstream" v-bind="tagColorOf(current.group_id)" />
           <template v-else>-</template>
           <!-- 上游模型也要复制：它是要贴进上游控制台、用量页面或工单的那个名字，
                与「请求模型」常常不是同一个（兜底映射时差得更远） -->

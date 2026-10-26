@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { groupStyle, groupVars } from '@/utils/groupStyle'
+import { parseModelName } from '@/utils/modelName'
 
 // 分组胶囊：全站所有显示分组名的地方都用它，颜色来自分组自己的配置
 // （没配就按分组名派生，见 utils/groupStyle.ts）。
@@ -18,21 +19,31 @@ const props = defineProps<{
    * 显示模型名/密钥名时**必须**传分组名，否则三个胶囊三种颜色。
    */
   colorFrom?: string | null
+  /** 是否按模型名排版分级（前缀弱化、核心加粗、版本微缩） */
+  isModel?: boolean
 }>()
 
 const style = computed(() => groupStyle(props.name, props.color, props.colorFrom))
 const vars = computed(() => groupVars(style.value))
+const modelSegments = computed(() => (props.isModel ? parseModelName(style.value.label) : null))
 </script>
 
 <template>
-  <span class="group-tag" :class="{ 'is-custom': !style.auto }" :style="vars" :title="style.label">
+  <span class="group-tag" :class="{ 'is-custom': !style.auto, 'is-model-tag': isModel }" :style="vars" :title="style.label">
     <!-- 内层 inline 包一层：inline 盒不会被任何容器压缩（放不下就溢出），
          它的 rect 宽度恒等于文字真实宽度。请求日志的列宽测量靠这一层
          「看穿」外层的 max-width: 100% —— 外层是被列宽压扁的（压扁后
          rect = 可用宽，量它等于量当前列宽，长名字永远撑不开列）。
          对渲染零影响：inline 盒继承外层的字体与 nowrap，省略号仍由
          外层的 overflow + text-overflow 画在它自己的边缘。 -->
-    <span class="gt-text">{{ style.label }}</span>
+    <span class="gt-text">
+      <template v-if="modelSegments">
+        <span v-if="modelSegments.prefix" class="gt-prefix">{{ modelSegments.prefix }}</span>
+        <span class="gt-core">{{ modelSegments.core }}</span>
+        <span v-if="modelSegments.suffix" class="gt-suffix">{{ modelSegments.suffix }}</span>
+      </template>
+      <template v-else>{{ style.label }}</template>
+    </span>
   </span>
 </template>
 
@@ -60,6 +71,20 @@ const vars = computed(() => groupVars(style.value))
   text-overflow: ellipsis;
   white-space: nowrap;
   vertical-align: middle;
+}
+
+.gt-prefix {
+  opacity: 0.65;
+  font-weight: 400;
+}
+
+.gt-core {
+  font-weight: 600;
+}
+
+.gt-suffix {
+  opacity: 0.75;
+  font-weight: 400;
 }
 
 .group-tag.is-custom {
