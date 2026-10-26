@@ -38,6 +38,13 @@ export default defineConfig({
     // 需要局域网调试时用 `npm run dev -- --host` 显式打开。
     host: '127.0.0.1',
     port: 5173,
+    watch: {
+      // 同步盘（工作区在 D:\Sync 下）写文件时会先落一个
+      // `.xxx.vue.<pid>.<uuid>.tmpdir/xxx.vue.tmp` 临时文件再改名替换，
+      // chokidar 一旦 watch 到它就抛 EBUSY 且未捕获，整个 dev server 直接退出。
+      // 把这族临时文件排除在监听之外；源文件本身的改动经改名后的最终路径到达，不受影响。
+      ignored: ['**/*.tmpdir/**', '**/*.tmp']
+    },
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8888',
