@@ -3,7 +3,7 @@
 // 闭区间边界（≤fast 进 fast、fast+1 进 mid）与档位间的无缝衔接
 // 是肉眼对不出来的，改阈值时这两组用例必须跟着改。
 import { describe, expect, it } from 'vitest'
-import { fmtMs, latencyClass, latencyTitle, latencyWaterfall } from './latency'
+import { fmtMs, latencyClass, latencyTicks, latencyTitle, latencyWaterfall } from './latency'
 import type { RequestLog } from '@/api/types'
 
 /** RequestLog 字段很多，用例只关心耗时三件套 —— 缺的字段对纯函数不可见 */
@@ -89,5 +89,28 @@ describe('latencyWaterfall 耗时瀑布', () => {
   it('阶段耗时超过总耗时（上游字段无保证）时封顶 100%', () => {
     const rows = latencyWaterfall(makeLog({ first_byte_ms: 1500, total_ms: 1000 }))
     expect(rows[0].pct).toBe(100)
+  })
+})
+
+describe('latencyTicks 标尺刻度', () => {
+  it('生成 0%, 25%, 50%, 75%, 100% 相对等分刻度', () => {
+    const ticks = latencyTicks(200)
+    expect(ticks).toHaveLength(5)
+    expect(ticks[0]).toEqual({ ratio: 0, label: '0ms' })
+    expect(ticks[2]).toEqual({ ratio: 0.5, label: '100ms' })
+    expect(ticks[4]).toEqual({ ratio: 1, label: '200ms' })
+  })
+
+  it('长耗时格式化为秒', () => {
+    const ticks = latencyTicks(40000)
+    expect(ticks[4].label).toBe('40.00s')
+    expect(ticks[2].label).toBe('20.00s')
+  })
+
+  it('处理 totalMs <= 0 的安全降级', () => {
+    const ticks = latencyTicks(0)
+    expect(ticks).toHaveLength(2)
+    expect(ticks[0].ratio).toBe(0)
+    expect(ticks[1].ratio).toBe(1)
   })
 })

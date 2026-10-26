@@ -47,7 +47,7 @@ import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
 import { rafThrottle } from '@/utils/rafThrottle'
 // 耗时家族（fmtMs / 档位 / 瀑布）与列宽纯逻辑（键 / 权重 / 摊法）已抽成独立模块：
 // 三条分摊不变量与档位边界在 spec 里钉着，契约检查的阈值锚点也移了过去
-import { fmtMs, latencyClass, latencyTitle, latencyWaterfall } from '@/components/latency'
+import { fmtMs, latencyClass, latencyTicks, latencyTitle, latencyWaterfall } from '@/components/latency'
 // 速度的口径抽成独立模块（2026-09-29）：它出过「几千 tok/s」的假值事故，
 // 「一列一个口径」与四种量不到的情形在 speed.spec.ts 里逐条钉着
 import { speedMissReason, speedOf, speedText } from '@/components/speed'
@@ -979,6 +979,7 @@ async function copyField(text: string | undefined | null, field: string) {
 /** 抽屉当前那条日志的瀑布行：computed 缓存，模板的 v-if（画不画）与
  *  v-for（画什么）共用同一份结果，不再每次渲染都重新算两遍 */
 const waterfallRows = computed(() => (current.value ? latencyWaterfall(current.value) : []))
+const waterfallTicks = computed(() => (current.value?.total_ms ? latencyTicks(current.value.total_ms) : []))
 
 // 加载失败必须留下痕迹：只弹一个转瞬即逝的 message 的话，
 // 表格紧接着显示「暂无数据」，用户会以为这段时间本来就没有调用
@@ -2424,6 +2425,22 @@ onMounted(() => {
               </span>
               <span class="wf-val">{{ r.text }}</span>
             </div>
+            <!-- 自适应时间刻度标尺 -->
+            <div v-if="current.total_ms && waterfallTicks.length" class="wf-ruler" aria-hidden="true">
+              <span class="wf-label" />
+              <div class="wf-ruler-track">
+                <span
+                  v-for="tick in waterfallTicks"
+                  :key="tick.ratio"
+                  class="wf-tick"
+                  :style="{ left: tick.ratio * 100 + '%' }"
+                >
+                  <i class="wf-tick-mark" />
+                  <span class="wf-tick-text">{{ tick.label }}</span>
+                </span>
+              </div>
+              <span class="wf-val" />
+            </div>
           </div>
         </a-descriptions-item>
         <a-descriptions-item label="费用">
@@ -2667,6 +2684,44 @@ onMounted(() => {
   text-align: right;
   font-variant-numeric: tabular-nums;
   color: var(--color-text);
+  white-space: nowrap;
+}
+.wf-ruler {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) 72px;
+  gap: 8px;
+  align-items: center;
+  margin-top: 2px;
+}
+.wf-ruler-track {
+  position: relative;
+  height: 14px;
+}
+.wf-tick {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.wf-tick:first-child {
+  transform: translateX(0);
+  align-items: flex-start;
+}
+.wf-tick:last-child {
+  transform: translateX(-100%);
+  align-items: flex-end;
+}
+.wf-tick-mark {
+  width: 1px;
+  height: 3px;
+  background: var(--color-border);
+}
+.wf-tick-text {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 

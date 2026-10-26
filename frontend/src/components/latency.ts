@@ -76,3 +76,24 @@ export function latencyWaterfall(row: RequestLog): WaterfallRow[] {
   push('总共', row.total_ms, 'total')
   return rows
 }
+
+/** 耗时瀑布标尺的一个刻度点 */
+export type LatencyTick = { ratio: number; label: string }
+
+/**
+ * 为耗时瀑布生成自适应刻度线（0%, 25%, 50%, 75%, 100%）。
+ * 无论总耗时是 150ms 还是 45s，刻度永远自适应展开、绝不溢出堆叠。
+ */
+export function latencyTicks(totalMs: number): LatencyTick[] {
+  if (!totalMs || totalMs <= 0) {
+    return [
+      { ratio: 0, label: '0ms' },
+      { ratio: 1, label: '0ms' }
+    ]
+  }
+  const ratios = [0, 0.25, 0.5, 0.75, 1]
+  return ratios.map((r) => ({
+    ratio: r,
+    label: r === 0 ? '0ms' : fmtMs(Math.round(totalMs * r))
+  }))
+}
