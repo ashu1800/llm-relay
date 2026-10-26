@@ -14,6 +14,7 @@ import {
   mergeBandwidth,
   pointTotal,
   polylinePoints,
+  dualBandwidthPoints,
   type BandwidthPoint
 } from './bandwidth'
 
@@ -150,5 +151,19 @@ describe('纵轴与坐标', () => {
     const line = polylinePoints(pts, 100, 20, 1024)
     const last = line.split(' ')[1].split(',').map(Number)
     expect(last[1]).toBe(0)
+  })
+
+  it('dualBandwidthPoints 计算出收发分离的线条与面积', () => {
+    const pts = [
+      pt({ rx_bytes_per_sec: 500, tx_bytes_per_sec: 100 }),
+      pt({ rx_bytes_per_sec: 1000, tx_bytes_per_sec: 300 })
+    ]
+    const res = dualBandwidthPoints(pts, 100, 20, 1000)
+    expect(res.rxLine).toContain('0.00,10.00')
+    expect(res.rxLine).toContain('100.00,0.00')
+    expect(res.rxArea).toBe(`0,20 ${res.rxLine} 100,20`)
+    expect(res.txLine).toContain('0.00,18.00')
+    expect(res.txLine).toContain('100.00,14.00')
+    expect(res.txArea).toBe(`0,20 ${res.txLine} 100,20`)
   })
 })

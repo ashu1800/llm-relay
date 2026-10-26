@@ -136,20 +136,68 @@ export function curveCeiling(points: BandwidthPoint[]): number {
  * 点数不足以画线（0 或 1 个点）时返回空串，让调用方渲染占位而不是一条
  * 「贴边的一条线」—— 后者看起来像「一直满速」。
  */
+/**
+ * 把一串读数按指定的提取器映射成 SVG 折线坐标（y 轴向上为 0，与 SVG 坐标系相反）。
+ */
+export function polylinePointsFor(
+  points: BandwidthPoint[],
+  width: number,
+  height: number,
+  ceiling: number,
+  accessor: (p: BandwidthPoint) => number
+): string {
+  if (points.length < 2 || width <= 0 || height <= 0 || ceiling <= 0) return ''
+  const step = width / (points.length - 1)
+  return points
+    .map((p, i) => {
+      const val = accessor(p)
+      const ratio = Math.min(1, Math.max(0, val) / ceiling)
+      // 最小值留 0.5px：为 0 的拍贴在底边上，与「没有这一拍」在视觉上会混
+      const y = height - Math.max(0.5, ratio * height)
+      return `${(i * step).toFixed(2)},${y.toFixed(2)}`
+    })
+    .join(' ')
+}
+
+/**
+ * 把一串读数映射成 SVG 折线坐标（y 轴向上为 0，与 SVG 的坐标系相反）。
+ *
+ * 点数不足以画线（0 或 1 个点）时返回空串，让调用方渲染占位而不是一条
+ * 「贴边的一条线」—— 后者看起来像「一直满速」。
+ */
 export function polylinePoints(
   points: BandwidthPoint[],
   width: number,
   height: number,
   ceiling: number
 ): string {
-  if (points.length < 2 || width <= 0 || height <= 0 || ceiling <= 0) return ''
-  const step = width / (points.length - 1)
-  return points
-    .map((p, i) => {
-      const ratio = Math.min(1, pointTotal(p) / ceiling)
-      // 最小值留 0.5px：为 0 的拍贴在底边上，与「没有这一拍」在视觉上会混
-      const y = height - Math.max(0.5, ratio * height)
-      return `${(i * step).toFixed(2)},${y.toFixed(2)}`
-    })
-    .join(' ')
+  return polylinePointsFor(points, width, height, ceiling, pointTotal)
+}
+
+/**
+ * 计算收（Rx 下行）与发（Tx 上行）双轨折线与面积路径。
+ */
+export function dualBandwidthPoints(
+  points: BandwidthPoint[],
+  width: number,
+  height: number,
+  ceiling: number
+): { rxLine: string; rxArea: string; txLine: string; txArea: string } {
+  const rxLine = polylinePointsFor(
+    points,
+    width,
+    height,
+    ceiling,
+    (p) => (p.available ? Math.max(0, p.rx_bytes_per_sec) : 0)
+  )
+  const txLine = polylinePointsFor(
+    points,
+    width,
+    height,
+    ceiling,
+    (p) => (p.available ? Math.max(0, p.tx_bytes_per_sec) : 0)
+  )
+  const rxArea = rxLine ? `0,${height} ${rxLine} ${width},${height}` : ''
+  const txArea = txLine ? `0,${height} ${txLine} ${width},${height}` : ''
+  return { rxLine, rxArea, txLine, txArea }
 }

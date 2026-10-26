@@ -30,6 +30,7 @@ import { onLive } from '@/composables/useLive'
 import {
   bandwidthState,
   curveCeiling,
+  dualBandwidthPoints,
   formatBytes,
   formatRate,
   mergeBandwidth,
@@ -81,13 +82,9 @@ const title = computed(() => {
 const CURVE_W = 96
 const CURVE_H = 22
 
-const line = computed(() => polylinePoints(points.value, CURVE_W, CURVE_H, curveCeiling(points.value)))
-// 面积填充：把折线首尾接到基线上。曲线贴底时它是一个几乎不可见的薄片，
-// 有流量时才显形 —— 这正是想要的「安静」观感
-const area = computed(() => {
-  if (!line.value) return ''
-  return `0,${CURVE_H} ${line.value} ${CURVE_W},${CURVE_H}`
-})
+const dual = computed(() => dualBandwidthPoints(points.value, CURVE_W, CURVE_H, curveCeiling(points.value)))
+const line = computed(() => dual.value.rxLine || dual.value.txLine)
+const area = computed(() => dual.value.rxArea)
 
 // ---- 展开明细 ----
 const expanded = ref(false)
@@ -140,8 +137,10 @@ onUnmounted(() => {
         :height="CURVE_H"
         preserveAspectRatio="none"
       >
-        <polygon class="bw-area" :points="area" />
-        <polyline class="bw-line" :points="line" />
+        <polygon v-if="dual.rxArea" class="bw-area is-rx" :points="dual.rxArea" />
+        <polyline v-if="dual.rxLine" class="bw-line is-rx" :points="dual.rxLine" />
+        <polygon v-if="dual.txArea" class="bw-area is-tx" :points="dual.txArea" />
+        <polyline v-if="dual.txLine" class="bw-line is-tx" :points="dual.txLine" />
       </svg>
       <span v-else-if="state === 'unavailable'" class="bw-curve-off hatch-off" />
     </span>
@@ -222,16 +221,27 @@ onUnmounted(() => {
 .bw-line {
   fill: none;
   stroke: var(--color-blue);
-  stroke-width: 1.2;
+  stroke-width: 1.1;
   stroke-linejoin: round;
   stroke-linecap: round;
-  /* 非等比缩放下描边会被横向拉细，vector-effect 让它保持 1.2px */
+  /* 非等比缩放下描边会被横向拉细，vector-effect 让它保持 1.1px */
   vector-effect: non-scaling-stroke;
+}
+.bw-line.is-rx {
+  stroke: var(--color-blue);
+}
+.bw-line.is-tx {
+  stroke: var(--color-orange);
 }
 
 .bw-area {
-  fill: color-mix(in oklab, var(--color-blue) 18%, transparent);
   stroke: none;
+}
+.bw-area.is-rx {
+  fill: color-mix(in oklab, var(--color-blue) 14%, transparent);
+}
+.bw-area.is-tx {
+  fill: color-mix(in oklab, var(--color-orange) 14%, transparent);
 }
 
 /* 不可用：斜纹底，与脉搏条断线同一视觉语言 —— 类名 hatch-off 加在模板上
