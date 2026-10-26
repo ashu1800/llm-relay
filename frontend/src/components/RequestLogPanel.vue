@@ -23,7 +23,8 @@
 // 仍用 PanelCard，不传 title 时它不会渲染标题栏。
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { message } from '@/utils/feedback'
-import { ArrowUpOutlined, CheckOutlined, CloseOutlined, CopyOutlined, ProfileOutlined } from '@ant-design/icons-vue'
+import { ArrowUpOutlined, CheckOutlined, CloseOutlined, CodeOutlined, CopyOutlined, ProfileOutlined } from '@ant-design/icons-vue'
+import { buildCurlCommand } from '@/utils/curl'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
 import EmptyState from '@/components/EmptyState.vue'
@@ -951,6 +952,23 @@ async function copyError() {
   if (!current.value?.error) return
   if (await writeClipboard(current.value.error)) markCopied('err')
   else message.warning('复制失败，请手动选择复制')
+}
+
+/** 终端复现 cURL 命令一键复制 */
+async function copyCurl() {
+  if (!current.value) return
+  const cmd = buildCurlCommand({
+    origin: window.location.origin,
+    protocol: current.value.inbound_protocol || 'openai-chat',
+    model: current.value.model_requested || '',
+    body: (current.value as any).inbound_body || (current.value as any).raw_request || ''
+  })
+  if (await writeClipboard(cmd)) {
+    markCopied('curl')
+    message.success('已复制终端 cURL 复现命令')
+  } else {
+    message.warning('复制失败，请手动选择复制')
+  }
 }
 
 /**
@@ -2309,6 +2327,17 @@ onMounted(() => {
            键盘用户不必先 Tab 到按钮上（见 onDetailKeydown）。 -->
       <template #extra>
         <a-space>
+          <a-button
+            size="small"
+            class="table-icon-btn"
+            title="复制终端 cURL 复现命令"
+            aria-label="复制终端 cURL 复现命令"
+            @click="copyCurl"
+          >
+            <CodeOutlined v-if="copiedWhat !== 'curl'" />
+            <CheckOutlined v-else class="trace-copy-ok" />
+            <span style="margin-left: 4px">{{ copiedWhat === 'curl' ? '已复制 cURL' : '复制 cURL' }}</span>
+          </a-button>
           <a-button
             size="small"
             :disabled="detailIndex <= 0"
