@@ -140,9 +140,10 @@ const tip = computed(() => {
   box-shadow: 0 0 6px color-mix(in oklab, var(--color-green) 45%, transparent);
 }
 
-/* 有失败：橙点快闪 */
+/* 有失败：橙点快闪，带柔和光晕 */
 .life-dot.warn .dot {
   background: var(--color-orange);
+  box-shadow: 0 0 6px color-mix(in oklab, var(--color-orange) 60%, transparent);
   animation: life-blink 1s ease-in-out infinite;
 }
 
@@ -152,9 +153,10 @@ const tip = computed(() => {
   opacity: 0.45;
 }
 
-/* 冷却中：橙点 + 收缩环 */
+/* 冷却中：橙点 + 收缩环 + 微光 */
 .life-dot.cooling .dot {
   background: var(--color-orange);
+  box-shadow: 0 0 6px color-mix(in oklab, var(--color-orange) 50%, transparent);
 }
 .ring {
   position: absolute;

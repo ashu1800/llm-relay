@@ -1502,9 +1502,10 @@ a:hover { opacity: 0.85; }
   box-shadow: none;
 }
 
-/* 按钮微弹簧触觉反馈（Micro Bounce） */
-.ant-btn:not(:disabled):active {
-  transform: scale(0.97);
+/* 按钮与交互项微弹簧触觉反馈（Micro Bounce） */
+.ant-btn:not(:disabled):active,
+.console-menu-item:active {
+  transform: scale(0.96);
   transition: transform 0.08s cubic-bezier(0.2, 0, 0, 1);
 }
 

@@ -79,6 +79,7 @@ const title = computed(() => {
   position: absolute;
   inset: 0;
   background: linear-gradient(90deg, transparent 5%, var(--pulse-color) 50%, transparent 95%);
+  filter: drop-shadow(0 0 3px var(--pulse-color));
   animation: pulse-sweep 0.68s ease-out forwards;
 }
 @keyframes pulse-sweep {
