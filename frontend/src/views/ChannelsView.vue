@@ -1233,9 +1233,10 @@ onMounted(async () => {
     sortable = Sortable.create(tbody as HTMLElement, {
       // 只认手柄：整行可拖会让「点测试/编辑」变成一次误拖
       handle: '.drag-handle',
-      animation: 150,
+      animation: 180,
       ghostClass: 'row-ghost',
       chosenClass: 'row-chosen',
+      dragClass: 'row-drag',
       onStart: onDragStart,
       onEnd: onDragEnd
     })
@@ -2136,9 +2137,26 @@ onBeforeUnmount(() => {
   font-size: var(--font-size-sm);
 }
 
-/* 拖动中的行：半透明让下面的落点看得见（sortablejs 的 ghostClass） */
-.row-ghost { opacity: 0.4; background: color-mix(in oklab, var(--color-primary) 10%, transparent); }
-.row-chosen .drag-handle { color: var(--text-primary-ink); }
+/* 拖拽排序的物理悬浮与平滑吸附反馈（SortableJS 状态类） */
+:deep(.row-ghost) {
+  opacity: 0.35;
+  background: color-mix(in oklab, var(--color-primary) 12%, transparent) !important;
+  outline: 1px dashed var(--color-primary) !important;
+  outline-offset: -1px;
+}
+:deep(.row-chosen .drag-handle) {
+  color: var(--text-primary-ink);
+  cursor: grabbing !important;
+}
+:deep(.row-drag) {
+  opacity: 0.96;
+  transform: scale(1.008) rotate(0.3deg);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.08);
+  background: var(--color-fg) !important;
+  cursor: grabbing !important;
+  z-index: 1000;
+  transition: transform 0.08s ease, box-shadow 0.1s ease;
+}
 
 /* 锁定态的顺序列（搜索/分页生效时不给出拖动入口，见模板里的说明）。
    占位高度与手柄一致，行高不变；颜色比手柄更淡 —— 它不是一个控件，
