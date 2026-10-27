@@ -27,8 +27,7 @@
 #    3. 计算版本号   从 git tag 取最新 semver 按参数递增
 #    4. 推送 main    tag 必须指向远端已有的提交
 #    5. 打 tag 推送  触发 .github/workflows/release.yml
-#    6. 观察流水线   gh run watch 直到全部 job 结束
-#    7. 验证产物     Release 归档 + checksums.txt 在场
+#    6. 观察流水线   gh run watch 直到全部 job 结束（绿了就是发布完成）
 #
 #  # 部署形态与产物的关系
 #
@@ -213,7 +212,7 @@ log "本次发布：$NEW_TAG$([ "$IS_PRE_RELEASE" = "1" ] && echo '（预发布�
 # 确认
 # ---------------------------------------------------------------
 if [ "$DRY_RUN" = "1" ]; then
-  log "（dry-run）后续将执行：推送 $BRANCH → 打 tag $NEW_TAG 并推送 → 观察流水线 → 验证产物"
+  log "（dry-run）后续将执行：推送 $BRANCH → 打 tag $NEW_TAG 并推送 → 观察流水线"
   log "（dry-run）结束，未改动任何状态"
   exit 0
 fi
@@ -287,32 +286,21 @@ fi
 ok "发布流水线全部通过"
 
 # ---------------------------------------------------------------
-# 7. 验证产物
+# 发布完成
 # ---------------------------------------------------------------
-step "验证产物"
-
-# 流水线绿 ≠ 产物可用。归档名是 binary 通道拼下载 URL 的硬契约，
-# 这里把「那个文件真的在 Release 上」验证掉。
-ARCHIVE="llm-relay_${NEW_VERSION}_linux_amd64.tar.gz"
-ASSETS="$(gh release view "$NEW_TAG" --repo "$REPO" --json assets --jq '[.assets[].name] | join("\n")')"
-
-grep -Fx "$ARCHIVE" <<< "$ASSETS" >/dev/null \
-  || die "Release 资产缺 $ARCHIVE（一键更新按这个名字拼 URL，缺了就是 404）。实际资产：$ASSETS"
-grep -Fx "checksums.txt" <<< "$ASSETS" >/dev/null \
-  || die "Release 资产缺 checksums.txt（更新时校验下载完整性用）"
-ok "Release 资产齐全：$ARCHIVE + checksums.txt"
-
-# 归档必须包含当前平台的产物。这是唯一能让「下载 → 校验 → 替换」
-# 在服务器上走通的组合，缺一个平台就是那个平台的用户更新失败。
-gh release download "$NEW_TAG" --repo "$REPO" --pattern "$ARCHIVE" --dir /tmp/llm-relay-release-verify --clobber \
-  && tar -tzf "/tmp/llm-relay-release-verify/$ARCHIVE" | grep -Fx "llm-relay" \
-  || warn "无法本地验证归档内容（可能本机不是 linux/amd64 或网络受限），跳过"
-rm -rf /tmp/llm-relay-release-verify 2>/dev/null || true
+# 流水线全绿就到此为止。曾经在这里再验证一遍产物（gh release view 查资产名
+# + gh release download 下归档解包核对二进制），2026-10-27 去掉：前半段只是
+# 把 release.yml 已经验过的事重做一次，后半段要真从 GitHub 拉 13MB 归档 ——
+# 国内网络下经常超时重试，一次发布因此多花十几分钟，而它拦不住任何真实的
+# 发布失败（真失败的话 gh run watch 那一步就已经 die 了）。
 
 # ---------------------------------------------------------------
 # 完成
 # ---------------------------------------------------------------
 RELEASE_URL="https://github.com/$REPO/releases/tag/$NEW_TAG"
+# 归档名是 binary 通道拼下载 URL 的硬契约，提示里要显示它。
+# 命名规则来自 .goreleaser.yml，不是这里猜的。
+ARCHIVE="llm-relay_${NEW_VERSION}_linux_amd64.tar.gz"
 echo
 ok "v$NEW_VERSION 发布完成"
 echo "  Release : $RELEASE_URL"

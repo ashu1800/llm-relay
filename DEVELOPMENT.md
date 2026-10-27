@@ -1467,8 +1467,12 @@ Windows 侧把 gh 的 PATH 拼好再转发。）
 （go vet/test、前端 type-check 与契约检查 —— release.yml 会再跑一遍，
 这里先跑是把失败拦在打 tag 之前，tag 一推就是「已发布」状态，不可收回）→
 按 semver 递增算出新版本号 → 推送 main → 打 tag 推送（触发流水线）→
-`gh run watch` 观察到全部 job 结束 → 验证 Release 归档与 checksums.txt
-真的在场（归档名是安装脚本与在线更新拼下载 URL 的硬契约）。
+`gh run watch` 观察到全部 job 结束。
+
+**流水线全绿 = 发布完成**，到此为止。不需要再下载归档、校验 sha256 或比对
+版本号 —— 那几件事 release.yml 自己已经验过一遍，重复做一遍只是把发布流程
+拖长十几分钟（国内访问 GitHub 下载超时是常态，重试几次也不一定成）。
+真要看产物，Release 页面本身就是清单。
 
 发布完成后，服务器上**不需要任何操作**：
 
