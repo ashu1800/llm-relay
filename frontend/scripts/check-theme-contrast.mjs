@@ -73,7 +73,7 @@ const CHECKS = [
 const themes = parseThemes()
 // 绝对下限，而不是只判「非空」：解析器结构变了、只解析出 1 套主题时，
 // 后面照样会打印「1 套主题 × 24 项断言全绿」—— 全绿但什么都没验。
-const MIN_THEMES = 12
+const MIN_THEMES = 2
 if (themes.size < MIN_THEMES) {
   console.error(`只解析到 ${themes.size} 套主题（应至少 ${MIN_THEMES} 套）—— theme.css 的结构变了，还是漏了主题块？`)
   process.exit(1)

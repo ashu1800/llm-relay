@@ -1550,6 +1550,36 @@ onMounted(async () => {
             </span>
           </div>
           <div v-if="form.default_model_enabled" class="fallback-model-row">
+            <!-- 铁道道岔分流拓扑微图（方案 5） -->
+            <div class="junction-schematic" aria-hidden="true">
+              <svg viewBox="0 0 280 40" class="junction-svg">
+                <!-- 入站端点 -->
+                <line x1="12" y1="12" x2="268" y2="12" stroke="var(--color-border)" stroke-width="2" />
+                <circle cx="12" cy="12" r="3" fill="var(--color-text-secondary)" />
+                <text x="20" y="9" font-size="9" fill="var(--color-text-secondary)">入站</text>
+                <!-- 直通主线 -->
+                <circle cx="268" cy="12" r="3" fill="var(--color-green)" />
+                <text x="208" y="9" font-size="9" fill="var(--text-green)">白名单直通</text>
+                <!-- 分流支线道岔 -->
+                <path
+                  d="M 65 12 Q 95 12, 115 28 L 268 28"
+                  fill="none"
+                  :stroke="form.default_model ? 'var(--color-primary)' : 'var(--color-border)'"
+                  stroke-width="2"
+                  :stroke-dasharray="form.default_model ? 'none' : '3 3'"
+                />
+                <circle cx="268" cy="28" r="3" :fill="form.default_model ? 'var(--color-primary)' : 'var(--color-border)'" />
+                <text
+                  x="155"
+                  y="36"
+                  font-size="9"
+                  :fill="form.default_model ? 'var(--text-primary-ink)' : 'var(--color-text-secondary)'"
+                >
+                  未命中分流 ➔ {{ form.default_model || '待选择' }}
+                </text>
+              </svg>
+            </div>
+
             <!-- 用下拉而不是自由输入：兜底靠「白名单里正好有这个名字」匹配，
                  自由输入能配出匹配不上的名字，那是个配了不生效的假象 -->
             <a-select
@@ -1742,6 +1772,22 @@ onMounted(async () => {
    挤在开关同一行会被省略号截掉（与白名单抽屉里的说明同一个处理） */
 .fallback-model-row { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .fallback-model-row .switch-hint { line-height: 1.6; }
+
+/* 铁道道岔分流拓扑微图（方案 5） */
+.junction-schematic {
+  padding: 4px 6px;
+  background: color-mix(in oklab, var(--color-bg) 60%, var(--color-fg));
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-control);
+  margin-bottom: 4px;
+}
+
+.junction-svg {
+  display: block;
+  width: 100%;
+  max-width: 320px;
+  height: 40px;
+}
 /* 白名单抽屉的说明块：用左侧一道主色竖线代替整块告警底色。
    这句话是「怎么填」的说明，不是需要警惕的异常状态；用 a-alert 会得到
    一整块主题色底 + 图标，在抽屉里比它要说明的表格还抢眼 */

@@ -29,6 +29,7 @@ const props = withDefaults(
 )
 
 const shown = ref(props.value ?? 0)
+const isUpdating = ref(false)
 let raf = 0
 let fallbackTimer: number | null = null
 
@@ -106,6 +107,7 @@ watch(
       shown.value = to
       return
     }
+    isUpdating.value = true
     const start = performance.now()
     const dur = Math.max(1, props.duration)
     cancelAnimationFrame(raf)
@@ -117,6 +119,7 @@ watch(
       fallbackTimer = null
       cancelAnimationFrame(raf)
       shown.value = to
+      isUpdating.value = false
     }, dur + 60)
     const step = (now: number) => {
       const t = Math.min(1, (now - start) / dur)
@@ -127,6 +130,7 @@ watch(
       } else {
         // 收尾必须精确落到目标值：补间累积的浮点误差会让 1000 显示成 999
         shown.value = to
+        isUpdating.value = false
         if (fallbackTimer !== null) {
           window.clearTimeout(fallbackTimer)
           fallbackTimer = null
@@ -144,10 +148,19 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <span class="an-num">{{ text }}</span>
+  <span class="an-num" :class="{ 'is-updating': isUpdating }">{{ text }}</span>
 </template>
 
 <style scoped>
 /* 等宽数字：补间时每一位的宽度固定，数字不会左右抖动 */
-.an-num { font-variant-numeric: tabular-nums; }
+.an-num {
+  font-variant-numeric: tabular-nums;
+  display: inline-block;
+  transition: filter 0.15s ease, opacity 0.15s ease;
+}
+
+.an-num.is-updating {
+  filter: blur(0.3px);
+  opacity: 0.92;
+}
 </style>

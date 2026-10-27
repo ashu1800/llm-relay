@@ -708,16 +708,22 @@ onMounted(() => {
       </template>
     </section>
 
-    <section class="panel">
-      <h2 class="panel-title">配置备份</h2>
+    <section class="panel cartridge-panel">
+      <div class="cartridge-header">
+        <h2 class="panel-title">配置备份与加密卡匣</h2>
+        <span class="cartridge-badge">RELAY CARTRIDGE DOCK</span>
+      </div>
       <div class="note">
         导出渠道、模型、绑定、模板、密钥与手工定价，用于换机或重装后快速恢复。
         调用日志与统计属于运行数据，请直接备份数据库卷。
       </div>
-      <div class="backup-note">
-        渠道密钥在备份里始终是<strong>密文</strong>，只有同一把
-        <span class="mono">RELAY_SECRET</span> 才能解出原文。备份文件里记有主密钥指纹，
-        导入到不同密钥的实例时会明确提示需要重填上游密钥。
+      <div class="backup-note cartridge-slot">
+        <span class="slot-pin" aria-hidden="true" />
+        <div>
+          渠道密钥在备份里始终是<strong>密文</strong>，只有同一把
+          <span class="mono">RELAY_SECRET</span> 才能解出原文。备份文件里记有主密钥指纹，
+          导入到不同密钥的实例时会明确提示需要重填上游密钥。
+        </div>
       </div>
       <a-space style="margin-top: 12px">
         <a-button :loading="exporting" @click="exportConfig"><DownloadOutlined /> 导出配置</a-button>
@@ -884,6 +890,47 @@ onMounted(() => {
   margin-top: 8px; padding: 10px 12px; border-radius: 8px;
   background: var(--color-bg); font-size: var(--font-size-sm); line-height: 1.8;
   color: var(--color-text-secondary);
+}
+
+/* ---- 配置卡匣插槽外观（方案 6） ---- */
+.cartridge-panel {
+  border-left: 3px solid var(--color-primary);
+}
+
+.cartridge-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.cartridge-badge {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-2xs);
+  letter-spacing: 0.1em;
+  padding: 1px 6px;
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--color-primary) 12%, transparent);
+  color: var(--text-primary-ink);
+  border: 1px dashed color-mix(in oklab, var(--color-primary) 30%, transparent);
+}
+
+.cartridge-slot {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px dashed var(--color-border);
+}
+
+.slot-pin {
+  flex: none;
+  width: 6px;
+  height: 18px;
+  border-radius: 2px;
+  background: var(--color-primary);
+  box-shadow: 0 0 6px var(--color-primary);
+  margin-top: 3px;
 }
 
 /* ---- 版本更新设置 ---- */

@@ -27,34 +27,14 @@
     <script>
       (function () {
         try {
-          var THEME_IDS = [
-            'light',
-            'latte',
-            'solarized-light',
-            'gruvbox-light',
-            'dark',
-            'oled',
-            'mocha',
-            'nord',
-            'dracula',
-            'tokyo-night',
-            'solarized-dark',
-            'gruvbox-dark'
-          ]
-          var saved = localStorage.getItem('llm-relay-theme')
-          var legacy = localStorage.getItem('llm-relay-darkstyle')
-          // 老版本把「深空纯黑」存成独立档位（主题=dark + 档位=oled）。
-          // 迁移规则与 stores/theme.ts 的 readStoredTheme 必须逐字一致，两处都要认：
-          //   · 只有「上次停在深色」（主题键是 dark，或干脆没有主题键）才迁移成 oled ——
-          //     老版本里档位与明暗是两个键，选了 oled 之后再点灯泡切到浅色的话，
-          //     档位键仍留着 oled；那种情况下用户最后看到的是浅色，不该被拽回深色。
-          //   · 主题键是 light 时保持浅色（oled 那层表面只对深色底生效，浅色下等于没选）。
-          // 这段判断**必须**写在这里：store 里的迁移要等打包产物跑起来才生效，
-          // 不认的话 OLED 用户每次刷新都会先闪一帧经典深灰（#202020）再跳纯黑。
-          // 注意 saved 为 'dark' 时也走这条 —— 老用户的主题键恰好就是 'dark'，
-          // 「只认主题键不认识的值」这种写法会让这条迁移永远不触发。
-          if ((saved === null || saved === 'dark') && legacy === 'oled') saved = 'oled'
-          if (THEME_IDS.indexOf(saved) < 0) {
+          var THEME_IDS = ['light', 'dark']
+          var mode = localStorage.getItem('llm-relay-theme-mode') || localStorage.getItem('llm-relay-theme')
+          var saved = 'light'
+          if (mode === 'dark') {
+            saved = 'dark'
+          } else if (mode === 'light') {
+            saved = 'light'
+          } else {
             saved = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
               ? 'dark'
               : 'light'

@@ -570,7 +570,11 @@ onUnmounted(() => {
                  App.vue 里还有一层（兜外壳本身的错误）：两层嵌套时内层先接住
                  （onErrorCaptured 返回 false 就不再向上冒泡）。 -->
             <ErrorBoundary>
-              <router-view />
+              <router-view v-slot="{ Component }">
+                <Transition name="route-fade" mode="out-in">
+                  <component :is="Component" />
+                </Transition>
+              </router-view>
             </ErrorBoundary>
           </div>
         </main>
@@ -1147,5 +1151,21 @@ onUnmounted(() => {
   border-radius: var(--radius-control);
   box-shadow: 0 2px 0 var(--color-border), 0 3px 6px rgba(0, 0, 0, 0.1);
   transform: translateY(-1px);
+}
+
+/* ---- 路由视图流体交叉溶解（方案 10） ---- */
+.route-fade-enter-active,
+.route-fade-leave-active {
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+
+.route-fade-enter-from {
+  opacity: 0;
+  transform: translateY(3px);
+}
+
+.route-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-2px);
 }
 </style>

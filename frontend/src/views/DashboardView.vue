@@ -21,7 +21,6 @@ import {
   CheckCircleOutlined,
   ReloadOutlined,
   SwapOutlined,
-  BgColorsOutlined,
 } from '@ant-design/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '@/api/client'
@@ -148,32 +147,13 @@ const router = useRouter()
 const themeStore = useThemeStore()
 const themePanelOpen = ref(false)
 
-// 快捷切换：切到该族上一次用过的主题（没记录过就是该族的默认）。
-// 这是原来那枚灯泡的行为（一次点击翻浅深）——它被保留在弹层顶部：
-// 常驻某套深色配色的人，不该为了「临时看一眼浅色」而丢掉自己的主题。
-// 它刻意**不带**圆形扩散：这里没有「点击位置」的语义（键盘也能按），
-// 而且这一下本来就是「临时翻一下」，静默切换比铺满全屏的动画更合手。
-function quickSwitch(tone: 'light' | 'dark') {
-  themeStore.setTone(tone)
-}
-
-// 弹层打开后把焦点移进选择器、Esc 关掉、关闭后焦点还给触发按钮。
-//
-// 三件事都在 composables/usePopoverA11y.ts 里（版本面板与列设置共用同一套）：
-// 不主动移焦的话弹层对纯键盘用户等于不可达 —— antd 把内容 teleport 到 body 外层，
-// 触发按钮的焦点不会跟着进去（实测点开后按 Tab 落到的是弹层**外面**的「刷新」按钮）；
-// 而全仓除了移动端抽屉之外没有任何 Esc 处理，按了没反应。
-//
-// 这里额外指定优先聚焦「当前选中那张卡的 radio」：它在 radiogroup 里，
-// 于是方向键可以直接换主题、Tab 也不会漏掉这 12 张卡。鼠标路径下浏览器认为
-// 这次聚焦不是键盘发起的，不会画出焦点环（:focus-visible 的判定），观感不受影响。
 const themeBtn = ref<HTMLElement | null>(null)
 const themePanel = ref<HTMLElement | null>(null)
 usePopoverA11y({
   open: themePanelOpen,
   trigger: themeBtn,
   panel: themePanel,
-  preferred: '.theme-radio:checked'
+  preferred: '.seg-item.is-active'
 })
 
 // 列表面板的句柄：工具栏的「刷新」要连它一起刷（一页一个刷新按钮）
@@ -777,53 +757,37 @@ onMounted(async () => {
         <span class="lens-reset-icon" aria-hidden="true">✕</span>
       </span>
       <template #right>
-        <!-- 主题选择：2026-09-26 从侧栏底部迁来，2026-09-30 从「一键翻浅深」
-             改成「点开弹层自选」。弹层里是 12 套主题的网格（浅色 4 / 深色 8），
-             点哪张卡就从哪个位置圆形扩散出去（坐标由 ThemePicker 递给 store）。
-             弹层刻意不自动关闭：换主题的用法就是「点一下看效果、不合适再换下一个」。 -->
+        <!-- 主题切换按钮（全新极客形态）与跟随系统分段胶囊弹层 -->
         <a-popover
           v-model:open="themePanelOpen"
           trigger="click"
           placement="bottomRight"
-          overlay-class-name="theme-popover"
+          overlay-class-name="theme-popover-compact"
         >
           <button
             ref="themeBtn"
             type="button"
             class="theme-btn"
-            :title="`界面主题（当前：${themeStore.current.name}）`"
-            :aria-label="`选择界面主题，当前 ${themeStore.current.name}`"
+            :title="`界面主题：${themeStore.mode === 'auto' ? '跟随系统' : themeStore.current.name}`"
+            :aria-label="`选择界面主题，当前 ${themeStore.mode === 'auto' ? '跟随系统' : themeStore.current.name}`"
             aria-haspopup="dialog"
             :aria-expanded="themePanelOpen"
           >
-            <BgColorsOutlined aria-hidden="true" />
+            <!-- 动态三态图标：跟随系统(电脑) / 暖白(太阳) / 深灰(月亮) -->
+            <svg v-if="themeStore.mode === 'auto'" viewBox="0 0 16 16" class="tb-svg-icon" fill="none" stroke="currentColor" stroke-width="1.3">
+              <rect x="2" y="2.5" width="12" height="8.5" rx="1.5" />
+              <path d="M6 13.5h4M8 11v2.5" />
+            </svg>
+            <svg v-else-if="themeStore.mode === 'light'" viewBox="0 0 16 16" class="tb-svg-icon is-light" fill="none" stroke="currentColor" stroke-width="1.3">
+              <circle cx="8" cy="8" r="3" />
+              <path d="M8 1.5v1.5M8 13v1.5M1.5 8h1.5M13 8h1.5M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1" />
+            </svg>
+            <svg v-else viewBox="0 0 16 16" class="tb-svg-icon is-dark" fill="none" stroke="currentColor" stroke-width="1.3">
+              <path d="M13.5 9.5A5.5 5.5 0 1 1 6.5 2.5a4.5 4.5 0 0 0 7 7z" />
+            </svg>
           </button>
           <template #content>
-            <div ref="themePanel" class="theme-panel" role="dialog" aria-label="界面主题">
-              <div class="theme-panel-head">
-                <span class="theme-panel-title">界面主题</span>
-                <!-- 快捷切换：回到该族上次用过的那一套（默认就是浅色/深色） -->
-                <span class="theme-quick" role="group" aria-label="浅色与深色快捷切换">
-                  <button
-                    type="button"
-                    class="theme-quick-btn"
-                    :disabled="themeStore.tone === 'light'"
-                    :title="`切到 ${themeStore.lastLight === 'light' ? '浅色' : '上次用过的浅色主题'}`"
-                    @click="quickSwitch('light')"
-                  >
-                    浅色
-                  </button>
-                  <button
-                    type="button"
-                    class="theme-quick-btn"
-                    :disabled="themeStore.tone === 'dark'"
-                    :title="`切到 ${themeStore.lastDark === 'dark' ? '深色' : '上次用过的深色主题'}`"
-                    @click="quickSwitch('dark')"
-                  >
-                    深色
-                  </button>
-                </span>
-              </div>
+            <div ref="themePanel" class="theme-panel-compact" role="dialog" aria-label="界面主题">
               <ThemePicker dense />
             </div>
           </template>
@@ -1135,10 +1099,7 @@ onMounted(async () => {
   opacity: 0.7;
 }
 
-/* 工具栏右上角的主题按钮：32px 圆形描边，形态沿用原侧栏底部那枚
-   （2026-09-26 迁来；2026-09-30 从灯泡换成调色盘图标 —— 它现在开的是
-   主题选择弹层，不再是「翻一下浅深」）。a-button 的标准高同为 32px，
-   并排基线一致；描边、图标色与悬停底色全走全站令牌，12 套主题各自成立。 */
+/* 工具栏右上角的主题按钮（全新极客形态）：32px 方圆角微型控制台按钮 */
 .theme-btn {
   width: 32px;
   height: 32px;
@@ -1147,65 +1108,42 @@ onMounted(async () => {
   align-items: center;
   justify-content: center;
   border: 1px solid var(--color-border);
-  border-radius: 50%;
-  background: transparent;
-  color: var(--color-icon);
-  font-size: var(--font-size-lg);
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--color-bg) 60%, var(--color-fg));
+  color: var(--color-text);
   cursor: var(--cursor-hand);
-  transition: background 0.2s var(--ease-expo);
+  transition: all 0.2s var(--ease-expo);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
 .theme-btn:hover {
   background: var(--color-icon-hover-bg);
+  border-color: color-mix(in oklab, var(--color-primary) 50%, var(--color-border));
+  transform: translateY(-1px);
 }
 
-/* ---- 主题选择弹层（2026-09-30）----
-   宽度取「12 套主题 × 两列」放得下的最小值：420px（窄屏退到 92vw，
-   由 ThemePicker 自己把网格退成一列）。
-   弹层内容整体由 ThemePicker 渲染，这里只管头部与两枚快捷按钮。 */
-.theme-panel {
-  width: min(420px, 92vw);
+.theme-btn:active {
+  transform: scale(0.92);
 }
-.theme-panel-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
+
+.tb-svg-icon {
+  width: 15px;
+  height: 15px;
+  flex: none;
 }
-.theme-panel-title {
-  font-size: var(--font-size-md);
-  font-weight: 600;
-  color: var(--color-text);
+
+.tb-svg-icon.is-light {
+  color: var(--text-amber);
+  filter: drop-shadow(0 0 3px var(--color-orange));
 }
-/* 快捷切换按钮：回到该族上次用过的那一套。禁用当前所在的那一侧 ——
-   点了也不会变，不如直接说「你已经在这边了」。 */
-.theme-quick {
-  display: inline-flex;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-pill);
-  overflow: hidden;
-}
-.theme-quick-btn {
-  border: none;
-  background: transparent;
-  color: var(--color-text-secondary);
-  font-size: var(--font-size-sm);
-  padding: 2px 10px;
-  cursor: var(--cursor-hand);
-  transition: background-color 0.15s ease, color 0.15s ease;
-}
-.theme-quick-btn + .theme-quick-btn {
-  border-left: 1px solid var(--color-border);
-}
-.theme-quick-btn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+
+.tb-svg-icon.is-dark {
   color: var(--text-primary-ink);
+  filter: drop-shadow(0 0 3px var(--text-primary-ink));
 }
-.theme-quick-btn:disabled {
-  color: var(--text-primary-ink);
-  font-weight: 600;
-  cursor: default;
+
+.theme-panel-compact {
+  padding: 2px;
 }
 
 /* 词元卡右上角的格式切换按钮。
@@ -1220,23 +1158,25 @@ onMounted(async () => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: none;
-  border-radius: 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--color-text-secondary);
   cursor: pointer;
   transition:
-    background-color 0.15s ease,
-    color 0.15s ease,
-    transform 0.1s ease;
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    color 0.2s ease,
+    transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 .fmt-toggle:hover {
   background: var(--tone-bg);
   color: var(--tone-ink);
+  border-color: color-mix(in oklab, var(--tone-ink) 25%, transparent);
 }
-/* 按压反馈：缩一下再弹回，与 antd 按钮的体感一致 */
+/* 按压反馈：转轮拨动回弹（方案 7） */
 .fmt-toggle:active {
-  transform: scale(0.92);
+  transform: rotate(180deg) scale(0.9);
 }
 /* 键盘焦点必须可见（项目一贯的可访问性口径）：
    环的取值改由 theme.css 的全站 :focus-visible 统一给出（P1-7）——

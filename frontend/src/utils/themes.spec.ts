@@ -60,7 +60,8 @@ describe('注册表不变量', () => {
 
 describe('查询与校验', () => {
   it('isThemeId 只认注册表里的字符串', () => {
-    expect(isThemeId('nord')).toBe(true)
+    expect(isThemeId('dark')).toBe(true)
+    expect(isThemeId('light')).toBe(true)
     expect(isThemeId('auto')).toBe(false)
     expect(isThemeId('')).toBe(false)
     expect(isThemeId(null)).toBe(false)
@@ -69,7 +70,7 @@ describe('查询与校验', () => {
   })
 
   it('themeById 查不到时回落第一项而不是抛异常（主题取不到不该白屏）', () => {
-    expect(themeById('dracula').id).toBe('dracula')
+    expect(themeById('dark').id).toBe('dark')
     expect(themeById('nope').id).toBe(THEMES[0].id)
   })
 })

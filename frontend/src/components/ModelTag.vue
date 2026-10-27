@@ -10,10 +10,25 @@ const props = defineProps<{
 
 const style = computed(() => modelStyle(props.name))
 const vars = computed(() => modelVars(style.value))
+
+/** 厂商血统光谱微晶点（方案 1） */
+function pedigreeColor(name?: string | null): string {
+  const s = (name || '').toLowerCase()
+  if (/gpt|o1|o3|text-embedding/.test(s)) return '#10b981'
+  if (/claude/.test(s)) return '#d97706'
+  if (/gemini/.test(s)) return '#3b82f6'
+  if (/deepseek/.test(s)) return '#0284c7'
+  if (/qwen/.test(s)) return '#8b5cf6'
+  if (/llama|meta/.test(s)) return '#ef4444'
+  return 'currentColor'
+}
 </script>
 
 <template>
-  <span class="model-tag" :style="vars" :title="style.label">{{ style.label }}</span>
+  <span class="model-tag" :style="vars" :title="style.label">
+    <span class="pedigree-pip" :style="{ '--pip-color': pedigreeColor(name) }" aria-hidden="true" />
+    <span class="model-tag-text">{{ style.label }}</span>
+  </span>
 </template>
 
 <style scoped>
@@ -25,11 +40,13 @@ const vars = computed(() => modelVars(style.value))
      多主题之后那种写法要列 8 个深色 id）。 */
   --mt-l: var(--tag-tint-l);
 
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   /* 列宽装不下的长模型名要出省略号，不能把列撑开、更不能折行
      （折行会把这一行撑得比别的行高）。full 名字由 title 提供。 */
   max-width: 100%;
-  padding: 1px 8px;
+  padding: 1px 7px;
   border-radius: var(--radius-control);
   border: 1px solid oklch(var(--mt-l) var(--mt-c) var(--mt-h) / 0.32);
   background: oklch(var(--mt-l) var(--mt-c) var(--mt-h) / 0.13);
@@ -37,10 +54,22 @@ const vars = computed(() => modelVars(style.value))
   font-size: var(--font-size-sm);
   font-weight: 500;
   line-height: 20px;
+  vertical-align: middle;
+}
+
+.pedigree-pip {
+  flex: none;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--pip-color);
+  box-shadow: 0 0 3px var(--pip-color);
+}
+
+.model-tag-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  vertical-align: middle;
 }
 
 /* 深色族提亮那一档现在写在 theme.css 的 --tag-tint-l 里（每个深色主题块各写一次）：

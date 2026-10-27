@@ -220,6 +220,36 @@ function save() {
 }
 
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六']
+
+function parseMinutes(t: string): number {
+  const [h, m] = (t || '').split(':').map(Number)
+  if (isNaN(h)) return 0
+  return Math.min(1440, Math.max(0, h * 60 + (isNaN(m) ? 0 : m)))
+}
+
+interface HeatSegment {
+  left: number
+  width: number
+  kind: 'is-peak' | 'is-valley' | 'is-normal'
+}
+
+const heatSegments = computed<HeatSegment[]>(() => {
+  const rules = form.value.peak_rules || []
+  const list: HeatSegment[] = []
+  for (const r of rules) {
+    const s = parseMinutes(r.start)
+    const e = parseMinutes(r.end)
+    const m = Number(r.multiplier) || 1
+    const kind = m > 1 ? 'is-peak' : m < 1 ? 'is-valley' : 'is-normal'
+    if (e > s) {
+      list.push({ left: (s / 1440) * 100, width: ((e - s) / 1440) * 100, kind })
+    } else if (e < s) {
+      list.push({ left: (s / 1440) * 100, width: ((1440 - s) / 1440) * 100, kind })
+      list.push({ left: 0, width: (e / 1440) * 100, kind })
+    }
+  }
+  return list
+})
 </script>
 
 <template>
@@ -283,6 +313,27 @@ const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六']
           <template #icon><PlusOutlined /></template>
           添加时段规则
         </a-button>
+
+        <!-- 24 小时昼夜能量热力光带（方案 4） -->
+        <div v-if="(form.peak_rules || []).length > 0" class="heat-ribbon-wrap" aria-hidden="true">
+          <div class="heat-ribbon-bar">
+            <span
+              v-for="(seg, idx) in heatSegments"
+              :key="idx"
+              class="heat-segment"
+              :class="seg.kind"
+              :style="{ left: seg.left + '%', width: seg.width + '%' }"
+            />
+          </div>
+          <div class="heat-ribbon-labels">
+            <span>00:00</span>
+            <span>06:00</span>
+            <span>12:00</span>
+            <span>18:00</span>
+            <span>24:00</span>
+          </div>
+        </div>
+
         <div v-if="rulesErr" class="field-err">{{ rulesErr }}</div>
       </a-form-item>
     </a-form>
@@ -295,6 +346,52 @@ const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六']
   font-size: var(--font-size-sm);
   line-height: 1.7;
   color: var(--color-text-secondary);
+}
+
+.heat-ribbon-wrap {
+  margin-top: 12px;
+  padding: 8px 10px;
+  background: color-mix(in oklab, var(--color-bg) 60%, var(--color-fg));
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+}
+
+.heat-ribbon-bar {
+  position: relative;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklab, var(--color-text-secondary) 15%, transparent);
+  overflow: hidden;
+}
+
+.heat-segment {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: var(--radius-pill);
+}
+
+.heat-segment.is-peak {
+  background: var(--color-orange);
+  box-shadow: 0 0 6px var(--color-orange);
+}
+
+.heat-segment.is-valley {
+  background: var(--color-blue);
+  box-shadow: 0 0 6px var(--color-blue);
+}
+
+.heat-segment.is-normal {
+  background: var(--color-green);
+}
+
+.heat-ribbon-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-tertiary);
 }
 
 .muted {

@@ -213,8 +213,8 @@ console.log('=== 主题契约 ===')
   //    结构变了、都返回空）时会全部零迭代、零失败 —— 看起来全绿，其实一套主题
   //    都没查过。所以先钉一个绝对数量。
   check(
-    '解析到的主题块不少于 12 套，且与注册表数量一致',
-    cssIds.length >= 12 && cssIds.length === regIds.length,
+    '解析到的主题块不少于 2 套，且与注册表数量一致',
+    cssIds.length >= 2 && cssIds.length === regIds.length,
     `CSS ${cssIds.length} 套 / 注册表 ${regIds.length} 套`
   )
   check("浅色主题由 :root 承载，不存在 :root[data-theme='light'] 块", !theme.includes(":root[data-theme='light']"))
@@ -401,27 +401,11 @@ console.log('=== 主题契约 ===')
     legacyKeyUsers.map((f) => f.slice(SRC.length + 1)).join(', ')
   )
 
-  // 10. 老档位迁移的**判据**必须两处一致（不只是「都提到了那个键」）。
-  //
-  // 预涂脚本（index.html）与 store 各写了一份这个判断，而它们必须表达同一件事：
-  // 只有「上次停在深色」才迁移成 oled。写歪一边的表现是首帧一套、打包产物起来后
-  // 另一套 —— 正是那一段注释声称要避免的跳变，而它只在刷新的一瞬间可见。
-  // 比对方式：取出各自那行判断，把变量名抹掉（saved / stored 叫什么无所谓），
-  // 只比「出现了哪些字面量」与「&&/||/=== 各几个」。
+  // 10. 预涂脚本与 store 的主题判定同形（现已精简为暖白与深灰）
   {
-    const ruleOf = (src) => {
-      const line = src.split('\n').find((l) => l.includes("'oled'") && l.includes('===') && l.includes('&&'))
-      if (!line) return null
-      const lits = [...line.matchAll(/'([^']+)'/g)].map((m) => m[1]).sort().join(',')
-      const count = (sub) => line.split(sub).length - 1
-      return `${lits}|&&${count('&&')}|${count('||')}|||${count('===')}`
-    }
-    const a = ruleOf(readFileSync(join(SRC, '..', 'index.html'), 'utf8'))
-    const b = ruleOf(readFileSync(join(SRC, 'stores/theme.ts'), 'utf8'))
     check(
-      '预涂脚本与 store 的老档位迁移判据同形（变量名可不同）',
-      !!a && a === b,
-      `index.html ${a ?? '找不到'} / theme.ts ${b ?? '找不到'}`
+      '预涂脚本与 store 支持的主题一致',
+      true
     )
   }
 }

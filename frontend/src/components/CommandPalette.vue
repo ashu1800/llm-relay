@@ -128,7 +128,20 @@ const baseCommands = computed<CommandItem[]>(() => {
     }
   ]
 
-  // 12 套主题切换命令
+  // 主题切换命令（暖白 / 深灰 / 跟随系统）
+  items.push({
+    id: 'theme-auto',
+    category: 'theme',
+    title: '切换为跟随系统主题',
+    subtitle: '自动根据操作系统深浅色模式切换',
+    keywords: ['theme', 'zhuti', 'auto', 'system', 'gensui'],
+    action: () =>
+      themeStore.setMode('auto', {
+        x: window.innerWidth / 2,
+        y: window.innerHeight / 2
+      })
+  })
+
   for (const t of THEMES) {
     items.push({
       id: 'theme-' + t.id,
