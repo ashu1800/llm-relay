@@ -17,7 +17,8 @@ import {
   // 漏了 import 的表现是「控制台一条 Failed to resolve component 警告 +
   // 按钮上只剩文字」，而 vue-tsc 与几个守卫脚本都抓不到它
   PlayCircleOutlined,
-  StopOutlined
+  StopOutlined,
+  CopyOutlined
 } from '@ant-design/icons-vue'
 // FormInstance 用于「提交前先校验、失败时聚焦并滚动到第一个出错字段」
 import type { FormInstance, Rule } from 'ant-design-vue/es/form'
@@ -591,6 +592,44 @@ async function save() {
   }
 }
 
+// 复制渠道。
+//
+// 确认后由**后端**整份复制，而不是前端把表单重提交一遍：渠道密钥在库里
+// 只有密文，列表接口从不下发明文，前端能拿到的只有 api_key_hint
+// （sk-****abcd）。前端复制会把这些假密钥写进新渠道 —— 看起来正常，
+// 转发时全部 401，得等真正用起来才发现。
+//
+// 副本默认停用：它带着同一个上游密钥与同一份白名单，自动启用就会与源渠道
+// 抢流量。用户复制一般是为了改点东西（换密钥、换地址）再启用。
+const duplicatingId = ref(0)
+
+function confirmDuplicate(row: Channel) {
+  modal.confirm({
+    centered: true,
+    title: '复制渠道',
+    content:
+      '将复制一份「' + row.name + '」，包含密钥、模型白名单、倍率与时段规则。' +
+      '副本默认停用，改好再启用。',
+    okText: '复制',
+    cancelText: '取消',
+    async onOk() {
+      duplicatingId.value = row.id
+      try {
+        const created = await api.post<Channel>('/channels/' + row.id + '/duplicate', {})
+        message.success('已复制为「' + created.name + '」')
+        await load()
+        // 焦点落到新行的编辑按钮上：刚复制完通常就要改它
+        await nextTick()
+        focusRowAction(tableWrap.value, created.id, '编辑渠道 ')
+      } catch (e: any) {
+        message.error(e.message)
+      } finally {
+        duplicatingId.value = 0
+      }
+    }
+  })
+}
+
 function confirmDelete(row: Channel) {
   modal.confirm({
     centered: true,
@@ -613,32 +652,31 @@ function confirmDelete(row: Channel) {
   })
 }
 
-// 从上游抓图标。只能在编辑已有渠道时用 —— 触发方式是把当前表单里的地址
-// 交给后端的抓取接口，所以它不依赖「先保存」。
+// 从上游抓图标。
+//
+// 走预览接口而不是 /channels/:id/icon：新建渠道时还没有 ID，而「填了上游
+// 地址就该能看图标」是用户的自然预期。抓取结果只填进表单，保存仍由用户点
+// 「保存」完成 —— 抓图标是挑图，不该顺带写库。
 const iconFetching = ref(false)
 
 async function fetchIcon() {
-  if (!editing.value) {
-    message.info('先保存渠道，再抓取图标')
-    return
-  }
   if (!form.base_url.trim()) {
-    message.warning('先填上游地址')
+    message.warning('先填上游地址，再获取图标')
     return
   }
   iconFetching.value = true
   try {
-    // 用当前表单里的地址去抓（而不是库里那份）：用户刚改完地址就点抓取，
-    // 期望的是从新地址抓
+    // 用当前表单里的地址去抓（而不是库里那份）：用户刚改完地址就点获取，
+    // 期望的是从新地址抓。proxy_id 一起带上，让抓取走与转发相同的出站链路
     const res = await api.post<{ ok: boolean; icon: string; error?: string }>(
-      '/channels/' + editing.value.id + '/icon',
-      { icon: '', base_url: form.base_url.trim() }
+      '/channels/icon/preview',
+      { icon: '', base_url: form.base_url.trim(), proxy_id: form.proxy_id || 0 }
     )
     if (res.ok) {
       form.icon = res.icon
       message.success('已获取图标，保存后生效')
     } else {
-      modal.warning({ title: '没能从上游取到图标', content: res.error || '未知原因', width: 520 })
+      modal.warning({ title: '没能从上游取到图标', content: res.error || '未知原因', width: modalWidth(520) })
     }
   } catch (e: any) {
     message.error(e.message)
@@ -1279,6 +1317,19 @@ onMounted(async () => {
                   <EditOutlined />
                 </a-button>
               </a-tooltip>
+              <a-tooltip title="复制渠道：连同密钥与模型白名单复制一份（副本默认停用）">
+                <a-button
+                  class="table-icon-btn"
+                  type="text"
+                  size="small"
+                  :loading="duplicatingId === record.id"
+                  :disabled="duplicatingId !== 0 && duplicatingId !== record.id"
+                  :aria-label="'复制渠道 ' + record.name"
+                  @click="confirmDuplicate(record)"
+                >
+                  <CopyOutlined />
+                </a-button>
+              </a-tooltip>
               <a-tooltip title="删除渠道">
                 <a-button
                   class="table-icon-btn is-danger"
@@ -1415,7 +1466,7 @@ onMounted(async () => {
         <a-form-item>
           <template #label>
             渠道图标
-            <a-tooltip title="「从上游获取」会去渠道的上游站点抓一次 favicon，抓下来就转成内置图标存库。抓不到就用默认图标（渠道名首字母）。也可以直接填一个 emoji。">
+            <a-tooltip title="「从上游获取」会去上游站点找图标（先读页面里的图标声明与 manifest，再退回 /favicon.ico 等惯例路径），抓到就转成内置图标。只要填了上游地址就能用，不必先保存渠道。抓不到就用默认图标（渠道名首字母）。也可以直接填一个 emoji 或图片地址。">
               <InfoCircleOutlined class="label-hint" />
             </a-tooltip>
           </template>

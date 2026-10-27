@@ -237,10 +237,30 @@ func TestReadIconResponse(t *testing.T) {
 		}
 	})
 
-	t.Run("Content-Type 本身畸形时按非图片拒", func(t *testing.T) {
-		_, err := readIconResponse(respOf(200, "image/png; =", png), "https://a.com/a.png")
+	// 畸形 Content-Type 的处理在 2026-10-27 改了：以前一律拒绝，现在退回
+	// 字节嗅探确认「内容确实是图片」才放行。
+	//
+	// 为什么改：一部分静态托管（对象存储、nginx 配错 mime.types）会发出
+	// `image/png; =` 这种解析不了的头，或者干脆不发 Content-Type。原行为
+	// 把这些站点的图标全部判死，理由还只有一句「返回的不是图片」——
+	// 而内容是能用的 PNG。
+	//
+	// 安全性没有降低：嗅探**认不出就照旧拒绝**（下一条子用例覆盖），
+	// 所以「404 页面配图片头」「HTML 冒充图片」这类情况仍然拦得住。
+	t.Run("畸形 Content-Type 但内容是 PNG：靠嗅探放行", func(t *testing.T) {
+		got, err := readIconResponse(respOf(200, "image/png; =", png), "https://a.com/a.png")
+		if err != nil {
+			t.Fatalf("内容是合法 PNG 时应当靠嗅探放行，实际 %v", err)
+		}
+		if !strings.HasPrefix(got, "data:image/png;base64,") {
+			t.Errorf("data URI 的媒体类型应由嗅探得出，实际 %.40s", got)
+		}
+	})
+
+	t.Run("Content-Type 畸形且内容不是图片：仍然拒", func(t *testing.T) {
+		_, err := readIconResponse(respOf(200, "image/png; =", []byte("<html>nope</html>")), "https://a.com/a.png")
 		if err == nil || !strings.Contains(err.Error(), "返回的不是图片") {
-			t.Errorf("畸形 Content-Type 应当被拒，实际 %v", err)
+			t.Errorf("内容认不出是图片时应当被拒，实际 %v", err)
 		}
 	})
 
@@ -267,9 +287,22 @@ func TestReadIconResponse(t *testing.T) {
 		}
 	})
 
-	t.Run("没有 Content-Type", func(t *testing.T) {
-		if _, err := readIconResponse(respOf(200, "", png), "https://a.com/a.png"); err == nil {
-			t.Error("缺 Content-Type 时应当被拒（浏览器也渲染不了）")
+	// 缺 Content-Type 的处理同样在 2026-10-27 改了：以前一律拒绝，
+	// 理由是「浏览器也渲染不了」—— 那条理由不成立：这里最终产出的是
+	// 带正确媒体类型的 data URI（媒体类型来自嗅探），浏览器渲染得出来。
+	t.Run("没有 Content-Type 但内容是 PNG：靠嗅探放行", func(t *testing.T) {
+		got, err := readIconResponse(respOf(200, "", png), "https://a.com/a.png")
+		if err != nil {
+			t.Fatalf("内容是合法 PNG 时应当靠嗅探放行，实际 %v", err)
+		}
+		if !strings.HasPrefix(got, "data:image/png;base64,") {
+			t.Errorf("应当补出 image/png，实际 %.40s", got)
+		}
+	})
+
+	t.Run("没有 Content-Type 且内容不是图片：仍然拒", func(t *testing.T) {
+		if _, err := readIconResponse(respOf(200, "", []byte("<?php echo 1; ?>")), "https://a.com/a.png"); err == nil {
+			t.Error("内容认不出是图片时应当被拒")
 		}
 	})
 
