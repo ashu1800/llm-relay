@@ -695,7 +695,13 @@ onMounted(async () => {
       <!-- 密钥排在渠道前面：排查「某个客户端在干什么」时它是第一入口 -->
       <span class="filter-select">
         <span class="filter-sizer" aria-hidden="true">{{ keyFilterLabel }}</span>
-        <a-select v-model:value="keyFilter" :options="keyOptions" @change="onKeyChange" />
+        <a-select
+          v-model:value="keyFilter"
+          :options="keyOptions"
+          :dropdown-match-select-width="false"
+          popup-class-name="filter-dropdown"
+          @change="onKeyChange"
+        />
       </span>
       <!-- 渠道 / 模型紧跟在密钥右边：它们回答的是同一类问题
            （「下面这些数字算的是哪一部分」），放在一起才读得成一句话 -->
@@ -704,7 +710,13 @@ onMounted(async () => {
              sizer 只量文字会窄出 22px（16px 图标 + 6px 间距），
              长渠道名因此会被提前截成「…」。加一个 is-with-icon 补上这一段。 -->
         <span class="filter-sizer is-with-icon" aria-hidden="true">{{ channelFilterLabel }}</span>
-        <a-select v-model:value="channelFilter" :options="channelOptions" @change="onChannelChange">
+        <a-select
+          v-model:value="channelFilter"
+          :options="channelOptions"
+          :dropdown-match-select-width="false"
+          popup-class-name="filter-dropdown"
+          @change="onChannelChange"
+        >
           <!-- 下拉项与选中值是 antd 的两个插槽，内容交给同一个组件渲染：
                分开写迟早会出现「下拉里有图标、选完就没了」这种不一致 -->
           <template #option="opt"><ChannelOption :option="opt" /></template>
@@ -714,7 +726,13 @@ onMounted(async () => {
       <!-- 模型候选按渠道白名单收窄（见 visibleModels） -->
       <span class="filter-select">
         <span class="filter-sizer" aria-hidden="true">{{ modelFilterLabel }}</span>
-        <a-select v-model:value="modelFilter" :options="modelOptions" @change="onModelChange" />
+        <a-select
+          v-model:value="modelFilter"
+          :options="modelOptions"
+          :dropdown-match-select-width="false"
+          popup-class-name="filter-dropdown"
+          @change="onModelChange"
+        />
       </span>
       <!-- 排障深链带来的两个临时条件：只从 URL 或日志详情里进来，平时不占地方 -->
       <a-tag v-if="traceId" closable :title="traceId" @close="clearExtra('trace')">
@@ -1205,5 +1223,28 @@ onMounted(async () => {
 <style>
 .theme-popover .ant-popover-inner {
   padding: 10px;
+}
+
+/* 三个筛选下拉的浮层边界（popup-class-name="filter-dropdown"）。
+   浮层是 teleport 到 body 的，scoped 样式碰不到它，所以写在这个非 scoped 块里
+   （与上面 .theme-popover 同一处理）。
+
+   为什么需要它：模板里设了 dropdown-match-select-width=false —— 浮层不再
+   跟随触发器宽度。触发器由 sizer 压到「刚好放下选中项」，浮层若也跟着那么
+   窄，选项就会被截断成 "deepseek-…"（2026-10-27 实测踩到）。
+   解耦之后浮层按自己的内容排版，但必须有边界：模型名可以很长（带版本号），
+   一路撑到屏幕外同样不可用。 */
+.filter-dropdown {
+  min-width: 140px;
+  max-width: 360px;
+}
+
+/* 浮层宽度有上限，比 360px 更长的模型名在这里省略成 …。
+   完整值选不回来（下拉里与触发器上都省略了），这是 360px 上限的代价 ——
+   真要放宽改上面的 max-width 即可。 */
+.filter-dropdown .ant-select-item-option-content {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

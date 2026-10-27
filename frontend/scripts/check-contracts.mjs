@@ -1611,6 +1611,43 @@ console.log('=== 带宽缓冲前后端一致 ===')
   if (!checked) console.log('  SKIP  未找到后端 api/live.go，跳过')
 }
 
+// ---- 浮层类名属性必须与组件的 prop 名一致 ----
+//
+// antd 的浮层类名属性各家不同：Select 用 popupClassName（dropdownClassName
+// 已废弃），Popover / Drawer / Tooltip 用 overlayClassName。写错了不会报错 ——
+// Vue 把不认识的属性当普通 DOM 属性透传，类名永远挂不到浮层上，
+// 表现是「样式写了但不生效」，而且看起来像 CSS 选择器的问题。
+//
+// 2026-10-27 实测踩到：给 a-select 写了 overlay-class-name 想限制下拉浮层
+// 宽度，样式一条都没命中。
+{
+  const dtsPath = 'node_modules/ant-design-vue/es/select/index.d.ts'
+  let dts = ''
+  try {
+    dts = readFileSync(dtsPath, 'utf8')
+  } catch {
+    dts = ''
+  }
+  // 从 d.ts 里取 Select 的 prop 名（4 空格缩进的 key）
+  const selectProps = dts ? [...dts.matchAll(/^\s{4}(\w+):/gm)].map((m) => m[1]) : []
+  if (!selectProps.length) {
+    console.log('  SKIP  未找到 antd Select 的类型声明，跳过浮层类名检查')
+  } else {
+    check('Select 用 popupClassName（不是 overlayClassName）', selectProps.includes('popupClassName'), selectProps.filter((p) => /class/i.test(p)).join(', '))
+    check('Select 不支持 overlayClassName', !selectProps.includes('overlayClassName'))
+
+    // 模板里每个 a-select 都必须用 popup-class-name
+    let wrong = []
+    for (const file of walk(SRC)) {
+      const src = readFileSync(file, 'utf8')
+      for (const m of src.matchAll(/<a-select(?![\w-])[\s\S]*?(\/>|>)/g)) {
+        if (/overlay-class-name/.test(m[0])) wrong.push(file)
+      }
+    }
+    check('模板里 a-select 没有误用 overlay-class-name', wrong.length === 0, wrong.join(', '))
+  }
+}
+
 console.log('')
 if (failed > 0) {
   console.log(`${failed} 项未通过`)
