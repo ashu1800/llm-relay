@@ -25,10 +25,14 @@ type Config struct {
 type SecurityConfig struct {
 	// Secret 用于 AES-GCM 加密上游渠道密钥；生产环境务必通过 RELAY_SECRET 注入。
 	Secret string `yaml:"secret"`
-	// AdminKey 是管理后台的登录密钥（无账号模型：全站只有这一把）。
+	// AdminKey 是管理后台的「引导密钥」（首次部署进入设置向导用）。
+	//
+	// 认证方式二选一：动态码（2FA）或用户自设的管理密钥（存在数据库里）。
+	// 这把引导密钥只在认证方式尚未初始化（首次部署、存量未完成向导）时
+	// 有效：用户用它登录后在页面上选定方式，之后它即从登录链路退役 ——
+	// 换句话说它是「初始化凭证」而不是「长期密码」。
 	// 为空表示关闭管理台登录鉴权 —— 仅建议在「只绑回环」的本地部署下使用；
-	// 公网部署必须设置，否则管理接口（含渠道密钥与调用日志）对外裸奔。
-	// 密钥本身不落库：启动时只算哈希，登录时常数时间比对。
+	// 公网部署必须设置，否则完成初始化的窗口期管理接口对外裸奔。
 	AdminKey string `yaml:"admin_key"`
 	// SessionTTL 是管理台登录会话的有效期，默认 168h（7 天）。
 	// 登录签发的会话令牌在签发时刻就带上了绝对过期时间，进程重启不影响它。
@@ -239,9 +243,10 @@ func applyEnv(c *Config) {
 	setDuration(&c.Relay.ClientMapTTL, "RELAY_CLIENT_MAP_TTL")
 
 	setStr(&c.Security.Secret, "RELAY_SECRET")
-	// 管理台登录密钥与会话时长。密钥缺失不报错（保持旧部署可升级），
+	// 管理台引导密钥与会话时长。密钥缺失不报错（保持旧部署可升级），
 	// 但「鉴权未启用」会体现在启动日志与 /api/admin/system/info 里，
 	// 让界面能持续提醒 —— 与默认加密密钥的处理是同一个思路。
+	// 该密钥只在认证方式未初始化时有效（详见 SecurityConfig.AdminKey 注释）。
 	setStr(&c.Security.AdminKey, "RELAY_ADMIN_KEY")
 	setDuration(&c.Security.SessionTTL, "RELAY_SESSION_TTL")
 
@@ -322,6 +327,8 @@ func (c *Config) validate() error {
 	// 管理密钥的强度在启动时就地卡死，而不是等到被暴力破解才后悔：
 	// 公网上的登录接口面对的是无限次的自动化尝试，太短的密钥（哪怕有
 	// 限流）在时间尺度上仍然守不住。install.sh 生成的 48 位随机值远超门槛。
+	// 注意这只校验「引导密钥」；用户在界面上自设的密钥由 api 层按同一
+	// 口径校验（见 console_setup.go 的 validateNewKey）。
 	if key := c.Security.AdminKey; key != "" {
 		if key == "CHANGE_ME" {
 			return fmt.Errorf("security.admin_key 还是占位值 CHANGE_ME，请设置真实的管理密钥（deploy/.env 中 RELAY_ADMIN_KEY）")

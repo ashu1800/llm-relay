@@ -36,6 +36,9 @@ type Price struct {
 	// PeakApplied 只表示「时段规则命中」，固定倍率不算峰时
 	PeakApplied bool
 	Base        model.ChannelModel
+	// Priced 表示这次计价真的取到了单价（模型在所属币种下配了价）。
+	// false 时金额必然为 0，供界面区分「真实的 0 元」与「漏配价」。
+	Priced bool
 }
 
 // 倍率来源，写进定价快照，事后能一眼看出这笔钱是按时段算的还是按固定倍率算的。
@@ -94,15 +97,21 @@ func scale(price decimal.Decimal, tokens int) decimal.Decimal {
 
 // Engine 负责把「渠道 + 模型名 + 时刻」解析成单价，带进程内缓存。
 //
-// 缓存整张 channel_models（几百行）而不是按需查库：计费发生在每次请求结束时，
-// 那时候再查一次库等于给转发链路加一跳。价格改了由调用方 Invalidate。
+// 缓存整张 model_prices（几十到几百行）而不是按需查库：计费发生在每次请求
+// 结束时，那时候再查一次库等于给转发链路加一跳。价格改了由调用方 Invalidate。
+//
+// 2026-10-27 起单价是**模型级**的（model.ModelPrice），渠道只提供币种与
+// 倍率。缓存因此拆成两张表的内容：模型价 → 按模型名查；币种/倍率/时段规则
+// → 按「渠道 × 模型」查（它们仍在 channel_models 上）。
 type Engine struct {
 	db    *gorm.DB
 	ttl   time.Duration
 	mu    sync.RWMutex
-	cache map[string]model.ChannelModel
-	// currencies 是「渠道 ID -> 记账币种」。金额带币种，算价时就要用到它，
-	// 所以和价格一起缓存：每次请求再单查一次 channels 等于给转发链路加一跳
+	cache map[string]model.ModelPrice
+	// rows 是白名单行：提供倍率、时段规则与「这条模型在该渠道是否启用」。
+	// 单价不再从这里取 —— 那部分已经搬到 model_prices。
+	rows map[string]model.ChannelModel
+	// currencies 是「渠道 ID -> 记账币种」。金额带币种，算价时就要用到它。
 	currencies map[uint]string
 	loadedAt   time.Time
 	lastErr    error
@@ -119,7 +128,13 @@ func NewEngine(db *gorm.DB, ttl time.Duration) *Engine {
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
-	return &Engine{db: db, ttl: ttl, cache: map[string]model.ChannelModel{}, currencies: map[uint]string{}}
+	return &Engine{
+		db:         db,
+		ttl:        ttl,
+		cache:      map[string]model.ModelPrice{},
+		rows:       map[string]model.ChannelModel{},
+		currencies: map[uint]string{},
+	}
 }
 
 // Invalidate 在定价被修改或同步后强制刷新缓存。
@@ -149,10 +164,15 @@ func (e *Engine) CurrencyOf(ctx context.Context, channelID uint) string {
 }
 
 // Resolve 解析「某个渠道的某个模型」在 at 时刻的单价。
-// 第二个返回值表示这条白名单记录是否存在且配了价。
+// 第二个返回值表示这条白名单记录存在、且该模型**在所属渠道的币种下**配了价。
 //
-// 两个都不满足时返回 false，调用方据此把费用记成 0 —— 这也是为什么
-// 渠道列表要显式提示「未配价的模型」：漏配的后果在账面上看不出异常。
+// 取价顺序（2026-10-27 模型级定价）：
+//  1. 白名单行必须存在且启用 —— 没上白名单的模型不该计费；
+//  2. 单价按**模型名**从 model_prices 取，再按渠道币种选美元或人民币那一档；
+//  3. 倍率仍来自白名单行（时段规则优先，其次固定倍率）。
+//
+// 不明码标价时返回 false，调用方据此把费用记成 0 —— 这也是为什么渠道列表
+// 仍要提示「未配价的模型」：漏配的后果在账面上看不出异常。
 func (e *Engine) Resolve(ctx context.Context, channelID uint, modelName string, at time.Time) (Price, bool) {
 	key := strings.TrimSpace(modelName)
 	if key == "" || channelID == 0 {
@@ -163,15 +183,32 @@ func (e *Engine) Resolve(ctx context.Context, channelID uint, modelName string, 
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	base, ok := e.cache[cacheKey(channelID, key)]
+	base, ok := e.rows[cacheKey(channelID, key)]
 	if !ok {
 		return Price{}, false
 	}
-	if base.InputPer1M.IsZero() && base.OutputPer1M.IsZero() &&
-		base.CacheReadPer1M.IsZero() && base.CacheWritePer1M.IsZero() && base.Multiplier <= 1 {
-		// 四个单价全 0 且没有倍率 = 这条模型还没配价。
-		// 继续算下去会得到 0 元，与「配了价但单价是 0」分不开，不如如实说没价
-		return Price{}, false
+
+	// 币种先定下来：它决定取哪一档单价，也决定这条模型到底「有没有配价」
+	currency := e.currencies[channelID]
+	if currency == "" {
+		// 加列之前的老库或渠道被手工改坏时兜底，不让金额挂到空币种上
+		currency = model.CurrencyUSD
+	}
+
+	row, priced := e.cache[base.PublicName]
+	var unit model.PriceSet
+	if priced {
+		unit = row.PriceFor(currency)
+	}
+	// 该币种四档全 0 = 这个模型没配这一档价。与「配成 0 元」在账面等价，
+	// 但语义不同：前者会让整笔费用记 0 且不标价，后者同样是 0。
+	// 两者都记 0，所以这里只要求「有白名单行」即可继续 —— 未配价时
+	// 金额自然是 0（见下面 Price.Cost），但倍率与快照仍有意义。
+	if !priced || unit.IsZero() {
+		// 没有价格也没有倍率：如实说「没价」，不让调用方以为这里有账可看
+		if base.Multiplier <= 1 && len(base.PeakRules) == 0 {
+			return Price{}, false
+		}
 	}
 
 	// 时段规则优先，其次固定倍率。
@@ -191,31 +228,28 @@ func (e *Engine) Resolve(ctx context.Context, channelID uint, modelName string, 
 	}
 	dec := decimal.NewFromFloat(m)
 
-	currency := e.currencies[channelID]
-	if currency == "" {
-		// 加列之前的老库或渠道被手工改坏时兜底，不让金额挂到空币种上
-		currency = model.CurrencyUSD
-	}
-
 	return Price{
 		ChannelID: channelID,
 		ModelName: base.PublicName,
-		// 币种跟着渠道走：人民币渠道配的就是人民币数字。
+		// 币种跟着渠道走：人民币渠道取人民币那一档单价。
 		//
 		// 这里曾经写死 USD，理由是「全站金额都按美元展示，留个能改的字段
 		// 只会让人以为能改」—— 那在当时是对的（那时确实只有美元一种口径），
 		// 现在上游有人民币账单，写死就变成了「把人民币数字标成美元」。
 		// 换算仍然不做：币种只用来分别展示、分别统计（见 model/currency.go）。
 		Currency:        currency,
-		InputPer1M:      base.InputPer1M.Mul(dec),
-		OutputPer1M:     base.OutputPer1M.Mul(dec),
-		CacheReadPer1M:  base.CacheReadPer1M.Mul(dec),
-		CacheWritePer1M: base.CacheWritePer1M.Mul(dec),
+		InputPer1M:      unit.InputPer1M.Mul(dec),
+		OutputPer1M:     unit.OutputPer1M.Mul(dec),
+		CacheReadPer1M:  unit.CacheReadPer1M.Mul(dec),
+		CacheWritePer1M: unit.CacheWritePer1M.Mul(dec),
 		Multiplier:      dec,
 		Source:          source,
 		PeakLabel:       label,
 		PeakApplied:     source == MultiplierSourcePeak,
 		Base:            base,
+		// Priced 区分「配了价但算出来 0」与「压根没配价」：
+		// 前者是真实的 0 元订单，后者是漏配 —— 界面上要能分别指出。
+		Priced: priced && !unit.IsZero(),
 	}, true
 }
 
@@ -233,7 +267,10 @@ func (e *Engine) refresh(ctx context.Context) {
 	var rows []model.ChannelModel
 	err := e.db.WithContext(ctx).Where("enabled = ?", true).Find(&rows).Error
 
-	// 币种按渠道存，价格按「渠道 x 模型」存，两者在同一次刷新里读回来
+	// 单价按模型名存（model_prices），币种按渠道存，三张表在同一次刷新里读回来
+	var prices []model.ModelPrice
+	errPrice := e.db.WithContext(ctx).Find(&prices).Error
+
 	var chans []struct {
 		ID       uint
 		Currency string
@@ -250,24 +287,35 @@ func (e *Engine) refresh(ctx context.Context) {
 		e.lastErr = err
 		return
 	}
-	cache := make(map[string]model.ChannelModel, len(rows))
-	for _, r := range rows {
-		cache[cacheKey(r.ChannelID, r.PublicName)] = r
+	cache := make(map[string]model.ModelPrice, len(prices))
+	for _, p := range prices {
+		cache[p.ModelName] = p
 	}
 	e.cache = cache
+
+	rowMap := make(map[string]model.ChannelModel, len(rows))
+	for _, r := range rows {
+		rowMap[cacheKey(r.ChannelID, r.PublicName)] = r
+	}
+	e.rows = rowMap
+
+	// 价格表读不回来是硬错误（会把所有模型记成 0 元），必须记下来
+	if errPrice != nil {
+		e.lastErr = errPrice
+	}
 	if errCurrency == nil {
 		currencies := make(map[uint]string, len(chans))
 		for _, ch := range chans {
 			currencies[ch.ID] = ch.Currency
 		}
 		e.currencies = currencies
-	} else if err == nil {
-		// 币种读不回来不影响金额本身（金额是价格乘出来的），只是会退回
-		// 默认币种展示；但也不能一声不吭，系统页会显示这个错误
+	} else if errPrice == nil {
+		// 币种读不回来会影响「取哪一档单价」，比丢金额轻一些，但也不能一声不吭：
+		// 系统页会显示这个错误
 		e.lastErr = errCurrency
 	}
 	e.loadedAt = time.Now()
-	if err == nil && errCurrency == nil {
+	if errPrice == nil && errCurrency == nil {
 		e.lastErr = nil
 	}
 }

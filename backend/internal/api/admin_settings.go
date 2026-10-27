@@ -77,8 +77,10 @@ func (s *Server) getSettings(c *gin.Context) {
 			// 毫秒而非秒：默认值 500ms 换算成整秒是 0，界面上会显示成
 			// 「已关闭」——那是与实际相反的误导。
 			"retry_same_upstream_delay_ms": int(cfg.Relay.RetrySameUpstreamDelay.Milliseconds()),
-			// 登录鉴权状态与会话时长。密钥本身（哪怕哈希）永远不出接口
+			// 登录鉴权状态与会话时长。密钥本身（哪怕哈希）永远不出接口；
+			// auth_method 告诉前端当前是二选一里的哪一种（unset=待初始化）
 			"console_auth_enabled": s.consoleAuthEnabled(),
+			"console_auth_method":  string(s.authMethod()),
 			"session_ttl_hours":    int(cfg.Security.SessionTTL.Hours()),
 			"database_ok":          dbVersion != "",
 			"database_version":     dbVersion,

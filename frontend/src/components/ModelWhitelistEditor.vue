@@ -1,12 +1,14 @@
 <script lang="ts">
-import type { PriceConfig } from './ModelPricingEditor.vue'
+import type { ChannelRate } from './ChannelRateEditor.vue'
 
 // WhitelistRow 是渠道模型白名单里的一行：客户端请求 public_name，
-// 转发时替换成 upstream_name（留空则同名），价格也挂在这一行上 ——
-// 同一个模型名在不同渠道成本不同，价格只有跟着渠道走才对得上账。
-// 价格字段用 Partial：老数据（价格功能上线前建的渠道）与「还没配价」的行
-// 都不带这些字段，强制必需会让「从后端读回来的白名单」过不了类型检查
-export interface WhitelistRow extends Partial<PriceConfig> {
+// 转发时替换成 upstream_name（留空则同名）。
+//
+// 2026-10-27：单价已迁到模型级（见 views/ModelPricingView.vue），
+// 这一行只保留**渠道倍率**与时段规则 —— 它们表达「这条渠道比标价贵/便宜
+// 多少」，与「某个模型值多少钱」是两个问题。
+// 倍率字段用 Partial：老数据与「还没配倍率」的行都不带这些字段。
+export interface WhitelistRow extends Partial<ChannelRate> {
   public_name: string
   upstream_name: string
   enabled: boolean
@@ -27,7 +29,7 @@ import { message } from '@/utils/feedback'
 import { PlusOutlined, DeleteOutlined, SnippetsOutlined, DollarOutlined, UndoOutlined } from '@ant-design/icons-vue'
 import { modalWidth } from '@/utils/modalWidth'
 import { useDirtyClose } from '@/composables/useDirtyClose'
-import ModelPricingEditor, { emptyPrice, hasPrice, priceSummary } from './ModelPricingEditor.vue'
+import ChannelRateEditor, { emptyRate, hasRate, rateSummary } from './ChannelRateEditor.vue'
 import { effortOptions, normalizeEfforts } from './efforts'
 
 // 这是纯展示型编辑器：数据的保存方式由父组件决定 ——
@@ -37,8 +39,6 @@ const props = defineProps<{
   items: WhitelistRow[]
   /** 可选：传了才显示「代理」列。没有代理可选的场景不必多一列空下拉 */
   proxies?: { id: number; name: string; enabled: boolean }[]
-  /** 所属渠道的记账币种（CNY / USD）：单价的单位与摘要都按它显示 */
-  currency?: string
 }>()
 const emit = defineEmits<{ (e: 'update:items', v: WhitelistRow[]): void }>()
 
@@ -57,14 +57,14 @@ const priceRow = computed(() => (priceIndex.value >= 0 ? props.items[priceIndex.
 function openPrice(index: number) {
   const row = props.items[index]
   if (!row.public_name.trim()) {
-    message.warning('先填上对外模型名，再配这个模型的价格')
+    message.warning('先填上对外模型名，再设置这条渠道的倍率')
     return
   }
   priceIndex.value = index
   priceOpen.value = true
 }
 
-function savePrice(cfg: PriceConfig) {
+function saveRate(cfg: ChannelRate) {
   const next = props.items.map((row, i) => (i === priceIndex.value ? { ...row, ...cfg } : row))
   update(next)
 }
@@ -72,7 +72,7 @@ function savePrice(cfg: PriceConfig) {
 function addRow() {
   update([
     ...props.items,
-    { public_name: '', upstream_name: '', enabled: true, supported_efforts: [], ...emptyPrice() }
+    { public_name: '', upstream_name: '', enabled: true, supported_efforts: [], ...emptyRate() }
   ])
 }
 
@@ -168,12 +168,15 @@ function effortTip(row: WhitelistRow) {
     : '留空 = 按渠道协议自动推导（Anthropic / Gemini 八档全在，OpenAI 兼容上游只列 low 以上）'
 }
 
-// 价格胶囊的悬停说明：胶囊本身宽度有限（列宽固定），带时段规则的摘要
-// 会被省略号截掉，完整内容在这里给出，同时说清点下去会发生什么
+// 倍率胶囊的悬停说明：胶囊本身宽度有限（列宽固定），带时段规则的摘要
+// 会被省略号截掉，完整内容在这里给出，同时说清点下去会发生什么。
+//
+// 「还没配价」的措辞已改：单价搬到模型定价页之后，这一格只管倍率，
+// 没配倍率意味着「按原价」，本身不是问题。
 function priceTip(row: WhitelistRow) {
-  return hasPrice(row)
-    ? '单价 ' + priceSummary(row, props.currency) + '（每百万词元）· 点击修改'
-    : '还没配价：这条模型的调用会被记成 0 元 · 点击配价'
+  return hasRate(row)
+    ? '渠道倍率 ' + rateSummary(row) + ' · 点击修改'
+    : '按模型标价原价计费（倍率 1）· 点击设置渠道倍率'
 }
 
 function toggleRow(index: number, value: boolean) {
@@ -302,11 +305,11 @@ function applyBulk() {
           <button
             type="button"
             class="price-pill"
-            :class="{ unset: !hasPrice(row) }"
+            :class="{ unset: !hasRate(row) }"
             @click="openPrice(index)"
           >
             <DollarOutlined />
-            <span class="price-text">{{ priceSummary(row, currency) }}</span>
+            <span class="price-text">{{ rateSummary(row) }}</span>
           </button>
         </a-tooltip>
       </span>
@@ -350,12 +353,11 @@ function applyBulk() {
       </button>
     </div>
 
-    <ModelPricingEditor
-      :currency="currency"
+    <ChannelRateEditor
       v-model:open="priceOpen"
       :model-name="priceRow?.public_name || ''"
       :value="priceRow"
-      @save="savePrice"
+      @save="saveRate"
     />
 
     <a-modal v-model:open="bulkOpen" title="批量粘贴模型清单" :width="modalWidth(560)" centered :mask-closable="false" @cancel="bulkDirty.guardCancel" @ok="applyBulk">

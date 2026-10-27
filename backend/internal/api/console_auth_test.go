@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"llm-relay/internal/config"
+	"llm-relay/internal/consoleauth"
 )
 
 // 管理台登录鉴权的测试。分两组：
@@ -22,6 +23,8 @@ const testAdminKey = "test-admin-key-0123456789abcdef"
 
 // newAuthTestServer 构造只带鉴权所需依赖的 Server 与真实路由。
 // systemInfo 只读 deps.Config，不需要数据库。
+// 认证状态用内存版 Store（无库）：生产路径里 authStore 的加载在
+// initConsoleAuth，这里显式补齐，行为与「库里已有一行状态」一致。
 func newAuthTestServer(t *testing.T, adminKey string) (*Server, *gin.Engine) {
 	t.Helper()
 	s := &Server{
@@ -34,6 +37,13 @@ func newAuthTestServer(t *testing.T, adminKey string) (*Server, *gin.Engine) {
 		lastTouch: map[uint]time.Time{},
 	}
 	s.initConsoleAuth(s.deps.Config, nil)
+	// initConsoleAuth 需要 deps.Store 才能建 authStore；测试没库，
+	// 用内存版替代 —— 状态机行为与真实存储一致（除持久化）。
+	sealer, err := consoleauth.NewSealer(s.deps.Config.Security.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.authStore = consoleauth.NewMemoryStore(sealer)
 
 	r := gin.New()
 	s.registerAdminRoutes(r)
@@ -58,8 +68,17 @@ func loginRequest(r *gin.Engine, key string, headers map[string]string) *httptes
 func TestSessionTokenRoundtrip(t *testing.T) {
 	s, _ := newAuthTestServer(t, testAdminKey)
 	token := s.signSessionToken(time.Now().Add(s.sessionTTL))
+	if token == "" {
+		t.Fatal("认证状态可用时必须能签发令牌")
+	}
 	if !s.verifySessionToken(token) {
 		t.Fatal("刚签发的令牌应当校验通过")
+	}
+	// 认证状态不可用（无 authStore）时拒绝签发 —— 宁可不发，
+	// 不发「版本未知」的令牌
+	s2 := &Server{deps: s.deps, sessionKey: s.sessionKey, sessionTTL: s.sessionTTL}
+	if s2.signSessionToken(time.Now().Add(time.Hour)) != "" {
+		t.Fatal("认证状态不可用时应拒绝签发令牌")
 	}
 }
 
@@ -74,6 +93,9 @@ func TestSessionTokenExpiry(t *testing.T) {
 func TestSessionTokenRejectsTampered(t *testing.T) {
 	s, _ := newAuthTestServer(t, testAdminKey)
 	token := s.signSessionToken(time.Now().Add(s.sessionTTL))
+	if token == "" {
+		t.Fatal("令牌签发不应为空")
+	}
 	// 篡改载荷的一个字符（保持 base64 合法）：签名对不上即拒绝
 	payloadIdx := strings.Index(token, ".") + 1
 	flipped := byte('A')
@@ -105,7 +127,9 @@ func TestSessionTokenRejectsForeignSignature(t *testing.T) {
 	}
 }
 
-// 版本绑定是轮换吊销的根基：换掉管理密钥后，旧会话必须即刻失效。
+// 版本绑定是轮换吊销的根基：会话版本来自认证状态（凭据变更即轮换），
+// 两个实例的状态彼此独立 —— s1 签发的令牌带 s1 的版本，rotated 的
+// 状态是另一份随机版本，令牌在它面前必然失效。
 func TestSessionTokenInvalidAfterKeyRotation(t *testing.T) {
 	s, _ := newAuthTestServer(t, testAdminKey)
 	token := s.signSessionToken(time.Now().Add(time.Hour))
@@ -120,7 +144,16 @@ func TestSessionTokenInvalidAfterKeyRotation(t *testing.T) {
 	}
 	rotated.initConsoleAuth(rotated.deps.Config, nil)
 	if rotated.verifySessionToken(token) {
-		t.Fatal("轮换管理密钥后旧令牌应当全部失效")
+		t.Fatal("凭据版本不同的实例之间令牌应当失效")
+	}
+
+	// 同实例内轮换：完成向导（设置新密钥）后版本轮换，旧令牌全部失效
+	old := s.signSessionToken(time.Now().Add(time.Hour))
+	if err := s.authStore.SetupKey("brand-new-key-0123456789"); err != nil {
+		t.Fatal(err)
+	}
+	if s.verifySessionToken(old) {
+		t.Fatal("凭据变更（完成向导/改密）后旧令牌应当全部失效")
 	}
 }
 

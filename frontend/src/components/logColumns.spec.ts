@@ -18,6 +18,7 @@ import {
 const baseW: Record<ColKey, number> = {
   time: 96,
   model: 190,
+  thinking: 88,
   channel: 88,
   tokens: 150,
   elapsed: 120,
@@ -119,12 +120,19 @@ describe('权重表与列键的一致性', () => {
     expect(Object.keys(DISTRIBUTE_WEIGHT).sort()).toEqual([...COL_KEYS].sort())
   })
 
-  it('Σw = 12（三个 ×2 长文本列 + 六个 ×1 数值列 + 两个 ×0 固定列）', () => {
+  it('Σw = 12（三个 ×2 长文本列 + 五个 ×1 数值列 + 四个 ×0 固定列）', () => {
     // 这条断言立的第一天就抓出注释里的算术错误（原注释写 13）：
     // 合计变了的唯一合法途径是有人动了权重表 —— 那必须是有意的。
     // 2026-10-14 客户端列加入：它不截断（显示名可枚举、长度有上界），
     // 与数值列同档 ×1，合计从 11 变 12。
+    // 2026-10-27 思考强度列加入：内容是封闭的档位词集合，宽度与容器无关，
+    // 取 ×0（与 status/action 同类）；合计因此仍是 12（+1 个 ×0 列，
+    // 同时 ×1 列数没变）。这条断言没动，正好证明那次的权重选择是「不摊余量」。
     expect(WEIGHT_SUM).toBe(12)
+  })
+
+  it('思考强度列权重为 0（内容是定长档位词，加宽只产生空白）', () => {
+    expect(DISTRIBUTE_WEIGHT.thinking).toBe(0)
   })
 
   it('客户端列权重为 1（它不会截断，不与长文本列同档）', () => {
@@ -141,6 +149,13 @@ describe('列序契约', () => {
     // —— 用户看到「设置里的顺序与表头不一致」这种没人能解释的现象。
     expect(COL_KEYS.indexOf('client')).toBe(COL_KEYS.indexOf('key') + 1)
     expect(COL_KEYS.indexOf('action')).toBe(COL_KEYS.indexOf('client') + 1)
+  })
+
+  it('思考强度列在模型与渠道之间（2026-10-27 需求原话的位置）', () => {
+    // 「单独加一列在模型和渠道列之间」：位置是需求的一部分 ——
+    // 挨着模型放，扫列表时「哪个模型 + 什么思考强度」是一次眼睛移动。
+    expect(COL_KEYS.indexOf('thinking')).toBe(COL_KEYS.indexOf('model') + 1)
+    expect(COL_KEYS.indexOf('channel')).toBe(COL_KEYS.indexOf('thinking') + 1)
   })
 })
 

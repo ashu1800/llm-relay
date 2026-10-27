@@ -23,9 +23,15 @@
 #   RELAY_GH_PROXY  GitHub 下载加速前缀（形如 https://gh-proxy.com），
 #                   github.com 直连可达时不用填
 #
+# 认证方式：首次登录用 RELAY_ADMIN_KEY（引导密钥）进入设置向导，
+# 之后二选一 —— 动态码（2FA）或自己设定的管理密钥。选定后引导密钥
+# 即从登录链路退役，登录凭据完全由你掌控；之后可在「系统设置 →
+# 登录认证」里改密、换绑或切换方式（切换需验证当前凭据）。
+#
 # 重装安全性：重复运行本脚本就是升级。数据库密码、RELAY_SECRET、
 # RELAY_ADMIN_KEY 从已有 .env 原样沿用（沿用不了会随机新生成并打印），
-# 升级前自动把数据库备份到 $INSTALL_DIR/backups/。
+# 升级前自动把数据库备份到 $INSTALL_DIR/backups/。已有的认证状态
+# 存在数据库里，升级不会重置。
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -187,17 +193,18 @@ else
   log "已生成新的加密主密钥"
 fi
 
-# 管理台登录密钥（无账号模型）：重装沿用原值，首次安装随机生成。
+# 引导密钥：重装沿用原值，首次安装随机生成。它只用于第一次登录
+# 进入设置向导；向导完成后即从登录链路退役（见文件头的认证方式说明）。
 # 与加密主密钥相互独立 —— 登录密钥出现在每个登录请求里，泄露面更大，
 # 两处绝不能共用同一个值
 ADMIN_KEY_GENERATED=no
 if [ -f "$ENV_FILE" ] && grep -q "^RELAY_ADMIN_KEY=.\+" "$ENV_FILE"; then
   RELAY_ADMIN_KEY="$(grep '^RELAY_ADMIN_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d "\"'[[:space:]]")"
-  log "复用已有配置中的管理台登录密钥"
+  log "复用已有配置中的引导密钥"
 else
   RELAY_ADMIN_KEY="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   ADMIN_KEY_GENERATED=yes
-  log "已生成新的管理台登录密钥"
+  log "已生成新的引导密钥"
 fi
 
 # ---------------- 数据库建库建用户 ----------------------------------------
@@ -248,7 +255,9 @@ SERVER_PUBLIC_ORIGIN=${SERVER_PUBLIC_ORIGIN}
 # 渠道密钥的加密主密钥。缺失会退回程序内置的公开默认值，等于没有加密
 RELAY_SECRET=${RELAY_SECRET}
 
-# 管理台登录密钥：浏览器打开管理台时输入它登录（无账号模型）
+# 管理台引导密钥：仅用于首次登录换取「设置向导」会话。
+# 浏览器打开管理台时输入它，登录后立即在向导里选择 2FA 或自定义密钥；
+# 向导完成后它即从登录链路退役（之后只有你自己设的凭据能登录）。
 RELAY_ADMIN_KEY=${RELAY_ADMIN_KEY}
 
 DB_HOST=127.0.0.1
@@ -317,8 +326,10 @@ if [ "$OK" = "1" ]; then
   echo "  管理后台: http://localhost:${PORT}"
   echo "  监听地址: ${BIND_ADDR}:${PORT}"
   echo "  配置文件: ${ENV_FILE}"
-  echo "  管理密钥: ${RELAY_ADMIN_KEY}（打开管理台时输入它登录）"
-  [ "$ADMIN_KEY_GENERATED" = "no" ] || echo "            （本次新生成，请妥善保存；泄露后在 ${ENV_FILE} 轮换并重启）"
+  echo "  引导密钥: ${RELAY_ADMIN_KEY}"
+  echo "            （首次登录用；登录后向导会让你二选一：动态码 2FA 或自定义密钥，"
+  echo "              选定后这把引导密钥即失效）"
+  [ "$ADMIN_KEY_GENERATED" = "no" ] || echo "            （本次新生成，请妥善保存到首次登录完成后）"
   echo
   echo "  查看日志: journalctl -u ${SERVICE} -f"
   echo "  重启服务: systemctl restart ${SERVICE}"
@@ -326,7 +337,8 @@ if [ "$OK" = "1" ]; then
   echo "  一键更新: 管理台「设置 → 版本与更新」里点一下即可（二进制自替换）"
   if [ "${BIND_ADDR}" != "127.0.0.1" ] && [ "${BIND_ADDR}" != "localhost" ]; then
     echo
-    warn "当前绑定在 ${BIND_ADDR}，管理台已由 RELAY_ADMIN_KEY 保护；公网部署建议再加反向代理 + HTTPS。"
+    warn "当前绑定在 ${BIND_ADDR}。请在部署完成后尽快打开管理台完成初始化 ——
+      在完成之前，引导密钥是管理台唯一的门槛。"
   fi
 else
   systemctl status "$SERVICE" --no-pager -l | head -20 || true

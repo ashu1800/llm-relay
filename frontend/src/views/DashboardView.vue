@@ -568,7 +568,7 @@ async function load(opts: { silent?: boolean } = {}) {
   if (!silent) loadError.value = ''
   try {
     // 只剩概览这一个请求了：图表与热力图移除后，timeseries / models /
-    // channels / heatmap 四个接口不再由前端调用（后端保留，见 docs/ui-spec.md 第九节）。
+    // channels / heatmap 四个接口不再由前端调用（后端保留，见 UI-SPEC.md 第九节）。
     // 这也让卡片刷新变快 —— 原来一次刷新要打五个接口，任何一个慢都会拖住整排数字。
     const data = await api.get<Summary>('/stats/summary' + statsQuery())
     // 已经有更新的请求发出去了：这次的结果（以及它的错误、它的 loading）都作废

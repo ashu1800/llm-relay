@@ -78,7 +78,7 @@ make build-embed             # 先构建前端、拷贝到 backend/internal/web/
 6. 移动端形态判断用 `railMode`（`collapsed && !isMobile`），不要用 `collapsed`。
 7. 响应式断点只用 640 / 768 / 1024 / 1200 / 1536；900 只作为侧栏折叠的 JS 断点。
 8. 组件是逐文件 import 的（只有 `main.ts` 里那批 antd 组件全局注册），新增标签必须 import。
-9. 新增主题见 `docs/development.md`「新增一套主题的步骤」，六处缺一不可。
+9. 新增主题见 `DEVELOPMENT.md`「新增一套主题的步骤」，六处缺一不可。
 10. **判据抽成纯函数 + 单测**：`components/*.ts`（logLive、tableTools、latency、speed、
     restartGate 等）是本仓库的固定做法，别把判定逻辑写在模板或组件内部。
 
@@ -107,7 +107,7 @@ make build-embed             # 先构建前端、拷贝到 backend/internal/web/
 
 | 文档 | 内容 |
 |---|---|
-| `docs/development.md` | 实现取舍与实测记录、验证脚本全集、发布流程 —— **改非显而易见的行为前先读** |
-| `docs/ui-spec.md` | UI 规格（令牌、布局、列宽、动效的实测数据） |
+| `DEVELOPMENT.md` | 实现取舍与实测记录、验证脚本全集、发布流程 —— **改非显而易见的行为前先读** |
+| `UI-SPEC.md` | UI 规格（令牌、布局、列宽、动效的实测数据） |
 | `README.md` | 使用与部署说明 |
 | `deploy/install.sh` | 安装/升级的唯一部署方式 |

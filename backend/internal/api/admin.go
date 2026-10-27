@@ -119,13 +119,9 @@ type whitelistItem struct {
 	// ProxyID 让这一个模型走自己的代理；0 = 跟随渠道。
 	// 用值类型即可：白名单是整表提交，0 的语义就是「跟随渠道」，不存在歧义。
 	ProxyID uint `json:"proxy_id"`
-	// ---- 价格 ----
-	// 金额用字符串传：JSON 的浮点会把 0.15 变成 0.14999999999999999，
-	// 而单价要落进 numeric(18,8) 的列里
-	InputPer1M      string `json:"input_per_1m"`
-	OutputPer1M     string `json:"output_per_1m"`
-	CacheReadPer1M  string `json:"cache_read_per_1m"`
-	CacheWritePer1M string `json:"cache_write_per_1m"`
+	// ---- 渠道定价属性 ----
+	// 单价已于 2026-10-27 迁到模型级（model.ModelPrice）：白名单行只保留
+	// 倍率与时段规则，它们才是「这条渠道相对标价怎么算」的表达。
 	// Multiplier 用指针区分「没传」与「显式填 0」；0 与不传都归一成 1
 	Multiplier *float64       `json:"multiplier"`
 	PeakRules  model.JSONList `json:"peak_rules"`
@@ -357,18 +353,18 @@ func (s *Server) invalidatePricing() {
 	}
 }
 
-// wipedPrices 找出 next 相对 old 被清零（非 0 → 0）的单价字段，返回人话描述。
+// wipedPrices 找出 next 相对 old 被清零（非 0 → 0）的价格属性，返回人话描述。
 //
 // 刻意做成纯函数：它直接决定 WARN 日志的内容，误报（原值就是 0）与漏报
 // （改值没清零）都会毁掉这条排查线索，所以拉出来单独测。
-// 字段与文案取自 priceFields，与校验路径同一份清单。
+//
+// 2026-10-27 起单价已迁到模型级，本函数只剩倍率一项 —— 它的作用从
+// 「保住价格」变成「保住倍率」：倍率被清零意味着这条渠道的加价规则消失，
+// 同样属于「界面上点了保存、账单口径变了却没人知道」的那类事。
 func wipedPrices(oldRow, next model.ChannelModel) []string {
-	out := make([]string, 0, len(priceFields))
-	for _, f := range priceFields {
-		was, now := f.read(&oldRow), f.read(&next)
-		if !was.IsZero() && now.IsZero() {
-			out = append(out, f.label+" "+was.String()+"→0")
-		}
+	out := make([]string, 0, 1)
+	if oldRow.Multiplier != 0 && next.Multiplier == 0 {
+		out = append(out, fmt.Sprintf("固定倍率 %g→0", oldRow.Multiplier))
 	}
 	return out
 }
@@ -481,6 +477,27 @@ func (s *Server) listChannels(c *gin.Context) {
 			writeInternalError(c, err)
 			return
 		}
+		// 「没配价」的判定要查模型级价格表（2026-10-27 起单价不再挂在
+		// 白名单行上）。一次把全表读成 map，比每行查一次库省事。
+		// 判定口径与该渠道币种有关：人民币渠道要看人民币那一档配没配。
+		pricedModels := map[string]model.ModelPrice{}
+		var priceRows []model.ModelPrice
+		if err := db.Find(&priceRows).Error; err == nil {
+			for _, p := range priceRows {
+				pricedModels[p.ModelName] = p
+			}
+		}
+		// 渠道币种也提前建 map：下面每一行都要用，而 currencyOfChannel
+		// 是线性扫描 —— 白名单几百行 × 渠道几十条就是上万次比较，
+		// 全在同一层循环里重复做。
+		currencyByChannel := make(map[uint]string, len(channels))
+		for _, ch := range channels {
+			cur := model.CurrencyUSD
+			if c, ok := model.NormalizeCurrency(ch.Currency); ok {
+				cur = c
+			}
+			currencyByChannel[ch.ID] = cur
+		}
 		for _, r := range rows {
 			names[r.ChannelID] = append(names[r.ChannelID], r.PublicName)
 			if r.Enabled {
@@ -489,11 +506,14 @@ func (s *Server) listChannels(c *gin.Context) {
 				}
 				enabledNames[r.ChannelID][r.PublicName] = true
 			}
-			// 「没配价」的判定与计价引擎一致：四个单价全 0 且没有倍率。
+			// 「没配价」= 该模型在该渠道币种下四档全 0，且没有倍率。
 			// 列表上要显式提示条数 —— 漏配价的后果是这笔调用被记成 0 元，
 			// 账面上完全看不出异常，只能靠这里点名
-			if r.InputPer1M.IsZero() && r.OutputPer1M.IsZero() &&
-				r.CacheReadPer1M.IsZero() && r.CacheWritePer1M.IsZero() && r.Multiplier <= 1 {
+			noPrice := true
+			if p, ok := pricedModels[r.PublicName]; ok {
+				noPrice = p.PriceFor(currencyByChannel[r.ChannelID]).IsZero()
+			}
+			if noPrice && r.Multiplier <= 1 {
 				unpriced[r.ChannelID]++
 			}
 		}
@@ -918,13 +938,9 @@ type bindPayload struct {
 	UpstreamName string `json:"upstream_name"`
 	Enabled      *bool  `json:"enabled"`
 	ProxyID      uint   `json:"proxy_id"`
-	// 价格字段与 whitelistItem 一致，见那里的说明
-	InputPer1M      string         `json:"input_per_1m"`
-	OutputPer1M     string         `json:"output_per_1m"`
-	CacheReadPer1M  string         `json:"cache_read_per_1m"`
-	CacheWritePer1M string         `json:"cache_write_per_1m"`
-	Multiplier      *float64       `json:"multiplier"`
-	PeakRules       model.JSONList `json:"peak_rules"`
+	// 渠道定价属性与 whitelistItem 一致，见那里的说明
+	Multiplier *float64       `json:"multiplier"`
+	PeakRules  model.JSONList `json:"peak_rules"`
 	// 与 whitelistItem 同名字段同语义：nil = 这次不动它
 	SupportedEfforts *model.StringList `json:"supported_efforts"`
 }
@@ -933,8 +949,6 @@ func (p bindPayload) whitelistItem() whitelistItem {
 	return whitelistItem{
 		PublicName: p.PublicName, UpstreamName: p.UpstreamName,
 		Enabled: p.Enabled, ProxyID: p.ProxyID,
-		InputPer1M: p.InputPer1M, OutputPer1M: p.OutputPer1M,
-		CacheReadPer1M: p.CacheReadPer1M, CacheWritePer1M: p.CacheWritePer1M,
 		Multiplier: p.Multiplier, PeakRules: p.PeakRules,
 		SupportedEfforts: p.SupportedEfforts,
 	}
@@ -1032,15 +1046,13 @@ func (s *Server) bindChannelModel(c *gin.Context) {
 	err := db.Where("channel_id = ? AND public_name = ?", id, item.PublicName).First(&binding).Error
 	switch {
 	case errors.Is(err, gorm.ErrRecordNotFound):
-		// 价格与代理都从 item 整块拷过来：item 已经过 normalizeWhitelist
-		// （价格在那里校验并归一），漏拷任何一项都会表现为
+		// 倍率、时段规则、代理都从 item 整块拷过来：item 已经过 normalizeWhitelist
+		// （规则在那里校验并归一），漏拷任何一项都会表现为
 		// 「接口返回了新的绑定，但那一项没保存」——ProxyID 就曾经这样丢过
 		binding = model.ChannelModel{
 			ChannelID: id, PublicName: item.PublicName,
 			UpstreamName: item.UpstreamName, Enabled: item.Enabled,
 			ProxyID:    item.ProxyID,
-			InputPer1M: item.InputPer1M, OutputPer1M: item.OutputPer1M,
-			CacheReadPer1M: item.CacheReadPer1M, CacheWritePer1M: item.CacheWritePer1M,
 			Multiplier: item.Multiplier, PeakRules: item.PeakRules,
 			SupportedEfforts: item.SupportedEfforts,
 		}

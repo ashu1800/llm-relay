@@ -4,57 +4,83 @@
 // source: columns.go
 
 /**
- * 定价表的列名常量。
- * 为什么需要这个文件：GORM 由 Go 字段名推导列名，
- * InputPer1M 推出的是 input_per1_m，不是 input_per_1m ——
- * 数字 1 跟着 per，下划线加在末尾那个 M 之前。
- * 这跟 json 名（input_per_1m）不一样，而写原生列映射时人自然会照 json 名写，
- * 结果是「列不存在」的运行期错误，且只在真的发生更新时才暴露。
- * 实际后果：定价同步过去只写首次插入，官方调价再也同步不进来；
- * 定价页的手工改价也一直静默失败。
- * 集中声明在这里，实体标签与原生映射共用一份，并由 columns_test.go
- * 直接拿 GORM 的命名策略做校验，改错会立刻测出来。
+ * 老 channel_models 上的单价列，只被一次性迁移使用
+ * （store.migratePricesToModelLevel）：读这些列、搬进 model_prices、再删掉。
+ * 迁移后代码不再引用，但常量保留 —— 那是「老库升级」路径唯一的列名来源。
  */
 export const ColPricingInputPer1M = "input_per1_m";
 /**
  * 定价表的列名常量。
- * 为什么需要这个文件：GORM 由 Go 字段名推导列名，
- * InputPer1M 推出的是 input_per1_m，不是 input_per_1m ——
- * 数字 1 跟着 per，下划线加在末尾那个 M 之前。
- * 这跟 json 名（input_per_1m）不一样，而写原生列映射时人自然会照 json 名写，
- * 结果是「列不存在」的运行期错误，且只在真的发生更新时才暴露。
- * 实际后果：定价同步过去只写首次插入，官方调价再也同步不进来；
- * 定价页的手工改价也一直静默失败。
- * 集中声明在这里，实体标签与原生映射共用一份，并由 columns_test.go
- * 直接拿 GORM 的命名策略做校验，改错会立刻测出来。
+ * GORM 由 Go 字段名推导列名：InputPer1M → input_per1_m（不是 input_per_1m），
+ * 写原生 SQL 时人容易照 json 名写，结果只在更新时才报「列不存在」。
+ * 集中在这里，由 columns_test.go 直接拿 GORM 命名策略校验。
+ * 本文件的包级注释会被 tygo 复制到生成产物里（每个 const 一遍），
+ * 所以正文只写这一段，细节在 columns_test.go。
  */
 export const ColPricingOutputPer1M = "output_per1_m";
 /**
  * 定价表的列名常量。
- * 为什么需要这个文件：GORM 由 Go 字段名推导列名，
- * InputPer1M 推出的是 input_per1_m，不是 input_per_1m ——
- * 数字 1 跟着 per，下划线加在末尾那个 M 之前。
- * 这跟 json 名（input_per_1m）不一样，而写原生列映射时人自然会照 json 名写，
- * 结果是「列不存在」的运行期错误，且只在真的发生更新时才暴露。
- * 实际后果：定价同步过去只写首次插入，官方调价再也同步不进来；
- * 定价页的手工改价也一直静默失败。
- * 集中声明在这里，实体标签与原生映射共用一份，并由 columns_test.go
- * 直接拿 GORM 的命名策略做校验，改错会立刻测出来。
+ * GORM 由 Go 字段名推导列名：InputPer1M → input_per1_m（不是 input_per_1m），
+ * 写原生 SQL 时人容易照 json 名写，结果只在更新时才报「列不存在」。
+ * 集中在这里，由 columns_test.go 直接拿 GORM 命名策略校验。
+ * 本文件的包级注释会被 tygo 复制到生成产物里（每个 const 一遍），
+ * 所以正文只写这一段，细节在 columns_test.go。
  */
 export const ColPricingCacheReadPer1M = "cache_read_per1_m";
 /**
  * 定价表的列名常量。
- * 为什么需要这个文件：GORM 由 Go 字段名推导列名，
- * InputPer1M 推出的是 input_per1_m，不是 input_per_1m ——
- * 数字 1 跟着 per，下划线加在末尾那个 M 之前。
- * 这跟 json 名（input_per_1m）不一样，而写原生列映射时人自然会照 json 名写，
- * 结果是「列不存在」的运行期错误，且只在真的发生更新时才暴露。
- * 实际后果：定价同步过去只写首次插入，官方调价再也同步不进来；
- * 定价页的手工改价也一直静默失败。
- * 集中声明在这里，实体标签与原生映射共用一份，并由 columns_test.go
- * 直接拿 GORM 的命名策略做校验，改错会立刻测出来。
+ * GORM 由 Go 字段名推导列名：InputPer1M → input_per1_m（不是 input_per_1m），
+ * 写原生 SQL 时人容易照 json 名写，结果只在更新时才报「列不存在」。
+ * 集中在这里，由 columns_test.go 直接拿 GORM 命名策略校验。
+ * 本文件的包级注释会被 tygo 复制到生成产物里（每个 const 一遍），
+ * 所以正文只写这一段，细节在 columns_test.go。
  */
 export const ColPricingCacheWritePer1M = "cache_write_per1_m";
+/**
+ * model.ModelPrice 的列名。实体上用 column: 显式声明，这里供原生 SQL
+ * （model.UpsertModelPrice / InsertModelPriceIfAbsent）引用；两处必须逐字一致。
+ */
+export const ColPriceModel = "model_name";
+/**
+ * model.ModelPrice 的列名。实体上用 column: 显式声明，这里供原生 SQL
+ * （model.UpsertModelPrice / InsertModelPriceIfAbsent）引用；两处必须逐字一致。
+ */
+export const ColPriceUSDInputPer1M = "usd_input_per1_m";
+/**
+ * model.ModelPrice 的列名。实体上用 column: 显式声明，这里供原生 SQL
+ * （model.UpsertModelPrice / InsertModelPriceIfAbsent）引用；两处必须逐字一致。
+ */
+export const ColPriceUSDOutputPer1M = "usd_output_per1_m";
+/**
+ * model.ModelPrice 的列名。实体上用 column: 显式声明，这里供原生 SQL
+ * （model.UpsertModelPrice / InsertModelPriceIfAbsent）引用；两处必须逐字一致。
+ */
+export const ColPriceUSDCacheReadPer1M = "usd_cache_read_per1_m";
+/**
+ * model.ModelPrice 的列名。实体上用 column: 显式声明，这里供原生 SQL
+ * （model.UpsertModelPrice / InsertModelPriceIfAbsent）引用；两处必须逐字一致。
+ */
+export const ColPriceUSDWritePer1M = "usd_cache_write_per1_m";
+/**
+ * model.ModelPrice 的列名。实体上用 column: 显式声明，这里供原生 SQL
+ * （model.UpsertModelPrice / InsertModelPriceIfAbsent）引用；两处必须逐字一致。
+ */
+export const ColPriceRMBInputPer1M = "rmb_input_per1_m";
+/**
+ * model.ModelPrice 的列名。实体上用 column: 显式声明，这里供原生 SQL
+ * （model.UpsertModelPrice / InsertModelPriceIfAbsent）引用；两处必须逐字一致。
+ */
+export const ColPriceRMBOutputPer1M = "rmb_output_per1_m";
+/**
+ * model.ModelPrice 的列名。实体上用 column: 显式声明，这里供原生 SQL
+ * （model.UpsertModelPrice / InsertModelPriceIfAbsent）引用；两处必须逐字一致。
+ */
+export const ColPriceRMBCacheReadPer1M = "rmb_cache_read_per1_m";
+/**
+ * model.ModelPrice 的列名。实体上用 column: 显式声明，这里供原生 SQL
+ * （model.UpsertModelPrice / InsertModelPriceIfAbsent）引用；两处必须逐字一致。
+ */
+export const ColPriceRMBWritePer1M = "rmb_cache_write_per1_m";
 
 //////////
 // source: currency.go
@@ -193,23 +219,14 @@ export interface ChannelModel {
    */
   enabled: boolean;
   /**
-   * ---- 价格 ----
-   * 价格随模型条目一起配置，而不是单独维护一张「模型 → 价格」的表：
-   * 同一个模型名在不同渠道的成本本来就不一样（官网直连 vs 中转站），
-   * 全局一份价只能取其一，用户还得自己在脑子里记住哪条渠道该按哪个价算。
-   * 单位是每 100 万 token 的价格，**币种由所属渠道的 Currency 决定**
-   * （人民币渠道就填人民币数字），日志与看板都按它显示。
-   * 四个单价全为 0 表示「这个模型还没配价」，界面上会点名提醒 ——
-   * 缺价的直接后果是这笔调用被记成 0 元，而账面上完全看不出异常。
-   */
-  input_per_1m: string;
-  output_per_1m: string;
-  cache_read_per_1m: string;
-  cache_write_per_1m: string;
-  /**
+   * ---- 倍率 ----
+   * 单价已于 2026-10-27 迁到模型级（见 ModelPrice）：原来四个价格列挂在这
+   * 一行上，理由是「同一个模型名在不同渠道成本不同」，但那让「给某模型定价」
+   * 变成「在每条渠道里各填一遍」。现在单价的唯一归属是模型，渠道只保留
+   * **倍率** —— 它表达的正是「这条渠道比标价贵/便宜多少」，这才是渠道差异
+   * 该用的表达方式。
    * Multiplier 是固定倍率（1 = 原价），0 表示「没配」，由代码归一到 1。
-   * 这一列**要**保留 default:0，与 ModelPricing 当年相反：那一列的问题是
-   * 「用户填的 0 会被列默认值顶掉」，而这一列的 0 恰好就是想要的语义
+   * 这一列**要**保留 default:0：0 恰好就是想要的语义
    * （引擎只在 multiplier > 0 且 != 1 时才用它）。
    * 反过来，NOT NULL 且无默认会留下一个很难查的坑：每一条原生 INSERT
    * 都必须显式给值，漏写就直接违反约束 —— 实测踩过：级联删除的测试用例
@@ -322,6 +339,11 @@ export interface APIKey {
    *     之后渠道被删 / 白名单被改导致条目失效时，路由侧静默跳过该条目 ——
    *     剩余条目为空即「无可用渠道」，报错里会点名去密钥页修改。
    * 老库升级由 store 的一次性回填生成（按当时的渠道 weight 顺序）。
+   * column:model_channels 必须显式声明：Go 字段名 ModelRoutes 的默认列名是
+   * model_routes，而写路径（Updates(map)）与前端契约用的都是 model_channels。
+   * 没有这个声明时 AutoMigrate 会把 model_routes 旧列保留/重建，读路径绑到
+   * 旧列 → 「界面上怎么保存都是旧顺序」（2026-10-26 实测踩过：GET 回的
+   * model_channels 永远是回填时的旧值，psql 直查却是新值）。
    */
   model_channels: JSONMap;
   last_used_at?: string;
@@ -482,6 +504,56 @@ export interface ClientAlias {
   created_at: string;
   updated_at: string;
 }
+/**
+ * ModelPrice 模型级定价（2026-10-27 从 ChannelModel 迁出）。
+ * 为什么从「渠道 × 模型」改成模型级：原设计把单价挂在白名单行上，理由是
+ * 同一个模型名在不同渠道成本不同（官网直连 vs 中转站）。实际使用中这条
+ * 理由让「我想给 gpt-5 定个价」变成「我得在每条渠道里各填一遍」，而站主
+ * 关心的是「这个模型卖多少钱」，渠道差异用**倍率**表达就够了 —— 倍率留在
+ * 渠道上（ChannelModel.Multiplier），单价收到这里。
+ * 同一行同时持有美元与人民币两套单价（USDInputPer1M / RMBInputPer1M …）：
+ * 记账时按**所属渠道的币种**取对应那一档（见 pricing.Engine.Resolve）。
+ * 两个币种都填、互不换算 —— 换算需要一个汇率，而汇率是会变的，
+ * 把它写进记账路径等于给历史账目埋一颗会漂移的雷。
+ */
+export interface ModelPrice {
+  id: number /* uint */;
+  /**
+   * ModelName 是**对外的模型名**（ChannelModel.PublicName），全局唯一。
+   * 只对 PublicName 定价、不对 UpstreamName：用户看到与计费的都是前者。
+   */
+  model_name: string;
+  /**
+   * ---- 美元单价（每 100 万 token）----
+   * 四种单价对应现有计费口径：输入 / 输出 / 缓存读 / 缓存写。
+   * 0 表示这一档没配（与「配成 0 元」在账面上等价，都是 0 元）。
+   */
+  usd_input_per_1m: string;
+  usd_output_per_1m: string;
+  usd_cache_read_per_1m: string;
+  usd_cache_write_per_1m: string;
+  /**
+   * ---- 人民币单价（每 100 万 token）----
+   */
+  rmb_input_per_1m: string;
+  rmb_output_per_1m: string;
+  rmb_cache_read_per_1m: string;
+  rmb_cache_write_per_1m: string;
+  created_at: string;
+  updated_at: string;
+}
+/**
+ * USDPrice / RMBPrice 按币种取一组单价。
+ * 计价引擎用这一个入口而不是自己 switch：币种判断只允许一处实现
+ * （与 NormalizeCurrency 同一条规矩），否则加第三个币种时漏改一处的
+ * 表现是「该币种的渠道全部按美元记账」—— 账面上看不出异常。
+ */
+export interface PriceSet {
+  InputPer1M: string;
+  OutputPer1M: string;
+  CacheReadPer1M: string;
+  CacheWritePer1M: string;
+}
 
 //////////
 // source: json.go
@@ -498,3 +570,7 @@ export type JSONList = { [key: string]: any}[];
  * StringList 映射到 jsonb 字符串数组（模型白名单等）。
  */
 export type StringList = string[];
+
+//////////
+// source: model_price_store.go
+

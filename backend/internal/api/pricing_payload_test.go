@@ -8,14 +8,16 @@ import (
 	"llm-relay/internal/model"
 )
 
-// applyPriceFields 的单价、倍率与时段规则处理。
+// applyPriceFields 的倍率与时段规则处理。
 //
-// 这里挡的是三类「静默失效」：
+// 这里挡的是两类「静默失效」：
 //   - 固定倍率「没传」与「显式传 1」要能区分（指针语义），且 0 不能落成「免费」；
-//   - 写错的时段窗口必须在保存时报错，否则它只会永不命中；
-//   - 空字符串必须落成 0 而不是解析失败 —— 白名单是整表提交的，不填就是不算钱。
+//   - 写错的时段窗口必须在保存时报错，否则它只会永不命中。
+//
+// 单价已于 2026-10-27 迁到模型级，它的解析与校验测试在
+// model_price_payload_test.go（buildModelPrice）。
 func TestApplyPriceFieldsMultiplier(t *testing.T) {
-	in := whitelistItem{PublicName: "m", InputPer1M: "1", OutputPer1M: "2"}
+	in := whitelistItem{PublicName: "m"}
 
 	// 没传倍率 -> 1（按原价），不能落成 0（0 看起来像「免费」）
 	row := model.ChannelModel{}
@@ -95,54 +97,6 @@ func TestApplyPriceFieldsMultiplierFourDecimals(t *testing.T) {
 // 那条链路要直接填 Engine 的缓存才能不依赖数据库，而 cache 是包内字段。
 // 这里只守 API 层：别在 applyPriceFields 这条路上把四位值收窄。
 
-func TestApplyPriceFieldsDecimals(t *testing.T) {
-	in := whitelistItem{
-		PublicName: "m",
-		InputPer1M: "0.15", OutputPer1M: "0.6",
-		CacheReadPer1M: "0.003", CacheWritePer1M: "0.3",
-	}
-	row := model.ChannelModel{}
-	if err := applyPriceFields(&row, in); err != nil {
-		t.Fatal(err)
-	}
-	got := []string{
-		row.InputPer1M.String(), row.OutputPer1M.String(),
-		row.CacheReadPer1M.String(), row.CacheWritePer1M.String(),
-	}
-	want := []string{"0.15", "0.6", "0.003", "0.3"}
-	for i := range want {
-		if got[i] != want[i] {
-			// 按字符串比对是为了盯住精度：单价要落进 numeric(18,8)，
-			// 走 float 中转的话 0.15 会变成 0.14999999999999999
-			t.Errorf("第 %d 个单价应为 %s，实际 %s", i+1, want[i], got[i])
-		}
-	}
-
-	// 空字符串 = 0（不填就是不算钱），不是解析失败
-	row = model.ChannelModel{}
-	if err := applyPriceFields(&row, whitelistItem{PublicName: "m"}); err != nil {
-		t.Fatalf("全空不该报错: %v", err)
-	}
-	if !row.InputPer1M.IsZero() || !row.OutputPer1M.IsZero() {
-		t.Errorf("空值应落成 0，实际 %s / %s", row.InputPer1M, row.OutputPer1M)
-	}
-
-	// 非法数字与负数要报错，并带上字段名（界面上要能对上哪一格填错了）
-	for _, bad := range []whitelistItem{
-		{PublicName: "m", InputPer1M: "abc"},
-		{PublicName: "m", OutputPer1M: "-1"},
-	} {
-		err := applyPriceFields(&model.ChannelModel{}, bad)
-		if err == nil {
-			t.Errorf("非法单价 %+v 应当报错", bad)
-			continue
-		}
-		if !strings.Contains(err.Error(), "单价") {
-			t.Errorf("错误信息应指明是哪个单价，实际 %v", err)
-		}
-	}
-}
-
 func TestApplyPriceFieldsPeakRules(t *testing.T) {
 	in := whitelistItem{PublicName: "m"}
 	rules := `[{"days":[1,2,3,4,5],"start":"09:00","end":"12:00","multiplier":2}]`
@@ -168,12 +122,12 @@ func TestApplyPriceFieldsPeakRules(t *testing.T) {
 	}
 }
 
-// 渠道白名单载荷必须能带上价格：漏掉任何一个字段都表现为
+// 渠道白名单载荷必须能带上倍率与时段规则：漏掉任何一项都表现为
 // 「界面填了、保存也成功，但库里是 0」——账面上完全看不出异常。
-func TestWhitelistItemCarriesPrice(t *testing.T) {
+//
+// 2026-10-27：单价已不在这个载荷里（见 model_price_payload_test.go）。
+func TestWhitelistItemCarriesChannelPricing(t *testing.T) {
 	body := `{"public_name":"m","upstream_name":"u","enabled":true,
-		"input_per_1m":"0.15","output_per_1m":"0.6",
-		"cache_read_per_1m":"0.003","cache_write_per_1m":"0.3",
 		"multiplier":1.5,
 		"peak_rules":[{"days":[1],"start":"09:00","end":"12:00","multiplier":2}]}`
 	var item whitelistItem
@@ -184,7 +138,7 @@ func TestWhitelistItemCarriesPrice(t *testing.T) {
 	if err := applyPriceFields(&row, item); err != nil {
 		t.Fatal(err)
 	}
-	if row.InputPer1M.String() != "0.15" || row.Multiplier != 1.5 || len(row.PeakRules) != 1 {
-		t.Errorf("载荷里的价格没有完整落到实体上: %+v", row)
+	if row.Multiplier != 1.5 || len(row.PeakRules) != 1 {
+		t.Errorf("载荷里的渠道定价属性没有完整落到实体上: %+v", row)
 	}
 }

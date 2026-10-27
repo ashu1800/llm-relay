@@ -28,7 +28,7 @@ defineProps<{
   min-height: 24px;
 }
 
-/* 规格实测自参考站的 section-title（见 docs/ui-spec.md）：
+/* 规格实测自参考站的 section-title（见 UI-SPEC.md）：
    16px / 700 / 主色。这里原来只有 flex: 1，
    标题一直按浏览器对 h2 的默认样式渲染，字号与字重都和参考站对不上。 */
 .section-title {

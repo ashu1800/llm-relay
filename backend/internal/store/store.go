@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shopspring/decimal"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -86,6 +87,7 @@ func (s *Store) Migrate() error {
 	if err := s.db.AutoMigrate(
 		&model.Channel{},
 		&model.ChannelModel{},
+		&model.ModelPrice{},
 		&model.APIKey{},
 		&model.RequestLog{},
 		&model.RequestPayload{},
@@ -94,6 +96,12 @@ func (s *Store) Migrate() error {
 		&model.ClientAlias{},
 	); err != nil {
 		return fmt.Errorf("数据库迁移失败: %w", err)
+	}
+	// 单价从「渠道 × 模型」搬到「模型级」（2026-10-27）。必须在 AutoMigrate
+	// 之后：新表得先存在。它读的是 channel_models 上**即将被删掉**的老价格列，
+	// 所以顺序是「先建表 → 搬数据 → 再删列」（删列在 migrateLegacySchema 里）。
+	if err := s.migratePricesToModelLevel(); err != nil {
+		return err
 	}
 	// 客户端显示映射的启动回填：日志列上线早于映射表，历史行没经过
 	// 写路径的自动登记，这里按 DISTINCT 一次性补齐（同样必须在
@@ -195,14 +203,28 @@ func (s *Store) migrateLegacySchema() error {
 	// 顺序很讲究：先把列补齐（AutoMigrate 加不了 NOT NULL 无默认的列），
 	// 再搬数据，最后才删表 —— 中间任何一步失败都不该丢价格。
 	if s.hasTable("channel_models") {
-		for _, stmt := range []string{
-			// 四个单价与实体上的 default:0 保持一致：0 就是「这个模型没配价」
-			"ALTER TABLE channel_models ADD COLUMN IF NOT EXISTS input_per1_m numeric(18,8) NOT NULL DEFAULT 0",
-			"ALTER TABLE channel_models ADD COLUMN IF NOT EXISTS output_per1_m numeric(18,8) NOT NULL DEFAULT 0",
-			"ALTER TABLE channel_models ADD COLUMN IF NOT EXISTS cache_read_per1_m numeric(18,8) NOT NULL DEFAULT 0",
-			"ALTER TABLE channel_models ADD COLUMN IF NOT EXISTS cache_write_per1_m numeric(18,8) NOT NULL DEFAULT 0",
-			"ALTER TABLE channel_models ADD COLUMN IF NOT EXISTS peak_rules jsonb",
-		} {
+		// 2026-10-27：单价已迁到模型级（见 migratePricesToModelLevel），
+		// 这四列**只在还没跑过那次迁移时**才需要补。
+		//
+		// 为什么必须加这个条件：本函数每次启动都会执行，而删列那段只在
+		// 第一次执行（幂等标记）。无条件 ADD COLUMN IF NOT EXISTS 会让
+		// 「第二次启动」把刚删掉的价格列原样加回来 —— 实测过，表里会多出
+		// 四个恒为 0 的列。它们不参与计价（读路径已不看），但会让
+		// 「列已删除」这件事看起来像没做成，也让后来的人把 0 当成真实价格。
+		priceColsNeeded := !s.hasTable("model_prices")
+		var stmts []string
+		if priceColsNeeded {
+			stmts = append(stmts,
+				// 四个单价与实体上的 default:0 保持一致：0 就是「这个模型没配价」
+				"ALTER TABLE channel_models ADD COLUMN IF NOT EXISTS input_per1_m numeric(18,8) NOT NULL DEFAULT 0",
+				"ALTER TABLE channel_models ADD COLUMN IF NOT EXISTS output_per1_m numeric(18,8) NOT NULL DEFAULT 0",
+				"ALTER TABLE channel_models ADD COLUMN IF NOT EXISTS cache_read_per1_m numeric(18,8) NOT NULL DEFAULT 0",
+				"ALTER TABLE channel_models ADD COLUMN IF NOT EXISTS cache_write_per1_m numeric(18,8) NOT NULL DEFAULT 0",
+			)
+		}
+		// peak_rules 仍归渠道（时段规则），永远要保证存在
+		stmts = append(stmts, "ALTER TABLE channel_models ADD COLUMN IF NOT EXISTS peak_rules jsonb")
+		for _, stmt := range stmts {
 			if err := s.db.Exec(stmt).Error; err != nil {
 				return fmt.Errorf("迁移 channel_models 价格列失败（%s）: %w", stmt, err)
 			}
@@ -234,7 +256,13 @@ func (s *Store) migrateLegacySchema() error {
 		slog.Info("代理表已补充「用于自动更新」列（既有代理默认不用于更新）")
 	}
 
-	if s.hasTable("model_pricings") && s.hasTable("channel_models") {
+	// model_pricings 是**最早一代**的定价表（模型名 → 单价），比「价格挂渠道」
+	// 还早。这段只在极老库上触发，且必须与新结构互斥：一旦 model_prices
+	// 已存在，channel_models 上的四个单价列可能已被删掉，此时任何 UPDATE
+	// 引用它们都会报「列不存在」，应用起不来。
+	legacyPricingApplies := s.hasTable("model_pricings") && s.hasTable("channel_models") &&
+		!s.hasTable("model_prices") && s.hasColumn("channel_models", "input_per1_m")
+	if legacyPricingApplies {
 		// 只填「还没配价」的白名单行：用户在渠道里已经配好的价格不能被
 		// 一张要被删掉的旧表覆盖
 		res := s.db.Exec(`UPDATE channel_models cm SET
@@ -534,8 +562,137 @@ func (s *Store) backfillClientAliases() error {
 	return nil
 }
 
-// Seed 写入首次启动所需的基线数据，可重复执行。
+// migratePricesToModelLevel 把单价从「渠道 × 模型」搬到模型级（2026-10-27）。
 //
+// 背景：单价原先挂在 channel_models 上（同一条价格列在每条渠道里各存一份），
+// 现在唯一归属是 model_prices，渠道只留倍率。存量数据必须搬过去，
+// 否则升级后所有模型都变成「未定价」，账单从有价突然掉到 0 元。
+//
+// 合并规则：同一模型名在多个渠道里有不同单价时**取各字段的最大值**
+// （站主拍板）。理由：宁可高估成本也不让账单看上去比实际便宜 ——
+// 低估会让人以为这条渠道很划算，而高估只是保守。合并后用户可以在
+// 新菜单里按模型改回准确值。
+//
+// 币种归属：老数据的价格数字是「跟着所属渠道币种」的。搬迁时按各渠道的
+// 币种，把它的数字写进新表对应的那一档（USD 渠道 → USD 四列，
+// CNY 渠道 → RMB 四列）。同一模型既有美元渠道又有人民币渠道时，
+// 两档各自取该币种下的最大值 —— 这正是「同一模型同时有美元价和人民币价」
+// 这一需求的来源。
+//
+// 幂等：用 settings 标记，与 backfillKeyModelRoutes / backfillClientAliases
+// 同一套做法。成功后写标记，失败下次启动重试。
+func (s *Store) migratePricesToModelLevel() error {
+	const markerKey = "model_prices_migration_v1"
+	var marker model.Setting
+	err := s.db.Where("key = ?", markerKey).First(&marker).Error
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return fmt.Errorf("读取模型定价迁移标记失败: %w", err)
+	}
+
+	// 老价格列还在时才搬。全新库里这些列从来不存在 —— 迁移直接跳过，
+	// 只写标记，避免反复判断。
+	if s.hasTable("channel_models") && s.hasColumn("channel_models", model.ColPricingInputPer1M) {
+		// 一次查出「模型名 + 币种 + 四档单价」，内存里按 (模型, 币种) 归并取最大。
+		var rows []struct {
+			PublicName      string
+			Currency        string
+			InputPer1M      decimal.Decimal
+			OutputPer1M     decimal.Decimal
+			CacheReadPer1M  decimal.Decimal
+			CacheWritePer1M decimal.Decimal
+		}
+		if err := s.db.Raw(`SELECT cm.public_name AS public_name,
+				COALESCE(NULLIF(ch.currency, ''), 'USD') AS currency,
+				cm.input_per1_m AS input_per1_m,
+				cm.output_per1_m AS output_per1_m,
+				cm.cache_read_per1_m AS cache_read_per1_m,
+				cm.cache_write_per1_m AS cache_write_per1_m
+			FROM channel_models cm
+			JOIN channels ch ON ch.id = cm.channel_id`).Scan(&rows).Error; err != nil {
+			return fmt.Errorf("读取存量单价失败: %w", err)
+		}
+
+		byName := map[string]*model.ModelPrice{}
+		for _, r := range rows {
+			// 四档全 0 的渠道不构成「有价」，跳过：否则一个没配价的渠道
+			// 会把 0 当成「最高价」参与比较（虽然 max 会取到非 0，但语义上
+			// 它本来就不该出现在候选里）
+			if r.InputPer1M.IsZero() && r.OutputPer1M.IsZero() &&
+				r.CacheReadPer1M.IsZero() && r.CacheWritePer1M.IsZero() {
+				continue
+			}
+			p, ok := byName[r.PublicName]
+			if !ok {
+				p = &model.ModelPrice{ModelName: r.PublicName}
+				byName[r.PublicName] = p
+			}
+			cny := false
+			if c, valid := model.NormalizeCurrency(r.Currency); valid && c == model.CurrencyCNY {
+				cny = true
+			}
+			if cny {
+				p.RMBInputPer1M = maxDec(p.RMBInputPer1M, r.InputPer1M)
+				p.RMBOutputPer1M = maxDec(p.RMBOutputPer1M, r.OutputPer1M)
+				p.RMBCacheReadPer1M = maxDec(p.RMBCacheReadPer1M, r.CacheReadPer1M)
+				p.RMBCacheWritePer1M = maxDec(p.RMBCacheWritePer1M, r.CacheWritePer1M)
+			} else {
+				p.USDInputPer1M = maxDec(p.USDInputPer1M, r.InputPer1M)
+				p.USDOutputPer1M = maxDec(p.USDOutputPer1M, r.OutputPer1M)
+				p.USDCacheReadPer1M = maxDec(p.USDCacheReadPer1M, r.CacheReadPer1M)
+				p.USDCacheWritePer1M = maxDec(p.USDCacheWritePer1M, r.CacheWritePer1M)
+			}
+		}
+
+		migrated := 0
+		for _, p := range byName {
+			// 用户可能已经在新表里填过价（例如先升级了二进制、又在界面里改过）：
+			// 不覆盖已有的行，只补缺的。InsertModelPriceIfAbsent 就是补缺语义
+			// （SQL 本体在 model 包里，列名只出现一次）。
+			inserted, err := model.InsertModelPriceIfAbsent(s.db, *p)
+			if err != nil {
+				return fmt.Errorf("迁移模型定价失败: %w", err)
+			}
+			if inserted {
+				migrated++
+			}
+		}
+		if migrated > 0 {
+			slog.Info("已把渠道单价迁移为模型级定价", "模型数", migrated)
+		}
+
+		// 搬完就删旧列：留着它们会有两个真相，而读路径已经不再看它们。
+		// DROP COLUMN 可重复执行（IF EXISTS），全程在迁移内部，不接受外部写入。
+		for _, col := range []string{
+			model.ColPricingInputPer1M, model.ColPricingOutputPer1M,
+			model.ColPricingCacheReadPer1M, model.ColPricingCacheWritePer1M,
+		} {
+			if err := s.db.Exec("ALTER TABLE channel_models DROP COLUMN IF EXISTS " + col).Error; err != nil {
+				return fmt.Errorf("删除旧单价列 %s 失败: %w", col, err)
+			}
+		}
+	}
+
+	if err := s.db.Create(&model.Setting{
+		Key:   markerKey,
+		Value: model.JSONMap{"value": true},
+	}).Error; err != nil {
+		return fmt.Errorf("写入模型定价迁移标记失败: %w", err)
+	}
+	return nil
+}
+
+// maxDec 返回两个 decimal 中较大的一个（用于迁移时取「各渠道最高价」）。
+func maxDec(a, b decimal.Decimal) decimal.Decimal {
+	if b.GreaterThan(a) {
+		return b
+	}
+	return a
+}
+
+// Seed 写入首次启动所需的基线数据，可重复执行。//
 // 分组已移除，这里只剩系统设置：首次启动写入报文留存与日志保留的默认值，
 // 已存在的键不覆盖。
 func (s *Store) Seed() error {

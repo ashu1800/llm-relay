@@ -30,30 +30,10 @@ func parseDecimal(s string) (decimal.Decimal, error) {
 //
 // 校验放在保存路径上而不是事后：时段窗口写错（起止相同、格式不对）不会报错、
 // 只会永不命中，用户会以为「配了双倍计费却没生效」，那是最难查的一类问题。
+//
+// 2026-10-27 起单价不再走这里：它已迁到模型级（见 admin_model_prices.go 的
+// applyModelPriceFields）。本函数只剩「倍率 + 时段规则」这两件渠道属性。
 func applyPriceFields(row *model.ChannelModel, in whitelistItem) error {
-	fields := []struct {
-		name string
-		raw  string
-		dst  *decimal.Decimal
-	}{
-		{"输入单价", in.InputPer1M, &row.InputPer1M},
-		{"输出单价", in.OutputPer1M, &row.OutputPer1M},
-		{"缓存读单价", in.CacheReadPer1M, &row.CacheReadPer1M},
-		{"缓存写单价", in.CacheWritePer1M, &row.CacheWritePer1M},
-	}
-	for _, f := range fields {
-		// 空字符串就是 0：白名单是整表提交的，不填即表示这个模型不算钱
-		if strings.TrimSpace(f.raw) == "" {
-			*f.dst = decimal.Zero
-			continue
-		}
-		d, err := parseDecimal(f.raw)
-		if err != nil {
-			return fmt.Errorf("%s 不是合法数字（%s）", f.name, strings.TrimSpace(f.raw))
-		}
-		*f.dst = d
-	}
-
 	// 倍率归一：不填、填 0 都表示「没配，按 1 算」。
 	// 刻意不把 0 当成「免费」——那会让「忘了填」和「故意填 0」变成同一件事
 	m := 1.0
@@ -73,17 +53,8 @@ func applyPriceFields(row *model.ChannelModel, in whitelistItem) error {
 // 校验（validatePricingRow）与清零告警（wipedPrices）都从这里取字段与文案：
 // 加第五个价格字段时只改这一处 —— 漏改任何一处都表现为静默失真
 // （「界面填了、库里是 0」，或者「清零了但 WARN 没点名」）。
-var priceFields = []struct {
-	label string
-	read  func(*model.ChannelModel) decimal.Decimal
-}{
-	{"输入单价", func(m *model.ChannelModel) decimal.Decimal { return m.InputPer1M }},
-	{"输出单价", func(m *model.ChannelModel) decimal.Decimal { return m.OutputPer1M }},
-	{"缓存读单价", func(m *model.ChannelModel) decimal.Decimal { return m.CacheReadPer1M }},
-	{"缓存写单价", func(m *model.ChannelModel) decimal.Decimal { return m.CacheWritePer1M }},
-}
-
-// validatePricingRow 校验并规整**已经落到实体上**的价格字段。
+// validatePricingRow 校验并规整**已经落到实体上**的渠道定价属性
+// （倍率 + 时段规则；单价已迁到模型级，见 admin_model_prices.go）。
 //
 // 这是价格不变式的唯一落点，两条写入路径共用：
 //   - API 保存路径（applyPriceFields）：字符串载荷先解析到实体，再走这里；
@@ -93,23 +64,19 @@ var priceFields = []struct {
 // （「为负数」vs「不是合法数字」），而这段规则要拦的是「负单价进统计」
 // 这种账面失真 —— 两套口径迟早会漏掉同一个边界。
 //
-// 做了四件事，缺一不可：
-//   - 单价非负：负费用进统计比没有统计更糟，看板上「省了钱」的假象看不出异常；
+// 做了三件事，缺一不可：
 //   - 倍率上界：超过 pricing.MaxMultiplier 直接拦下，不做夹取；
 //   - 倍率 0 归一成 1：「没配」与「故意填 0」不做区分，引擎对 0 本就等价于
 //     没配，归一后库里不留歧义值（免费模型用单价 0 表达）；
 //   - 时段规则写回 NormalizeRules 规整后的结果：手编辑过的脏规则（days 带小数、
 //     label 超长被截）落库前收干净，前端编辑器读到的与 API 保存的形态一致。
 //
+// 单价非负那条校验随单价的归属一起搬到了 admin_model_prices.go
+// （validateModelPriceRows）：单价不再是渠道属性，规则也该跟着走。
+//
 // 时段窗口写错（起止相同、格式不对）必须在这里报错而不是放行：它不会报错、
 // 只会永不命中，用户会以为「配了双倍计费却没生效」，那是最难查的一类问题。
 func validatePricingRow(row *model.ChannelModel) error {
-	for _, f := range priceFields {
-		if f.read(row).IsNegative() {
-			return fmt.Errorf("%s不能为负", f.label)
-		}
-	}
-
 	if row.Multiplier < 0 || row.Multiplier > pricing.MaxMultiplier {
 		return fmt.Errorf("固定倍率需要在 0 到 %g 之间（1 表示原价）", pricing.MaxMultiplier)
 	}

@@ -153,7 +153,7 @@ function disabled(opt: ColumnOption): boolean {
 .cs-reset { padding: 0; height: auto; font-size: var(--font-size-sm); }
 .cs-list { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; }
 /* 勾选框本身是 12px 字号（antd 默认 14 会把这面板撑得很高），
-   行高与内边距一起收，11 列也能一屏放下 */
+   行高与内边距一起收，12 列也能一屏放下 */
 .cs-item {
   font-size: var(--font-size-sm);
   line-height: 22px;

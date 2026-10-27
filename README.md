@@ -37,9 +37,11 @@
 
 - **精细计量**：输入 / 输出 / 缓存命中 / 缓存写入 / 推理 Token，区分「子集型」与
   「并列型」缓存口径
-- **价格挂在渠道 × 模型上**（同一模型名在不同渠道成本不同），单位是每 100 万 token
-  的价格；支持固定倍率与按时段倍率（4 位小数，按服务器本地时区判断，时段优先）；
-  漏配价会被渠道列表点名「N 个未定价」
+- **价格按模型设置**（「模型定价」菜单）：同一个模型可同时填**美元与人民币两套**
+  单价，互不换算；记账时按所属渠道的币种取对应那一档。单位是每 100 万 token
+- **渠道只保留倍率**：固定倍率与按时段倍率（4 位小数，按服务器本地时区判断，
+  时段优先）表达「这条渠道比标价贵/便宜多少」。漏配价的模型会在定价页与渠道
+  列表点名「N 个未定价」—— 漏配的后果是这笔调用被记成 0 元，账面上看不出异常
 - **多币种不换算**：币种是渠道属性，日志逐条显示自己的币种，看板按币种并列展示、
   永不合计 —— 「哪条渠道在烧钱」不需要回答汇率从哪来
 - **无充值 / 无金额系统**：金额仅作成本感知，不做任何扣减
@@ -65,9 +67,13 @@
 
 ### 安全
 
-- **无账号的密钥登录**：全站一把管理密钥换取 HMAC 签名的无状态会话（HttpOnly
-  Cookie，默认 7 天），登录接口带 IP 暴力破解限流；轮换密钥即全体下线
-- **渠道密钥加密**：上游密钥以 AES-256-GCM 加密后入库
+- **二选一的登录认证**：首次登录用安装时生成的**引导密钥**进入设置向导，
+  之后在页面上二选一 —— **动态码（2FA，TOTP）/ 自设管理密钥**。选定后引导
+  密钥立即退役，登录凭据完全由你掌控；改密、2FA 换绑、切换方式都在
+  「系统设置 → 登录认证」里完成（切换需要先验证当前凭据）。登录接口带
+  IP 暴力破解限流（15 分钟内错 5 次锁定），2FA 动态码另有 30 秒防重放。
+- **渠道密钥加密**：上游密钥以 AES-256-GCM 加密后入库；2FA 密钥同样加密
+  存储（两者用不同的派生密钥）
 
 ## 快速开始
 
@@ -92,8 +98,10 @@ curl -sSL https://raw.githubusercontent.com/ashu1800/llm-relay/main/deploy/insta
 
 ```bash
 sudo systemctl status llm-relay     # 服务状态
-# 管理密钥（RELAY_ADMIN_KEY）在安装结束时打印，也在 /opt/llm-relay/deploy/.env
-# 浏览器打开 http://你的服务器IP:8888，输入它登录
+# 引导密钥（RELAY_ADMIN_KEY）在安装结束时打印，也在 /opt/llm-relay/deploy/.env
+# 浏览器打开 http://你的服务器IP:8888，输入它登录一次 —— 随后页面会让你
+# 二选一：扫码绑定动态码（2FA），或自己设定一个管理密钥。选定后引导密钥
+# 立即失效，之后就用你选的那种方式登录。
 ```
 
 **可选参数**（跟在 `bash -s --` 后面，或先 export 再 `sudo -E`）：
@@ -243,8 +251,9 @@ Administrators 读取）→ 注册为 Windows 服务并配置失败自动重启 
 >   加失败重启策略（进程即便仍以非零码退出，SCM 也会按 5s/10s/30s 重试）。
 >   二进制自身在启动阶段还会对「数据库尚未就绪」这类连接错误做 30 秒有界重试；
 >   认错密码、库不存在则立即失败并写日志——以前这类启动失败在服务形态下**没有任何记录**。
-> - 重复运行就是升级：三把密钥（DB 密码 / `RELAY_SECRET` / `RELAY_ADMIN_KEY`）
->   原样沿用，升级前自动把数据库 `pg_dump` 到 `<InstallDir>ackups\`。
+> - 重复运行就是升级：三把密钥（DB 密码 / `RELAY_SECRET` / `RELAY_ADMIN_KEY`
+>   引导密钥）原样沿用，升级前自动把数据库 `pg_dump` 到 `<InstallDir>ackups\`。
+>   已完成的认证状态（2FA 或自设密钥）存在数据库里，升级不会重置。
 
 常用命令：
 
@@ -312,7 +321,7 @@ curl -s http://127.0.0.1:8888/system/info | python3 -m json.tool
 | `SERVER_HOST` | `127.0.0.1` | 监听地址。`deploy/.env` 与 `install.sh` 的 `BIND_ADDR` 参数写的都是它 |
 | `DB_*` | — | PostgreSQL 连接 |
 | `RELAY_SECRET` | 无 | 渠道密钥的加密主密钥，**必须显式设置**（见下节） |
-| `RELAY_ADMIN_KEY` | 无 | 管理台登录密钥（见下节） |
+| `RELAY_ADMIN_KEY` | 无 | 管理台**引导密钥**（首次登录进入设置向导用，见下节） |
 | `RELAY_PAYLOAD_STORAGE_MODE` | `errors` | 报文留存：`all` / `errors` / `none` |
 | `RELAY_PAYLOAD_MAX_KB` | `256` | 单条报文留存上限，超出截断并标注 |
 | `RELAY_MAX_CONCURRENCY` | `64` | 全局在途请求上限，超出排队（最多 60 秒）；`0` 不限 |
@@ -326,17 +335,45 @@ curl -s http://127.0.0.1:8888/system/info | python3 -m json.tool
 
 本站有两把相互独立的密钥，不要混用：
 
-### 管理台登录密钥 `RELAY_ADMIN_KEY`
+### 管理台登录认证（二选一）与引导密钥 `RELAY_ADMIN_KEY`
 
-无账号模型的登录凭据：打开管理台时输入它换取会话。
+管理台是**无账号**模型，登录凭据二选一：
 
-- 首次安装自动生成 48 位随机值；自己设置时**至少 16 位**，太短拒绝启动
-- 只在启动时取哈希比对，**不落库、不进配置备份**，泄露后改 `.env` 重启即可
-- **轮换并重启后所有已登录会话立即失效** —— 无状态会话唯一的吊销手段，怀疑
-  泄露就轮换；会话有效期 `RELAY_SESSION_TTL` 默认 168h
-- 未设置时登录鉴权整体关闭（只绑 `127.0.0.1` 的本地部署可接受），启动日志与
-  界面横幅持续提醒；登录接口带按 IP 的暴力破解限流（15 分钟内错 5 次锁定），
-  经 HTTPS 反代部署时会话 Cookie 自动附加 `Secure` 标志
+| 方式 | 登录时输入 | 绑定/设置入口 |
+|---|---|---|
+| 动态码（2FA / TOTP） | 认证器 App 上的 6 位动态码 | 首次向导扫码，或「设置 → 登录认证 → 切换到动态码」 |
+| 管理密钥 | 你自己设定的密钥（≥16 位） | 首次向导手填，或「设置 → 登录认证 → 修改密钥」 |
+
+**首次登录用的是引导密钥**（`RELAY_ADMIN_KEY`，安装脚本自动生成并打印）：
+
+- 它只在你完成初始化之前有效。登录后页面让你二选一：扫码绑 2FA，或手填
+  管理密钥；选定后它立即从登录链路退役，**之后只有你选的凭据能登录**。
+- 它同时是公网部署的第一道门：初始化完成之前，它是唯一门槛 —— 所以别把
+  「跳过向导」当成可以拖的事。
+- 认证状态存在数据库中（`settings` 表的 `console_auth_v1` 一行），**不进配置
+  备份**。2FA 密钥以 AES-256-GCM 加密存储，密钥派生带域分隔前缀（与渠道密钥
+  的派生互不相同）。
+- 切换方式、改密、换绑都在「系统设置 → 登录认证」完成，且**必须先通过当前
+  凭据**（2FA 模式验动态码，密钥模式验旧密钥）—— 劫持了浏览器会话的人没有
+  当前凭据，换不掉你的 2FA。
+- 任何凭据变更都会轮换会话版本：**其它设备上的登录立即失效**，当前浏览器由
+  服务端重签 Cookie 无感续期。会话有效期 `RELAY_SESSION_TTL` 默认 168h。
+- 登录接口带按 IP 的暴力破解限流（15 分钟内错 5 次锁定）；动态码另有 30 秒
+  防重放（同一个码不能用两次）。
+- 未设置 `RELAY_ADMIN_KEY` 时登录鉴权整体关闭（只绑 `127.0.0.1` 的本地部署
+  可接受），启动日志与界面横幅会持续提醒。
+
+**设备丢失/忘记密钥怎么办**：删掉认证状态那一行后重启，会回到「引导密钥 +
+设置向导」的状态，重新初始化即可：
+
+```bash
+su - postgres -c "psql -d llm_relay -c \"DELETE FROM settings WHERE key='console_auth_v1'\""
+sudo systemctl restart llm-relay
+```
+
+> 这一步的代价是「任何拿到服务器 shell 的人都能重置认证」—— 物理/root 权限
+> 本来就等同于全部权限，这一条不扩大攻击面。数据库备份里不含认证状态，
+> 用旧备份恢复后同样会回到向导。
 
 ### 渠道密钥加密主密钥 `RELAY_SECRET`
 
@@ -354,7 +391,8 @@ curl -s http://127.0.0.1:8888/system/info | python3 -m json.tool
   bash scripts/rotate-secret.sh          # 内部会先 dry-run 再正式迁移
   ```
 
-**公网部署**：先设好 `RELAY_ADMIN_KEY`，再把 `SERVER_HOST` 改成 `0.0.0.0`，
+**公网部署**：先设好 `RELAY_ADMIN_KEY`（引导密钥），再把 `SERVER_HOST` 改成 `0.0.0.0`，
+部署完成后**尽快打开管理台完成初始化**（选 2FA 或自设密钥），
 建议加反向代理 + HTTPS（Caddy / Nginx 均可）。有固定域名时再设 `SERVER_PUBLIC_ORIGIN`
 把管理台锁死到该来源；域名不固定（内网穿透）可留空，此时只接受同源请求。
 经反代时按 `SERVER_TRUSTED_PROXIES`
@@ -374,11 +412,11 @@ npm run dev          # 开发服务器 :5173，/api 代理到 :8888
 ```
 
 前端类型与契约检查：`npm run type-check`、`npm run check`；单测 `npm run test`。
-前端产物构建后需同步到后端嵌入目录（命令见 `docs/development.md`）。
+前端产物构建后需同步到后端嵌入目录（命令见 `DEVELOPMENT.md`）。
 
 开发态的 Vite 代理有两个**必须显式配**的坑（`ws: true` 与 Origin 改写，少任何
 一个都是「页面能看，但实时不更新」），原因与解法见
-[docs/development.md](docs/development.md#本地开发补充)。
+[DEVELOPMENT.md](DEVELOPMENT.md#本地开发补充)。
 
 ## 目录结构
 
@@ -390,8 +428,10 @@ llm-relay/
 │                               proxy / secure / version / update / web(前端 embed)
 ├── frontend/                   Vue 3 + Vite + Ant Design Vue 4
 ├── deploy/                     install.sh / install.ps1 / uninstall-windows.ps1 / restore.sh / .env.example
-├── scripts/                    端到端验证脚本与发布脚本（见 docs/development.md）
-├── docs/                       ui-spec.md（UI 规格）、development.md（开发细节）
+├── scripts/                    端到端验证脚本与发布脚本（见 DEVELOPMENT.md）
+├── DEVELOPMENT.md              开发细节、实现取舍笔记、验证脚本全集、发布流程
+├── UI-SPEC.md                  UI 规格（令牌、布局、列宽、动效的实测数据）
+├── docs/                       本地产物（截图、布局测量、历史计划），不入版本控制
 └── .github/workflows/          ci.yml（push/PR）、release.yml（tag 触发发布）
 ```
 
@@ -399,8 +439,8 @@ llm-relay/
 
 | 文档 | 内容 |
 |---|---|
-| [docs/development.md](docs/development.md) | 本地开发细节、实现取舍笔记、验证脚本全集、发布流程 |
-| [docs/ui-spec.md](docs/ui-spec.md) | UI 规格书（设计令牌与布局的实测数据） |
+| [DEVELOPMENT.md](DEVELOPMENT.md) | 本地开发细节、实现取舍笔记、验证脚本全集、发布流程 |
+| [UI-SPEC.md](UI-SPEC.md) | UI 规格书（设计令牌与布局的实测数据） |
 
 ## 许可证
 

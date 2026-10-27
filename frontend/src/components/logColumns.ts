@@ -8,9 +8,9 @@
 //
 // 约定：本模块不碰 DOM、不碰 Vue 响应式 —— 那是组件那一层的事。
 
-/** 日志表的 11 列（顺序即渲染顺序） */
+/** 日志表的 12 列（顺序即渲染顺序） */
 export const COL_KEYS = [
-  'time', 'model', 'channel', 'tokens', 'elapsed', 'cost', 'speed', 'status', 'key', 'client', 'action'
+  'time', 'model', 'thinking', 'channel', 'tokens', 'elapsed', 'cost', 'speed', 'status', 'key', 'client', 'action'
 ] as const
 export type ColKey = (typeof COL_KEYS)[number]
 
@@ -19,6 +19,7 @@ export type ColKey = (typeof COL_KEYS)[number]
 export const COL_LABELS: Record<ColKey, string> = {
   time: '请求时间',
   model: '模型',
+  thinking: '思考强度',
   channel: '渠道',
   tokens: '词元',
   elapsed: '任务耗时',
@@ -55,10 +56,16 @@ export const CELL_BREATH = 6
  * 内容是显示名，我们自己定的、可枚举、长度有上界（最长 Anthropic
  * TypeScript SDK ≈ 150px，下限 112 配合余量就放得下），与 model/channel/key
  * 那三个「用户数据、想多长有多长」的列不是一类数据。
+ *
+ * 思考强度列（2026-10-27 加）同样取 0：内容是固定的一组档位词
+ * （off/minimal/low/medium/high/on/auto/xhigh/max，最长 "medium" ≈ 44px），
+ * 宽度由档位词本身决定，与容器多宽无关 —— 与 status/action 是同一类
+ * 「定宽胶囊列」，给它余量只会让胶囊周围空一圈。
  */
 export const DISTRIBUTE_WEIGHT: Record<ColKey, number> = {
   time: 1,
   model: 2,
+  thinking: 0,
   channel: 2,
   tokens: 1,
   elapsed: 1,
@@ -70,7 +77,7 @@ export const DISTRIBUTE_WEIGHT: Record<ColKey, number> = {
   action: 0
 }
 
-/** 全表的 Σw（12 = 3×2 + 6×1 + 2×0）。
+/** 全表的 Σw（12 = 3×2 + 5×1 + 4×0）。
  *
  *  注意它不再直接参与分摊：allocateWidths 现在按**传入的列子集**现算 Σw
  *  （列显隐会关掉几列，分母必须跟着变）。这条常量留下是为了让

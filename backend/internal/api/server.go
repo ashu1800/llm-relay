@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"llm-relay/internal/config"
+	"llm-relay/internal/consoleauth"
 	"llm-relay/internal/model"
 	"llm-relay/internal/pricing"
 	"llm-relay/internal/relay"
@@ -59,12 +60,17 @@ type Server struct {
 	lastTouch map[uint]time.Time
 
 	// ---- 管理台登录鉴权（无账号模型，详见 console_auth.go）----
-	// adminKeyHash 为 nil 表示鉴权关闭（未配置 RELAY_ADMIN_KEY）
+	// adminKeyHash 为 nil 表示未配置引导密钥（未设置 RELAY_ADMIN_KEY）：
+	// 它只在认证方式为 unset（首次部署 / 存量未完成向导）时作为登录凭据，
+	// 用户完成设置向导后即从登录链路退役。
 	adminKeyHash    []byte
 	adminKeyVersion []byte
 	sessionKey      []byte
 	sessionTTL      time.Duration
 	loginGuards     *loginLimiter
+	// authStore 是认证方式状态（unset/totp/key + 凭据）的持有者。
+	// 为 nil 时（构造失败，如库不可达）登录接口 fail closed。
+	authStore *consoleauth.Store
 }
 
 // New 构造 HTTP 层。
@@ -157,11 +163,15 @@ func (s *Server) registerAdminRoutes(r *gin.Engine) {
 		admin.GET("/system/info", s.systemInfo)
 		registerSystemRoutes(admin, s)
 		registerChannelRoutes(admin, s)
+		// 模型级定价（2026-10-27 从渠道白名单里拆出来）
+		registerModelPriceRoutes(admin, s)
 		registerKeyRoutes(admin, s)
 		registerLogRoutes(admin, s)
 		registerClientAliasRoutes(admin, s)
 		registerBackupRoutes(admin, s)
 		registerSettingsRoutes(admin, s)
+		// 认证向导（挂公开侧，凭「向导会话」准入）与切换/改密/换绑（挂受保护组）
+		registerAuthSetupRoutes(adminPublic, admin, s)
 
 		registerProxyRoutes(admin, s)
 		registerStatsRoutes(admin, s)
@@ -237,7 +247,8 @@ func (s *Server) systemInfo(c *gin.Context) {
 		// 前端据此显示持久告警，而不是只在启动日志里提一句
 		"using_default_secret": UsingDefaultSecret(s.deps.Config.Security.Secret),
 		// 管理台登录鉴权状态：未启用时前端同样显示持久告警。
-		// 只暴露布尔位，密钥本身（哪怕哈希）永远不随接口出去
+		// 只暴露布尔位与方法名，密钥与 TOTP 密钥（哪怕哈希/密文）永远不随接口出去
 		"console_auth_enabled": s.consoleAuthEnabled(),
+		"console_auth_method":  string(s.authMethod()),
 	})
 }

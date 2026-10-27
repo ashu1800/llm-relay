@@ -1010,7 +1010,7 @@ console.log('=== 请求日志列宽：测量锚点与模板必须对得上 ===')
   if (boundsBlock) {
     const keys = [...boundsBlock[0].matchAll(/^\s{2}(\w+):\s*\[/gm)].map((m) => m[1])
     const bound = [...panelSrc.matchAll(/:width="colW\.(\w+)"/g)].map((m) => m[1])
-    check('COL_BOUNDS 覆盖全部 11 列', keys.length === 11, `读到 ${keys.length} 个：${keys.join(', ')}`)
+    check('COL_BOUNDS 覆盖全部 12 列', keys.length === 12, `读到 ${keys.length} 个：${keys.join(', ')}`)
     check(
       '模板里每一列都绑了 colW（没有写死的 :width）',
       bound.length === keys.length && [...bound].sort().join(',') === [...keys].sort().join(','),
@@ -1364,6 +1364,27 @@ console.log('=== 标题层级契约 ===')
   const loginSrc = stripComments(readFileSync(join(SRC, 'views/LoginView.vue'), 'utf8'))
   check('登录页有且仅有一个 <h1>（它不在 MainLayout 里）', (loginSrc.match(/<h1\b/g) || []).length === 1)
 
+
+  // 动态码输入框不许带 maxlength（2026-10-27）。
+  //
+  // 浏览器在 input 事件**之前**按 maxlength 截断原始字符串：粘贴
+  // "123 456" 先变成 "123 45"，再经 sanitizeCode 清洗得 "12345" ——
+  // 第 6 位数字被丢掉，用户从认证器复制的码永远验不过，界面也不报错。
+  // 截断该由 sanitizeCode 负责（它看到完整原文），这个属性只会抢在前面截。
+  const codeInputsWithMaxlength = []
+  for (const file of walk(SRC)) {
+    if (!file.endsWith('.vue')) continue
+    const rel = file.slice(SRC.length + 1).replace(/\\/g, '/')
+    const src = stripComments(readFileSync(file, 'utf8'))
+    // 只盯同时用了 sanitizeCode 的输入框：那是动态码，别的字段的 maxlength 合法
+    if (!src.includes('sanitizeCode')) continue
+    if (/:maxlength\s*=/.test(src)) codeInputsWithMaxlength.push(rel)
+  }
+  check(
+    '动态码输入框不用 maxlength（会抢在 sanitizeCode 之前截断粘贴内容）',
+    codeInputsWithMaxlength.length === 0,
+    codeInputsWithMaxlength.join(', ')
+  )
   // 两条规则各出一条断言（而不是每个文件一条）：三十来个 .vue 会刷出六十行
   // PASS，真正失败的那一行反而找不着 —— 违规文件列在 detail 里更清楚
   const ownH1 = []

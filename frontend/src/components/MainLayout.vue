@@ -10,6 +10,7 @@ import {
   DashboardOutlined,
   KeyOutlined,
   ApiOutlined,
+  DollarOutlined,
   GlobalOutlined,
   SettingOutlined,
   MenuFoldOutlined,
@@ -77,6 +78,9 @@ const menus = [
   { key: '/console/dashboard', label: '数据看板', icon: DashboardOutlined },
   { key: '/console/keys', label: '密钥信息', icon: KeyOutlined },
   { key: '/console/channels', label: '渠道管理', icon: ApiOutlined },
+  // 模型定价（2026-10-27）：单价从渠道里拆出来独立成页。
+  // 放在渠道管理之后：先有渠道（谁能跑），再有定价（跑一次多少钱）。
+  { key: '/console/pricing', label: '模型定价', icon: DollarOutlined },
   { key: '/console/proxies', label: '代理管理', icon: GlobalOutlined },
   { key: '/console/system', label: '系统设置', icon: SettingOutlined }
 ]

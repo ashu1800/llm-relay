@@ -86,8 +86,12 @@ type backupBundle struct {
 	// ClientAliases 客户端显示映射：纯明文配置（名字 + 图标字符串），
 	// 不涉及密文与外键，直接随模型序列化即可
 	ClientAliases []model.ClientAlias `json:"client_aliases"`
-	// Pricings 是**只读**的旧字段：价格已改随渠道模型配置（见 model.ChannelModel），
-	// 新备份不再导出它。保留定义只为能把老备份里的价格捞出来应用到对应的渠道模型上，
+	// ModelPrices 模型级定价（2026-10-27 起单价的唯一归属）。
+	// 纯明文数字，无外键，直接随模型序列化。
+	ModelPrices []model.ModelPrice `json:"model_prices"`
+	// Pricings 是**只读**的旧字段：价格先是改成「随渠道模型配置」，
+	// 2026-10-27 又改成模型级（见 ModelPrices）。新备份不再导出它。
+	// 保留定义只为把老备份里的价格捞出来写进 model_prices，
 	// 否则「导入旧备份」会静默丢掉全部价格。
 	Pricings       []legacyPricing `json:"pricings"`
 	ManualPricings []legacyPricing `json:"manual_pricings"`
@@ -165,9 +169,11 @@ func (s *Server) exportConfig(c *gin.Context) {
 			},
 		},
 		{"客户端显示映射", func() error { return db.Order("id").Find(&b.ClientAliases).Error }},
-		// 「模型定价」这一步已取消：价格随渠道的模型白名单一起导出
-		// （见 channelExport.Models），单独再导一份只会出现两份真相。
-		// b.Pricings 保持为空数组，老版本的导入逻辑读到空值不会报错。
+		// 模型定价（2026-10-27）：单价的唯一归属，必须随备份走 ——
+		// 不导出的话「换机恢复后所有模型都变成未定价」，账单从有价掉到 0 元，
+		// 而备份看起来是成功的。
+		{"模型定价", func() error { return db.Order("model_name").Find(&b.ModelPrices).Error }},
+		// b.Pricings 保持为空数组：那是老版本字段，新备份不再导出。
 	}
 	for _, step := range steps {
 		if err := step.run(); err != nil {
@@ -464,30 +470,64 @@ func (s *Server) importConfig(c *gin.Context) {
 	if len(pricings) == 0 {
 		pricings = b.ManualPricings
 	}
-	// 老备份里的价格：按模型名写到对应的渠道模型上。
-	// 新备份没有这个数组，这段对它是空转。
-	for i := range pricings {
-		p := pricings[i]
-		// 旧备份里没有 multiplier 字段（那时还没有固定倍率），反序列化后是 0；
-		// 0 的语义是「没配」，由引擎归一到 1
-		res := db.Model(&model.ChannelModel{}).
-			Where("public_name = ?", p.ModelKey).
-			Where("COALESCE(input_per1_m,0) = 0 AND COALESCE(output_per1_m,0) = 0").
-			Where("COALESCE(cache_read_per1_m,0) = 0 AND COALESCE(cache_write_per1_m,0) = 0").
-			Updates(map[string]any{
-				"input_per1_m": p.InputPer1M, "output_per1_m": p.OutputPer1M,
-				"cache_read_per1_m": p.CacheReadPer1M, "cache_write_per1_m": p.CacheWritePer1M,
-				"multiplier": p.Multiplier, "peak_rules": p.PeakRules,
-			})
-		if res.Error != nil {
-			report.Warnings = append(report.Warnings, "定价 "+p.ModelKey+" 导入失败: "+res.Error.Error())
+	// 模型定价（新备份的正规路径）：按模型名 upsert。
+	// 与老备份的价格块分开：这一段是「本版本导出的」，冲突时直接覆盖
+	// （导入备份的语义就是「恢复成备份里的样子」）；老字段那段用 DO NOTHING
+	// （见下面的注释）。
+	for i := range b.ModelPrices {
+		mp := b.ModelPrices[i]
+		name := strings.TrimSpace(mp.ModelName)
+		if name == "" {
+			report.Warnings = append(report.Warnings, "模型定价有一条缺少模型名，已跳过")
+			report.Skipped["模型定价"]++
 			continue
 		}
-		if res.RowsAffected == 0 {
-			// 没有渠道在用这个模型（或它已经有价了）：如实说明，
-			// 不要让人以为价格恢复成功了
+		// 非负校验统一走 ModelPrice.NegativePriceField：写入路径与
+		// 备份导入路径共用一份判断（负单价会让看板出现「省了钱」的假象）。
+		if label := mp.NegativePriceField(); label != "" {
+			report.Warnings = append(report.Warnings, "模型定价 "+name+" 跳过："+label+"为负")
+			report.Skipped["模型定价"]++
+			continue
+		}
+		mp.ModelName = name
+		if err := model.UpsertModelPrice(db, mp); err != nil {
+			report.Warnings = append(report.Warnings, "模型定价 "+name+" 导入失败: "+err.Error())
+			continue
+		}
+		report.Created["模型定价"]++
+	}
+
+	// 老备份里的价格：写到模型级价格表里（2026-10-27 起单价的唯一归属）。
+	// 新备份没有这个数组，这段对它是空转 —— 新备份的价格走 b.ModelPrices。
+	//
+	// 币种按老备份自带的 Currency 分派：老数据的价格数字是「那种币种的数字」，
+	// 塞进错误的币种列会把人民币数字标成美元。
+	for i := range pricings {
+		p := pricings[i]
+		cny := false
+		if c, ok := model.NormalizeCurrency(p.Currency); ok && c == model.CurrencyCNY {
+			cny = true
+		}
+		// 「补缺」语义：库里已有的价一律不动，否则会用旧备份盖掉用户
+		// 后来改好的价格。InsertModelPriceIfAbsent 的 ON CONFLICT DO NOTHING
+		// 就是这个语义（SQL 本体在 model 包里，列名只出现一次）。
+		mp := model.ModelPrice{ModelName: p.ModelKey}
+		if cny {
+			mp.RMBInputPer1M, mp.RMBOutputPer1M = p.InputPer1M, p.OutputPer1M
+			mp.RMBCacheReadPer1M, mp.RMBCacheWritePer1M = p.CacheReadPer1M, p.CacheWritePer1M
+		} else {
+			mp.USDInputPer1M, mp.USDOutputPer1M = p.InputPer1M, p.OutputPer1M
+			mp.USDCacheReadPer1M, mp.USDCacheWritePer1M = p.CacheReadPer1M, p.CacheWritePer1M
+		}
+		inserted, err := model.InsertModelPriceIfAbsent(db, mp)
+		if err != nil {
+			report.Warnings = append(report.Warnings, "定价 "+p.ModelKey+" 导入失败: "+err.Error())
+			continue
+		}
+		if !inserted {
+			// 这个模型已经有价了：如实说明，不要让人以为旧价覆盖上去了
 			report.Warnings = append(report.Warnings,
-				"备份里的定价 "+p.ModelKey+" 没有对应的渠道模型（或该模型已有价格），已跳过")
+				"备份里的定价 "+p.ModelKey+" 已存在（保留现有价格），已跳过")
 			report.Skipped["模型定价"]++
 			continue
 		}

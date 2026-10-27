@@ -36,7 +36,7 @@ import ChannelLifeDot from '@/components/ChannelLifeDot.vue'
 import { PROTOCOLS, type Channel, type ChannelBinding } from '@/api/types'
 import { symbolOf } from '@/utils/money'
 import { fmtTime, pad2 } from '@/utils/fmtTime'
-import { emptyPrice, pickPrice } from '@/components/ModelPricingEditor.vue'
+import { emptyRate, pickRate } from '@/components/ChannelRateEditor.vue'
 // 本地搜索 + 客户端分页（四张管理表共用，判据在 components/tableTools.ts 有单测）
 import { useTableTools } from '@/composables/useTableTools'
 // 批量启停（与密钥页共用：顺序执行、失败不中断、汇报失败名单）
@@ -304,7 +304,7 @@ function blankForm() {
     default_model_enabled: false,
     default_model: '',
     models: [
-      { public_name: '', upstream_name: '', enabled: true, supported_efforts: [], ...emptyPrice() }
+      { public_name: '', upstream_name: '', enabled: true, supported_efforts: [], ...emptyRate() }
     ]
   })
 }
@@ -336,10 +336,13 @@ const bindDirty = useDirtyClose({
 })
 
 // bindingRows 把接口返回的白名单行转成表单行。
-// 价格必须一起带上：编辑一次渠道再保存，提交的就是这张表，
-// 漏掉价格等于把用户配好的价全部清零。档位同理（supported_efforts）——
+// 倍率与时段规则必须一起带上：编辑一次渠道再保存，提交的就是这张表，
+// 漏掉它们等于把用户配好的倍率全部清零。档位同理（supported_efforts）——
 // 漏了它，编辑一次渠道就会把逐模型配好的思考档位全部抹回「按协议推导」，
 // 而界面上只是那一格显示回「自动」，看不出是被清掉的。
+//
+// 2026-10-27：单价已迁到模型级，这里不再搬价格字段 —— 搬了反而是错的
+// （白名单行上已经没有那些列）。
 function bindingRows(items: ChannelBinding[]): WhitelistRow[] {
   return items.map((b) => ({
     public_name: b.public_name,
@@ -347,7 +350,7 @@ function bindingRows(items: ChannelBinding[]): WhitelistRow[] {
     enabled: b.enabled,
     proxy_id: b.proxy_id || 0,
     supported_efforts: [...(b.supported_efforts || [])],
-    ...pickPrice(b)
+    ...pickRate(b)
   }))
 }
 
@@ -445,7 +448,7 @@ function whitelistPayload(): WhitelistRow[] | null {
       enabled: r.enabled,
       proxy_id: r.proxy_id || 0,
       supported_efforts: [...(r.supported_efforts || [])],
-      ...pickPrice(r)
+      ...pickRate(r)
     }))
     .filter((r) => r.public_name || r.upstream_name)
   const seen = new Set<string>()
@@ -895,7 +898,7 @@ async function saveBindings() {
       enabled: r.enabled,
       proxy_id: r.proxy_id || 0,
       supported_efforts: [...(r.supported_efforts || [])],
-      ...pickPrice(r)
+      ...pickRate(r)
     }))
     .filter((r) => r.public_name)
   if (!items.length) {

@@ -57,8 +57,12 @@ func TestMigrateIdempotent(t *testing.T) {
 func TestMigrateFreshDatabase(t *testing.T) {
 	s := testStore(t)
 	// 清掉本测试库里的所有表（专用测试库才允许这么干）
+	// model_prices 必须一起 DROP：它是 2026-10-27 新增的表，
+	// 且迁移用 settings 里的 model_prices_migration_v1 做幂等标记 ——
+	// 只删其它表的话，残留的 model_prices 会让「全新库」这个前提不成立，
+	// 表现是本测试在整套测试里跑时失败、单独跑时通过（实测过）。
 	tables := []string{"request_payloads", "request_logs", "channel_models",
-		"channels", "channel_groups", "api_keys", "proxies", "settings"}
+		"channels", "channel_groups", "api_keys", "proxies", "settings", "model_prices"}
 	for _, tbl := range tables {
 		s.db.Exec("DROP TABLE IF EXISTS " + tbl + " CASCADE")
 	}

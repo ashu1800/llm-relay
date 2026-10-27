@@ -10,16 +10,25 @@ import (
 	"llm-relay/internal/model"
 )
 
-// seed 往 Engine 里塞一条价格，并让缓存处于「新鲜」状态。
+// seed 往 Engine 里塞一条「渠道白名单行 + 模型价」，并让缓存处于「新鲜」状态。
 //
 // 为什么直接操作内部字段而不建 *gorm.DB：refresh 的判据是
-// `time.Since(loadedAt) < ttl && loadedAt != 零值`（engine.go:225），
+// `time.Since(loadedAt) < ttl && loadedAt != 零值`（engine.go），
 // 把 loadedAt 设成当前时刻后它立刻返回，整条 Resolve 路径不碰数据库 ——
 // 为一条精度断言起一套 PG 不划算。
-func seed(e *Engine, channelID uint, name string, cm model.ChannelModel, currency string) {
+//
+// 2026-10-27 起单价挂在模型级（e.cache 按模型名，单位是 model.ModelPrice），
+// 倍率仍挂在白名单行上（e.rows 按「渠道+模型」），所以两个都要塞。
+func seed(e *Engine, channelID uint, name string, cm model.ChannelModel, in, out decimal.Decimal, currency string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.cache[cacheKey(channelID, name)] = cm
+	cm.ChannelID = channelID
+	cm.PublicName = name
+	e.rows[cacheKey(channelID, name)] = cm
+	e.cache[name] = model.ModelPrice{
+		ModelName:     name,
+		USDInputPer1M: in, USDOutputPer1M: out,
+	}
 	e.currencies[channelID] = currency
 	e.loadedAt = time.Now()
 }
@@ -38,13 +47,8 @@ func seed(e *Engine, channelID uint, name string, cm model.ChannelModel, currenc
 // 0.19，回头核对「怎么看都对」。这条断言把它钉在具体数字上。
 func TestFourDecimalMultiplierExact(t *testing.T) {
 	e := NewEngine(nil, time.Minute)
-	seed(e, 1, "m", model.ChannelModel{
-		ChannelID:   1,
-		PublicName:  "m",
-		InputPer1M:  decimal.RequireFromString("0.15"),
-		OutputPer1M: decimal.RequireFromString("0.6"),
-		Multiplier:  0.1875,
-	}, model.CurrencyUSD)
+	seed(e, 1, "m", model.ChannelModel{Multiplier: 0.1875},
+		decimal.RequireFromString("0.15"), decimal.RequireFromString("0.6"), model.CurrencyUSD)
 
 	p, ok := e.Resolve(context.Background(), 1, "m", time.Now())
 	if !ok {
@@ -83,12 +87,8 @@ func TestFourDecimalMultiplierBounds(t *testing.T) {
 	}
 	for _, c := range cases {
 		e := NewEngine(nil, time.Minute)
-		seed(e, 1, "m", model.ChannelModel{
-			ChannelID:  1,
-			PublicName: "m",
-			InputPer1M: decimal.RequireFromString("0.15"),
-			Multiplier: c.mult,
-		}, model.CurrencyUSD)
+		seed(e, 1, "m", model.ChannelModel{Multiplier: c.mult},
+			decimal.RequireFromString("0.15"), decimal.Zero, model.CurrencyUSD)
 
 		p, ok := e.Resolve(context.Background(), 1, "m", time.Now())
 		if !ok {
@@ -120,12 +120,8 @@ func TestFourDecimalMultiplierInPeakRule(t *testing.T) {
 	_ = label
 
 	e := NewEngine(nil, time.Minute)
-	seed(e, 1, "m", model.ChannelModel{
-		ChannelID:  1,
-		PublicName: "m",
-		InputPer1M: decimal.RequireFromString("0.15"),
-		PeakRules:  rules,
-	}, model.CurrencyUSD)
+	seed(e, 1, "m", model.ChannelModel{PeakRules: rules},
+		decimal.RequireFromString("0.15"), decimal.Zero, model.CurrencyUSD)
 
 	p, ok := e.Resolve(context.Background(), 1, "m", time.Now())
 	if !ok {

@@ -38,6 +38,15 @@ const routes: RouteRecordRaw[] = [
       },
       { path: 'keys', name: 'keys', component: () => import('@/views/KeysView.vue'), meta: { title: '密钥信息' } },
       { path: 'channels', name: 'channels', component: () => import('@/views/ChannelsView.vue'), meta: { title: '渠道管理' } },
+      // 模型定价（2026-10-27）：单价的唯一归属从「渠道 × 模型」搬到了模型级。
+      // 菜单里紧跟渠道管理 —— 两者一起回答「这次调用花了多少钱」：
+      // 渠道给倍率，这一页给基准单价。
+      {
+        path: 'pricing',
+        name: 'pricing',
+        component: () => import('@/views/ModelPricingView.vue'),
+        meta: { title: '模型定价' }
+      },
       // 分组管理已随分组功能一起移除（2026-10-26）。旧地址保留为跳转：
       // 收藏与历史记录里可能还指着 /console/groups，落到渠道管理是最近的去处
       {
@@ -58,9 +67,12 @@ const router = createRouter({
 
 // ---- 登录守卫 ----
 //
-// 后端开启了登录鉴权（配置了 RELAY_ADMIN_KEY）时，未登录一律先去登录页；
-// 未开启鉴权（旧部署、只绑回环）时 fetchStatus 报 enabled=false，全部放行，
-// 行为与没有登录功能时完全一致。
+// 后端开启了登录鉴权时，未登录一律先去登录页；未开启鉴权（未配
+// RELAY_ADMIN_KEY 的本地部署）时全部放行，行为与没有登录功能时一致。
+//
+// 已登录但认证方式还没初始化（needsSetup）时同样回登录页完成向导：
+// 这是「第一次使用」的语义，不能让用户先逛起来再配 —— 那时页面上
+// 的写操作都会落在未受保护的通道上。
 //
 // 状态只查一次（statusLoaded），之后由两条路径维持新鲜：
 //   - 登录/登出各自更新 store；
@@ -81,7 +93,11 @@ router.beforeEach(async (to) => {
     // 排障深链（?trace_id=…）才不会在登录这一步丢掉
     return { path: '/login', query: { redirect: to.fullPath } }
   }
-  if (to.path === '/login' && auth.authenticated) {
+  // 已登录但方式未初始化：全部回登录页完成向导
+  if (auth.authenticated && auth.needsSetup && to.path !== '/login') {
+    return { path: '/login', query: { redirect: to.fullPath } }
+  }
+  if (to.path === '/login' && auth.authenticated && !auth.needsSetup) {
     return { path: '/console/dashboard' }
   }
 })
