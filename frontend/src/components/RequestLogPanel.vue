@@ -148,15 +148,18 @@ const COL_BOUNDS: Record<ColKey, [number, number]> = {
   // 上限 170 留给跨年的完整日期
   time: [92, 170],
   model: [120, 300],
-  // 思考强度（2026-10-27 从模型列的胶囊里拆出来独立成列）。
-  // 内容是一枚定宽胶囊：档位词最长 "medium" / "minimal"（7 字符 ≈ 44px）
-  // + 胶囊左右内边距 16 + 边框 2 + 单元格内边距 16 + 呼吸 6 ≈ 84px；
-  // 表头「思考强度」四字 48px + 内边距 16 = 64px 是硬下界。
-  // 下限取 88 是两者取大后再留一点余量。上限 96：内容是**封闭集合**
-  // （见 THINKING_COLORS 那九个档位 + 认不得的档位原样展示），
-  // 最长也就 "minimal" 这一档，给再宽只是空白 —— 与 status/action
-  // 同属「定宽胶囊列」，所以 DISTRIBUTE_WEIGHT 也取 0。
-  thinking: [88, 96],
+  // 思考（2026-10-27 从「思考强度」改名，同时去掉胶囊改为纯文字）。
+  //
+  // 两个变化各自的影响：
+  //   表头 4 字 → 2 字：64px → 42px（两字 26 + 内边距 16）；
+  //   内容去胶囊：原来要算「档位词 44 + 胶囊内边距 16 + 边框 2」，
+  //               现在只要档位词本身的 44px 左右。
+  //
+  // 下限 62 = 表头 42 vs 最长档位词 "minimal"（44）+ 内边距 16 = 60，取大再留 2。
+  // 上限 74 = 60 + 呼吸 6 + 一点余量：内容是**封闭集合**
+  // （九个档位词 + 认不得的档位原样展示），再宽只是空白，所以
+  // DISTRIBUTE_WEIGHT 仍取 0。
+  thinking: [62, 74],
   // 渠道列下限 130 → 128 → 88（2026-09-26）。
   //
   // 130 是 2026-09-16 那组人工定宽常量的遗留，当时按「最坏情况」拍。
@@ -207,7 +210,7 @@ const COL_BOUNDS: Record<ColKey, [number, number]> = {
 const baseW: Record<ColKey, number> = {
   time: 96,
   model: 190,
-  thinking: 88,
+  thinking: 62,
   channel: 88,
   tokens: 150,
   elapsed: 120,
@@ -265,11 +268,11 @@ const { visible: colShown, visibleKeys: colShownKeys } = logColumns
  */
 const CONTENT_MEASURE: Partial<Record<ColKey, { sel: string; pad: number }>> = {
   model: { sel: '.model-cell', pad: 0 }, // inline-flex + nowrap，放不下就溢出、不被压缩
-  // 思考强度：量的是胶囊里的**内层文字**（.think-text，普通 inline 盒）。
-  // 不能量 .think-pill 自己 —— 它是 inline-flex 且被单元格内容宽约束，
-  // 与 .chan-name / .key-tag 同一个坑（量到的是当前列宽，长档位撑不开列）。
-  // pad 18 = 胶囊左右内边距 16 + 边框 2。
-  thinking: { sel: '.think-text', pad: 18 },
+  // 思考：去掉胶囊后内容是普通 inline 文字（2026-10-27），直接给它一个
+  // 类名来量 —— 不再有「外层 flex 把内层压扁」那个坑（.think-pill 当初
+  // 就是因为是 inline-flex 被单元格内容宽约束，才只能量内层 .think-text）。
+  // pad 0：没有胶囊内边距与边框了，单元格内边距由 CELL_PAD 统一加。
+  thinking: { sel: '.think-level', pad: 0 },
   // 渠道：量的是**内层 .chan-text**（inline 盒，放不下就溢出），不是 .chan-name。
   // .chan-name 是 flex 子项（min-width: 0）会被列宽压扁：压扁后 rect = 可用宽，
   // 量它等于量「当前列宽装了多少」—— 长名字时每次测量只比上一次多 6px
@@ -1997,23 +2000,20 @@ onMounted(() => {
             </span>
           </template>
         </a-table-column>
-        <!-- 思考强度列（2026-10-27 从模型列的胶囊里拆出来）。
+        <!-- 思考列（2026-10-27 从模型列的胶囊里拆出来，同日改名并去掉胶囊）。
              拆出来的理由：它此前挤在模型名后面 —— 一个单元格里最多三枚胶囊
              （模型名 + 思考档位 + 兜底），模型列因此被撑到 300px 上限，
-             而「这条请求用了什么思考强度」是要横向对比的信息，
+             而「这条请求用了什么思考档位」是要横向对比的信息，
              混在模型名里就没法顺着列往下扫。
-             没带思考参数的请求显示 —（「没说」不是「off」，见下） -->
-        <a-table-column v-if="colShown.thinking" title="思考强度" :width="colW.thinking">
+             没带思考参数的请求显示 -（「没说」不是「off」，见 thinkingTitle） -->
+        <a-table-column v-if="colShown.thinking" title="思考" :width="colW.thinking">
           <template #default="{ record }">
-            <span
-              v-if="record.thinking_level"
-              class="think-pill"
-              :style="{ '--pill-color': thinkingColor(record.thinking_level) }"
-              :title="thinkingTitle(record.thinking_level)"
-            >
-              <span class="think-text">{{ record.thinking_level }}</span>
-            </span>
-            <span v-else class="muted" title="请求体里没带思考参数">—</span>
+            <!-- 纯文字，不再套胶囊（2026-10-27 站主要求）：档位词本身很短，
+                 一枚描边胶囊在这里只是多一层框，而颜色只用来区分档位高低 ——
+                 同一列里扫的是「有没有 / 是什么档」，默认文字色足够。
+                 空值用 - 而不是 —：整表其他格用 —，这一格按站主要求单独用 - -->
+            <span v-if="record.thinking_level" class="think-level" :title="thinkingTitle(record.thinking_level)">{{ record.thinking_level }}</span>
+            <span v-else class="muted" title="请求体里没带思考参数">-</span>
           </template>
         </a-table-column>
         <!-- 渠道列当初是随「按渠道筛选」一起加的，那个筛选现在不再作用于列表；
@@ -2871,11 +2871,11 @@ onMounted(() => {
   vertical-align: middle;
 }
 
-/* 思考强度列的测量锚点（见 CONTENT_MEASURE.thinking）。
-   .think-pill 是 inline-block 且会被单元格内容宽约束 —— 量它等于量
-   「当前列宽装了多少」；内层 inline 盒放不下就溢出，rect 恒为文字真实
-   宽度，才是该量的东西（与 .chan-text / .gt-text 同一个套路）。 */
-.think-text {
+/* 思考列的测量锚点（见 CONTENT_MEASURE.thinking）。
+   去掉胶囊后这一格就是普通 inline 文字，rect 恒为文字真实宽度 ——
+   正是该量的东西。不再有「外层 flex 压扁内层」的问题，
+   所以可以直接量它本身（.think-pill / .think-text 那两层已不存在）。 */
+.think-level {
   display: inline;
 }
 

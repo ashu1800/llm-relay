@@ -19,7 +19,7 @@ export type ColKey = (typeof COL_KEYS)[number]
 export const COL_LABELS: Record<ColKey, string> = {
   time: '请求时间',
   model: '模型',
-  thinking: '思考强度',
+  thinking: '思考',
   channel: '渠道',
   tokens: '词元',
   elapsed: '任务耗时',
@@ -57,10 +57,10 @@ export const CELL_BREATH = 6
  * TypeScript SDK ≈ 150px，下限 112 配合余量就放得下），与 model/channel/key
  * 那三个「用户数据、想多长有多长」的列不是一类数据。
  *
- * 思考强度列（2026-10-27 加）同样取 0：内容是固定的一组档位词
- * （off/minimal/low/medium/high/on/auto/xhigh/max，最长 "medium" ≈ 44px），
- * 宽度由档位词本身决定，与容器多宽无关 —— 与 status/action 是同一类
- * 「定宽胶囊列」，给它余量只会让胶囊周围空一圈。
+ * 思考列（2026-10-27 加，原名「思考强度」，同日去掉胶囊改为纯文字）同样取 0：
+ * 内容是固定的一组档位词（off/minimal/low/medium/high/on/auto/xhigh/max，
+ * 最长 "minimal" ≈ 44px），宽度由档位词本身决定，与容器多宽无关 ——
+ * 与 status 是同一类「定宽列」，给它余量只会让文字周围空一圈。
  */
 export const DISTRIBUTE_WEIGHT: Record<ColKey, number> = {
   time: 1,
