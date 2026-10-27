@@ -22,17 +22,11 @@ import {
   ReloadOutlined,
   SwapOutlined,
   BgColorsOutlined,
-  CheckOutlined,
-  LinkOutlined,
-  DownloadOutlined
 } from '@ant-design/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '@/api/client'
 import { useThemeStore } from '@/stores/theme'
 import ThemePicker from '@/components/ThemePicker.vue'
-import ColumnSettings from '@/components/ColumnSettings.vue'
-import { COL_KEYS, COL_LABELS, COL_LOCKED, type ColKey } from '@/components/logColumns'
-import { logColumns, logDensity } from '@/components/logColumnVisibility'
 import PageToolbar from '@/components/PageToolbar.vue'
 import StatCard from '@/components/StatCard.vue'
 import AnimatedNumber from '@/components/AnimatedNumber.vue'
@@ -52,29 +46,8 @@ import { message } from '@/utils/feedback'
 import { currencyKeys, moneyText, primaryCurrency, symbolOf } from '@/utils/money'
 import type { Channel, APIKey } from '@/api/types'
 import { readStoredChoice, writeStoredChoice } from '@/utils/persistedChoice'
-// 复制当前视角链接走与密钥页同一个降级实现（http 非 localhost 也能复制）
-import { writeClipboard } from '@/utils/clipboard'
 import { channelOption } from '@/utils/channelOption'
 import ChannelOption from '@/components/ChannelOption.vue'
-
-// ---- 请求日志表的列显隐（2026-10-10）----
-//
-// 状态是单例（与 RequestLogPanel 共用），这里只负责把「有哪些列、哪几列不许关」
-// 递给工具栏上的勾选面板。选项从 logColumns 的 COL_KEYS/COL_LABELS 生成 ——
-// 面板文案与表头同源，改表头不会漏掉面板。
-//
-// 解构成 ref：模板只自动解包顶层绑定（理由见 RequestLogPanel 里的同款注释）。
-// 「只剩一列不许再关」由 ColumnSettings 自己判断，这里不用管。
-const { visible: logColShown, toggle: toggleLogColumnKey, reset: resetLogColumns } = logColumns
-const logColumnOptions = COL_KEYS.map((k) => ({
-  key: k,
-  label: COL_LABELS[k],
-  locked: COL_LOCKED.includes(k)
-}))
-// 勾选面板是通用组件（键是 string），这里收窄回 ColKey
-function toggleLogColumn(key: string): void {
-  toggleLogColumnKey(key as ColKey)
-}
 
 type Summary = {
   requests: number
@@ -204,10 +177,12 @@ usePopoverA11y({
 })
 
 // 列表面板的句柄：工具栏的「刷新」要连它一起刷（一页一个刷新按钮）
-// 面板对外暴露的两个动作（见 RequestLogPanel 的 defineExpose）：
-//   reload()      —— 让列表重取一次（工具栏那唯一的「刷新」）
-//   exportQuery() —— 取导出用的查询串，与列表同一份条件（只去掉分页）
-const logPanel = ref<{ reload: () => void; exportQuery: () => string } | null>(null)
+// 面板对外暴露 reload()（见 RequestLogPanel 的 defineExpose）—— 让列表重取一次。
+//
+// exportQuery() 仍在面板上暴露，但这里不再声明/使用：工具栏的「导出 CSV」
+// 按钮已移除（2026-10-27），没有消费者了。留着类型声明等于给后来的人
+// 一个「这里还能导出」的错误印象。
+const logPanel = ref<{ reload: () => void } | null>(null)
 // 筛选下拉的候选：来自管理接口，不是统计接口 —— 统计接口只回有流量的渠道，
 // 而「筛一条今天还没被用过的渠道」是合理需求（结果就是 0）。
 const filterChannels = ref<Channel[]>([])
@@ -247,6 +222,22 @@ const modelOptions = computed(() => [
   ...visibleModels.value.map((m) => ({ value: m, label: m }))
 ])
 
+// ---- 三个筛选下拉的宽度：跟着当前选中项的文字走（2026-10-27）----
+//
+// 原来写死 180 / 240 / 180px（合计 600px），而「全部密钥」这类五字选项在
+// 240px 里空出一大片。现在由 CSS sizer 技巧按内容撑开，实现与原理见
+// <style> 里的 .filter-select（那里才是该解释 fit-content 为什么不行的地方）。
+//
+// 这里只负责把「当前选中项的文字」取出来喂给 sizer：label 与 antd 实际
+// 渲染的文本必须一致，否则撑出来的宽度与内容对不上。
+function selectedLabel(options: { value: string; label: string }[], value: string): string {
+  return options.find((o) => o.value === value)?.label ?? ''
+}
+
+const keyFilterLabel = computed(() => selectedLabel(keyOptions.value, keyFilter.value))
+const channelFilterLabel = computed(() => selectedLabel(channelOptions.value, channelFilter.value))
+const modelFilterLabel = computed(() => selectedLabel(modelOptions.value, modelFilter.value))
+
 // syncFilters 把下级筛选夹回合法值：换了渠道，原来选的模型可能已不在候选里。
 // 不夹的话查询条件会停在一个空集合上（列表恒为 0 条、卡片全是 0），
 // 而界面上看不出原因。
@@ -280,9 +271,12 @@ function persistFilters() {
 function applyStoredFilters() {
   // URL 带了任何条件（深链或视角）就整段不跑：applyUrlFilters 已经把这些
   // 值写进各筛选了，本地存储（或空存储的默认值）再来一遍会把链接带来的
-  // 视角整体覆盖掉 —— copyViewLink 宣称「收链接的人第一屏就是当前视角」，
-  // 覆盖发生的表现正是收件人看到自己的旧筛选（2026-10-26 评审 R1；HEAD 时
+  // 视角整体覆盖掉 —— 带条件的链接应当「打开就是那个视角」，
+  // 覆盖发生的表现正是打开者看到自己的旧筛选（2026-10-26 评审 R1；HEAD 时
   // 只影响卡片，列表纳入筛选后影响翻倍）。
+  //
+  // 注：工具栏上的「复制当前视角链接」按钮已移除（2026-10-27），但**读**这一侧
+  // 必须保留 —— 用户仍可从地址栏复制、或从收藏夹/历史记录进来。
   const q = route.query
   if (
     q.trace_id || q.status_class || q.log ||
@@ -332,9 +326,9 @@ async function loadFilters() {
 //      （见 syncUrl），因为它们描述的是「我正在看哪一条 / 哪一批」，交接得出去；
 //   2. 分享链接里带的视角（range / channel / model）—— 工具栏上的筛选**变化时
 //      不写地址栏**（见 syncUrl 的说明：那会让返回键变成「上一个筛选」），
-//      但「复制当前视角链接」会显式带上它们，所以这里必须读 ——
-//      否则复制出去的链接打开后是另一个视角，而收链接的人无从察觉。
-//      「复制当前视角链接」的注释见 copyViewLink —— 谁负责交接谁负责读回。
+//      但手写/收藏的链接会带上它们，所以这里必须读 ——
+//      否则打开后是另一个视角，而点链接的人无从察觉。
+//      （2026-10-27 起「复制当前视角链接」按钮已移除，读取侧不变。）
 //      `range` 在这里做四档白名单再入库：/stats 与 /logs 对坏值的处理口径
 //      不同（前者静默回「今天」，后者 400），同一页打开坏链接会「卡片正常、
 //      列表报错且重试无解」；前端校掉坏值后两半同口径（2026-10-26 评审 R5）。
@@ -437,61 +431,6 @@ function clearExtra(key: 'trace' | 'status') {
 // 漏掉任何一处，地址栏讲的就是另一个故事。
 watch([traceId, statusClass, logId], syncUrl)
 
-/**
- * 复制「当前视角」的链接（2026-10-11）。
- *
- * 为什么需要一个按钮而不是「让用户自己复制地址栏」：地址栏里只有排障深链，
- * 而排障时真正要交接的往往是「我在看的这个视角」—— 一旦将来把筛选也放进 URL，
- * 用户仍会照着地址栏抄。这里显式生成一次完整链接，边界清楚：点它就是分享当前视角。
- *
- * 用 location.origin 拼绝对地址：粘进聊天工具要能直接点开，
- * 相对路径在别人那里是拼到他自己的域名上的。
- */
-const copiedLink = ref(false)
-async function copyViewLink() {
-  const q = new URLSearchParams()
-  if (traceId.value) q.set('trace_id', traceId.value)
-  if (statusClass.value) q.set('status_class', statusClass.value)
-  if (logId.value != null) q.set('log', String(logId.value))
-  // 时间范围是「这些数字算的是哪一段」，它决定了卡片的口径，必须带上；
-  // 渠道 / 密钥 / 模型同理 —— 列表与卡片吃同一组条件，
-  // 收链接的人看到的第一屏（卡片与列表）就都是这个视角
-  if (range.value !== 'today') q.set('range', range.value)
-  if (channelFilter.value !== ALL) q.set('channel', channelFilter.value)
-  if (modelFilter.value !== ALL) q.set('model', modelFilter.value)
-  if (keyFilter.value !== ALL) q.set('key', keyFilter.value)
-  const qs = q.toString()
-  const url = location.origin + route.path + (qs ? '?' + qs : '')
-  if (!(await writeClipboard(url))) {
-    message.warning('复制失败，请手动复制地址栏')
-    return
-  }
-  copiedLink.value = true
-  window.setTimeout(() => { copiedLink.value = false }, 2000)
-}
-
-// 导出（2026-10-11 加回来）：
-//
-// 站主 2026-09-16 把导出按钮从**日志面板**撤掉了，理由是那张面板的标题栏
-// 整个要删（表体刚好能多放一整行）。现在它回到**看板工具栏**、做成图标 ——
-// 与刷新、列设置、主题并列，不占表格面板的高度，也不给那张面板加回标题栏。
-//
-// 参数取自面板暴露的 exportQuery()（与列表同一份条件，只去掉分页）。
-// 下载走一个临时的 <a>：不用 window.open（会被当成弹窗拦掉），
-// 也不用 fetch + blob（几万行 CSV 全进内存，还要自己解析 Content-Disposition
-// 里的文件名）。<a> 是浏览器原生的下载路径，同源请求带着会话 Cookie。
-function exportLogs() {
-  const qs = logPanel.value?.exportQuery?.() || ''
-  const a = document.createElement('a')
-  a.href = '/api/admin/logs/export' + (qs ? '?' + qs : '')
-  a.rel = 'noopener'
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  // 后端的 maxExportRows 会截断（响应头里有 X-Exported-Truncated，但 <a> 下载
-  // 读不到它），所以提示里明说「不超过上限」——比默默给一个少了几万行的文件好
-  message.success('已开始下载 CSV（超出后端单次上限时会截断，文件里的行数是实际导出的条数）')
-}
 
 // 一页只有一个「刷新」：卡片与列表一起刷。
 // 拆成两个按钮的话，用户永远要猜「哪个按钮刷的是哪块」。
@@ -754,32 +693,29 @@ onMounted(async () => {
         <a-radio-button v-for="r in ranges" :key="r.key" :value="r.key">{{ r.label }}</a-radio-button>
       </a-radio-group>
       <!-- 密钥排在渠道前面：排查「某个客户端在干什么」时它是第一入口 -->
-      <a-select
-        v-model:value="keyFilter"
-        :options="keyOptions"
-        style="width: 180px"
-        @change="onKeyChange"
-      />
+      <span class="filter-select">
+        <span class="filter-sizer" aria-hidden="true">{{ keyFilterLabel }}</span>
+        <a-select v-model:value="keyFilter" :options="keyOptions" @change="onKeyChange" />
+      </span>
       <!-- 渠道 / 模型紧跟在密钥右边：它们回答的是同一类问题
            （「下面这些数字算的是哪一部分」），放在一起才读得成一句话 -->
-      <a-select
-        v-model:value="channelFilter"
-        :options="channelOptions"
-        style="width: 240px"
-        @change="onChannelChange"
-      >
-        <!-- 下拉项与选中值是 antd 的两个插槽，内容交给同一个组件渲染：
-             分开写迟早会出现「下拉里有图标、选完就没了」这种不一致 -->
-        <template #option="opt"><ChannelOption :option="opt" /></template>
-        <template #optionLabel="opt"><ChannelOption :option="opt" /></template>
-      </a-select>
+      <span class="filter-select">
+        <!-- 渠道的选中值渲染成「图标 + 名字」（见 ChannelOption.vue），
+             sizer 只量文字会窄出 22px（16px 图标 + 6px 间距），
+             长渠道名因此会被提前截成「…」。加一个 is-with-icon 补上这一段。 -->
+        <span class="filter-sizer is-with-icon" aria-hidden="true">{{ channelFilterLabel }}</span>
+        <a-select v-model:value="channelFilter" :options="channelOptions" @change="onChannelChange">
+          <!-- 下拉项与选中值是 antd 的两个插槽，内容交给同一个组件渲染：
+               分开写迟早会出现「下拉里有图标、选完就没了」这种不一致 -->
+          <template #option="opt"><ChannelOption :option="opt" /></template>
+          <template #optionLabel="opt"><ChannelOption :option="opt" /></template>
+        </a-select>
+      </span>
       <!-- 模型候选按渠道白名单收窄（见 visibleModels） -->
-      <a-select
-        v-model:value="modelFilter"
-        :options="modelOptions"
-        style="width: 180px"
-        @change="onModelChange"
-      />
+      <span class="filter-select">
+        <span class="filter-sizer" aria-hidden="true">{{ modelFilterLabel }}</span>
+        <a-select v-model:value="modelFilter" :options="modelOptions" @change="onModelChange" />
+      </span>
       <!-- 排障深链带来的两个临时条件：只从 URL 或日志详情里进来，平时不占地方 -->
       <a-tag v-if="traceId" closable :title="traceId" @close="clearExtra('trace')">
         链路 {{ traceId.slice(0, 8) }}…
@@ -839,36 +775,6 @@ onMounted(async () => {
             </div>
           </template>
         </a-popover>
-        <!-- 请求日志表的列显隐（2026-10-10）。按钮放在这里而不是表格面板里：
-             那张面板 2026-09-26 特意去掉了 40px 标题栏（表体刚好能多放一整行），
-             为一个设置按钮把它加回来等于把那次优化退回去；而工具栏本来就是
-             「这一页怎么看」的开关区（时间范围、密钥、渠道、模型、主题都在这儿）。
-             状态与 RequestLogPanel 共用同一份单例，见 logColumnVisibility.ts -->
-        <!-- 行密度（2026-10-11）与列显隐同属「这张表怎么看」，所以放在同一个
-             弹层里，而不是再加一枚工具栏按钮（工具栏已经 6 件东西了） -->
-        <ColumnSettings
-          :options="logColumnOptions"
-          :visible="logColShown"
-          :density="logDensity"
-          @toggle="toggleLogColumn"
-          @reset="resetLogColumns"
-          @update:density="logDensity = $event"
-        />
-        <!-- 复制当前视角的链接（2026-10-11）。图标化，与另外几枚并列 ——
-             这个动作低频但关键时刻很省事（把「我在看的这个视角」发给同事），
-             而文字按钮会占掉工具栏本来就不多的一行宽度 -->
-        <a-button
-          :title="copiedLink ? '已复制当前视角链接' : '复制当前视角链接'"
-          :aria-label="copiedLink ? '已复制当前视角链接' : '复制当前视角链接'"
-          @click="copyViewLink"
-        >
-          <CheckOutlined v-if="copiedLink" class="copy-link-ok" />
-          <LinkOutlined v-else />
-        </a-button>
-        <!-- 导出 CSV（2026-10-11 回到工具栏，见 exportLogs 的说明） -->
-        <a-button title="导出当前条件的请求日志（CSV）" aria-label="导出请求日志 CSV" @click="exportLogs">
-          <DownloadOutlined />
-        </a-button>
         <!-- 一页一个「刷新」：卡片与列表一起刷（见 reloadAll）。
              图标化与另外三页的工具栏统一 —— 刷新是高频动作，位置固定后
              图标即可辨认；title 与 aria-label 兜住悬停提示与读屏 -->
@@ -1019,6 +925,66 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+/* 筛选下拉的宽度由内容决定（2026-10-27）。
+ *
+ * 结构是 sizer 技巧：一个隐藏的同文本 span + 下拉放进同一格 inline-grid，
+ * 格子宽度取两者较宽者，于是下拉被撑到「刚好放下这段文字」。
+ *
+ * 为什么不用 width: fit-content：antd 把选中文字渲染在绝对定位的
+ * .ant-select-selection-item 里，根节点量不到它的宽度，fit-content 会塌成
+ * 一条窄缝。sizer 量的是我们自己写的文本，与 antd 内部结构无关。
+ *
+ * 上下限：min-width 兜住空内容（不挤成缝），max-width 防止超长模型名
+ * 把工具栏撑爆 —— 超出部分 antd 自己省略，完整值在下拉列表里可见。 */
+.filter-select {
+  display: inline-grid;
+  align-items: center;
+  min-width: 108px;
+  max-width: 260px;
+  /* 不许被 flex 压扁：工具栏允许换行，被压扁的话下拉里的文字会先省略 */
+  flex: 0 0 auto;
+}
+
+/* sizer 与下拉叠在同一个格子里：两者都显式落在 1 行 1 列，
+   格子宽度由较宽者决定 —— 这就是「宽度跟着内容走」的来源。
+   不加这条的话 grid 默认按列排布，两者会并排，宽度变成两者之和。 */
+.filter-select > * {
+  grid-row: 1;
+  grid-column: 1;
+}
+
+/* 隐藏的测量用文本。不能用 display:none / visibility:hidden ——
+   那两种都不产生盒子，量不出宽度；用 opacity + 超出裁剪让它不可见但可量。 */
+.filter-sizer {
+  opacity: 0;
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+  /* 必须与 antd 选中项的排版一致，否则量出来的宽度会差一截：
+     antd 中号控件（Select 默认 size）的字号是 14px，即 --font-size-panel；
+     用 --font-size-base（16px）量会宽出约 2px，框就比需要的更大 ——
+     而这一改动的要求正是「别留多余的宽度」。 */
+  font-size: var(--font-size-panel);
+  line-height: 1;
+  /* 给右侧的下拉箭头与内边距留位置：antd 的 .ant-select-selector 有
+     左右内边距 + 一个 12px 的箭头图标，直接用文字宽度会和内容打架 */
+  padding-inline-end: 30px;
+}
+
+/* 带图标的选项（渠道）：选中值前面还有一个 16px 图标 + 6px 间距，
+   补 22px 才能让下拉装得下完整的「图标 + 名字」。
+   与 ChannelOption.vue 里的 :size="16" 和 gap: 6px 必须一致 ——
+   那两处改了这里也要改，否则渠道名会被提前截断。 */
+.filter-sizer.is-with-icon {
+  padding-inline-start: 22px;
+}
+
+/* 下拉本身铺满格子 */
+.filter-select :deep(.ant-select) {
+  width: 100%;
+}
+
 .dashboard {
   /* 整页锁在一屏里：工具栏与卡片排按内容占高，下面的日志面板吃掉剩下的全部高度，
      面板底边因此与左侧栏最后一行齐平（两侧底部留白都是内容区的 --gap）。

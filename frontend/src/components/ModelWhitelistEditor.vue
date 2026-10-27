@@ -281,8 +281,8 @@ function applyBulk() {
            只会造出「后端归一后丢掉」的静默偏差（见 efforts.ts 的说明）。
            高度与同排控件对齐：antd 在多选模式下会把高度撑到内容，这里用
            .wl-efforts 把内边距收住，一行里不至于比输入框高出一截。
-           不加悬停提示：下拉展开时 tooltip 会压住选项列表（与 ColumnSettings
-           的触发按钮同一类坑，那边因此改用原生 title） -->
+           不加悬停提示：下拉展开时 tooltip 会压住选项列表 ——
+           带 tooltip 的控件在展开态一律改用原生 title（原生提示不会遮挡内容） -->
       <a-select
         class="wl-efforts"
         size="small"

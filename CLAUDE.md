@@ -73,8 +73,11 @@ make build-embed             # 先构建前端、拷贝到 backend/internal/web/
 2. 弹窗/抽屉宽度只用 `utils/modalWidth.ts` 的 `modalWidth(N)`，模板里不许出现字面 `vw`。
 3. 字号只用 `var(--font-size-*)`。
 4. 轻提示与确认弹窗一律从 `@/utils/feedback` 引入，不要用 antd 静态方法（拿不到主题上下文）。
-5. 表格列显隐走 `useColumnVisibility` + `ColumnSettings`；有测量的表要同步改
-   `v-if`、`scroll.x`、`allocateWidths` 的 keys 三处。
+5. 表格列显隐走 `useColumnVisibility`（状态单例在 `components/logColumnVisibility.ts`）；
+   有测量的表要同步改 `v-if`、`scroll.x`、`allocateWidths` 的 keys 三处。
+   注：勾选面板 `ColumnSettings.vue` 已于 2026-10-27 随工具栏按钮一并移除，
+   现在没有调整入口，表格沿用已持久化的设置。要恢复面板时 `useColumnVisibility`
+   与 `logColumnVisibility` 都还在，重建 UI 即可。
 6. 移动端形态判断用 `railMode`（`collapsed && !isMobile`），不要用 `collapsed`。
 7. 响应式断点只用 640 / 768 / 1024 / 1200 / 1536；900 只作为侧栏折叠的 JS 断点。
 8. 组件是逐文件 import 的（只有 `main.ts` 里那批 antd 组件全局注册），新增标签必须 import。
