@@ -17,8 +17,10 @@
 //
 // 面板标题栏与「导出」按钮已经去掉（2026-09-16）：标题「请求日志」只说了一遍
 // 表头下面那排列名已经说清的事，却占掉 40px 高度 —— 去掉之后表体多出一整行；
-// 导出按钮一并撤掉（接口 /logs/export 仍在，看板工具栏的导出走它，
-// 只是界面上不再单独开这个口子）。面板本身（背景 / 边框 / 圆角 / 内边距）
+// 导出按钮一并撤掉。接口 GET /api/admin/logs/export 仍保留（脚本
+// scripts/test-log-filters.py 在用，也可直接 curl），但界面上已无入口——
+// 看板工具栏那枚「导出 CSV」也于 2026-10-27 移除。
+// 面板本身（背景 / 边框 / 圆角 / 内边距）
 // 仍用 PanelCard，不传 title 时它不会渲染标题栏。
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { message } from '@/utils/feedback'
@@ -736,27 +738,7 @@ const PAGE_SIZE_KEY = 'log-page-size'
 const PAGE_SIZE_OPTIONS = ['20', '50', '100']
 const pageSize = ref(Number(readStoredChoice(PAGE_SIZE_KEY, PAGE_SIZE_OPTIONS, '20')))
 
-// ---- 排序（P1-9，2026-09-24）----
-//
-// 三列可排：耗时、费用、状态。为什么是这三列：审评的原话是
-// 「25000 条里没法按耗时/费用/状态找异常」—— 排障要找的就是「最慢的那次、
-// 最贵的那单、失败的那批」，而这三件事恰好各对应一列。
-//
-// 排序**由服务端做**（`sort=` 参数），不是前端 sort —— 前端只能排当前页的
-// 50 条，而「最贵的一单」显然不在当前页。这也是为什么审评把这一条
-// 标成「需要后端加 sort= 参数」。
-//
-// 值为空串 = 默认（最新在前），由后端 orderLogs 兜底。
-//
-// 排序偏好持久化（2026-10-10）：与每页条数同一个道理 —— 「按耗时倒序」
-// 是排障时的常态视角，刷新一次就回到默认顺序是纯重复劳动。
-// 允许值就是下面三列的两个方向 + 空串，读的时候走白名单校验：
-// 旧版本、手改的脏值一律回落到默认（否则会带着一个后端不认的 sort= 去取数）。
-const SORT_ALLOWED = ['', 'elapsed', '-elapsed', 'cost', '-cost', 'status', '-status']
-const SORT_KEY = 'log-sort'
-const sort = ref(readStoredChoice(SORT_KEY, SORT_ALLOWED, ''))
-watch(sort, (v) => writeStoredChoice(SORT_KEY, v))
-const SORTABLE = ['elapsed', 'cost', 'status'] as const
+// 排序已移除（站主 2026-10-27）：列表固定「最新在前」，即 id DESC。
 
 // ---- 第 1 页之外攒下的新日志（2026-10-11）----
 //
@@ -767,66 +749,6 @@ const SORTABLE = ['elapsed', 'cost', 'status'] as const
 // 回到第 1 页（点提示条或点分页器）即清零。
 const pendingNew = ref(0)
 const pendingText = computed(() => pendingLogText(pendingNew.value, page.value === 1))
-
-// 表头用的 sortOrder：antd 据此画箭头（升/降/无）。
-function sortOrderOf(key: string): 'ascend' | 'descend' | null {
-  if (sort.value === key) return 'ascend'
-  if (sort.value === '-' + key) return 'descend'
-  return null
-}
-
-// sortProps 把一个可排序列该带的四个属性一次给全（用法 v-bind="sortProps('cost')"）。
-//
-// 这四个属性少任何一个都不会报错，只是**静默失灵**：少了 sorter 就点不动；
-// 少了 sort-order 箭头永远不亮；少了 key/受控方式会让本地排序与服务端排序
-// 打架。三列各抄一遍时，漏写是靠肉眼发现的 —— 收成一处之后，列与列的
-// 一致性由这个函数保证，SORTABLE 是唯一需要维护的清单。
-function sortProps(key: (typeof SORTABLE)[number]) {
-  return {
-    key,
-    sorter: true,
-    'sort-order': sortOrderOf(key),
-    'show-sorter-tooltip': false
-  }
-}
-
-/**
- * a-table 的 change：分页、筛选、排序三者共用一个回调，只处理排序那一路。
- *
- * 必须用 extra.action 区分（而不是「sorter 有值就当家」）：翻页时 antd
- * 也会带着当前 sorter 回调一次，不区分就会在翻页时重复触发一次排序重取
- * （分页自己的 onChange 已经取过一次了）。
- *
- * 取列名要读 **`column.key`**，不是 `columnKey` 之外的什么自定义字段：
- * antd 的 getColumnKey 只认 column.key → dataIndex → 位置下标（见
- * node_modules/ant-design-vue/es/table/util.js:11）。这条是实测踩出来的：
- * 一开始把标识写在 `column-key` 上，于是 sorter.columnKey 拿到的是位置下标
- * （"4"、"5"），下面的白名单判断永远不成立 —— 表头点得动、箭头不亮、
- * 一条请求都不发，看起来像「antd 没接上线」，其实是回调里把它丢了。
- */
-function onTableChange(_pag: unknown, _filters: unknown, sorter: any, extra: any) {
-  if (extra?.action !== 'sort') return
-  const key = typeof sorter?.columnKey === 'string' ? sorter.columnKey : ''
-  const order = sorter?.order
-  // 认不出的列（将来加了别的可排序列）保持现状，不乱改视角
-  if (!(SORTABLE as readonly string[]).includes(key)) return
-  sort.value = order === 'ascend' ? key : order === 'descend' ? '-' + key : ''
-  // 换了次序，原来那一页的偏移量已经没有意义（第 7 页的「最慢的 50 条」
-  // 与第 1 页的不是同一批）——排序变动一律回第一页
-  // 表体也滚回顶部：`search()` 会回第 1 页，但滚动条留在原处的话，
-  // 用户看到的是第 1 页的中段（「点了排序，列表没动」）。
-  scrollBodyTop()
-  search()
-}
-
-// 费用排序的说明文案：站里不做汇率换算，两种币都在时后端会先按币种分组
-// 再排金额（见后端 logSortClause 的注释）。工具条上把这件事说清楚，
-// 否则用户看到「¥ 排在 $ 后面」会以为是坏了。
-const costSortHint = computed(() =>
-  sort.value === 'cost' || sort.value === '-cost'
-    ? '费用按币种分组后排序（不同币种不做换算，也不互相比较大小）'
-    : '',
-)
 
 // 表体的高度上限，交给 antd 的 scroll.y。
 //
@@ -883,8 +805,6 @@ function buildParams(): URLSearchParams {
   if (props.channelId && props.channelId !== 'all') params.set('channel_id', props.channelId)
   if (props.model && props.model !== 'all') params.set('model', props.model)
   if (props.keyId && props.keyId !== 'all') params.set('key_id', props.keyId)
-  // 排序（P1-9）：空串不传，让后端用默认的「最新在前」
-  if (sort.value) params.set('sort', sort.value)
   return params
 }
 
@@ -1130,18 +1050,10 @@ function search() {
 // 用 defineExpose 而不是再加一个 refreshToken prop：这里就是「叫它重取一次」，
 // 传一个计数器反而让人以为它是个状态。
 //
-// exportQuery 同理（2026-10-11 加导出按钮）：导出必须与列表**同一份条件** ——
-// 同一个 trace_id / status_class / sort，只去掉分页。把拼参数这件事留在这里，
-// 看板那边只负责触发下载，两处就不会各写一遍而慢慢漂移
-// （漂移的表现是「列表里 12 条、导出 3400 条」，而且没人会立刻发现）。
-function exportQuery(): string {
-  const p = buildParams()
-  p.delete('page')
-  p.delete('page_size')
-  return p.toString()
-}
-
-defineExpose({ reload: () => load(), exportQuery })
+// exportQuery() 曾在这里对外暴露，供工具栏的「导出 CSV」使用（导出必须与列表
+// 同一份条件，只去掉分页）。该按钮已移除（2026-10-27），函数随之删除 ——
+// 留着一个没人调用的导出入口，下一个人会以为导出功能还在。
+defineExpose({ reload: () => load() })
 
 // 空列表的文案分三种：带深链时是被那两个条件滤空的（要告诉用户怎么退回去）、
 // 实时连接断了时是「看不到新记录」而不是「没有记录」、其余才是真的一条日志都没有。
@@ -1407,7 +1319,7 @@ function speedMissTitle(row: RequestLog) {
         fmtMs(span) +
         ' 的窗口算是 ' +
         fmtTokens(rate) +
-        ' tok/s，超过物理上限（1000 tok/s），窗口或词元数不可信'
+        ' t/s，超过物理上限（1000 t/s），窗口或词元数不可信'
       )
     }
     case 'burst': {
@@ -1516,12 +1428,15 @@ function fmtTokens(v: number | null | undefined) {
 // 费用：符号取这条日志自己的币种快照（渠道后来改了币种也不影响历史行），
 // 不做任何换算 —— 人民币渠道的钱就是人民币。
 //
-// 小数位交给 utils/money.ts 的 costText：它按量级分档（<0.01 六位、否则四位），
-// 并且是全站唯一一份规则。这里原来是自己的 toFixed(6)，而同一笔钱在详情里
-// 是 toFixed(8)、在分组预算是 toFixed(2)、在日报是 toFixed(4) ——
-// 用户核对「这一单到底多少钱」时四个地方对不上（2026-09-24 UI 审评）。
+// 小数位固定四位（站主 2026-10-27 要求）。以前交给 utils/money.ts 的
+// costText 按量级分档（<0.01 六位、否则四位），在别处是对的，但在这张
+// **竖着扫的列表**里是反效果：同一列里一行四位、一行六位，小数点对不齐。
+//
+// 固定四位的代价：小于 0.00005 的费用显示成 0.0000（最便宜一单约 0.000938，
+// 四位下是 0.0009）。要看精确值可以点开这一行的详情 —— 详情不传 decimals，
+// 走原来的分档规则。
 function fmtCost(v: string, currency?: string) {
-  return costText(v, currency)
+  return costText(v, currency, 4)
 }
 
 // 费用为什么是这么多：把当时生效的倍率摊在金额旁边。
@@ -1681,7 +1596,9 @@ onLive('logs', (items: RequestLog[]) => {
   // 新日志 unshift 进来会让列表与筛选框矛盾，由重取保证口径。
   const action = decideLiveInsert({
     page: page.value,
-    sort: sort.value,
+    // 排序功能已移除（2026-10-27），这里恒为空 —— 保留参数是因为
+    // decideLiveInsert 的判据里仍有这一条（有单测），将来若恢复排序不必重写
+    sort: '',
     traceId: props.traceId,
     statusClass: props.statusClass,
     // 与 buildParams 同一套哨兵判断（'all' = 不筛选，不能算「筛选生效」）
@@ -1919,11 +1836,7 @@ onMounted(() => {
           「仅失败」开关都删了。这一行只在「有需要说的话」时出现 ——
           排序口径、生效中的排障条件、第 1 页之外攒下的新日志，
           三者共用一条窄提示行，没有内容时整行不渲染（不留空白）。 -->
-    <div v-if="costSortHint || traceId || statusClass || pendingText" class="panel-hints">
-      <!-- 排序生效时的口径说明（P1-9）。只对「费用」这一列出现：
-           站里不做汇率换算，后端会先按币种分组再排金额，不说清的话
-           用户看到 ¥ 排在 $ 后面会以为坏了。role=status 让读屏也听得到。 -->
-      <span v-if="costSortHint" class="sort-hint" role="status">{{ costSortHint }}</span>
+    <div v-if="traceId || statusClass || pendingText" class="panel-hints">
       <!-- 生效中的排障条件（2026-10-11 从看板工具栏搬回来一份）：
            带 ?status_class=error 打开时，面板里原来完全看不出「只看失败」，
            用户会以为全站都在报错；而唯一的清除入口在屏幕另一端的工具栏上。
@@ -2034,7 +1947,6 @@ onMounted(() => {
           row-key="id"
           size="small"
           :scroll="{ x: columnsTotal, y: TABLE_BODY_Y }"
-          @change="onTableChange"
         >
         <template #emptyText>
           <!-- 首屏加载中不显示空态文案（2026-10-11）：此刻还没有数据，但
@@ -2179,15 +2091,7 @@ onMounted(() => {
              标签只留两个字（截图就是这样）：`总耗时` 三个字在 36px 的标签轨里
              会把数值列推远，而这一格的宽度是按最窄列倒推出来的，一寸都不富余。
              数值按同一档位着色，悬停说明这一行是什么、以及这一档的判据。 -->
-        <!-- 三列可排序（P1-9）：耗时 / 费用 / 状态。
-             用 antd 的 sorter 而不是手写表头点击：它自带升/降箭头、
-             键盘可达、以及 <th aria-sort>（读屏用户听得到当前次序），
-             这些都是手写版要一项项补齐的。
-             sorter: true 表示「服务端排序」——表格不本地比较数据，
-             而是回调 onTableChange 让我们带着 sort= 重新取数。
-             四个属性由 sortProps() 一次给全（见其注释：少一个就是静默失灵）。 -->
         <a-table-column v-if="colShown.elapsed"
-          v-bind="sortProps('elapsed')"
           title="任务耗时"
           :width="colW.elapsed"
         >
@@ -2219,7 +2123,6 @@ onMounted(() => {
           </template>
         </a-table-column>
         <a-table-column v-if="colShown.cost"
-          v-bind="sortProps('cost')"
           title="费用"
           :width="colW.cost"
         >
@@ -2242,7 +2145,7 @@ onMounted(() => {
           <template #default="{ record }">
             <span v-if="tokPerSec(record)" class="spd-cell" :title="speedTitle(record)">
               <span v-if="record.stream" class="stream-pill">流</span>
-              <span class="spd">{{ tokPerSec(record) }} tok/s</span>
+              <span class="spd">{{ tokPerSec(record) }} t/s</span>
             </span>
             <span v-else class="muted" :title="speedTitle(record)">—</span>
           </template>
@@ -2250,7 +2153,6 @@ onMounted(() => {
         <!-- 状态列移到费用之后（站主 2026-09-20 要求）：数字区（词元/耗时/费用）
              读完后，「成没成」与「哪把密钥」两个结果性信息收尾 -->
         <a-table-column v-if="colShown.status"
-          v-bind="sortProps('status')"
           title="状态"
           :width="colW.status"
         >
@@ -2474,7 +2376,7 @@ onMounted(() => {
           总共 {{ fmtMs(current.total_ms) }}
           <!-- 速度口径与列表一致（见 tokPerSec）：量不到生成时段就显示 —，
                悬停说明讲原因 —— 与列表同款处理，不在这里悄悄少一段 -->
-          <span> · 速度 <span :title="speedTitle(current)">{{ tokPerSec(current) || '—' }}<template v-if="tokPerSec(current)"> tok/s</template></span></span>
+          <span> · 速度 <span :title="speedTitle(current)">{{ tokPerSec(current) || '—' }}<template v-if="tokPerSec(current)"> t/s</template></span></span>
           <!-- 时序瀑布：条长 = 该阶段占总耗时的比例，条色沿用耗时分级 -->
           <div v-if="waterfallRows.length" class="wf">
             <div v-for="r in waterfallRows" :key="r.label" class="wf-row">
@@ -3299,13 +3201,6 @@ onMounted(() => {
   align-items: center;
   gap: 6px;
   margin-bottom: 6px;
-}
-
-/* 排序口径说明（P1-9）。12px 次要色（--color-text-secondary 是 0.70 alpha，
-   白卡 5.10:1）—— 它是解释不是警示，但也要读得清。 */
-.sort-hint {
-  font-size: var(--font-size-sm);
-  color: var(--color-text-secondary);
 }
 
 /* 条件胶囊与看板工具栏上那两枚说的是同一件事，所以观感对齐 antd tag：

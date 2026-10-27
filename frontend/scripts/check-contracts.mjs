@@ -688,18 +688,20 @@ console.log('=== 请求日志列表与工具栏共用筛选 ===')
   const referenced = filterProps.filter((p) => !new RegExp(`props\\.${p}\\b`).test(panel))
   check('面板里四个筛选 props 都被引用（进了 buildParams 或 watch）', referenced.length === 0, referenced.join(', '))
 
-  // 查询串必须带上四个筛选 + 分页 + 两个排障深链 + 排序。用参数名而不是
+  // 查询串必须带上四个筛选 + 分页 + 两个排障深链。用参数名而不是
   // 「有没有 if」来判：少传一个但换成别的方式塞进去（比如拼在 URL 上）同样要拦住。
   //
-  // 2026-09-24：sort 进白名单（P1-9 的服务端排序）。排序必须由服务端做，
-  // 前端只能排当前页那 50 条。2026-10-26：channel_id / key_id / model / range
-  // 进白名单（列表纳入筛选）。这条断言的用意是**别的一律不许出现**。
+  // 2026-09-24：sort 曾进白名单（P1-9 的服务端排序）；2026-10-27 站主要求
+  // 移除表头排序按钮，排序功能整体下掉，于是 sort 从白名单里移出 ——
+  // 这条断言是**正向白名单**，`sort` 若再被加回来会立刻失败。
+  // 2026-10-26：channel_id / key_id / model / range 进白名单（列表纳入筛选）。
+  // 这条断言的用意是**别的一律不许出现**。
   const bpStart = panel.indexOf('function buildParams')
   const bp = panel.slice(bpStart, panel.indexOf('\n}', bpStart))
   const sent = [...bp.matchAll(/params\.set\(\s*'([\w-]+)'/g)].map((m) => m[1]).sort()
   check(
-    '查询串 = 分页 + 四个筛选 + 两个排障深链 + 排序',
-    sent.join(',') === 'channel_id,key_id,model,page,page_size,range,sort,status_class,trace_id',
+    '查询串 = 分页 + 四个筛选 + 两个排障深链（排序已移除）',
+    sent.join(',') === 'channel_id,key_id,model,page,page_size,range,status_class,trace_id',
     `实际发出: ${sent.join(', ')}`,
   )
 

@@ -51,10 +51,30 @@ export function moneyText(v: string | number | null | undefined, currency?: stri
  * 0 就是 0，写 ¥0.00 是对的；而日志里的一行回答的是「这一笔花了多少」，
  * 0 的真实含义是「没计价 / 免费渠道 / 失败请求」—— 写成 ¥0.00 会被读成
  * 「这次很便宜」，那是错的。规则同一份，空值语义各自表达。
+ *
+ * decimals 可选：传了就固定这个位数，不再按量级分档。
+ *
+ * 为什么需要它：请求日志的费用列（站主 2026-10-27 要求）要**默认四位**。
+ * 按量级分档在那里是反效果 —— 同一列里 0.0375 显示四位、0.0038 显示六位，
+ * 数字对不齐，竖着扫一列的时候很别扭。固定四位后整列是同一个量纲。
+ *
+ * 代价要说清楚：小于 0.00005 的费用会显示成 0.0000。这一档本来就看不见
+ * （最便宜的一单约 0.000938，四位下是 0.0009），真要精确值可以去日志详情。
+ * 其余调用方（看板合计、详情）不传这个参数，继续用分档规则。
+ *
+ * decimals 是**展示精度**，不是取整开关：传 0 会得到 `¥12`（把分以下全丢掉），
+ * 那不是任何地方的诉求。目前唯一的调用方是日志列表的费用列，传 4。
  */
-export function costText(v: string | number | null | undefined, currency?: string | null): string {
+export function costText(
+  v: string | number | null | undefined,
+  currency?: string | null,
+  decimals?: number
+): string {
   const n = Number(v ?? 0)
   if (!Number.isFinite(n) || n <= 0) return '-'
+  if (decimals !== undefined) {
+    return symbolOf(currency) + n.toFixed(decimals)
+  }
   return symbolOf(currency) + amountText(n)
 }
 
