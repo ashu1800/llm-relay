@@ -93,6 +93,7 @@ const tableRows = computed<TableRow[]>(() => {
 const filtered = computed(() => {
   const k = keyword.value.trim().toLowerCase()
   if (!k) return tableRows.value
+  if (k === '未定价') return tableRows.value.filter((r) => !r.priced || priceState(r.form) === 'none')
   return tableRows.value.filter((r) => r.model_name.toLowerCase().includes(k))
 })
 
@@ -220,8 +221,16 @@ function usedLabel(name: string): string {
       show-icon
       class="unpriced-alert"
       :message="`有 ${unpricedCount} 个模型还没有定价`"
-      description="它们的调用费用会被记成 0 元，而看板上完全看不出异常 —— 这是「账单对不上」最常见的原因。"
-    />
+    >
+      <template #description>
+        <div class="unpriced-alert-desc">
+          <span>它们的调用费用会被记成 0 元。请及时配置，避免账单与上游脱节。</span>
+          <a-button type="link" size="small" class="unpriced-filter-btn" @click="keyword = '未定价'">
+            只看未定价模型
+          </a-button>
+        </div>
+      </template>
+    </a-alert>
 
     <a-input v-model:value="keyword" placeholder="按模型名搜索" allow-clear class="search" />
 
@@ -288,9 +297,9 @@ function usedLabel(name: string): string {
           />
         </a-form-item>
 
-        <div class="tier">
+        <div class="tier is-usd">
           <div class="tier-head">
-            <span class="tier-title">美元价（USD）</span>
+            <span class="tier-title"><span class="currency-chip is-usd">$ USD</span> 美元价</span>
             <span class="muted">用于币种为美元的渠道</span>
           </div>
           <div class="tier-grid">
@@ -301,9 +310,9 @@ function usedLabel(name: string): string {
           </div>
         </div>
 
-        <div class="tier">
+        <div class="tier is-cny">
           <div class="tier-head">
-            <span class="tier-title">人民币价（CNY）</span>
+            <span class="tier-title"><span class="currency-chip is-cny">¥ CNY</span> 人民币价</span>
             <span class="muted">用于币种为人民币的渠道</span>
           </div>
           <div class="tier-grid">
@@ -375,12 +384,59 @@ function usedLabel(name: string): string {
   color: var(--color-text-secondary);
 }
 
+.unpriced-alert {
+  box-shadow: 0 0 14px color-mix(in oklab, var(--color-orange) 20%, transparent);
+}
+
+.unpriced-alert-desc {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.unpriced-filter-btn {
+  padding: 0;
+  height: auto;
+  font-size: var(--font-size-xs);
+}
+
 .modal-alert {
   margin-bottom: 12px;
 }
 
 .tier {
-  margin-bottom: 4px;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--color-bg) 60%, var(--color-fg));
+  border: 1px solid var(--color-border);
+}
+
+.tier.is-usd {
+  border-left: 3px solid var(--color-green);
+}
+
+.tier.is-cny {
+  border-left: 3px solid var(--color-orange);
+}
+
+.currency-chip {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-2xs);
+  padding: 1px 5px;
+  border-radius: var(--radius-control);
+}
+
+.currency-chip.is-usd {
+  background: color-mix(in oklab, var(--color-green) 18%, transparent);
+  color: var(--text-green);
+}
+
+.currency-chip.is-cny {
+  background: color-mix(in oklab, var(--color-orange) 18%, transparent);
+  color: var(--text-amber);
 }
 
 .tier-head {

@@ -375,6 +375,30 @@ function syncUrl() {
   void router.replace({ query: q })
 }
 
+const activeFilterCount = computed(() => {
+  let cnt = 0
+  if (channelFilter.value !== ALL) cnt++
+  if (modelFilter.value !== ALL) cnt++
+  if (keyFilter.value !== ALL) cnt++
+  if (traceId.value) cnt++
+  if (statusClass.value) cnt++
+  return cnt
+})
+
+function resetAllFilters() {
+  channelFilter.value = ALL
+  modelFilter.value = ALL
+  keyFilter.value = ALL
+  traceId.value = ''
+  statusClass.value = ''
+  writeStoredChoice(CHANNEL_KEY, ALL)
+  writeStoredChoice(MODEL_KEY, ALL)
+  writeStoredChoice(KEY_KEY, ALL)
+  syncUrl()
+  void load()
+  logPanel.value?.reload()
+}
+
 // 注意：a-radio-group 的 change 给的是**事件对象**，不是值（a-select 给的是值，
 // 两者不一样）。所以这里不接收参数、也不赋值 —— v-model 已经更新过 range。
 // 之前写成 onRangeChange(v) { range.value = v }，range 就变成了一个事件对象：
@@ -741,6 +765,17 @@ onMounted(async () => {
       <a-tag v-if="statusClass" closable @close="clearExtra('status')">
         {{ statusClass === 'error' ? '仅失败' : '仅成功' }}
       </a-tag>
+      <!-- 多维滤波透镜聚焦指示与一键还原（方案 5） -->
+      <span
+        v-if="activeFilterCount > 0"
+        class="filter-lens-badge"
+        title="当前已激活多维过滤，点击一键恢复全局视角"
+        @click="resetAllFilters"
+      >
+        <span class="lens-dot" />
+        已聚焦 {{ activeFilterCount }} 维度
+        <span class="lens-reset-icon" aria-hidden="true">✕</span>
+      </span>
       <template #right>
         <!-- 主题选择：2026-09-26 从侧栏底部迁来，2026-09-30 从「一键翻浅深」
              改成「点开弹层自选」。弹层里是 12 套主题的网格（浅色 4 / 深色 8），
@@ -1067,6 +1102,37 @@ onMounted(async () => {
 /* 胶囊本身是 flex 项，别被压扁（它里面的文字不允许换行） */
 .dash-live-status {
   flex: 0 0 auto;
+}
+
+/* 多维滤波透镜聚焦指示与一键还原（方案 5） */
+.filter-lens-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklab, var(--color-primary) 14%, transparent);
+  border: 1px solid color-mix(in oklab, var(--color-primary) 35%, transparent);
+  color: var(--text-primary-ink);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  box-shadow: 0 0 8px color-mix(in oklab, var(--color-primary) 20%, transparent);
+  transition: all 0.2s var(--ease-expo);
+}
+.filter-lens-badge:hover {
+  background: color-mix(in oklab, var(--color-primary) 22%, transparent);
+  transform: translateY(-1px);
+}
+.lens-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  box-shadow: 0 0 4px var(--color-primary);
+}
+.lens-reset-icon {
+  font-size: var(--font-size-2xs);
+  opacity: 0.7;
 }
 
 /* 工具栏右上角的主题按钮：32px 圆形描边，形态沿用原侧栏底部那枚

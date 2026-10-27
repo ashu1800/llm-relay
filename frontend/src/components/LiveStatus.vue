@@ -82,6 +82,7 @@ const title = computed(() =>
   font-size: var(--font-size-sm);
   line-height: 18px;
   white-space: nowrap;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
 .ls-icon {
@@ -94,14 +95,33 @@ const title = computed(() =>
   color: var(--text-green);
 }
 
+.live-status.is-live .ls-icon {
+  animation: ls-discharge 5s ease-in-out infinite;
+}
+
+@keyframes ls-discharge {
+  0%, 94%, 100% { filter: drop-shadow(0 0 1px var(--color-green)); opacity: 1; }
+  96% { filter: drop-shadow(0 0 4px var(--color-green)); opacity: 0.55; }
+  98% { filter: drop-shadow(0 0 6px var(--color-green)); opacity: 1; }
+}
+
 .live-status.is-stale {
   color: var(--text-amber);
-  border-color: var(--text-amber);
+  border-color: color-mix(in oklab, var(--text-amber) 60%, var(--color-border));
+  box-shadow: 0 0 8px color-mix(in oklab, var(--color-orange) 20%, transparent);
+  animation: ls-sentry-glow 2.4s ease-in-out infinite;
 }
 
 .live-status.is-offline {
   color: var(--text-red);
-  border-color: var(--text-red);
+  border-color: color-mix(in oklab, var(--text-red) 60%, var(--color-border));
+  box-shadow: 0 0 10px color-mix(in oklab, var(--color-red) 25%, transparent);
+  animation: ls-sentry-glow 1.6s ease-in-out infinite;
+}
+
+@keyframes ls-sentry-glow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.72; }
 }
 
 /* 正常态不需要那个占位的对勾图标参与排版 */
@@ -111,15 +131,20 @@ const title = computed(() =>
 
 .ls-retry {
   margin-left: 2px;
-  padding: 0 4px;
-  border: none;
-  border-radius: var(--radius-control);
-  background: transparent;
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklab, currentColor 10%, transparent);
   color: inherit;
   font-family: inherit;
-  font-size: var(--font-size-sm);
-  text-decoration: underline;
+  font-size: var(--font-size-2xs);
+  text-decoration: none;
   cursor: var(--cursor-hand);
+  transition: transform 0.1s ease;
+}
+
+.ls-retry:active {
+  transform: scale(0.92);
 }
 
 .ls-retry:hover {

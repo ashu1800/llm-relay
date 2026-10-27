@@ -1038,6 +1038,36 @@ onUnmounted(() => {
         填 0 表示跟随全局默认；填 -1 表示这把密钥完全不限流（适合本地压测）。
       </div>
     </a-modal>
+
+    <!-- 批量管理战术悬浮舱（方案 7） -->
+    <Transition name="dock-slide">
+      <div v-if="filteredKeys.length >= 2" class="tactical-dock" role="region" aria-label="批量管理战术舱">
+        <div class="dock-content">
+          <span class="dock-badge">已锁定 {{ filteredKeys.length }} 密钥</span>
+          <div class="dock-actions">
+            <a-button
+              type="primary"
+              size="small"
+              :loading="batch.running.value"
+              @click="batch.run(filteredKeys, true)"
+            >
+              <PlayCircleOutlined /> 批量启用
+            </a-button>
+            <a-button
+              size="small"
+              danger
+              :loading="batch.running.value"
+              @click="confirmBatchDisable"
+            >
+              <StopOutlined /> 批量停用
+            </a-button>
+          </div>
+          <span v-if="batch.running.value" class="dock-progress">
+            正在处理 {{ batch.progress.value.done }}/{{ batch.progress.value.total }}
+          </span>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -1227,5 +1257,57 @@ onUnmounted(() => {
   word-break: break-all;
 }
 .key-box code { flex: 1; font-family: var(--font-family-mono); font-size: var(--font-size-sm); }
+
+/* ---- 战术悬浮舱（方案 7） ---- */
+.tactical-dock {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 990;
+  pointer-events: none;
+}
+
+.dock-content {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  background: color-mix(in oklab, var(--color-fg) 85%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+
+.dock-badge {
+  font-size: var(--font-size-xs);
+  font-family: var(--font-family-mono);
+  color: var(--color-text-secondary);
+}
+
+.dock-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dock-progress {
+  font-size: var(--font-size-xs);
+  color: var(--text-primary-ink);
+}
+
+.dock-slide-enter-active,
+.dock-slide-leave-active {
+  transition: all 0.3s var(--ease-expo);
+}
+
+.dock-slide-enter-from,
+.dock-slide-leave-to {
+  transform: translate(-50%, 28px);
+  opacity: 0;
+}
 </style>
 

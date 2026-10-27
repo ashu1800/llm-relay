@@ -477,6 +477,15 @@ const phaseText = computed(() => {
                 <span>{{ phaseText }}</span>
                 <span class="vb-task-pct">{{ task?.percent }}%</span>
               </div>
+              <!-- 分段校验点阵晶格（方案 6） -->
+              <div class="vb-lattice" aria-hidden="true">
+                <span
+                  v-for="idx in 12"
+                  :key="idx"
+                  class="vb-lattice-cell"
+                  :class="{ active: (task?.percent || 0) >= (idx * 100 / 12) }"
+                />
+              </div>
               <div class="vb-progress">
                 <div class="vb-progress-fill" :style="{ width: (task?.percent || 0) + '%' }"></div>
               </div>
@@ -505,7 +514,7 @@ const phaseText = computed(() => {
               >
                 <SyncOutlined v-if="restarting" spin />
                 <ReloadOutlined v-else />
-                <span v-if="restarting">正在重启…{{ restartCountdown > 0 ? `（${restartCountdown}s）` : '' }}</span>
+                <span v-if="restarting">正在重启…<span v-if="restartCountdown > 0" class="split-flap-badge">{{ restartCountdown }}s</span></span>
                 <span v-else>立即重启以生效</span>
               </button>
               <!-- 失败后最要紧的是「再试一次」：只给「重新检测」的话，
@@ -1048,6 +1057,38 @@ const phaseText = computed(() => {
   border-radius: var(--radius-pill);
   background: var(--color-primary);
   transition: width 0.4s var(--ease-expo);
+}
+
+/* 分段校验点阵晶格（方案 6） */
+.vb-lattice {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 3px;
+  margin: 2px 0;
+}
+
+.vb-lattice-cell {
+  height: 5px;
+  border-radius: 2px;
+  background: color-mix(in oklab, var(--color-border) 60%, transparent);
+  transition: all 0.25s ease;
+}
+
+.vb-lattice-cell.active {
+  background: var(--color-green);
+  box-shadow: 0 0 5px color-mix(in oklab, var(--color-green) 70%, transparent);
+}
+
+.split-flap-badge {
+  display: inline-block;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+  padding: 0 5px;
+  margin-left: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: var(--radius-control);
+  color: var(--text-amber);
 }
 
 .vb-task-msg {

@@ -148,7 +148,8 @@ const priciestLines = computed(() => {
     :footer="null"
     class="report-modal"
   >
-    <div v-if="report" class="report">
+    <div v-if="report" class="report cyber-gazette">
+      <div class="gazette-stamp" aria-hidden="true">RELAY DISPATCH</div>
       <div class="report-eyebrow">昨日战报</div>
       <div class="report-day">{{ dayLabel }}</div>
 
@@ -168,21 +169,23 @@ const priciestLines = computed(() => {
           </div>
         </div>
 
-        <div class="report-line">
-          花费
-          <span class="report-strong">
-            {{ currencies.map((c) => moneyText(report!.summary.costs[c], c)).join('　') }}
-          </span>
-        </div>
-        <div v-if="report.top_model.model" class="report-line">
-          最忙模型
-          <span class="report-strong">
-            {{ report.top_model.model }}（{{ report.top_model.requests }} 次）
-          </span>
-        </div>
-        <div v-if="priciestLines.length" class="report-line">
-          {{ priciestLines.length > 1 ? '最贵一单（按币种）' : '最贵一单' }}
-          <span class="report-strong">{{ priciestLines.join('　') }}</span>
+        <div class="report-tape">
+          <div class="report-line">
+            <span>花费</span>
+            <span class="report-strong tabular-nums">
+              {{ currencies.map((c) => moneyText(report!.summary.costs[c], c)).join('　') }}
+            </span>
+          </div>
+          <div v-if="report.top_model.model" class="report-line">
+            <span>最忙模型</span>
+            <span class="report-strong">
+              {{ report.top_model.model }}（{{ report.top_model.requests }} 次）
+            </span>
+          </div>
+          <div v-if="priciestLines.length" class="report-line">
+            <span>{{ priciestLines.length > 1 ? '最贵一单（按币种）' : '最贵一单' }}</span>
+            <span class="report-strong tabular-nums">{{ priciestLines.join('　') }}</span>
+          </div>
         </div>
       </template>
 
@@ -197,8 +200,32 @@ const priciestLines = computed(() => {
 
 <style scoped>
 .report {
+  position: relative;
   text-align: center;
-  padding: 6px 4px 2px;
+  padding: 8px 6px 2px;
+}
+
+.gazette-stamp {
+  position: absolute;
+  top: -2px;
+  right: 6px;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-2xs);
+  letter-spacing: 0.14em;
+  padding: 1px 6px;
+  border: 1px dashed color-mix(in oklab, var(--color-primary) 50%, transparent);
+  border-radius: var(--radius-control);
+  color: var(--text-primary-ink);
+  transform: rotate(3deg);
+  opacity: 0.85;
+}
+
+.report-tape {
+  margin-top: 4px;
+  padding: 2px 8px;
+  background: color-mix(in oklab, var(--color-bg) 50%, var(--color-fg));
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-control);
 }
 .report-eyebrow {
   font-size: var(--font-size-md);

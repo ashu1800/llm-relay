@@ -179,10 +179,17 @@ onUnmounted(() => {
   padding: 1px 8px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-pill);
+  background: color-mix(in oklab, var(--color-fg) 75%, transparent);
+  box-shadow: inset 0 1px 0 0 color-mix(in oklab, var(--color-fg) 80%, white 20%);
   /* 明细是绝对定位的浮层，需要它作为定位基准 */
   position: relative;
   /* 焦点环走全站 :focus-visible（theme.css） */
   outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.bw:hover {
+  border-color: color-mix(in oklab, var(--color-primary) 45%, var(--color-border));
 }
 
 .bw-label {
@@ -228,19 +235,22 @@ onUnmounted(() => {
 }
 .bw-line.is-rx {
   stroke: var(--color-blue);
+  filter: drop-shadow(0 0 2px color-mix(in oklab, var(--color-blue) 75%, transparent));
 }
 .bw-line.is-tx {
-  stroke: var(--color-orange);
+  stroke: var(--color-purple);
+  filter: drop-shadow(0 0 2px color-mix(in oklab, var(--color-purple) 75%, transparent));
 }
 
 .bw-area {
   stroke: none;
+  mix-blend-mode: screen;
 }
 .bw-area.is-rx {
-  fill: color-mix(in oklab, var(--color-blue) 14%, transparent);
+  fill: color-mix(in oklab, var(--color-blue) 18%, transparent);
 }
 .bw-area.is-tx {
-  fill: color-mix(in oklab, var(--color-orange) 14%, transparent);
+  fill: color-mix(in oklab, var(--color-purple) 18%, transparent);
 }
 
 /* 不可用：斜纹底，与脉搏条断线同一视觉语言 —— 类名 hatch-off 加在模板上

@@ -210,6 +210,13 @@ function onKeydown(e: KeyboardEvent) {
   }
 }
 
+const activeItem = computed(() => filteredItems.value[activeIndex.value] || null)
+const activeThemeDef = computed(() => {
+  if (activeItem.value?.category !== 'theme') return null
+  const id = activeItem.value.id.replace('theme-', '')
+  return THEMES.find((t) => t.id === id) || null
+})
+
 function scrollToActive() {
   nextTick(() => {
     const el = listRef.value?.querySelector(`.palette-item.is-active`) as HTMLElement | null
@@ -221,7 +228,7 @@ function scrollToActive() {
 <template>
   <a-modal
     :open="open"
-    :width="modalWidth(560)"
+    :width="modalWidth(680)"
     :footer="null"
     :closable="false"
     centered
@@ -244,38 +251,68 @@ function scrollToActive() {
         <kbd class="palette-kbd">ESC</kbd>
       </div>
 
-      <div ref="listRef" class="palette-list" role="listbox">
-        <template v-if="filteredItems.length">
-          <div
-            v-for="(item, idx) in filteredItems"
-            :key="item.id"
-            class="palette-item"
-            :class="{ 'is-active': idx === activeIndex }"
-            role="option"
-            :aria-selected="idx === activeIndex"
-            @click="execute(item)"
-            @mouseenter="activeIndex = idx"
-          >
-            <div class="palette-item-icon">
-              <DashboardOutlined v-if="item.id === 'nav-dashboard'" />
-              <KeyOutlined v-else-if="item.id === 'nav-keys'" />
-              <ApiOutlined v-else-if="item.id === 'nav-channels' || item.category === 'model'" />
-              <GlobalOutlined v-else-if="item.id === 'nav-proxies'" />
-              <SettingOutlined v-else-if="item.id === 'nav-settings'" />
-              <BgColorsOutlined v-else-if="item.category === 'theme'" />
-              <ThunderboltOutlined v-else />
+      <!-- 双舱平视架构（方案 2：Avionics HUD Twin-Chamber） -->
+      <div class="palette-body">
+        <div ref="listRef" class="palette-list" role="listbox">
+          <template v-if="filteredItems.length">
+            <div
+              v-for="(item, idx) in filteredItems"
+              :key="item.id"
+              class="palette-item"
+              :class="{ 'is-active': idx === activeIndex }"
+              role="option"
+              :aria-selected="idx === activeIndex"
+              @click="execute(item)"
+              @mouseenter="activeIndex = idx"
+            >
+              <div class="palette-item-icon">
+                <DashboardOutlined v-if="item.id === 'nav-dashboard'" />
+                <KeyOutlined v-else-if="item.id === 'nav-keys'" />
+                <ApiOutlined v-else-if="item.id === 'nav-channels' || item.category === 'model'" />
+                <GlobalOutlined v-else-if="item.id === 'nav-proxies'" />
+                <SettingOutlined v-else-if="item.id === 'nav-settings'" />
+                <BgColorsOutlined v-else-if="item.category === 'theme'" />
+                <ThunderboltOutlined v-else />
+              </div>
+              <div class="palette-item-content">
+                <div class="palette-item-title">{{ item.title }}</div>
+                <div v-if="item.subtitle" class="palette-item-sub">{{ item.subtitle }}</div>
+              </div>
+              <div class="palette-item-tag">
+                {{ CATEGORY_LABELS[item.category] }}
+              </div>
             </div>
-            <div class="palette-item-content">
-              <div class="palette-item-title">{{ item.title }}</div>
-              <div v-if="item.subtitle" class="palette-item-sub">{{ item.subtitle }}</div>
-            </div>
-            <div class="palette-item-tag">
-              {{ CATEGORY_LABELS[item.category] }}
-            </div>
+          </template>
+          <div v-else class="palette-empty">
+            未找到匹配的命令或模型
           </div>
-        </template>
-        <div v-else class="palette-empty">
-          未找到匹配的命令或模型
+        </div>
+
+        <!-- 右侧 Live Peek 即时透视舱 -->
+        <div class="palette-peek" aria-hidden="true">
+          <template v-if="activeItem">
+            <div class="peek-badge">{{ CATEGORY_LABELS[activeItem.category] }}</div>
+            <div class="peek-title">{{ activeItem.title }}</div>
+            <div class="peek-desc">{{ activeItem.subtitle }}</div>
+
+            <!-- 主题色板即时微缩预览 -->
+            <div v-if="activeItem.category === 'theme' && activeThemeDef" class="peek-theme-preview">
+              <span class="theme-swatch" :data-swatch="activeThemeDef.id" aria-hidden="true">
+                <i class="sw-dot" />
+                <i class="sw-card" />
+              </span>
+              <div class="peek-tone-pill">{{ activeThemeDef.name }} · {{ activeThemeDef.tone === 'dark' ? '深色系' : '浅色系' }}</div>
+            </div>
+
+            <!-- 操作与快捷键微提示 -->
+            <div class="peek-shortcut">
+              <span class="peek-shortcut-label">即时直达</span>
+              <kbd class="palette-kbd">↵ Enter</kbd>
+            </div>
+          </template>
+          <div v-else class="peek-placeholder">
+            等待选择命令...
+          </div>
         </div>
       </div>
 
@@ -337,10 +374,121 @@ function scrollToActive() {
   line-height: 1;
 }
 
+.palette-body {
+  display: grid;
+  grid-template-columns: 1fr 220px;
+  min-height: 340px;
+}
+
 .palette-list {
-  max-height: 360px;
+  max-height: 380px;
   overflow-y: auto;
   padding: 6px;
+  border-right: 1px solid var(--color-border);
+}
+
+.palette-peek {
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  background: color-mix(in oklab, var(--color-bg) 40%, var(--color-fg));
+}
+
+.peek-badge {
+  display: inline-block;
+  align-self: flex-start;
+  font-size: var(--font-size-2xs);
+  padding: 1px 6px;
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--color-primary) 15%, transparent);
+  color: var(--text-primary-ink);
+  margin-bottom: 8px;
+}
+
+.peek-title {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--color-text);
+  line-height: 1.3;
+  margin-bottom: 6px;
+}
+
+.peek-desc {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  margin: 0 0 16px;
+}
+
+.peek-theme-preview {
+  margin-top: auto;
+  padding: 10px;
+  border-radius: var(--radius-control);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+}
+
+.peek-theme-preview .theme-swatch {
+  display: block;
+  width: 100%;
+  height: 38px;
+  border-radius: var(--radius-control);
+  background: var(--sw-page);
+  border: 1px solid var(--sw-border);
+  position: relative;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.peek-theme-preview .sw-card {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: 0;
+  height: 22px;
+  border-radius: 3px 3px 0 0;
+  background: var(--sw-card);
+  border: 1px solid var(--sw-border);
+  border-bottom: none;
+}
+
+.peek-theme-preview .sw-dot {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--sw-accent);
+}
+
+.peek-tone-pill {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-tertiary);
+  text-align: center;
+}
+
+.peek-shortcut {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 10px;
+  border-top: 1px dashed var(--color-border);
+}
+
+.peek-shortcut-label {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-tertiary);
+}
+
+.peek-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
 }
 
 .palette-item {

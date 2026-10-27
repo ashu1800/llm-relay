@@ -718,6 +718,14 @@ const testModal = ref({
   loadingModels: false,
 })
 
+const latestPings = ref<Record<number, { latency: number; ok: boolean }>>({})
+
+function rttClass(ms: number) {
+  if (ms < 500) return 'is-fast'
+  if (ms < 1500) return 'is-mid'
+  return 'is-slow'
+}
+
 async function openTest(row: ChannelRow) {
   if (testingId.value !== 0) {
     message.info('上一项测试还在进行中，请稍候')
@@ -760,6 +768,7 @@ async function runTest() {
     // 但必须说清楚这次成功不等于已经生效，否则会以为改完就能用了
     const disabledHint = row.enabled ? null : '这条渠道当前是停用状态，测通也不会参与路由；要让它生效请点「启用」'
     if (res.ok) {
+      latestPings.value[row.id] = { latency: res.latency_ms, ok: true }
       modal.success({
         title: row.name + ' 连通正常（' + res.latency_ms + ' ms）',
         content: h('div', [
@@ -776,6 +785,7 @@ async function runTest() {
         ])
       })
     } else {
+      latestPings.value[row.id] = { latency: 0, ok: false }
       modal.error({
         title: row.name + ' 连通失败' + (res.status_code ? '（HTTP ' + res.status_code + '）' : ''),
         content: res.error || '未知错误',
@@ -1284,7 +1294,7 @@ onMounted(async () => {
             <a-space :size="4">
               <a-tooltip title="测试连通性：选一个模型，向上游发一个最小请求">
                 <a-button
-                  class="table-icon-btn"
+                  class="table-icon-btn btn-test-channel"
                   type="text"
                   size="small"
                   :loading="testingId === record.id"
@@ -1295,6 +1305,15 @@ onMounted(async () => {
                   <ThunderboltOutlined />
                 </a-button>
               </a-tooltip>
+              <span
+                v-if="latestPings[record.id]"
+                class="rtt-badge"
+                :class="latestPings[record.id].ok ? rttClass(latestPings[record.id].latency) : 'is-fail'"
+                :title="'最近探测 RTT：' + latestPings[record.id].latency + ' ms'"
+              >
+                <template v-if="latestPings[record.id].ok">{{ latestPings[record.id].latency }}ms</template>
+                <template v-else>✕ 失败</template>
+              </span>
               <a-tooltip title="模型白名单：这条渠道能跑哪些模型">
                 <a-button
                   class="table-icon-btn"
@@ -1648,6 +1667,35 @@ onMounted(async () => {
         这条渠道还没有启用中的模型，先在「模型白名单」里加一个再测。
       </div>
     </a-modal>
+    <!-- 批量管理战术悬浮舱（方案 7） -->
+    <Transition name="dock-slide">
+      <div v-if="filteredRows.length >= 2" class="tactical-dock" role="region" aria-label="批量管理战术舱">
+        <div class="dock-content">
+          <span class="dock-badge">已锁定 {{ filteredRows.length }} 渠道</span>
+          <div class="dock-actions">
+            <a-button
+              type="primary"
+              size="small"
+              :loading="batch.running.value"
+              @click="batch.run(filteredRows, true)"
+            >
+              <PlayCircleOutlined /> 批量启用
+            </a-button>
+            <a-button
+              size="small"
+              danger
+              :loading="batch.running.value"
+              @click="confirmBatchDisable"
+            >
+              <StopOutlined /> 批量停用
+            </a-button>
+          </div>
+          <span v-if="batch.running.value" class="dock-progress">
+            正在处理 {{ batch.progress.value.done }}/{{ batch.progress.value.total }}
+          </span>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -1813,6 +1861,93 @@ onMounted(async () => {
 .batch-progress {
   color: var(--color-text-secondary);
   font-size: var(--font-size-sm);
+}
+
+/* ---- 战术悬浮舱（方案 7） ---- */
+.tactical-dock {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 990;
+  pointer-events: none;
+}
+
+.dock-content {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  background: color-mix(in oklab, var(--color-fg) 85%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+
+.dock-badge {
+  font-size: var(--font-size-xs);
+  font-family: var(--font-family-mono);
+  color: var(--color-text-secondary);
+}
+
+.dock-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dock-progress {
+  font-size: var(--font-size-xs);
+  color: var(--text-primary-ink);
+}
+
+.dock-slide-enter-active,
+.dock-slide-leave-active {
+  transition: all 0.3s var(--ease-expo);
+}
+
+.dock-slide-enter-from,
+.dock-slide-leave-to {
+  transform: translate(-50%, 28px);
+  opacity: 0;
+}
+
+/* RTT 徽章（方案 1） */
+.rtt-badge {
+  font-size: var(--font-size-2xs);
+  font-family: var(--font-family-mono);
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  line-height: 18px;
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.rtt-badge.is-fast {
+  background: color-mix(in oklab, var(--color-green) 15%, transparent);
+  color: var(--text-green);
+  border: 1px solid color-mix(in oklab, var(--color-green) 30%, transparent);
+}
+
+.rtt-badge.is-mid {
+  background: color-mix(in oklab, var(--color-blue) 15%, transparent);
+  color: var(--text-blue);
+  border: 1px solid color-mix(in oklab, var(--color-blue) 30%, transparent);
+}
+
+.rtt-badge.is-slow {
+  background: color-mix(in oklab, var(--color-orange) 15%, transparent);
+  color: var(--text-amber);
+  border: 1px solid color-mix(in oklab, var(--color-orange) 30%, transparent);
+}
+
+.rtt-badge.is-fail {
+  background: color-mix(in oklab, var(--color-red) 15%, transparent);
+  color: var(--text-red);
+  border: 1px solid color-mix(in oklab, var(--color-red) 30%, transparent);
 }
 </style>
 

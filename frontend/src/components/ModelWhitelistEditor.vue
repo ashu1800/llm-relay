@@ -502,7 +502,7 @@ function applyBulk() {
   max-width: 100%;
   height: var(--size-control-height);
   padding: 0 8px;
-  border: none;
+  border: 1px solid color-mix(in oklab, var(--color-primary) 30%, transparent);
   border-radius: var(--radius-control);
   background: color-mix(in oklab, var(--color-primary) 13%, transparent);
   /* 13% 主色底上主色文字只有 2.89:1；ink 版 5.17:1 */
@@ -510,10 +510,16 @@ function applyBulk() {
   font-family: var(--font-family-mono);
   font-size: var(--font-size-sm);
   cursor: var(--cursor-hand);
+  transition: all 0.2s var(--ease-expo);
 }
-.price-pill:hover { background: color-mix(in oklab, var(--color-primary) 22%, transparent); }
+.price-pill:hover {
+  background: color-mix(in oklab, var(--color-primary) 22%, transparent);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px color-mix(in oklab, var(--color-primary) 25%, transparent);
+}
 /* 未定价用灰底而不是主题色：提示语是「这里缺东西」，不是「这里能点」 */
 .price-pill.unset {
+  border: 1px dashed var(--color-border);
   background: color-mix(in oklab, var(--color-text-secondary) 12%, transparent);
   color: var(--color-text-secondary);
 }

@@ -278,6 +278,12 @@ function statusOf(row: Proxy) {
   return statusMeta[row.last_status] || statusMeta.unknown
 }
 
+function proxyRttClass(ms: number) {
+  if (ms < 300) return 'is-fast'
+  if (ms < 1000) return 'is-mid'
+  return 'is-slow'
+}
+
 function addressOf(row: Proxy) {
   return row.host + ':' + row.port
 }
@@ -372,12 +378,17 @@ onMounted(load)
           </a-table-column>
           <a-table-column title="协议" :width="80">
             <template #default="{ record }">
-              <a-tag>{{ record.protocol }}</a-tag>
+              <span class="proto-shield" :class="'is-' + record.protocol">
+                {{ record.protocol.toUpperCase() }}
+              </span>
             </template>
           </a-table-column>
           <a-table-column title="地址" :width="210">
             <template #default="{ record }">
-              <span class="proxy-addr">{{ addressOf(record) }}</span>
+              <div class="addr-capsule">
+                <span class="addr-host mono">{{ record.host }}</span>
+                <span class="addr-port mono">:{{ record.port }}</span>
+              </div>
               <div v-if="record.username" class="sub-text">用户：{{ record.username }}</div>
               <!-- 更新代理的身份要一眼可辨：它决定的是「版本更新走不走得通」，
                    与转发无关，所以放地址列而不是启用列 -->
@@ -386,10 +397,14 @@ onMounted(load)
           </a-table-column>
           <a-table-column title="状态" :width="200">
             <template #default="{ record }">
-              <a-tag :color="statusOf(record).color">
-                {{ statusOf(record).text }}
-                <template v-if="record.last_status === 'ok'"> {{ record.last_latency_ms }}ms</template>
-              </a-tag>
+              <div class="proxy-status-cell">
+                <a-tag :color="statusOf(record).color">
+                  {{ statusOf(record).text }}
+                </a-tag>
+                <span v-if="record.last_status === 'ok'" class="proxy-rtt" :class="proxyRttClass(record.last_latency_ms)">
+                  ⚡ {{ record.last_latency_ms }}ms
+                </span>
+              </div>
               <!-- 测试时间与失败原因都铺在状态下面：单看一个红标签，
                    用户不知道是「刚测的」还是「三天前的」，也不知道为什么不通 -->
               <div v-if="record.last_tested_at" class="sub-text">{{ testedAt(record) }}</div>
@@ -562,6 +577,77 @@ onMounted(load)
   overflow: hidden;
 }
 .disabled { color: var(--color-text-secondary); cursor: not-allowed; }
+
+/* ---- 协议盾牌与跳点时延（方案 2） ---- */
+.proto-shield {
+  display: inline-block;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-2xs);
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--color-border);
+}
+
+.proto-shield.is-socks5 {
+  background: color-mix(in oklab, var(--color-blue) 15%, transparent);
+  color: var(--text-blue);
+  border-color: color-mix(in oklab, var(--color-blue) 30%, transparent);
+}
+
+.proto-shield.is-http {
+  background: color-mix(in oklab, var(--color-orange) 15%, transparent);
+  color: var(--text-amber);
+  border-color: color-mix(in oklab, var(--color-orange) 30%, transparent);
+}
+
+.addr-capsule {
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--font-size-sm);
+}
+
+.addr-host {
+  color: var(--color-text);
+}
+
+.addr-port {
+  color: var(--text-primary-ink);
+  font-weight: 600;
+}
+
+.proxy-status-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.proxy-rtt {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-2xs);
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.proxy-rtt.is-fast {
+  background: color-mix(in oklab, var(--color-green) 15%, transparent);
+  color: var(--text-green);
+  border: 1px solid color-mix(in oklab, var(--color-green) 30%, transparent);
+}
+
+.proxy-rtt.is-mid {
+  background: color-mix(in oklab, var(--color-blue) 15%, transparent);
+  color: var(--text-blue);
+  border: 1px solid color-mix(in oklab, var(--color-blue) 30%, transparent);
+}
+
+.proxy-rtt.is-slow {
+  background: color-mix(in oklab, var(--color-orange) 15%, transparent);
+  color: var(--text-amber);
+  border: 1px solid color-mix(in oklab, var(--color-orange) 30%, transparent);
+}
 .field-hint { color: var(--color-text-secondary); font-size: var(--font-size-sm); margin-top: 4px; }
 .field-hint.inline { margin-left: 8px; }
 .update-mark { color: var(--text-red); }

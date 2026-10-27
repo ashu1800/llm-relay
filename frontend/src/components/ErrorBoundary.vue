@@ -73,17 +73,22 @@ async function copyDetail() {
 
 <template>
   <div v-if="err" class="err-boundary" role="alert">
+    <!-- 黑匣子飞行记录仪标牌（方案 8） -->
+    <div class="blackbox-tag" aria-hidden="true">
+      <span class="bb-pulse" />
+      <span>CRASH FLIGHT RECORDER · PANIC OCCURRED</span>
+    </div>
     <ExclamationCircleOutlined class="eb-icon" aria-hidden="true" />
-    <h2 class="eb-title">这个页面出错了</h2>
+    <h2 class="eb-title">视图渲染异常 · 黑匣子已捕获</h2>
     <p class="eb-text">
-      页面在渲染时遇到了未预期的错误。刷新通常就能恢复；如果反复出现，
-      请把下面的信息复制下来一起反馈。
+      页面在渲染时捕获到未处理的异常，已自动切断故障传播以保护核心控制台。
+      刷新通常可恢复；若反复出现，请复制下方崩溃快照反馈。
     </p>
-    <pre class="eb-detail" tabindex="0">{{ err.message }}<template v-if="info">（{{ info }}）</template></pre>
+    <pre class="eb-detail" tabindex="0"><code>{{ err.message }}<template v-if="info">（阶段: {{ info }}）</template></code></pre>
     <div class="eb-actions">
       <a-button type="primary" @click="reload">重新加载页面</a-button>
-      <a-button @click="copyDetail">{{ copied ? '已复制' : '复制错误信息' }}</a-button>
-      <router-link to="/console/dashboard" class="eb-link">回到数据看板</router-link>
+      <a-button @click="copyDetail">{{ copied ? '已复制诊断快照' : '复制诊断快照 (Crash Dump)' }}</a-button>
+      <router-link to="/console/dashboard" class="eb-link">紧急脱离（回到数据看板）</router-link>
     </div>
   </div>
   <!-- 正常路径：边界只是透传，不产生任何额外 DOM（不包一层 div：
@@ -108,6 +113,35 @@ async function copyDetail() {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-panel);
   box-shadow: var(--color-fg-shadow);
+}
+
+.blackbox-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-2xs);
+  letter-spacing: 0.14em;
+  padding: 2px 8px;
+  background: color-mix(in oklab, var(--color-red) 12%, transparent);
+  border: 1px dashed color-mix(in oklab, var(--color-red) 45%, transparent);
+  border-radius: var(--radius-control);
+  color: var(--text-red);
+  margin-bottom: 4px;
+}
+
+.bb-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-red);
+  box-shadow: 0 0 6px var(--color-red);
+  animation: bb-pulse-glow 1.5s ease-in-out infinite;
+}
+
+@keyframes bb-pulse-glow {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
 }
 
 /* 图标用 --text-red（正文级语义色，白底 5.44:1）；--color-red 只有 3.90:1，

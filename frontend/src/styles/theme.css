@@ -1397,9 +1397,11 @@ a:hover { opacity: 0.85; }
    多主题下那种写法表达不了「深色族」，所以收口成令牌。 */
 .log-table[data-hint-l='1'] .ant-table-cell-fix-left-last::after {
   background-image: linear-gradient(to right, var(--scroll-hint-color), transparent);
+  box-shadow: inset 1px 0 0 color-mix(in oklab, var(--color-primary) 20%, transparent);
 }
 .log-table[data-hint-r='1'] .ant-table-cell-fix-right-first::after {
   background-image: linear-gradient(to left, var(--scroll-hint-color), transparent);
+  box-shadow: inset -1px 0 0 color-mix(in oklab, var(--color-primary) 20%, transparent);
 }
 
 /* ---- 表头与表体不需要额外补宽 ----
@@ -1529,6 +1531,15 @@ a:hover { opacity: 0.85; }
 
 .table-icon-btn.ant-btn:not(:disabled):active {
   transform: scale(0.92);
+}
+
+/* 物理拨码开关触觉阻尼与通电微光（方案 10） */
+.ant-switch {
+  transition: all 0.22s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+}
+
+.ant-switch-checked {
+  box-shadow: 0 0 8px color-mix(in oklab, var(--color-primary) 35%, transparent) !important;
 }
 
 /* ---- 复制成功的原位对勾弹出（copy-pop，2026-09-27）----

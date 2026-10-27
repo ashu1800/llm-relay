@@ -922,10 +922,20 @@ onMounted(() => {
 }
 .alias-ops { display: inline-flex; gap: 6px; }
 .alias-ops-head { width: 108px; }
-.alias-key { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.alias-key {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 3px 6px;
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--color-bg) 60%, var(--color-fg));
+  border: 1px solid var(--color-border);
+}
 .alias-key-text {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--font-size-sm);
+  color: var(--color-text);
 }
 /* 状态徽标：待设置是真正要人来的（内置表也没有它），内置是「显示本来
    就好、配不配随意」—— 颜色上也区分主次，避免 40 多个内置行看起来

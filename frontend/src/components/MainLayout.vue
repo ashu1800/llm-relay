@@ -23,6 +23,7 @@ import { useAuthStore } from '@/stores/auth'
 import { message } from '@/utils/feedback'
 import { onLive } from '@/composables/useLive'
 import { startTabPulse } from '@/utils/tabPulse'
+import { modalWidth } from '@/utils/modalWidth'
 import VersionBadge from '@/components/VersionBadge.vue'
 import CommandPalette from '@/components/CommandPalette.vue'
 // 页面级错误边界：某个视图渲染抛异常时兜住它，保住侧栏（见模板里的说明）
@@ -33,6 +34,7 @@ const router = useRouter()
 const authStore = useAuthStore()
 
 const paletteOpen = ref(false)
+const helpModalOpen = ref(false)
 
 // 退出登录：服务端清掉会话 Cookie，本地状态随之置否，回登录页。
 // logout 内部已保证「请求失败也清本地状态」—— 会话可能早已过期。
@@ -242,6 +244,12 @@ function handleShortcut(e: KeyboardEvent) {
       e.preventDefault()
       btn.click()
     }
+    return
+  }
+
+  if (e.key === '?') {
+    e.preventDefault()
+    helpModalOpen.value = !helpModalOpen.value
     return
   }
 
@@ -569,6 +577,62 @@ onUnmounted(() => {
       </div>
     </div>
     <CommandPalette v-model:open="paletteOpen" />
+
+    <!-- 全站极客快捷键图谱 HUD（方案 10） -->
+    <a-modal
+      v-model:open="helpModalOpen"
+      title="极客快捷键全景图谱"
+      :width="modalWidth(560)"
+      :footer="null"
+      centered
+      class="keymap-modal"
+    >
+      <div class="keymap-hud">
+        <div class="keymap-section">
+          <div class="keymap-sec-title">全局导航与直达</div>
+          <div class="keymap-grid">
+            <div class="keymap-row">
+              <span class="keymap-desc">唤出命令面板</span>
+              <span class="keymap-keys"><kbd class="geek-kbd">Ctrl</kbd> + <kbd class="geek-kbd">K</kbd></span>
+            </div>
+            <div class="keymap-row">
+              <span class="keymap-desc">直达各管理页面</span>
+              <span class="keymap-keys"><kbd class="geek-kbd">G</kbd> 然后 <kbd class="geek-kbd">D / K / C / P / S</kbd></span>
+            </div>
+            <div class="keymap-row">
+              <span class="keymap-desc">聚焦搜索框</span>
+              <span class="keymap-keys"><kbd class="geek-kbd">/</kbd></span>
+            </div>
+            <div class="keymap-row">
+              <span class="keymap-desc">刷新当前数据</span>
+              <span class="keymap-keys"><kbd class="geek-kbd">R</kbd></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="keymap-section">
+          <div class="keymap-sec-title">日志表格极客排障</div>
+          <div class="keymap-grid">
+            <div class="keymap-row">
+              <span class="keymap-desc">上下行穿梭</span>
+              <span class="keymap-keys"><kbd class="geek-kbd">J</kbd> / <kbd class="geek-kbd">K</kbd> 或 <kbd class="geek-kbd">↓</kbd> / <kbd class="geek-kbd">↑</kbd></span>
+            </div>
+            <div class="keymap-row">
+              <span class="keymap-desc">展开/关闭调用详情</span>
+              <span class="keymap-keys"><kbd class="geek-kbd">Space</kbd> / <kbd class="geek-kbd">Enter</kbd></span>
+            </div>
+            <div class="keymap-row">
+              <span class="keymap-desc">快速复制 Trace ID</span>
+              <span class="keymap-keys"><kbd class="geek-kbd">C</kbd></span>
+            </div>
+            <div class="keymap-row">
+              <span class="keymap-desc">查看此帮助图谱</span>
+              <span class="keymap-keys"><kbd class="geek-kbd">?</kbd></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -666,6 +730,15 @@ onUnmounted(() => {
   color: var(--brand-mark-fg);
   font-size: var(--font-size-md);
   font-weight: 700;
+  box-shadow: 0 0 10px color-mix(in oklab, var(--brand-mark-bg) 50%, transparent),
+              inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  transition: transform 0.25s var(--ease-expo), box-shadow 0.25s ease;
+}
+
+.brand:hover .brand-mark {
+  transform: scale(1.05);
+  box-shadow: 0 0 16px color-mix(in oklab, var(--brand-mark-bg) 80%, transparent),
+              inset 0 1px 0 rgba(255, 255, 255, 0.45);
 }
 
 .brand-text {
@@ -850,6 +923,11 @@ onUnmounted(() => {
 .console-sidebar.is-collapsed .console-menu-item {
   justify-content: center;
   padding: 0;
+  transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.2s ease, color 0.2s ease;
+}
+
+.console-sidebar.is-collapsed .console-menu-item:hover {
+  transform: scale(1.12);
 }
 
 .console-menu-list {
@@ -1008,5 +1086,66 @@ onUnmounted(() => {
   height: 100%;
   display: flex;
   flex-direction: column;
+}
+
+/* ---- 极客快捷键全景图谱（方案 10） ---- */
+.keymap-hud {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 6px 0 2px;
+}
+
+.keymap-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.keymap-sec-title {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--text-primary-ink);
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--color-border);
+}
+
+.keymap-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.keymap-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: var(--font-size-sm);
+}
+
+.keymap-desc {
+  color: var(--color-text-secondary);
+}
+
+.keymap-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--font-size-xs);
+}
+
+.geek-kbd {
+  display: inline-block;
+  padding: 2px 7px;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-2xs);
+  line-height: 1.2;
+  color: var(--color-text);
+  background: color-mix(in oklab, var(--color-bg) 65%, var(--color-fg));
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  box-shadow: 0 2px 0 var(--color-border), 0 3px 6px rgba(0, 0, 0, 0.1);
+  transform: translateY(-1px);
 }
 </style>

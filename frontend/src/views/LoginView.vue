@@ -147,6 +147,12 @@ watch(
         <span class="brand-text">LLM Relay</span>
       </div>
 
+      <!-- 终端安全准入徽标（方案 1） -->
+      <div class="terminal-hud-header" aria-hidden="true">
+        <span class="hud-status-led" />
+        <span>RESTRICTED GATEWAY ACCESS</span>
+      </div>
+
       <!-- 整页唯一的 h1：契约检查要求登录页恰好一个（静态计数）。
            向导形态下由 LoginSetup 自己用 h2 表达各阶段标题，
            所以这里用 v-if 隐藏而不是删掉。 -->
@@ -274,6 +280,34 @@ watch(
   font-size: var(--font-size-xl);
   font-weight: 600;
   color: var(--text-primary-ink);
+}
+
+/* 终端安全准入徽标（方案 1） */
+.terminal-hud-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-2xs);
+  letter-spacing: 0.12em;
+  color: var(--color-text-tertiary);
+  margin-bottom: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--color-border);
+}
+
+.hud-status-led {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-green);
+  box-shadow: 0 0 6px var(--color-green);
+  animation: led-breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes led-breathe {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
 }
 
 .login-title {

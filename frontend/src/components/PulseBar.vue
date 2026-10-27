@@ -64,6 +64,7 @@ const title = computed(() => {
   overflow: hidden;
   /* 底轨用主色掺透明而不是再引一个变量：它不是语义色，只是「仪器面板的底」 */
   background: color-mix(in oklab, var(--text-primary-ink) 10%, transparent);
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.12);
 }
 .pulse-bar.ok { --pulse-color: var(--color-green); }
 .pulse-bar.bad { --pulse-color: var(--color-red); }
@@ -78,10 +79,25 @@ const title = computed(() => {
 .pulse-spark {
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, transparent 5%, var(--pulse-color) 50%, transparent 95%);
-  filter: drop-shadow(0 0 3px var(--pulse-color));
-  animation: pulse-sweep 0.68s ease-out forwards;
+  /* 荧光示波器余晖光轨：高能白炽光核 + 荧光边缘（方案 3） */
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in oklab, var(--pulse-color) 35%, transparent) 25%,
+    var(--pulse-color) 65%,
+    #ffffff 82%,
+    var(--pulse-color) 92%,
+    transparent 100%
+  );
+  filter: drop-shadow(0 0 4px var(--pulse-color));
+  animation: pulse-sweep 0.65s cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
+
+.pulse-bar.bad .pulse-spark {
+  filter: drop-shadow(0 0 6px var(--color-red));
+  animation: pulse-sweep 0.55s ease-out forwards;
+}
+
 @keyframes pulse-sweep {
   from { transform: translateX(-100%); }
   to { transform: translateX(100%); }
