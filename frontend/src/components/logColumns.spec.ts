@@ -26,8 +26,7 @@ const baseW: Record<ColKey, number> = {
   speed: 118,
   status: 64,
   key: 100,
-  client: 112,
-  action: 64
+  client: 112
 }
 const declared = COL_KEYS.reduce((s, k) => s + baseW[k], 0)
 
@@ -48,10 +47,9 @@ describe('allocateWidths 余量分摊', () => {
     }
   })
 
-  it('权重 0 的固定窄列（status/action）不拿余量，保持声明宽', () => {
+  it('权重 0 的固定窄列（status）不拿余量，保持声明宽', () => {
     const out = allocateWidths(declared + 500, baseW)
     expect(out.status).toBe(64)
-    expect(out.action).toBe(64)
   })
 
   it('份额与权重成比例：model（×2）拿的是 time（×1）的两份', () => {
@@ -78,7 +76,7 @@ describe('allocateWidths 余量分摊', () => {
   // 重新成立（Σ份额 = 容器宽 − 可见列声明合计）。这三条如果坏掉，
   // 表现是「关掉两列后表格右边多出一条空白」或「可见列反而变窄」。
   describe('只对可见列分摊（keys 子集）', () => {
-    const shown: ColKey[] = ['time', 'model', 'channel', 'status', 'action']
+    const shown: ColKey[] = ['time', 'model', 'channel', 'status', 'client']
     const shownDeclared = shown.reduce((s, k) => s + baseW[k], 0)
 
     it('可见列之和 ≈ 容器可用宽（Σ份额 = leftover）', () => {
@@ -96,13 +94,15 @@ describe('allocateWidths 余量分摊', () => {
     })
 
     it('只剩权重 0 的列时不做除法（无 NaN），原样返回声明宽', () => {
-      // status / action 的权重都是 0：weightSum = 0，若不判零就是 0/0 = NaN，
+      // status / thinking 是仅有的两个权重 0 列：可见集合只有它们时
+      // weightSum = 0，若不判零就是 0/0 = NaN，
       // 列宽会变成 NaN 并被写进 :width（表格直接崩掉）
-      const only: ColKey[] = ['status', 'action']
+      const only: ColKey[] = ['status', 'thinking']
       const out = allocateWidths(2000, baseW, only)
       expect(out.status).toBe(baseW.status)
-      expect(out.action).toBe(baseW.action)
+      expect(out.thinking).toBe(baseW.thinking)
       expect(Number.isNaN(out.status)).toBe(false)
+      expect(Number.isNaN(out.thinking)).toBe(false)
     })
 
     it('可见子集比容器宽时同样不摊（横向滚动区）', () => {
@@ -148,7 +148,8 @@ describe('列序契约', () => {
     // 勾选顺序都跟着 COL_KEYS 走。插错位置不会报错，只会让三处对不上
     // —— 用户看到「设置里的顺序与表头不一致」这种没人能解释的现象。
     expect(COL_KEYS.indexOf('client')).toBe(COL_KEYS.indexOf('key') + 1)
-    expect(COL_KEYS.indexOf('action')).toBe(COL_KEYS.indexOf('client') + 1)
+    // 操作列 2026-10-27 移除后，客户端就是最后一列
+    expect(COL_KEYS[COL_KEYS.length - 1]).toBe('client')
   })
 
   it('思考列在模型与渠道之间（2026-10-27 需求原话的位置）', () => {

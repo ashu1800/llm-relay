@@ -1012,7 +1012,20 @@ console.log('=== 请求日志列宽：测量锚点与模板必须对得上 ===')
   if (boundsBlock) {
     const keys = [...boundsBlock[0].matchAll(/^\s{2}(\w+):\s*\[/gm)].map((m) => m[1])
     const bound = [...panelSrc.matchAll(/:width="colW\.(\w+)"/g)].map((m) => m[1])
-    check('COL_BOUNDS 覆盖全部 12 列', keys.length === 12, `读到 ${keys.length} 个：${keys.join(', ')}`)
+    // 列数从 logColumns.ts 的 COL_KEYS 现读，不写字面量：
+    // 写死的话每次加/删列都要同步改这里（2026-10-27 删掉操作列时，
+    // 这条断言就以「读到 11 个」的形式失败了一次 —— 它拦得对，但
+    // 维护成本应该由推导消掉，而不是每次改数字）
+    const colKeysSrc = readFileSync(join(SRC, 'components/logColumns.ts'), 'utf8')
+    const colKeysBlock = colKeysSrc.match(/export const COL_KEYS = \[([\s\S]*?)\] as const/)
+    const colKeyCount = colKeysBlock
+      ? [...colKeysBlock[1].matchAll(/'([\w]+)'/g)].length
+      : 0
+    check(
+      'COL_BOUNDS 覆盖全部列（列数由 COL_KEYS 推导）',
+      colKeyCount > 0 && keys.length === colKeyCount,
+      `COL_BOUNDS 读到 ${keys.length} 个，COL_KEYS 有 ${colKeyCount} 个：${keys.join(', ')}`,
+    )
     check(
       '模板里每一列都绑了 colW（没有写死的 :width）',
       bound.length === keys.length && [...bound].sort().join(',') === [...keys].sort().join(','),

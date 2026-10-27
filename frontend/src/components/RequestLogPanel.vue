@@ -22,9 +22,9 @@
 // 看板工具栏那枚「导出 CSV」也于 2026-10-27 移除。
 // 面板本身（背景 / 边框 / 圆角 / 内边距）
 // 仍用 PanelCard，不传 title 时它不会渲染标题栏。
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { message } from '@/utils/feedback'
-import { ArrowUpOutlined, CheckOutlined, CloseOutlined, CodeOutlined, CopyOutlined, ProfileOutlined } from '@ant-design/icons-vue'
+import { ArrowUpOutlined, CheckOutlined, CloseOutlined, CodeOutlined, CopyOutlined } from '@ant-design/icons-vue'
 import { buildCurlCommand } from '@/utils/curl'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
@@ -59,6 +59,7 @@ import {
   clampColumnWidth,
   type ColKey
 } from '@/components/logColumns'
+import { autoHiddenColumns, visibleColumnKeys } from '@/components/logColumnAutoHide'
 // 实时插行的处置判据（2026-10-11 抽出）：它有四种输入组合要测，
 // 埋在 onLive 回调里测不到，而判错的表现是静默的 —— 见 logLive.ts 顶部
 import { decideLiveInsert, pendingLogText } from '@/components/logLive'
@@ -152,14 +153,23 @@ const COL_BOUNDS: Record<ColKey, [number, number]> = {
   //
   // 两个变化各自的影响：
   //   表头 4 字 → 2 字：64px → 42px（两字 26 + 内边距 16）；
-  //   内容去胶囊：原来要算「档位词 44 + 胶囊内边距 16 + 边框 2」，
-  //               现在只要档位词本身的 44px 左右。
+  //   内容去胶囊：原来要算「档位词 + 胶囊内边距 16 + 边框 2」，
+  //               现在只要档位词本身。
   //
-  // 下限 62 = 表头 42 vs 最长档位词 "minimal"（44）+ 内边距 16 = 60，取大再留 2。
-  // 上限 74 = 60 + 呼吸 6 + 一点余量：内容是**封闭集合**
-  // （九个档位词 + 认不得的档位原样展示），再宽只是空白，所以
-  // DISTRIBUTE_WEIGHT 仍取 0。
-  thinking: [62, 74],
+  // 实际宽 = 内容 + spec.pad(0) + CELL_PAD(16) + CELL_BREATH(6)
+  //        （见 logColumns.clampColumnWidth —— 这两个常量容易漏算，
+  //         第一版就是漏了 BREATH、又把文字宽估成 6.5px/字符，
+  //         下限 62 比 medium 实际需要的 ~63px 还差 1px，
+  //         表现为 "medium" 在格子里折成两行：mediu / m）
+  //
+  // 最长的两个档位词：medium 6 字符、minimal 7 字符。
+  // 12px 正文字体下按 6.8px/字符（偏保守，含字距）估算：
+  //   medium  ≈ 41 + 22 = 63px
+  //   minimal ≈ 48 + 22 = 70px
+  // 所以下限取 72（最长档位词 + 2px 余量），上限 84 给认不得的长档位词留点空间。
+  // 内容仍是封闭集合（九个档位词 + 未知值原样展示），所以
+  // DISTRIBUTE_WEIGHT 保持 0 —— 再宽只是空白。
+  thinking: [72, 84],
   // 渠道列下限 130 → 128 → 88（2026-09-26）。
   //
   // 130 是 2026-09-16 那组人工定宽常量的遗留，当时按「最坏情况」拍。
@@ -198,8 +208,7 @@ const COL_BOUNDS: Record<ColKey, [number, number]> = {
   // 内边距 ≈ 200px，留一点余量；客户端名是我们可枚举的短串、长度有上界，
   // 不给模型列那一档（300）。识别不出的长 product token 超出部分交给
   // ellipsis + 悬停 title（少数情况，且悬停即可看全）。
-  client: [112, 220],
-  action: [64, 64] // 一个 28px 图标按钮，宽度固定
+  client: [112, 220]
 }
 
 /** 各列的「内容紧宽」：下限与当前页内容所需宽度取较大者，**不含**余量均摊。
@@ -207,7 +216,7 @@ const COL_BOUNDS: Record<ColKey, [number, number]> = {
  *  只需要按新容器宽重新均摊（内容紧宽不变），不必重新量内容 —— 两件事要能
  *  独立发生，均摊不能反过来要求一次测量。初值同 colW（首屏在测量落地前先
  *  按它们渲染）。 */
-const baseW: Record<ColKey, number> = {
+const baseW = reactive<Record<ColKey, number>>({
   time: 96,
   model: 190,
   thinking: 62,
@@ -218,9 +227,8 @@ const baseW: Record<ColKey, number> = {
   speed: 118,
   status: 64,
   key: 100,
-  client: 112,
-  action: 64
-}
+  client: 112
+})
 
 /** 运行时列宽（模板绑定值）= 内容紧宽 + 余量均摊份额，见 distribute。
  *  初值取原来那组定宽常量（模型列的 190 是它的常规值），
@@ -234,7 +242,39 @@ const colW = ref<Record<ColKey, number>>({ ...baseW })
 // 这里**解构**成两个 ref 而不是留成 `logColumns.visible`：模板只会自动解包
 // 顶层绑定，`logColumns.visible` 拿到的是 computed 本身（`.time` 恒为 undefined，
 // 表现是所有列一起消失），解构之后模板里写 colShown.time 才是值。
-const { visible: colShown, visibleKeys: colShownKeys } = logColumns
+const { visible: userColShown } = logColumns
+const userHiddenKeys = computed(() => COL_KEYS.filter((k) => !userColShown.value[k]))
+
+// 表格容器的可用宽度：响应式列显隐的输入。
+//
+// 为什么不用 window.innerWidth 或 vw：判的是「这条表体装不装得下」，
+// 而表体宽 = 视口 − 侧栏 − 页面内边距（差 300~400px）。用视口宽会让
+// 「侧栏展开 vs 收成图标栏」在同一视口宽度下表现出两种列显隐。
+//
+// 初值 0 表示**还没量到**：此时不自动隐藏任何列（见 autoHiddenColumns 对
+// 0 的处理）—— 首帧闪一下「缺三列」再补回来比晚一点藏起来更难受。
+const tableWidth = ref(0)
+
+/** 宽度不足时自动隐藏的列（当前容器宽下） */
+//
+// 判据用 baseW（内容紧宽，**不含**均摊份额）而不是 colW：后者含余量分摊，
+// 会随容器变宽而虚胖 —— 拿虚胖的宽度去判「装不装得下」，永远装不下。
+//
+// baseW 是 reactive 的：测量会就地更新它（见 remeasureColumns），
+// 判据因此能在「内容变宽/变窄」后自动重算，不必靠 resize 事件顺带触发。
+const autoHiddenKeys = computed(() => autoHiddenColumns(tableWidth.value, baseW))
+
+/** 最终列显隐 = 用户手动隐藏 ∪ 宽度自动隐藏（任一隐藏即隐藏） */
+const colShown = computed<Record<ColKey, boolean>>(() => {
+  const out = {} as Record<ColKey, boolean>
+  for (const k of COL_KEYS) {
+    out[k] = userColShown.value[k] && !autoHiddenKeys.value.has(k)
+  }
+  return out
+})
+
+/** 当前可见列，顺序与 COL_KEYS 一致 —— 列宽合计与余量分摊都按它遍历 */
+const colShownKeys = computed<ColKey[]>(() => visibleColumnKeys(colShown.value, COL_KEYS))
 
 /**
  * 每列的内容锚点与固定前缀宽（px）。
@@ -1173,7 +1213,9 @@ function rowSummary(record: RequestLog): string {
     '请求 ' + fmtTimeCompact(record.created_at) +
     '，模型 ' + (record.model_requested || '未知') +
     '，状态 ' + record.status_code +
-    '。按回车查看调用详情'
+    // 「点击或按回车」：2026-10-27 起鼠标也走这条路（操作列移除）。
+    // 读屏用户听到的是「这一行能打开详情」以及怎么开，所以两种入口都要说
+    '。点击或按回车查看调用详情'
   )
 }
 
@@ -1188,6 +1230,25 @@ function rowProps(record: RequestLog, index: number) {
   return {
     tabindex: index === tabRowIndex.value ? 0 : -1,
     'aria-label': rowSummary(record),
+    // 单击打开详情（2026-10-27：操作列移除后，行就是入口）。
+    //
+    // 用单击而不是双击：这个表里没有别的「单击该做别的事」的元素
+    // （图标的 title 是悬停提示、不是点击动作），双击只会让入口多一步而无收益，
+    // 且双击在触屏上不可发现。
+    //
+    // 需要让开的情况：
+    //   · 点在可交互元素上（将来若给某格加按钮/链接）—— 让给那个元素；
+    //   · 用户正在选中文字准备复制（报文/错误原文要拿去搜是最常见的动作）——
+    //     选择非空就不算「点行」。
+    onClick: (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null
+      if (target?.closest('a, button, input, select, textarea, [role="button"]')) return
+      // 拖选（选中了表内文字）时不触发：window.getSelection() 在大多数浏览器里
+      // 对表格单元格的选择也会返回非折叠的 Range
+      const sel = window.getSelection()
+      if (sel && !sel.isCollapsed && sel.toString().trim() !== '') return
+      openDetail(record)
+    },
     onFocus: () => {
       activeRowIndex.value = index
     },
@@ -1791,7 +1852,26 @@ function restoreAnchor(body: HTMLElement, anchor: RowAnchor, attempt = 0) {
 // 挂到 window 的是 rAF 节流版（节流器的说明见 remeasureColumns 下方的
 // rafThrottle）：resize 事件连发时每帧最多重摊一次，distribute 里的
 // clientWidth 读取不再逐事件强制布局。
+/**
+ * 读表体可用宽并写入 tableWidth（响应式列显隐的输入）。
+ *
+ * 与 distribute() 读的是同一个元素、同一个口径（clientWidth 已扣除纵向
+ * 滚动条）：两处若用不同的量法，「宽度够不够显示某列」与「余量怎么摊」
+ * 会在 1~8px 的范围内给出不一致的结论，表现为列刚藏完又冒出来。
+ *
+ * 返回宽度是否发生变化 —— 变了才会触发列显隐重算与重渲染，
+ * 拖动窗口时每帧都调，不变就不该写 ref。
+ */
+function syncTableWidth(): boolean {
+  const body = tableWrap.value?.querySelector<HTMLElement>('.ant-table-body')
+  const w = body?.clientWidth || 0
+  if (w === tableWidth.value) return false
+  tableWidth.value = w
+  return true
+}
+
 function onResize() {
+  syncTableWidth()
   if (distribute()) nextTick(repositionBeams)
   nextTick(syncScrollHints)
 }
@@ -1804,6 +1884,11 @@ onMounted(() => {
   // 列表字体（Harding-Regular.ttf）就绪前，量到的是回退字体的宽度 ——
   // 两者字宽不同，按回退字体算出的列宽会偏窄。字体到了要重量一次。
   document.fonts?.ready.then(() => nextTick(remeasureColumns))
+
+  // 首屏就把容器宽读进来：resize 事件只在窗口变化时触发，而首帧从不触发 ——
+  // 不读的话窄屏首次进页面会先按「宽屏全列」渲染一遍，等用户碰一下窗口才收起。
+  // 放在 nextTick 里：表体是 antd 挂载后才渲染的，同步读会拿到 null。
+  nextTick(syncTableWidth)
 
   // 横向滚动的边界提示。列宽是量出来的、行数还会随实时推送变，
   // 所以「能不能往右滚」在每个可能改变它的时机都要重算：
@@ -1908,8 +1993,8 @@ onMounted(() => {
            （28px），列宽改由内容决定 —— 12px 字体下最宽的一排是
            「↓ 300.48K ↑ 32.76K」124px（近 7 天输入词元的最大值 304483），
            下排「▣ 479.23K 99.86%」107px。
-           操作列 72 -> 64 是「详情」文字链接改成图标按钮那一次
-           （见模板里那一列上方的注释）。
+           操作列 72 -> 64 是「详情」文字链接改成图标按钮那一次（那一列 2026-10-27 已整体移除）
+           （现改为点行开详情，见 rowProps）。
            思考等级 2026-09-18 并入模型列（独立 80px 列删除）：胶囊贴在模型名
            后面，「用什么模型、什么强度思考」一行读完。
            2026-09-20 模型列先改成按内容自适应；2026-09-23 推广到每一列
@@ -2006,12 +2091,15 @@ onMounted(() => {
              而「这条请求用了什么思考档位」是要横向对比的信息，
              混在模型名里就没法顺着列往下扫。
              没带思考参数的请求显示 -（「没说」不是「off」，见 thinkingTitle） -->
-        <a-table-column v-if="colShown.thinking" title="思考" :width="colW.thinking">
+        <a-table-column v-if="colShown.thinking" title="思考" :width="colW.thinking" ellipsis>
           <template #default="{ record }">
             <!-- 纯文字，不再套胶囊（2026-10-27 站主要求）：档位词本身很短，
                  一枚描边胶囊在这里只是多一层框，而颜色只用来区分档位高低 ——
                  同一列里扫的是「有没有 / 是什么档」，默认文字色足够。
-                 空值用 - 而不是 —：整表其他格用 —，这一格按站主要求单独用 - -->
+                 空值用 - 而不是 —：整表其他格用 —，这一格按站主要求单独用 -。
+             ellipsis（2026-10-27 补）：与渠道/客户端列同一处理 —— 没有它时
+             列宽差 1px 就会让 "medium" 折成两行（实测踩到），有了它最差也是
+             省略号，而档位词很短，正常情况下永远用不到那个省略号。 -->
             <span v-if="record.thinking_level" class="think-level" :title="thinkingTitle(record.thinking_level)">{{ record.thinking_level }}</span>
             <span v-else class="muted" title="请求体里没带思考参数">-</span>
           </template>
@@ -2219,33 +2307,11 @@ onMounted(() => {
           :custom-header-cell="elasticCell"
           :custom-cell="elasticCell"
         />
-        <!-- 操作列与其它列表页同一个写法：28px 图标按钮（.table-icon-btn）。
-             这一列只有一个「详情」，原来是一行文字链接，占 72px 里的大半；
-             换成图标后列收到 64px，表格总宽跟着从 1036 降到 1028。
-             图标按钮没有可见文字，tooltip 与 aria-label 是它的动作名 ——
-             少了这两样，读屏用户只会听到一个没有名字的按钮。
-             tabindex="-1"（2026-10-11）：行本身已经是这张表的键盘入口
-             （roving tabindex + 回车开详情，见 rowProps）。按钮若仍留在 Tab 序里，
-             一页 100 行就是 100 个额外停靠点，「整张表只占一个停靠点」当场作废
-             —— 这一点是代码审查实测出来的（当时表内实测 24 个停靠点）。
-             设成 -1 之后按钮仍可点击、仍能被读屏的虚拟光标读到（aria-label 还在），
-             只是不再参与 Tab 走查：键盘路径由行负责。 -->
-        <a-table-column v-if="colShown.action" title="操作" :width="colW.action" fixed="right">
-          <template #default="{ record }">
-            <a-tooltip title="调用详情：报文、错误原文与链路">
-              <a-button
-                class="table-icon-btn"
-                type="text"
-                size="small"
-                tabindex="-1"
-                aria-label="查看这次调用的详情"
-                @click="openDetail(record)"
-              >
-                <ProfileOutlined />
-              </a-button>
-            </a-tooltip>
-          </template>
-        </a-table-column>
+        <!-- 操作列已于 2026-10-27 移除（站主要求）：打开详情的入口改为
+             直接点行（见 rowProps 的 onClick）。行本身从 2026-10-11 起就是
+             这张表的键盘入口（roving tabindex + 回车），鼠标原先是唯一的
+             「必须瞄准一个 28px 按钮」的动作 —— 现在两者统一到行上。
+             缓存好处的顺带一条：省下 64px 宽度，窄屏能多留一列。 -->
         </a-table>
       </div>
 
@@ -2877,6 +2943,12 @@ onMounted(() => {
    所以可以直接量它本身（.think-pill / .think-text 那两层已不存在）。 */
 .think-level {
   display: inline;
+  /* 绝不折行：档位词是**原子内容**，"medium" 折成 "mediu / m" 会被读成
+     两个东西。列宽算得再准也可能差 1px（字体渲染、字距、浏览器取整），
+     nowrap 让那种误差表现为「溢出后被 ellipsis 截断」而不是「折行」——
+     前者至少还是一个词，后者直接变成错的信息。
+     与速度列 .spd-cell、渠道列 .chan-text 等同一处理。 */
+  white-space: nowrap;
 }
 
 /* ---- 状态徽标（2026-09-27 感官升级）----

@@ -8,9 +8,10 @@
 //
 // 约定：本模块不碰 DOM、不碰 Vue 响应式 —— 那是组件那一层的事。
 
-/** 日志表的 12 列（顺序即渲染顺序） */
+/** 日志表的 11 列（顺序即渲染顺序）。
+ *  操作列 2026-10-27 移除：打开详情的入口改为点行（见 RequestLogPanel.rowProps）。 */
 export const COL_KEYS = [
-  'time', 'model', 'thinking', 'channel', 'tokens', 'elapsed', 'cost', 'speed', 'status', 'key', 'client', 'action'
+  'time', 'model', 'thinking', 'channel', 'tokens', 'elapsed', 'cost', 'speed', 'status', 'key', 'client'
 ] as const
 export type ColKey = (typeof COL_KEYS)[number]
 
@@ -27,13 +28,14 @@ export const COL_LABELS: Record<ColKey, string> = {
   speed: '速度',
   status: '状态',
   key: '密钥',
-  client: '客户端',
-  action: '操作'
+  client: '客户端'
 }
 
-/** 不允许隐藏的列：请求时间是行的身份，操作是打开详情的唯一入口。
- *  两者都能关掉的话，用户会得到一张「看不出这行是什么、也点不开」的表。 */
-export const COL_LOCKED: readonly ColKey[] = ['time', 'action']
+/** 不允许隐藏的列：请求时间是行的身份（看不出这行是什么的表没有意义）。
+ *
+ *  原来还锁着「操作」（它是打开详情的唯一入口），2026-10-27 操作列移除后
+ *  入口变成「点行」，所以只剩请求时间一列需要锁。 */
+export const COL_LOCKED: readonly ColKey[] = ['time']
 
 /** 单元格左右内边距（antd 小表格 8+8）与右侧呼吸余量（给省略号与边框）。
  *  内容宽要加这一组才是「列需要的宽」；下限的加法必须与测量同一套
@@ -44,11 +46,11 @@ export const CELL_BREATH = 6
 /**
  * 宽屏余量分摊的**权重**（2026-09-27 感官升级）。
  *
- * 等额分摊（每列 +leftover/10）对短列是浪费：status / action 两列是
- * COL_BOUNDS 里写死的固定宽（[64,64]），内容是一枚胶囊、一个图标按钮，
- * 拉宽它们只会让一枚小胶囊周围空出一圈，而最需要宽度的模型/渠道/密钥
+ * 等额分摊（每列 +leftover/10）对短列是浪费：status 是
+ * COL_BOUNDS 里写死的固定宽（[64,64]），内容是一枚胶囊，
+ * 拉宽它只会让一枚小胶囊周围空出一圈，而最需要宽度的模型/渠道/密钥
  * 三列（唯一会 ellipsis 截断的三列）只多拿到同样的一份。于是改为加权：
- *   · 固定窄列（status / action）份额为 0 —— 永远按声明宽渲染；
+ *   · 固定窄列（status）份额为 0 —— 永远按声明宽渲染；
  *   · 三个会截断的长文本列（model / channel / key）权重 ×2；
  *   · 其余数值列权重 1。
  *
@@ -73,11 +75,11 @@ export const DISTRIBUTE_WEIGHT: Record<ColKey, number> = {
   speed: 1,
   status: 0,
   key: 2,
-  client: 1,
-  action: 0
+  client: 1
 }
 
-/** 全表的 Σw（12 = 3×2 + 5×1 + 4×0）。
+/** 全表的 Σw（当前 12 = 3×2 + 6×1 + 2×0；操作列移除前是同样的 12 ——
+ *  它权重为 0，删掉不改变和，但列数从 12 变 11）。
  *
  *  注意它不再直接参与分摊：allocateWidths 现在按**传入的列子集**现算 Σw
  *  （列显隐会关掉几列，分母必须跟着变）。这条常量留下是为了让
