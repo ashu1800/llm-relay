@@ -1475,9 +1475,27 @@ a:hover { opacity: 0.85; }
  * 会随实时推送跳变，不等宽就会左右抖），所以这里不重复声明。 */
 .ant-table-thead > tr > th,
 .ant-table-tbody > tr > td,
-.ant-tag {
-  font-variant-numeric: tabular-nums;
+.ant-tag,
+.tabular-nums {
+  font-variant-numeric: tabular-nums lining-nums;
 }
+
+.num-dim,
+.num-tail {
+  opacity: 0.52;
+}
+
+/* 弹窗与抽屉立体倒角高光与环境闭塞遮挡 */
+.ant-modal-content,
+.ant-drawer-content {
+  background: var(--color-fg) !important;
+  color: var(--color-text) !important;
+  border: 1px solid var(--color-border);
+  box-shadow: inset 0 1px 0 0 color-mix(in oklab, var(--color-fg) 75%, white 25%),
+              0 12px 32px -4px rgba(0, 0, 0, 0.25),
+              0 4px 16px -2px rgba(0, 0, 0, 0.15) !important;
+}
+
 
 /* 弹窗内容区自己滚，标题栏与按钮栏始终留在视口里。
    表单类弹窗（新建渠道那类是十段纵向表单）会一路长到屏幕外面去：

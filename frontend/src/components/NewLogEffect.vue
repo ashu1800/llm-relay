@@ -218,6 +218,7 @@ const stardust = computed(() => {
      起手看不见、收尾也在行外消失 */
   background-size: 30% 100%;
   background-position-x: -50%;
+  filter: drop-shadow(0 0 5px color-mix(in oklab, var(--color-primary) 55%, #ffa940));
   /* 匀速，并且**不要**换成 --ease-expo：那个曲线 0.3 秒就走完了全程，
      剩下的时间停在右端不动，观感是「闪一下」而不是「扫过 2 秒」。
      这里的时长本身就是需求（约 2s），不是「快点响应」那类过渡。 */

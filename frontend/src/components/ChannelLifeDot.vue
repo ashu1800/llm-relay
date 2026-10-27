@@ -103,6 +103,8 @@ const tip = computed(() => {
     :style="{ width: size + 'px', height: size + 'px' }"
     :title="tip"
   >
+    <!-- 正常态声呐脉冲环（方案 7：生命力刻度） -->
+    <span v-if="state === 'ok'" class="sonar-wave" aria-hidden="true" />
     <svg v-if="state === 'cooling'" class="ring" viewBox="0 0 20 20" aria-hidden="true">
       <circle class="ring-bg" cx="10" cy="10" :r="R" />
       <circle
@@ -130,10 +132,36 @@ const tip = computed(() => {
   width: 100%;
   height: 100%;
   border-radius: 50%;
+  position: relative;
+  z-index: 1;
 }
 
-/* 正常：绿点慢呼吸。呼吸而不是常亮 —— 常亮的绿点看两天就「隐形」了，
-   节奏感让它持续留在余光里 */
+/* 正常：声呐脉冲波扩散 + 绿点慢呼吸 */
+.sonar-wave {
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  border: 1px solid var(--color-green);
+  opacity: 0;
+  animation: sonar-ripple 3.2s cubic-bezier(0.1, 0.8, 0.3, 1) infinite;
+  pointer-events: none;
+}
+
+@keyframes sonar-ripple {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.8;
+  }
+  60% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
 .life-dot.ok .dot {
   background: var(--color-green);
   animation: life-breathe 3.2s ease-in-out infinite;
@@ -176,6 +204,7 @@ const tip = computed(() => {
 }
 .ring-fg {
   stroke: var(--color-orange);
+  filter: drop-shadow(0 0 2.5px color-mix(in oklab, var(--color-orange) 80%, transparent));
 }
 
 @keyframes life-breathe {

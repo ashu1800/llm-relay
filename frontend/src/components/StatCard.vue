@@ -96,6 +96,25 @@ onUnmounted(() => {
     <div v-if="slots.suffix" class="summary-suffix">
       <slot name="suffix" />
     </div>
+
+    <!-- 极轻平视微火花线与精密刻度网格（方案 2） -->
+    <div class="summary-ambient-hud" aria-hidden="true">
+      <svg class="hud-svg" viewBox="0 0 160 60" preserveAspectRatio="none" fill="none">
+        <path
+          d="M0 48 Q 20 48, 35 40 T 70 34 T 105 18 T 135 22 T 160 8"
+          stroke="var(--tone-color)"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+        <path
+          d="M0 48 Q 20 48, 35 40 T 70 34 T 105 18 T 135 22 T 160 8 L 160 60 L 0 60 Z"
+          fill="var(--tone-color)"
+          opacity="0.12"
+        />
+      </svg>
+      <div class="hud-reticle" />
+    </div>
   </article>
 </template>
 
@@ -127,7 +146,50 @@ onUnmounted(() => {
   background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--tone-color) 45%, transparent), transparent);
   opacity: 0.6;
   pointer-events: none;
+  transition: opacity 0.25s ease, height 0.25s ease;
 }
+
+.summary-card:hover::before {
+  opacity: 1;
+  height: 2.5px;
+}
+
+/* 极轻微平视火花线底纹（HUD Ambient Sparkline） */
+.summary-ambient-hud {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 140px;
+  height: 52px;
+  pointer-events: none;
+  opacity: 0.28;
+  transition: opacity 0.25s ease, transform 0.25s cubic-bezier(0.2, 1, 0.3, 1);
+  overflow: hidden;
+  z-index: 0;
+}
+
+.summary-card:hover .summary-ambient-hud {
+  opacity: 0.55;
+  transform: scale(1.04);
+}
+
+.hud-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.hud-reticle {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  width: 5px;
+  height: 5px;
+  border-top: 1px solid var(--tone-color);
+  border-right: 1px solid var(--tone-color);
+  opacity: 0.65;
+}
+
 
 /* hover 阴影走主题令牌（--card-hover-shadow）：浅色族是两段投影，
    深色族换成「白描边 + 更重的投影」—— 深色下投影几乎看不见，
@@ -169,7 +231,11 @@ onUnmounted(() => {
   background: var(--tone-bg);
 }
 
-.summary-body { min-width: 0; }
+.summary-body {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+}
 
 .summary-label {
   font-size: var(--font-size-base);
@@ -236,6 +302,8 @@ onUnmounted(() => {
 /* 右侧附加区。色调变量（--tone-*）定义在卡片根上，
    这里的控件（如格式切换按钮）直接继承本卡的色调体系 */
 .summary-suffix {
+  position: relative;
+  z-index: 1;
   margin-left: auto;
   align-self: center;
   flex: 0 0 auto;

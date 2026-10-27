@@ -26,8 +26,13 @@ func (s *Server) getSettings(c *gin.Context) {
 	var counts struct {
 		Logs     int64 `json:"logs"`
 		Payloads int64 `json:"payloads"`
-		// Priced 是「已配价的渠道模型条数」：价格表下线后，最能说明
-		// 「定价配置是否完整」的就是它，而模型总数另有 models 一项
+		// Priced 是「已定价的模型数」，取自 model_prices 的行数。
+		//
+		// 曾经统计的是 channel_models 上四档单价非 0 的白名单行数。2026-10-27
+		// 单价迁到模型级时，store.migratePricesToModelLevel 把那四列 DROP 掉了，
+		// 这条 SQL 没跟着改 —— 升级后的库上整个接口直接 500（实测：
+		// `column "input_per1_m" does not exist`），系统设置页整页打不开。
+		// 现在与「模型定价」页同一个口径：有 model_prices 行就是定了价。
 		Priced   int64 `json:"priced"`
 		Channels int64 `json:"channels"`
 		Models   int64 `json:"models"`
@@ -36,9 +41,7 @@ func (s *Server) getSettings(c *gin.Context) {
 	if err := db.Raw(`SELECT
 		(SELECT COUNT(*) FROM request_logs)::bigint AS logs,
 		(SELECT COUNT(*) FROM request_payloads)::bigint AS payloads,
-		(SELECT COUNT(*) FROM channel_models
-			WHERE input_per1_m <> 0 OR output_per1_m <> 0
-			   OR cache_read_per1_m <> 0 OR cache_write_per1_m <> 0)::bigint AS priced,
+		(SELECT COUNT(*) FROM model_prices)::bigint AS priced,
 		(SELECT COUNT(*) FROM channels)::bigint AS channels,
 		(SELECT COUNT(DISTINCT public_name) FROM channel_models WHERE enabled = true)::bigint AS models,
 		(SELECT COUNT(*) FROM api_keys)::bigint AS keys`).Scan(&counts).Error; err != nil {

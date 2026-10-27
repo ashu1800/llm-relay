@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { amountText, costText, moneyText } from './money'
+import { amountText, costText, moneyText, splitCostParts } from './money'
 
 // 金额展示规则。这个文件此前没有测试，而它是全站唯一一份小数位规则 ——
 // 看板、日志列表、日志详情、价格试算都走它。规则悄悄变了的表现是
@@ -75,3 +75,18 @@ describe('moneyText', () => {
     expect(moneyText('12.5', 'USD')).toBe('$12.5000')
   })
 })
+
+describe('splitCostParts 阶梯拆解', () => {
+  it('拆解四位小数', () => {
+    expect(splitCostParts('$12.3456')).toEqual({ head: '$12.34', tail: '56' })
+    expect(splitCostParts('¥0.0038')).toEqual({ head: '¥0.00', tail: '38' })
+  })
+
+  it('不足两位小数或无小数时不拆分 tail', () => {
+    expect(splitCostParts('$12.3')).toEqual({ head: '$12.3', tail: '' })
+    expect(splitCostParts('¥10')).toEqual({ head: '¥10', tail: '' })
+    expect(splitCostParts('-')).toEqual({ head: '-', tail: '' })
+    expect(splitCostParts('')).toEqual({ head: '-', tail: '' })
+  })
+})
+

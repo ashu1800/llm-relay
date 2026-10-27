@@ -41,7 +41,7 @@ import { onLive, createThrottledLiveReloader, liveConnected } from '@/composable
 import { useCopyFeedback } from '@/composables/useCopyFeedback'
 import NewLogEffect, { type FxTarget } from '@/components/NewLogEffect.vue'
 import { useLogFxStore } from '@/stores/logFx'
-import { costText, symbolOf } from '@/utils/money'
+import { costText, splitCostParts, symbolOf } from '@/utils/money'
 import { writeClipboard } from '@/utils/clipboard'
 import { fmtTime, fmtTimeCompact, pad2 } from '@/utils/fmtTime'
 import { modalWidth } from '@/utils/modalWidth'
@@ -766,9 +766,14 @@ function thinkingTitle(level: string) {
 // 能被认出是同一类状态标记，而不是模型名的一部分。
 const FALLBACK_COLOR = '#722ed1'
 
-/** 行的 class 由「是否刚新增」决定；antd 在它自己的渲染里调用它，读到的依赖归它 */
-function rowClassName(record: RequestLog) {
-  return freshIds.value.has(record.id) ? 'is-new' : ''
+/** 行的 class 由「是否刚新增」与「键盘穿梭活动行」决定；antd 在它自己的渲染里调用它 */
+function rowClassName(record: RequestLog, index: number) {
+  const isNew = freshIds.value.has(record.id)
+  const isActive = activeRowIndex.value === index
+  if (isNew && isActive) return 'is-new is-active-row'
+  if (isNew) return 'is-new'
+  if (isActive) return 'is-active-row'
+  return ''
 }
 
 // 分页是本面板自己的状态：翻页不该惊动看板上方那些卡片
@@ -949,6 +954,17 @@ async function copyCurl() {
     message.warning('复制失败，请手动选择复制')
   }
 }
+
+/** 终端复现测试台代码文本 */
+const terminalCurlSnippet = computed(() => {
+  if (!current.value) return ''
+  return buildCurlCommand({
+    origin: window.location.origin,
+    protocol: current.value.inbound_protocol || 'openai-chat',
+    model: current.value.model_requested || '',
+    body: ''
+  })
+})
 
 /**
  * 抽屉里另外四个「要拿去别处用」的字段（2026-10-11 补）：渠道名 / 密钥名 /
@@ -1253,19 +1269,28 @@ function rowProps(record: RequestLog, index: number) {
       activeRowIndex.value = index
     },
     onKeydown: (e: KeyboardEvent) => {
-      if (e.key === 'Enter') {
+      const isInput = e.target instanceof HTMLElement && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)
+      if (isInput) return
+      if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault()
         openDetail(record)
         return
       }
-      if (e.key === 'ArrowDown') {
+      if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault()
         void focusRowAt(index + 1)
         return
       }
-      if (e.key === 'ArrowUp') {
+      if (e.key === 'ArrowUp' || e.key === 'k') {
         e.preventDefault()
         void focusRowAt(index - 1)
+        return
+      }
+      if (e.key === 'c' && !e.metaKey && !e.ctrlKey && record.trace_id) {
+        e.preventDefault()
+        void writeClipboard(record.trace_id).then(() => {
+          message.success('已复制 Trace ID')
+        })
       }
     }
   }
@@ -2219,7 +2244,7 @@ onMounted(() => {
                  必须是普通 inline —— inline-block 会改变单元格行高
                  （ui-spec 第 10 条实测 41px → 49px），而 inline 盒子的
                  rect 宽度恰好就是文本自身的宽度。 -->
-            <span class="txt-cell">{{ fmtCost(record.estimated_cost, record.cost_currency) }}</span>
+            <span class="txt-cell tabular-nums"><template v-if="splitCostParts(fmtCost(record.estimated_cost, record.cost_currency)).tail">{{ splitCostParts(fmtCost(record.estimated_cost, record.cost_currency)).head }}<span class="num-tail">{{ splitCostParts(fmtCost(record.estimated_cost, record.cost_currency)).tail }}</span></template><template v-else>{{ fmtCost(record.estimated_cost, record.cost_currency) }}</template></span>
           </template>
         </a-table-column>
         <!-- 速度列：每秒词元输出速度。只有一个含义 —— 输出词元 ÷ 首字后生成时段
@@ -2402,8 +2427,18 @@ onMounted(() => {
           <span v-if="current.thinking_level" class="think-pill" :style="{ '--pill-color': thinkingColor(current.thinking_level) }">{{ current.thinking_level }}</span>
           <template v-else>-</template>
         </a-descriptions-item>
-        <a-descriptions-item label="入站 → 出站协议">
-          {{ current.inbound_protocol }} → {{ current.upstream_protocol || '-' }}
+        <a-descriptions-item label="协议转译流">
+          <div class="proto-flow">
+            <span class="proto-badge in">{{ current.inbound_protocol || 'openai-chat' }}</span>
+            <span class="proto-arrow">➔</span>
+            <span class="proto-badge up">{{ current.upstream_protocol || current.inbound_protocol || 'openai-chat' }}</span>
+            <span v-if="current.inbound_protocol !== current.upstream_protocol && current.upstream_protocol" class="proto-tag is-trans">
+              协议转译
+            </span>
+            <span v-else class="proto-tag is-direct">
+              原协议直通
+            </span>
+          </div>
         </a-descriptions-item>
         <a-descriptions-item label="流式">{{ current.stream ? '是' : '否' }}</a-descriptions-item>
         <a-descriptions-item label="词元明细">
@@ -2566,6 +2601,22 @@ onMounted(() => {
           </div>
           <pre class="err-box">{{ current.error }}</pre>
         </a-descriptions-item>
+        <a-descriptions-item label="终端复现">
+          <div class="terminal-box">
+            <div class="terminal-bar">
+              <span class="term-dots" aria-hidden="true">
+                <i class="dot-red" /><i class="dot-yellow" /><i class="dot-green" />
+              </span>
+              <span class="term-title">cURL Instant Reproduction</span>
+              <a-button type="text" size="small" class="term-copy" @click="copyCurl">
+                <CheckOutlined v-if="copiedWhat === 'curl'" class="trace-copy-ok" />
+                <CopyOutlined v-else />
+                <span>{{ copiedWhat === 'curl' ? '已复制' : '复制' }}</span>
+              </a-button>
+            </div>
+            <pre class="terminal-code"><code>{{ terminalCurlSnippet }}</code></pre>
+          </div>
+        </a-descriptions-item>
       </a-descriptions>
 
     </a-drawer>
@@ -2704,6 +2755,7 @@ onMounted(() => {
   left: 0;
   border-radius: 3px;
   background: currentColor;
+  box-shadow: 0 0 6px color-mix(in oklab, currentColor 55%, transparent);
   /* 条长变化时的过渡：翻到上一条/下一条日志时比例条平滑重排 */
   transition: width 0.3s var(--ease-expo);
 }
@@ -2855,6 +2907,7 @@ onMounted(() => {
 .dur-bar i {
   background: currentColor;
   border-radius: 2px;
+  box-shadow: 0 0 4px currentColor;
 }
 .dur-line {
   grid-column: 2;
@@ -3072,6 +3125,117 @@ onMounted(() => {
   color: var(--text-red);
 }
 
+/* ---- 协议转译流（方案 6） ---- */
+.proto-flow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: var(--font-size-sm);
+}
+
+.proto-badge {
+  padding: 1px 7px;
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--color-border) 45%, transparent);
+  border: 1px solid var(--color-border);
+  font-family: var(--font-family-mono);
+  color: var(--color-text);
+}
+
+.proto-badge.in {
+  border-color: color-mix(in oklab, var(--color-primary) 35%, var(--color-border));
+}
+
+.proto-arrow {
+  color: var(--text-primary-ink);
+  font-size: var(--font-size-2xs);
+}
+
+.proto-tag {
+  font-size: var(--font-size-2xs);
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+
+.proto-tag.is-trans {
+  background: color-mix(in oklab, var(--color-orange) 15%, transparent);
+  color: var(--text-amber);
+  border: 1px solid color-mix(in oklab, var(--color-orange) 30%, transparent);
+}
+
+.proto-tag.is-direct {
+  background: color-mix(in oklab, var(--color-green) 12%, transparent);
+  color: var(--text-green);
+  border: 1px solid color-mix(in oklab, var(--color-green) 25%, transparent);
+}
+
+/* ---- 终端复现测试台（方案 6） ---- */
+.terminal-box {
+  margin-top: 4px;
+  border-radius: var(--radius-control);
+  background: #14161b;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+
+.terminal-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  background: #1c1f26;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.term-dots {
+  display: inline-flex;
+  gap: 5px;
+}
+
+.term-dots i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.dot-red { background: #ff5f56; }
+.dot-yellow { background: #ffbd2e; }
+.dot-green { background: #27c93f; }
+
+.term-title {
+  font-size: var(--font-size-xs);
+  font-family: var(--font-family-mono);
+  color: rgba(255, 255, 255, 0.6);
+  flex: 1;
+}
+
+.term-copy {
+  color: rgba(255, 255, 255, 0.75) !important;
+  font-size: var(--font-size-xs);
+  padding: 0 4px;
+  height: 20px;
+}
+
+.term-copy:hover {
+  color: #ffffff !important;
+}
+
+.terminal-code {
+  margin: 0;
+  padding: 8px 10px;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+  color: #73d13d;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
 /* 失败链路（retry_trail）：每次失败尝试一行 —— 渠道、状态码、错误摘要、
    该次消耗。序号与状态码用次要色的小标签形态：它们是索引信息不是正文 */
 .trail-list {
@@ -3184,6 +3348,13 @@ onMounted(() => {
 .log-table :deep(tr[data-row-key]:focus-visible) {
   outline: var(--focus-ring) !important;
   outline-offset: -2px !important;
+}
+
+/* 键盘穿梭活动行聚光灯（方案 9：Vim 穿梭与环境聚光灯） */
+.log-table :deep(tr.is-active-row > td) {
+  background: color-mix(in oklab, var(--color-primary) 8%, var(--color-fg)) !important;
+  box-shadow: inset 0 1px 0 color-mix(in oklab, var(--color-primary) 32%, transparent),
+              inset 0 -1px 0 color-mix(in oklab, var(--color-primary) 32%, transparent);
 }
 
 /* 抽屉里的字段复制按钮：与列表操作列同一枚 .table-icon-btn，只把左边距收紧

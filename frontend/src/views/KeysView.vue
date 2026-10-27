@@ -793,16 +793,21 @@ onUnmounted(() => {
             <div class="route-summary">
               <div v-for="entry in routeSummary(record)" :key="entry.model" class="route-line">
                 <ModelTag :name="entry.model" />
-                <span class="route-arrow">→</span>
+                <span class="route-arrow">➔</span>
                 <span v-if="!entry.channels.length" class="route-missing">未配置渠道</span>
-                <template v-else>
-                  <span
-                    v-for="(cid, i) in entry.channels"
-                    :key="cid"
-                    class="route-channel"
-                    :class="{ 'is-missing': !channels.some((c) => c.id === cid) }"
-                  >{{ i > 0 ? '›' : '' }}{{ i > 0 ? ' ' : '' }}{{ channelLabelOf(cid) }}</span>
-                </template>
+                <div v-else class="route-pipeline">
+                  <template v-for="(cid, i) in entry.channels" :key="cid">
+                    <span v-if="i > 0" class="pipe-arrow">›</span>
+                    <span
+                      class="route-channel-node"
+                      :class="{ 'is-missing': !channels.some((c) => c.id === cid) }"
+                      :title="'优先级 #' + (i + 1) + '：' + channelLabelOf(cid)"
+                    >
+                      <span class="node-idx">{{ i + 1 }}</span>
+                      {{ channelLabelOf(cid) }}
+                    </span>
+                  </template>
+                </div>
               </div>
             </div>
           </template>
@@ -1128,16 +1133,41 @@ onUnmounted(() => {
   .key-copy { opacity: 0.75; }
 }
 
-/* ---- 模型路由：列表摘要列 ----
-   每个模型一行：模型胶囊 + 「→」+ 有序渠道名（› 分隔）。 */
-.route-summary { display: flex; flex-direction: column; gap: 3px; }
+/* ---- 模型路由：列表摘要列（方案 3：流道管道与拓扑） ---- */
+.route-summary { display: flex; flex-direction: column; gap: 4px; }
 .route-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; min-width: 0; }
-.route-arrow { color: var(--color-text-secondary); font-size: var(--font-size-sm); }
-.route-channel { font-size: var(--font-size-sm); color: var(--color-text-secondary); }
-/* 渠道已删的占位：引用失效会让该模型的候选少一条，必须能看出来 */
-.route-channel.is-missing, .route-missing {
+.route-arrow { color: var(--text-primary-ink); font-size: var(--font-size-xs); opacity: 0.8; }
+.route-pipeline { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.pipe-arrow { color: var(--color-text-secondary); font-size: var(--font-size-xs); opacity: 0.6; }
+.route-channel-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px 1px 4px;
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--color-border) 35%, transparent);
+  border: 1px solid var(--color-border);
+  font-size: var(--font-size-xs);
+  color: var(--color-text);
+  transition: all 0.2s var(--ease-expo);
+}
+.route-channel-node:hover {
+  border-color: var(--color-primary);
+  background: color-mix(in oklab, var(--color-primary) 10%, transparent);
+  transform: translateY(-1px);
+}
+.route-channel-node .node-idx {
+  font-size: var(--font-size-2xs);
+  font-family: var(--font-family-mono);
+  background: color-mix(in oklab, var(--color-text) 12%, transparent);
+  border-radius: 2px;
+  padding: 0 3px;
+  color: var(--color-text-secondary);
+}
+.route-channel-node.is-missing, .route-missing {
   color: var(--text-red);
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-xs);
+  border-color: color-mix(in oklab, var(--color-red) 30%, var(--color-border));
 }
 
 /* ---- 模型路由编辑器（弹窗内）----

@@ -43,10 +43,16 @@ defineProps<{
       aria-hidden="true"
       focusable="false"
     >
+      <!-- 电气工程美学待命参考线与网格（方案 10） -->
+      <g class="es-grid">
+        <line x1="8" y1="56" x2="20" y2="56" stroke-dasharray="2 3" />
+        <line x1="76" y1="56" x2="88" y2="56" stroke-dasharray="2 3" />
+        <path d="M48 4v6 M45 7h6" />
+      </g>
       <g class="es-line">
         <path d="M20 42h56v14a4 4 0 0 1-4 4H24a4 4 0 0 1-4-4z" />
         <path d="M20 42h14l4 6h20l4-6h14" />
-        <path d="M48 12v20" />
+        <path d="M48 14v18" />
       </g>
       <g class="es-accent">
         <path d="M42 26l6 6 6-6" />
@@ -78,6 +84,21 @@ defineProps<{
 .es-art {
   color: color-mix(in oklab, var(--color-text) 30%, transparent);
   display: block;
+  animation: es-breathe 4.5s ease-in-out infinite;
+}
+
+.es-grid {
+  opacity: 0.6;
+  stroke: color-mix(in oklab, var(--color-text) 22%, transparent);
+}
+
+@keyframes es-breathe {
+  0%, 100% {
+    filter: drop-shadow(0 0 0 transparent);
+  }
+  50% {
+    filter: drop-shadow(0 2px 10px color-mix(in oklab, var(--color-primary) 18%, transparent));
+  }
 }
 
 /* 点缀（箭头）用主色：全站只有主色是「有指向性」的颜色。

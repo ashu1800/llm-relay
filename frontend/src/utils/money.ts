@@ -107,3 +107,31 @@ export function costsText(costs?: Record<string, string> | null, sep = ' / '): s
     .map((c) => moneyText(map[c], c))
     .join(sep)
 }
+
+export type CostParts = {
+  head: string
+  tail: string
+}
+
+/**
+ * 将费用文本拆解为两段：主体部分（符号+整数+前两位小数）与尾部细微小数（后两位或更多）。
+ * 供阶梯排印（Hierarchical Typography）降低视觉信噪比。
+ * 样例：
+ *   '$12.3456' -> { head: '$12.34', tail: '56' }
+ *   '¥0.0038'  -> { head: '¥0.00', tail: '38' }
+ *   '¥0.00'    -> { head: '¥0.00', tail: '' }
+ *   '-'        -> { head: '-', tail: '' }
+ */
+export function splitCostParts(text: string): CostParts {
+  if (!text || text === '-') return { head: text || '-', tail: '' }
+  const dotIndex = text.indexOf('.')
+  if (dotIndex === -1) return { head: text, tail: '' }
+  const splitIdx = dotIndex + 3
+  if (text.length <= splitIdx) {
+    return { head: text, tail: '' }
+  }
+  return {
+    head: text.slice(0, splitIdx),
+    tail: text.slice(splitIdx)
+  }
+}
