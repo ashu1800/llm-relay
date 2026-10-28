@@ -378,7 +378,8 @@ onMounted(load)
           </a-table-column>
           <a-table-column title="协议" :width="80">
             <template #default="{ record }">
-              <span class="proto-shield" :class="'is-' + record.protocol">
+              <span class="proto-shield" :class="['is-' + record.protocol, { 'is-testing': testing === record.id }]">
+                <span class="proto-dot" aria-hidden="true" />
                 {{ record.protocol.toUpperCase() }}
               </span>
             </template>
@@ -584,27 +585,54 @@ onMounted(load)
 }
 .disabled { color: var(--color-text-secondary); cursor: not-allowed; }
 
-/* ---- 协议盾牌与跳点时延（方案 2） ---- */
+/* ---- 协议盾牌与跳点时延（方案 2 & 方案 5） ---- */
 .proto-shield {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-family: var(--font-family-mono);
   font-size: var(--font-size-2xs);
   font-weight: 600;
   padding: 1px 6px;
   border-radius: var(--radius-control);
   border: 1px solid var(--color-border);
+  transition: all 0.2s ease;
+}
+
+.proto-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.85;
 }
 
 .proto-shield.is-socks5 {
-  background: color-mix(in oklab, var(--color-blue) 15%, transparent);
+  background: color-mix(in oklab, var(--color-green) 12%, transparent);
+  color: var(--text-green);
+  border-color: color-mix(in oklab, var(--color-green) 30%, transparent);
+}
+
+.proto-shield.is-http {
+  background: color-mix(in oklab, var(--color-orange) 12%, transparent);
+  color: var(--text-amber);
+  border-color: color-mix(in oklab, var(--color-orange) 30%, transparent);
+}
+
+.proto-shield.is-https {
+  background: color-mix(in oklab, var(--color-blue) 12%, transparent);
   color: var(--text-blue);
   border-color: color-mix(in oklab, var(--color-blue) 30%, transparent);
 }
 
-.proto-shield.is-http {
-  background: color-mix(in oklab, var(--color-orange) 15%, transparent);
-  color: var(--text-amber);
-  border-color: color-mix(in oklab, var(--color-orange) 30%, transparent);
+.proto-shield.is-testing {
+  animation: proto-ping-pulse 0.8s infinite alternate ease-in-out;
+  box-shadow: 0 0 8px currentColor;
+}
+
+@keyframes proto-ping-pulse {
+  0% { transform: scale(0.96); opacity: 0.7; }
+  100% { transform: scale(1.05); opacity: 1; }
 }
 
 .addr-capsule {

@@ -218,6 +218,14 @@ const keyFilterLabel = computed(() => selectedLabel(keyOptions.value, keyFilter.
 const channelFilterLabel = computed(() => selectedLabel(channelOptions.value, channelFilter.value))
 const modelFilterLabel = computed(() => selectedLabel(modelOptions.value, modelFilter.value))
 
+// 当前时段负荷状态（方案 7）：根据系统当前时刻判断业务高峰/谷时
+const currentFlux = computed<'peak' | 'offpeak' | 'normal'>(() => {
+  const h = new Date().getHours()
+  if (h >= 9 && h < 19) return 'peak'
+  if (h >= 0 && h < 7) return 'offpeak'
+  return 'normal'
+})
+
 // syncFilters 把下级筛选夹回合法值：换了渠道，原来选的模型可能已不在候选里。
 // 不夹的话查询条件会停在一个空集合上（列表恒为 0 条、卡片全是 0），
 // 而界面上看不出原因。
@@ -858,6 +866,7 @@ onMounted(async () => {
       tone="orange"
       :hint="costHint"
       :flash="costFlash"
+      :flux="currentFlux"
     >
       <template #value>
         <AnimatedNumber :value="costValue" format="money" :currency="costCur" />

@@ -15,7 +15,11 @@ import {
   SearchOutlined,
   ArrowUpOutlined,
   ArrowDownOutlined,
-  CloseOutlined
+  CloseOutlined,
+  EyeOutlined,
+  EyeInvisibleOutlined,
+  VerticalAlignTopOutlined,
+  ThunderboltOutlined
 } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import { useFormValidate } from '@/composables/useFormValidate'
@@ -389,6 +393,7 @@ function openCreate() {
   editing.value = null
   blankForm()
   createdKey.value = ''
+  createdRevealed.value = false
   modalOpen.value = true
   dirty.markClean()
 }
@@ -452,6 +457,69 @@ const routeModalKey = ref<APIKey | null>(null)
 function openRouteModal(record: APIKey) {
   routeModalKey.value = record
   routeModalOpen.value = true
+}
+
+const createdRevealed = ref(false)
+
+function maskedKey(key: string): string {
+  if (!key) return ''
+  const prefix = key.slice(0, 7)
+  return `${prefix}••••••••••••••••••••••••`
+}
+
+const NAME_PRESETS = [
+  '本地 Dev 测试',
+  'Claude Code 专线',
+  'Cherry Studio',
+  'NextChat 网页端',
+  '自动化流水线 CI'
+]
+
+const RPM_PRESETS = [
+  { label: '⚙ 跟随默认 (0)', val: 0 },
+  { label: '∞ 无限制 (-1)', val: -1 },
+  { label: '⚡ 60 RPM', val: 60 },
+  { label: '⚡ 180 RPM', val: 180 },
+  { label: '⚡ 300 RPM', val: 300 }
+]
+
+function autoWireAllRoutes() {
+  let addedCount = 0
+  for (const entry of form.model_entries) {
+    const available = channelOptionsFor(entry.model).map((o) => o.value)
+    for (const cid of available) {
+      if (!entry.channels.includes(cid)) {
+        entry.channels.push(cid)
+        addedCount++
+      }
+    }
+  }
+  if (addedCount > 0) {
+    message.success(`已为 ${form.model_entries.length} 个模型自动装配 ${addedCount} 条推荐渠道`)
+  } else {
+    message.info('当前所有模型已装配全部可用渠道')
+  }
+}
+
+function topChannel(entry: { model: string; channels: number[] }, idx: number) {
+  if (idx <= 0) return
+  const [item] = entry.channels.splice(idx, 1)
+  entry.channels.unshift(item)
+}
+
+const curlSnippet = computed(() => {
+  if (!createdKey.value) return ''
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:8888'
+  const model = form.allowed_models[0] || 'deepseek-r1'
+  return `curl -X POST ${origin}/v1/chat/completions \\
+  -H "Authorization: Bearer ${createdKey.value}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"${model}","messages":[{"role":"user","content":"Hi"}]}'`
+})
+
+async function copyCurlSnippet() {
+  if (await writeClipboard(curlSnippet.value)) markCopied('curl')
+  else message.warning('复制失败')
 }
 
 // 模型白名单的候选只能来自渠道（选项下发），无需去空白去重，
@@ -811,11 +879,11 @@ onUnmounted(() => {
                           <span v-if="i > 0" class="pipe-arrow">›</span>
                           <span
                             class="route-channel-node"
-                            :class="{ 'is-missing': !channels.some((c) => c.id === cid) }"
-                            :title="'优先级 #' + (i + 1) + '：' + channelLabelOf(cid)"
+                            :class="{ 'is-missing': !channels.some((c) => c.id === cid), 'is-primary-route': i === 0 }"
+                            :title="(i === 0 ? '⚡ 首选主路：' : '优先级 #' + (i + 1) + '：') + channelLabelOf(cid)"
                           >
                             <span class="node-grip" aria-hidden="true">⋮</span>
-                            <span class="node-idx">{{ i + 1 }}</span>
+                            <span class="node-idx">{{ i === 0 ? '1' : i + 1 }}</span>
                             {{ channelLabelOf(cid) }}
                           </span>
                         </template>
@@ -895,7 +963,7 @@ onUnmounted(() => {
 
     <a-modal
       v-model:open="modalOpen"
-      :title="title"
+      :title="createdKey ? '密钥创建成功' : title"
       :confirm-loading="saving"
       :width="modalWidth(720)"
       :ok-text="createdKey ? '完成' : '确定'"
@@ -905,24 +973,58 @@ onUnmounted(() => {
       @ok="save"
       @cancel="onCancel"
     >
-      <a-form ref="formRef" :model="form" :rules="formRules" layout="vertical">
+      <!-- 表单编辑区：未创建完成时展示 -->
+      <a-form v-if="!createdKey" ref="formRef" :model="form" :rules="formRules" layout="vertical">
+        <!-- 编辑密钥时的只读身份徽章与安全锁（方案 6） -->
+        <div v-if="editing" class="key-identity-anchor">
+          <span class="key-identity-lock">🔒</span>
+          <span class="key-identity-label">密钥凭据：</span>
+          <code class="key-identity-code mono">{{ editing.key_prefix }}…</code>
+          <span class="key-identity-tag">唯一凭据 · 核心只读</span>
+        </div>
+
         <a-form-item label="名称" name="name">
           <a-input v-model:value="form.name" placeholder="例如 本地客户端" />
+          <!-- 密钥名称场景联想标签（方案 9） -->
+          <div class="name-preset-chips">
+            <button
+              v-for="p in NAME_PRESETS"
+              :key="p"
+              type="button"
+              class="preset-chip"
+              @click="form.name = p"
+            >
+              {{ p }}
+            </button>
+          </div>
         </a-form-item>
+
         <a-form-item label="每分钟请求上限">
           <a-input-number v-model:value="form.rate_limit_rpm" :min="-1" :max="1000000" style="width: 100%" />
+          <!-- RPM 常用预设微胶囊（方案 5） -->
+          <div class="rpm-preset-chips">
+            <button
+              v-for="p in RPM_PRESETS"
+              :key="p.val"
+              type="button"
+              class="preset-chip"
+              :class="{ 'is-active': form.rate_limit_rpm === p.val }"
+              @click="form.rate_limit_rpm = p.val"
+            >
+              {{ p.label }}
+            </button>
+          </div>
           <div class="field-hint">0 表示跟随全局默认；负数表示这把密钥完全不限流。</div>
         </a-form-item>
+
         <a-form-item label="状态">
           <a-switch v-model:checked="form.enabled" />
           <span style="margin-left: 8px; font-size: var(--font-size-sm); color: var(--color-text-secondary)">
             {{ form.enabled ? '启用（客户端可正常鉴权调用）' : '停用（客户端请求将收到 401）' }}
           </span>
         </a-form-item>
+
         <a-form-item label="可调用的模型" required>
-          <!-- 受控多选而不是自由输入的 tags：值只能来自渠道白名单里真实存在的
-               模型 —— 自由输入一个任何渠道都没有的模型名，保存后这把密钥
-               一调用就 403/502，界面上还看不出原因 -->
           <a-select
             v-model:value="form.allowed_models"
             mode="multiple"
@@ -932,12 +1034,22 @@ onUnmounted(() => {
           />
           <div class="field-hint">不选模型无法创建密钥；只有这里选中的模型可以被这把密钥调用。</div>
         </a-form-item>
-        <a-form-item v-if="form.model_entries.length" label="每模型的渠道优先级" required>
-          <!-- 每个选中的模型一个编辑块：上方是有序候选渠道（1 起编，
-               排前面的先被尝试），下方从候选池里追加渠道。
-               用「单选添加 + 上移/下移」而不是 multiple select：优先级是
-               这个表单的核心语义，antd multiple 的值序依赖组件内部的
-               选择顺序维护，不显式 —— 显式按钮排序让顺序永远看得见、改得动 -->
+
+        <a-form-item v-if="form.model_entries.length" required>
+          <template #label>
+            <div class="route-header-bar">
+              <span>每模型的渠道优先级</span>
+              <!-- 一键自动装配全部可用渠道（方案 2） -->
+              <a-button
+                type="link"
+                size="small"
+                class="auto-wire-btn"
+                @click="autoWireAllRoutes"
+              >
+                <ThunderboltOutlined /> 一键装配推荐渠道
+              </a-button>
+            </div>
+          </template>
           <div class="route-editor">
             <div v-for="entry in form.model_entries" :key="entry.model" class="route-entry">
               <div class="route-head">
@@ -949,11 +1061,21 @@ onUnmounted(() => {
                   v-for="(cid, idx) in entry.channels"
                   :key="cid"
                   class="route-item"
+                  :class="{ 'is-primary-route': idx === 0 }"
                   role="listitem"
                 >
-                  <span class="route-idx" aria-hidden="true">{{ idx + 1 }}</span>
+                  <span class="route-idx" aria-hidden="true">{{ idx === 0 ? '⚡ 1' : idx + 1 }}</span>
                   <span class="route-name">{{ channelLabelOf(cid) }}</span>
                   <a-space :size="0">
+                    <!-- 一键置顶为首选主路（方案 7） -->
+                    <a-button
+                      v-if="idx > 0"
+                      type="text"
+                      size="small"
+                      title="置顶为首选主路"
+                      :aria-label="'置顶 ' + channelLabelOf(cid)"
+                      @click="topChannel(entry, idx)"
+                    ><VerticalAlignTopOutlined /></a-button>
                     <a-button
                       type="text"
                       size="small"
@@ -994,26 +1116,58 @@ onUnmounted(() => {
           </div>
           <div class="field-hint">渠道按顺序依次尝试，前面的失败自动换下一条；候选只列白名单里有该模型的启用渠道。</div>
         </a-form-item>
-        <a-form-item label="启用">
-          <a-switch v-model:checked="form.enabled" />
-        </a-form-item>
       </a-form>
 
-      <a-alert
-        v-if="createdKey"
-        type="success"
-        show-icon
-        message="密钥创建成功"
-        description="密钥已保存。以后随时能在列表里悬停查看、点击复制，这里也可以直接复制走。"
-        style="margin-top: 8px"
-      />
-      <div v-if="createdKey" class="key-box">
-        <code>{{ createdKey }}</code>
-        <a-button size="small" @click="copyKey">
-          <CheckOutlined v-if="copiedWhat === 'created'" class="btn-copy-ok" />
-          <CopyOutlined v-else />
-          {{ copiedWhat === 'created' ? '已复制' : '复制' }}
-        </a-button>
+      <!-- 创建成功后：收敛隐藏表单，展示纯粹聚焦的凭据交付舱（方案 3 & 4） -->
+      <div v-else class="created-key-deliverable">
+        <a-alert
+          type="success"
+          show-icon
+          message="密钥创建成功"
+          description="该密钥已安全落库。此明文仅在此刻展示一次，请立即复制并妥善保管。"
+        />
+        <!-- 绝密密码机防窥揭示舱（方案 6） -->
+        <div class="cryptex-reveal-chamber">
+          <div class="cryptex-header">
+            <span class="cryptex-badge">ONE-TIME SECRET VAULT</span>
+            <span class="cryptex-note">一次性凭据 · 阅后即焚</span>
+          </div>
+          <div class="cryptex-body">
+            <code class="cryptex-code mono">
+              {{ createdRevealed ? createdKey : maskedKey(createdKey) }}
+            </code>
+            <div class="cryptex-actions">
+              <a-button
+                type="text"
+                size="small"
+                class="cryptex-eye-btn"
+                :title="createdRevealed ? '点击防窥遮蔽' : '点击揭示明文'"
+                @click="createdRevealed = !createdRevealed"
+              >
+                <EyeInvisibleOutlined v-if="createdRevealed" />
+                <EyeOutlined v-else />
+              </a-button>
+              <a-button type="primary" size="small" class="cryptex-copy-btn" @click="copyKey">
+                <CheckOutlined v-if="copiedWhat === 'created'" class="btn-copy-ok" />
+                <CopyOutlined v-else />
+                {{ copiedWhat === 'created' ? '已复制' : '复制密钥' }}
+              </a-button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 即开即用 cURL 接入测试台（方案 4） -->
+        <div class="curl-test-deck">
+          <div class="curl-deck-head">
+            <span class="curl-deck-title">⚡ 极速接入测试（终端一键运行）</span>
+            <button type="button" class="curl-copy-btn" @click="copyCurlSnippet">
+              <CheckOutlined v-if="copiedWhat === 'curl'" class="btn-copy-ok" />
+              <CopyOutlined v-else />
+              {{ copiedWhat === 'curl' ? '已复制命令' : '复制 cURL' }}
+            </button>
+          </div>
+          <pre class="curl-snippet mono"><code>{{ curlSnippet }}</code></pre>
+        </div>
       </div>
     </a-modal>
 
@@ -1068,11 +1222,11 @@ onUnmounted(() => {
                 <span v-if="i > 0" class="pipe-arrow">›</span>
                 <span
                   class="route-channel-node"
-                  :class="{ 'is-missing': !channels.some((c) => c.id === cid) }"
-                  :title="'优先级 #' + (i + 1) + '：' + channelLabelOf(cid)"
+                  :class="{ 'is-missing': !channels.some((c) => c.id === cid), 'is-primary-route': i === 0 }"
+                  :title="(i === 0 ? '⚡ 首选主路：' : '优先级 #' + (i + 1) + '：') + channelLabelOf(cid)"
                 >
                   <span class="node-grip" aria-hidden="true">⋮</span>
-                  <span class="node-idx">{{ i + 1 }}</span>
+                  <span class="node-idx">{{ i === 0 ? '1' : i + 1 }}</span>
                   {{ channelLabelOf(cid) }}
                 </span>
               </template>
@@ -1431,10 +1585,155 @@ onUnmounted(() => {
   border-color: color-mix(in oklab, var(--color-red) 30%, var(--color-border));
 }
 
-/* ---- 模型路由编辑器（弹窗内）----
-   每个模型一个块：头部（模型 + 计数）、有序列表、追加下拉。
-   序号章是该行的核心信息 —— 它就是故障转移顺序。 */
-.route-editor { display: flex; flex-direction: column; gap: 10px; }
+.route-channel-node.is-primary-route {
+  border-color: color-mix(in oklab, var(--color-orange) 45%, var(--color-border));
+  background: color-mix(in oklab, var(--color-orange) 10%, var(--color-bg));
+}
+.route-channel-node.is-primary-route .node-idx {
+  background: color-mix(in oklab, var(--color-orange) 25%, transparent);
+  color: var(--text-amber);
+  font-weight: 700;
+}
+
+/* ---- 编辑密钥身份锚点（方案 6） ---- */
+.key-identity-anchor {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--color-bg) 70%, var(--color-fg));
+  border: 1px solid var(--color-border);
+  margin-bottom: 14px;
+}
+.key-identity-lock {
+  font-size: var(--font-size-sm);
+}
+.key-identity-label {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+.key-identity-code {
+  font-size: var(--font-size-sm);
+  color: var(--text-primary-ink);
+  font-weight: 600;
+}
+.key-identity-tag {
+  margin-left: auto;
+  font-size: var(--font-size-2xs);
+  font-family: var(--font-family-mono);
+  color: var(--color-text-secondary);
+  background: color-mix(in oklab, var(--color-text-secondary) 15%, transparent);
+  padding: 1px 6px;
+  border-radius: var(--radius-control);
+}
+
+/* ---- 场景微联想与常用 RPM 预设胶囊（方案 5 & 9） ---- */
+.name-preset-chips,
+.rpm-preset-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.preset-chip {
+  padding: 1px 8px;
+  border-radius: var(--radius-control);
+  font-size: var(--font-size-xs);
+  font-family: var(--font-family-base);
+  border: 1px solid var(--color-border);
+  background: color-mix(in oklab, var(--color-bg) 60%, var(--color-fg));
+  color: var(--color-text-secondary);
+  cursor: var(--cursor-hand);
+  transition: all 0.15s ease;
+}
+.preset-chip:hover {
+  border-color: var(--color-primary);
+  color: var(--text-primary-ink);
+  background: var(--color-icon-hover-bg);
+}
+.preset-chip.is-active {
+  border-color: color-mix(in oklab, var(--color-primary) 45%, var(--color-border));
+  background: color-mix(in oklab, var(--color-primary) 14%, transparent);
+  color: var(--text-primary-ink);
+  font-weight: 600;
+}
+
+/* ---- 路由头部栏与一键装配（方案 2） ---- */
+.route-header-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+.auto-wire-btn {
+  padding: 0;
+  height: auto;
+  font-size: var(--font-size-xs);
+}
+
+/* ---- 拓扑编辑区独立限高视窗（方案 10） ---- */
+.route-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 380px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+/* ---- 即开即用 cURL 接入测试台（方案 4） ---- */
+.created-key-deliverable {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.curl-test-deck {
+  border-radius: var(--radius-panel);
+  border: 1px solid var(--color-border);
+  background: color-mix(in oklab, var(--color-bg) 75%, var(--color-fg));
+  overflow: hidden;
+}
+.curl-deck-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: color-mix(in oklab, var(--color-bg) 50%, var(--color-fg));
+  border-bottom: 1px solid var(--color-border);
+}
+.curl-deck-title {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text);
+}
+.curl-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-control);
+  font-size: var(--font-size-xs);
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: var(--cursor-hand);
+  transition: all 0.15s ease;
+}
+.curl-copy-btn:hover {
+  border-color: var(--color-primary);
+  color: var(--text-primary-ink);
+}
+.curl-snippet {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: var(--font-size-xs);
+  line-height: 1.6;
+  color: var(--text-primary-ink);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 .route-entry {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-control);
@@ -1581,6 +1880,60 @@ onUnmounted(() => {
 
 .rpm-symbol {
   font-size: var(--font-size-2xs);
+}
+
+/* ---- 绝密密码机防窥揭示舱（方案 6） ---- */
+.cryptex-reveal-chamber {
+  margin-top: 12px;
+  border-radius: var(--radius-panel);
+  border: 1px solid color-mix(in oklab, var(--color-primary) 35%, var(--color-border));
+  background: color-mix(in oklab, var(--color-primary) 5%, var(--color-bg));
+  overflow: hidden;
+}
+
+.cryptex-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: color-mix(in oklab, var(--color-primary) 10%, transparent);
+  border-bottom: 1px solid color-mix(in oklab, var(--color-primary) 20%, transparent);
+}
+
+.cryptex-badge {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-2xs);
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  color: var(--text-primary-ink);
+}
+
+.cryptex-note {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-secondary);
+}
+
+.cryptex-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.cryptex-code {
+  flex: 1;
+  font-size: var(--font-size-sm);
+  color: var(--text-primary-ink);
+  word-break: break-all;
+  user-select: all;
+}
+
+.cryptex-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
 }
 </style>
 

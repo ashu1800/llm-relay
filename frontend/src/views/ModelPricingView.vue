@@ -5,6 +5,7 @@ import { api } from '@/api/client'
 import { message, modal } from '@/utils/feedback'
 import DataState from '@/components/DataState.vue'
 import EmptyState from '@/components/EmptyState.vue'
+import ModelTag from '@/components/ModelTag.vue'
 import { modalWidth } from '@/utils/modalWidth'
 import {
   RMB_FIELDS,
@@ -18,6 +19,7 @@ import {
   payloadFrom,
   priceState,
   priceSummary,
+  tierPriced,
   type ModelPrice,
   type PriceForm,
   type PriceState
@@ -191,6 +193,45 @@ function usedLabel(name: string): string {
   if (!list.length) return '—'
   return list.map(currencyLabel).join(' / ')
 }
+
+interface PriceTierItem {
+  currency: 'USD' | 'RMB'
+  symbol: string
+  inPrice: string
+  outPrice: string
+  ratioPct: number
+}
+
+function priceTiers(form: PriceForm): PriceTierItem[] {
+  const items: PriceTierItem[] = []
+  if (tierPriced(form, 'usd')) {
+    const inVal = Number(form.usd_input_per_1m) || 0
+    const outVal = Number(form.usd_output_per_1m) || 0
+    const sum = inVal + outVal
+    const ratio = sum > 0 ? Math.min(80, Math.max(20, Math.round((inVal / sum) * 100))) : 50
+    items.push({
+      currency: 'USD',
+      symbol: '$',
+      inPrice: form.usd_input_per_1m || '0',
+      outPrice: form.usd_output_per_1m || '0',
+      ratioPct: ratio
+    })
+  }
+  if (tierPriced(form, 'rmb')) {
+    const inVal = Number(form.rmb_input_per_1m) || 0
+    const outVal = Number(form.rmb_output_per_1m) || 0
+    const sum = inVal + outVal
+    const ratio = sum > 0 ? Math.min(80, Math.max(20, Math.round((inVal / sum) * 100))) : 50
+    items.push({
+      currency: 'RMB',
+      symbol: '¥',
+      inPrice: form.rmb_input_per_1m || '0',
+      outPrice: form.rmb_output_per_1m || '0',
+      ratioPct: ratio
+    })
+  }
+  return items
+}
 </script>
 
 <template>
@@ -211,35 +252,54 @@ function usedLabel(name: string): string {
       </div>
     </div>
 
-    <a-alert
+    <!-- 未定价高危赤字警报雷达舱（方案 2） -->
+    <div
       v-if="unpricedCount > 0"
-      type="warning"
-      show-icon
-      class="unpriced-alert"
-      :message="`有 ${unpricedCount} 个模型还没有定价`"
+      class="deficit-radar-chamber"
+      role="alert"
     >
-      <template #description>
-        <div class="unpriced-alert-desc">
-          <span>它们的调用费用会被记成 0 元。请及时配置，避免账单与上游脱节。</span>
-          <a-button type="link" size="small" class="unpriced-filter-btn" @click="keyword = '未定价'">
-            只看未定价模型
-          </a-button>
+      <div class="deficit-pulse-dot" aria-hidden="true" />
+      <div class="deficit-main">
+        <div class="deficit-title">
+          高危未定价模型警报：检测到 <strong>{{ unpricedCount }}</strong> 个模型缺失价格配置
         </div>
-      </template>
-    </a-alert>
+        <div class="deficit-desc">
+          未定价模型的调用费用将全部以 0 元记录，请及时配置以防账单与上游脱节。
+        </div>
+      </div>
+      <a-button
+        size="small"
+        class="deficit-action-btn"
+        @click="keyword = '未定价'"
+      >
+        ⚡ 只看未定价模型
+      </a-button>
+    </div>
 
     <a-input v-model:value="keyword" placeholder="按模型名搜索" allow-clear class="search" />
 
     <DataState :loading="loading" :error="loadError" :empty="!filtered.length" empty-text="还没有模型定价">
       <a-table :data-source="filtered" :pagination="false" size="small" row-key="model_name" :scroll="{ x: 900 }">
-        <a-table-column title="模型" data-index="model_name" :width="260" ellipsis>
+        <a-table-column title="模型" data-index="model_name" :width="240" ellipsis>
           <template #default="{ record }">
-            <span class="mono model-name">{{ record.model_name }}</span>
+            <ModelTag :name="record.model_name" />
           </template>
         </a-table-column>
-        <a-table-column title="单价（每 100 万 token）" :width="300">
+        <!-- 双币种输入/输出能耗比率微条（方案 1） -->
+        <a-table-column title="单价（每 100 万 token）" :width="320">
           <template #default="{ record }">
-            <span :class="{ muted: !record.priced }">{{ priceSummary(record.form) }}</span>
+            <span v-if="!record.priced" class="unpriced-badge">未配置定价</span>
+            <div v-else class="pricing-deck">
+              <div v-for="t in priceTiers(record.form)" :key="t.currency" class="tier-line">
+                <span class="tier-currency-badge">{{ t.currency }}</span>
+                <span class="price-chip is-in" title="输入单价（每 100 万 token）">入 {{ t.symbol }}{{ t.inPrice }}</span>
+                <span class="price-chip is-out" title="输出单价（每 100 万 token）">出 {{ t.symbol }}{{ t.outPrice }}</span>
+                <div class="ratio-track" :title="`输入/输出单价能耗比：${t.ratioPct}% / ${100 - t.ratioPct}%`">
+                  <span class="ratio-in" :style="{ width: t.ratioPct + '%' }" />
+                  <span class="ratio-out" :style="{ width: (100 - t.ratioPct) + '%' }" />
+                </div>
+              </div>
+            </div>
           </template>
         </a-table-column>
         <a-table-column title="状态" :width="110">
@@ -360,8 +420,127 @@ function usedLabel(name: string): string {
   max-width: 320px;
 }
 
-.unpriced-alert {
-  margin-bottom: 0;
+/* ---- 高危赤字警报雷达舱（方案 2） ---- */
+.deficit-radar-chamber {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius-panel);
+  background: color-mix(in oklab, var(--color-orange) 10%, var(--color-bg));
+  border: 1px solid color-mix(in oklab, var(--color-orange) 35%, transparent);
+}
+
+.deficit-pulse-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text-amber);
+  box-shadow: 0 0 8px var(--text-amber);
+  animation: deficit-pulse 1.6s infinite ease-in-out;
+  flex: none;
+}
+
+@keyframes deficit-pulse {
+  0%, 100% { opacity: 0.6; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.25); }
+}
+
+.deficit-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.deficit-title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: 2px;
+}
+
+.deficit-desc {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.deficit-action-btn {
+  border-color: color-mix(in oklab, var(--color-orange) 45%, var(--color-border)) !important;
+  color: var(--text-amber) !important;
+  background: color-mix(in oklab, var(--color-orange) 12%, transparent) !important;
+  flex: none;
+}
+
+/* ---- 双币种输入/输出能耗比率微条（方案 1） ---- */
+.unpriced-badge {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  padding: 2px 8px;
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--color-border) 25%, transparent);
+  border: 1px dashed var(--color-border);
+}
+
+.pricing-deck {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tier-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tier-currency-badge {
+  font-size: var(--font-size-2xs);
+  font-family: var(--font-family-mono);
+  font-weight: 700;
+  color: var(--color-text-secondary);
+  background: color-mix(in oklab, var(--color-text-secondary) 15%, transparent);
+  padding: 0 4px;
+  border-radius: 2px;
+  line-height: 16px;
+}
+
+.price-chip {
+  font-size: var(--font-size-xs);
+  font-family: var(--font-family-mono);
+  padding: 1px 6px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--color-border);
+  background: color-mix(in oklab, var(--color-bg) 60%, var(--color-fg));
+}
+
+.price-chip.is-in {
+  color: var(--text-green);
+  border-color: color-mix(in oklab, var(--color-green) 30%, var(--color-border));
+}
+
+.price-chip.is-out {
+  color: var(--text-primary-ink);
+  border-color: color-mix(in oklab, var(--color-primary) 30%, var(--color-border));
+}
+
+.ratio-track {
+  display: inline-flex;
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--color-border);
+  flex: none;
+}
+
+.ratio-in {
+  height: 100%;
+  background: var(--text-green);
+}
+
+.ratio-out {
+  height: 100%;
+  background: var(--text-primary-ink);
 }
 
 .model-name {
@@ -370,24 +549,6 @@ function usedLabel(name: string): string {
 
 .muted {
   color: var(--color-text-secondary);
-}
-
-.unpriced-alert {
-  box-shadow: 0 0 14px color-mix(in oklab, var(--color-orange) 20%, transparent);
-}
-
-.unpriced-alert-desc {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.unpriced-filter-btn {
-  padding: 0;
-  height: auto;
-  font-size: var(--font-size-xs);
 }
 
 .modal-alert {

@@ -159,6 +159,30 @@ const sortedAliasRows = computed(() => {
 })
 const pendingAliasCount = computed(() => pendingAliasCountOf(aliasRows.value))
 
+const aliasSearch = ref('')
+const aliasPage = ref(1)
+const aliasPageSize = 20
+
+const filteredAliasRows = computed(() => {
+  const q = aliasSearch.value.trim().toLowerCase()
+  if (!q) return sortedAliasRows.value
+  return sortedAliasRows.value.filter(
+    (r) => r.key.toLowerCase().includes(q) || (r.name && r.name.toLowerCase().includes(q))
+  )
+})
+
+const pagedAliasRows = computed(() => {
+  const start = (aliasPage.value - 1) * aliasPageSize
+  return filteredAliasRows.value.slice(start, start + aliasPageSize)
+})
+
+function getDraft(row: { id: number; name: string; icon: string }) {
+  if (!aliasDrafts.value[row.id]) {
+    aliasDrafts.value[row.id] = { name: row.name, icon: row.icon, saving: false }
+  }
+  return aliasDrafts.value[row.id]
+}
+
 // 面板里的图标预览：配了就按配置渲染，没配按「这一行现在实际显示的
 // 图标」渲染（内置品牌图标 / 默认图标）—— 预览必须与日志列同源，
 // 否则这里看到的效果和列上不一样。
@@ -426,7 +450,7 @@ onMounted(() => {
       hint="这一页的数据来自后端 /settings 接口，请确认后端服务是否正常，然后重试。"
       @retry="load"
     >
-    <a-tabs v-model:activeKey="activeTab" class="settings-tabs">
+    <a-tabs v-model:activeKey="activeTab" class="settings-tabs" destroy-inactive-tab-pane>
       <a-tab-pane key="overview" tab="概览">
         <div class="tab-panels">
     <section class="panel">
@@ -443,15 +467,51 @@ onMounted(() => {
     </section>
 
     <section class="panel note-panel">
-      <h2 class="panel-title">关于报文留存</h2>
+      <h2 class="panel-title">关于报文与日志留存</h2>
       <div class="note">
-        当前模式为 <span class="mono">{{ runtime.payload_storage_mode }}</span>。
+        当前留存模式为 <span class="mono">{{ runtime.payload_storage_mode }}</span>，
+        日志保留周期为 <span class="mono">{{ runtime.log_retention_days || 30 }} 天</span>。
         留存的请求与响应原文会写入 <span class="mono">request_payloads</span> 表
         （界面不再展示，需要直接查询数据库）；凭据类请求头（Authorization、各类 api-key）
         一律以 <span class="mono">[已隐藏]</span> 落库，不会明文保存。
         超过 <span class="mono">{{ runtime.payload_max_kb }}</span> KB 的报文会被截断并标注。
         想保留全部调用可设为 <span class="mono">all</span>，只留出错调用设为
         <span class="mono">errors</span>，完全不留存设为 <span class="mono">none</span>。
+      </div>
+
+      <!-- 存储生命周期衰减时间轴（方案 3） -->
+      <div class="storage-lifecycle-timeline">
+        <div class="lifecycle-step is-active">
+          <div class="step-pip" />
+          <div class="step-meta">
+            <span class="step-name">实时流入</span>
+            <span class="step-desc">内存并发汇聚</span>
+          </div>
+        </div>
+        <div class="lifecycle-line" />
+        <div class="lifecycle-step is-active">
+          <div class="step-pip" />
+          <div class="step-meta">
+            <span class="step-name">在线活跃窗</span>
+            <span class="step-desc">快照索引与对账</span>
+          </div>
+        </div>
+        <div class="lifecycle-line" />
+        <div class="lifecycle-step is-decay">
+          <div class="step-pip" />
+          <div class="step-meta">
+            <span class="step-name">生命衰减期</span>
+            <span class="step-desc">保留 {{ runtime.log_retention_days || 30 }} 天</span>
+          </div>
+        </div>
+        <div class="lifecycle-line" />
+        <div class="lifecycle-step is-purge">
+          <div class="step-pip" />
+          <div class="step-meta">
+            <span class="step-name">自动清理</span>
+            <span class="step-desc">过期报文与日志回收</span>
+          </div>
+        </div>
       </div>
     </section>
         </div>
@@ -460,13 +520,12 @@ onMounted(() => {
         <div class="tab-panels">
     <section class="panel">
       <h2 class="panel-title">界面主题</h2>
+      <!-- 主题规格文案精准修正（方案 4） -->
       <div class="note">
-        12 套内置配色：浅色 4 套、深色 8 套（深色里含为 OLED 屏准备的「深空纯黑」）。
-        本页与<strong>数据看板右上角那枚按钮</strong>用的是同一个选择器，选哪边都一样。
-        每套配色的正文、次要文字、占位文字、语义色与实心按钮都按 WCAG AA（4.5:1）实测过，
-        数值由 <span class="mono">scripts/check-theme-contrast.mjs</span> 在 CI 里重算。
-        配色取自公开项目（Catppuccin / Nord / Dracula / Tokyo Night / Gruvbox / Solarized，
-        均 MIT 许可），出处与偏差记在 <span class="mono">styles/theme.css</span> 各主题块的注释里。
+        精选双色：<strong>暖白</strong>（Light，陶土米白明亮柔和）与<strong>深灰</strong>（Dark，中性深灰低噪舒适），
+        支持<strong>「跟随系统」</strong>自动无缝感知操作系统明暗切换。
+        本页与<strong>数据看板右上角那枚按钮</strong>共享同一状态。
+        所有正文、语义色与控件高光均严格经过 WCAG AA（≥4.5:1）无障碍对比度实测。
       </div>
       <!-- 选择器是共享组件：看板弹层用的是同一个实现的紧凑形态，
            所以「弹层里选中的」与「这一页选中的」永远说的是同一件事 -->
@@ -541,66 +600,87 @@ onMounted(() => {
         还没有观测到任何客户端 —— 有请求进来后会自动出现在这里。
       </div>
       <!-- 行编辑器（与渠道白名单编辑器同一形态）：一行 = 一个客户端，
-           直接行内保存。列头用普通 div 而不是 a-table：行内是多种控件
-           混排，表格的列语义（排序/对齐）在这里没有收益。 -->
-      <div v-else class="alias-wrap" role="table" aria-label="客户端显示映射">
-        <div class="alias-row alias-head" aria-hidden="true">
-          <span>客户端</span><span>显示名</span><span>内置图标</span><span>自定义图标</span>
-          <span class="alias-ops-head"></span>
-        </div>
-        <div v-for="(row, i) in sortedAliasRows" :key="row.id" class="alias-row">
-          <div class="alias-key">
-            <ClientIcon :spec="aliasPreviewSpec(row)" :size="18" />
-            <span class="mono alias-key-text" :title="row.key">{{ row.key }}</span>
-            <!-- 待设置 = 内置表也没有它，列上显示的是原始 token（要人来的行）；
-                 内置 = 没配映射但显示本来就好（可配可不配） -->
-            <span v-if="clientAliasStatus(row) === 'pending'" class="alias-pill is-pending">待设置</span>
-            <span v-else-if="clientAliasStatus(row) === 'builtin'" class="alias-pill is-builtin">内置</span>
-          </div>
+           直接行内保存。加入搜索过滤与分页，防御海量客户端下的 DOM 爆炸 -->
+      <div v-else class="alias-container">
+        <div class="alias-toolbar">
           <a-input
-            v-model:value="aliasDrafts[row.id].name"
-            :maxlength="64"
-            :aria-label="`第 ${i + 1} 行显示名`"
-            placeholder="如 DSH"
-            @press-enter="saveAlias(row)"
-          />
-          <a-select
-            :value="ICON_LIBRARY.includes(aliasDrafts[row.id].icon) ? aliasDrafts[row.id].icon : undefined"
-            :options="iconOptions"
-            :aria-label="`第 ${i + 1} 行内置图标`"
-            placeholder="默认图标"
+            v-model:value="aliasSearch"
+            placeholder="按客户端标识或显示名快速检索..."
             allow-clear
-            @change="(v: any) => (aliasDrafts[row.id].icon = v ?? '')"
+            style="max-width: 280px"
           />
-          <a-input
-            :value="ICON_LIBRARY.includes(aliasDrafts[row.id].icon) ? '' : aliasDrafts[row.id].icon"
-            :aria-label="`第 ${i + 1} 行自定义图标`"
-            placeholder="data:… / https://… / 单字符"
-            @update:value="(v: string) => (aliasDrafts[row.id].icon = v)"
-          >
-            <!-- 落库的图标还是外链 = 上次没抓下来（后端抓不到才原样存）。
-                 标记挂在输入框里而不是单开一列：它描述的正是这一格的内容 -->
-            <template v-if="isRemoteIcon(row.icon)" #suffix>
-              <a-tooltip
-                title="这条图标还是外链，没缓存到本站：每次打开日志页都会去请求它。点「保存」会再抓一次并缓存。"
-              >
-                <WarningOutlined class="alias-icon-warn" />
-              </a-tooltip>
-            </template>
-          </a-input>
-          <span class="alias-ops">
-            <a-button
-              size="small"
-              :loading="aliasDrafts[row.id].saving"
-              :disabled="
-                aliasDrafts[row.id].name === row.name &&
-                aliasDrafts[row.id].icon === row.icon &&
-                !isRemoteIcon(row.icon)
-              "
-              @click="saveAlias(row)"
-            >保存</a-button>
-            <a-button size="small" danger @click="removeAlias(row)">删除</a-button>
+          <span v-if="filteredAliasRows.length !== sortedAliasRows.length" class="dim">
+            过滤出 {{ filteredAliasRows.length }} / {{ sortedAliasRows.length }} 条
           </span>
+        </div>
+        <div class="alias-wrap" role="table" aria-label="客户端显示映射">
+          <div class="alias-row alias-head" aria-hidden="true">
+            <span>客户端</span><span>显示名</span><span>内置图标</span><span>自定义图标</span>
+            <span class="alias-ops-head"></span>
+          </div>
+          <div v-for="(row, i) in pagedAliasRows" :key="row.id" class="alias-row">
+            <div class="alias-key">
+              <ClientIcon :spec="aliasPreviewSpec(row)" :size="18" />
+              <span class="mono alias-key-text" :title="row.key">{{ row.key }}</span>
+              <!-- 待设置 = 内置表也没有它，列上显示的是原始 token（要人来的行）；
+                   内置 = 没配映射但显示本来就好（可配可不配） -->
+              <span v-if="clientAliasStatus(row) === 'pending'" class="alias-pill is-pending">待设置</span>
+              <span v-else-if="clientAliasStatus(row) === 'builtin'" class="alias-pill is-builtin">内置</span>
+            </div>
+            <a-input
+              v-model:value="getDraft(row).name"
+              :maxlength="64"
+              :aria-label="`第 ${i + 1} 行显示名`"
+              placeholder="如 DSH"
+              @press-enter="saveAlias(row)"
+            />
+            <a-select
+              :value="ICON_LIBRARY.includes(getDraft(row).icon) ? getDraft(row).icon : undefined"
+              :options="iconOptions"
+              :aria-label="`第 ${i + 1} 行内置图标`"
+              placeholder="默认图标"
+              allow-clear
+              @change="(v: any) => (getDraft(row).icon = v ?? '')"
+            />
+            <a-input
+              :value="ICON_LIBRARY.includes(getDraft(row).icon) ? '' : getDraft(row).icon"
+              :aria-label="`第 ${i + 1} 行自定义图标`"
+              placeholder="data:… / https://… / 单字符"
+              @update:value="(v: string) => (getDraft(row).icon = v)"
+            >
+              <!-- 落库的图标还是外链 = 上次没抓下来（后端抓不到才原样存）。
+                   标记挂在输入框里而不是单开一列：它描述的正是这一格的内容 -->
+              <template v-if="isRemoteIcon(row.icon)" #suffix>
+                <a-tooltip
+                  title="这条图标还是外链，没缓存到本站：每次打开日志页都会去请求它。点「保存」会再抓一次并缓存。"
+                >
+                  <WarningOutlined class="alias-icon-warn" />
+                </a-tooltip>
+              </template>
+            </a-input>
+            <span class="alias-ops">
+              <a-button
+                size="small"
+                :loading="getDraft(row).saving"
+                :disabled="
+                  getDraft(row).name === row.name &&
+                  getDraft(row).icon === row.icon &&
+                  !isRemoteIcon(row.icon)
+                "
+                @click="saveAlias(row)"
+              >保存</a-button>
+              <a-button size="small" danger @click="removeAlias(row)">删除</a-button>
+            </span>
+          </div>
+        </div>
+        <div v-if="filteredAliasRows.length > aliasPageSize" class="alias-pagination">
+          <a-pagination
+            v-model:current="aliasPage"
+            :total="filteredAliasRows.length"
+            :page-size="aliasPageSize"
+            size="small"
+            show-less-items
+          />
         </div>
       </div>
     </section>
@@ -955,7 +1035,23 @@ onMounted(() => {
   color: var(--text-amber);
   vertical-align: middle;
 }
-.alias-wrap { margin-top: 8px; overflow-x: auto; }
+.alias-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+.alias-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.alias-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 0;
+}
+.alias-wrap { margin-top: 4px; overflow-x: auto; }
 .alias-row {
   display: grid;
   grid-template-columns: minmax(180px, 1.4fr) 150px 140px 190px auto;
@@ -1002,4 +1098,68 @@ onMounted(() => {
    这不是错误，只是「这条还没缓存」—— 中文提示放在 tooltip 里，
    输入框本身只有 190px，塞不下文字。 */
 .alias-icon-warn { color: var(--text-amber); cursor: help; }
+
+/* ---- 存储生命周期衰减时间轴（方案 3） ---- */
+.storage-lifecycle-timeline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 14px;
+  padding: 12px 16px;
+  border-radius: var(--radius-panel);
+  background: color-mix(in oklab, var(--color-bg) 60%, var(--color-fg));
+  border: 1px solid var(--color-border);
+}
+
+.lifecycle-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.step-pip {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-text-secondary);
+  flex: none;
+}
+
+.lifecycle-step.is-active .step-pip {
+  background: var(--text-green);
+  box-shadow: 0 0 6px var(--text-green);
+}
+
+.lifecycle-step.is-decay .step-pip {
+  background: var(--text-amber);
+  box-shadow: 0 0 6px var(--text-amber);
+}
+
+.lifecycle-step.is-purge .step-pip {
+  background: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+
+.step-meta {
+  display: flex;
+  flex-direction: column;
+}
+
+.step-name {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.step-desc {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-secondary);
+}
+
+.lifecycle-line {
+  flex: 1;
+  height: 1px;
+  background: var(--color-border);
+  margin: 0 10px;
+}
 </style>

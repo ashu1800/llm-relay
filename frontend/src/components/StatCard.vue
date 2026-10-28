@@ -35,6 +35,8 @@ const props = withDefaults(defineProps<{
    * hot = 超支（红晕 + 缓慢脉动）。不传 = 常态。
    */
   heat?: 'warm' | 'hot'
+  /** 能量通量微晶核：当前时段负荷感应（方案 7） */
+  flux?: 'peak' | 'offpeak' | 'normal'
 }>(), { tone: 'purple', value: '' })
 
 // 右侧附加区只在被使用时渲染（useSlots 判断）：
@@ -90,6 +92,16 @@ onUnmounted(() => {
         <div v-if="hint" class="summary-hint">{{ hint }}</div>
       </template>
     </div>
+    <!-- 能量通量微晶核（方案 7） -->
+    <div v-if="flux === 'peak'" class="flux-core-pip is-peak" title="当前处于日间业务高峰期">
+      <span class="flux-dot" aria-hidden="true" />
+      <span class="flux-text">⚡ 业务高峰</span>
+    </div>
+    <div v-else-if="flux === 'offpeak'" class="flux-core-pip is-offpeak" title="当前处于夜间谷时折扣期">
+      <span class="flux-dot" aria-hidden="true" />
+      <span class="flux-text">🌙 谷时折扣</span>
+    </div>
+
     <!-- 右侧附加区：放「切换显示格式」这类只作用于本卡的小控件。
          margin-left:auto 把它推到卡片最右、垂直居中；
          只有插槽被使用时才渲染（见 script 里的说明） -->
@@ -351,5 +363,55 @@ onUnmounted(() => {
   50% {
     box-shadow: var(--color-fg-shadow), 0 0 20px color-mix(in oklab, var(--color-red) 30%, transparent);
   }
+}
+
+/* ---- 能量通量微晶核（方案 7） ---- */
+.flux-core-pip {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-2xs);
+  font-weight: 600;
+  z-index: 2;
+  pointer-events: auto;
+}
+
+.flux-core-pip.is-peak {
+  background: color-mix(in oklab, var(--color-orange) 14%, transparent);
+  border: 1px solid color-mix(in oklab, var(--color-orange) 35%, transparent);
+  color: var(--text-amber);
+}
+
+.flux-core-pip.is-peak .flux-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-amber);
+  box-shadow: 0 0 6px var(--text-amber);
+  animation: flux-glow 1.5s infinite alternate ease-in-out;
+}
+
+.flux-core-pip.is-offpeak {
+  background: color-mix(in oklab, var(--color-green) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--color-green) 30%, transparent);
+  color: var(--text-green);
+}
+
+.flux-core-pip.is-offpeak .flux-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-green);
+  box-shadow: 0 0 6px var(--text-green);
+}
+
+@keyframes flux-glow {
+  0% { opacity: 0.6; transform: scale(0.9); }
+  100% { opacity: 1; transform: scale(1.25); }
 }
 </style>

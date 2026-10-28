@@ -48,7 +48,7 @@
      docs/ui-spec.md 里仍按原样记录着参考站的值，那是描述参考站而非本项目的令牌表。 */
   --color-bg: #f8f5ee;
   --color-fg: #ffffff;
-  --color-fg-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 4px 12px 0 rgba(0, 0, 0, 0.04);
+  --color-fg-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.04), 0 4px 12px -2px rgba(90, 60, 45, 0.04), 0 10px 24px -4px rgba(0, 0, 0, 0.02);
   --color-text: #303030;
   /* 次要文字。alpha 从 0.65 提到 0.70 是**修复**不是调色（2026-09-24 UI 审评）：
      0.65 在三种底色上全部低于 WCAG AA 正文要求的 4.5:1 ——
@@ -321,10 +321,10 @@
      真正生效的降级在文件末尾的 prefers-reduced-motion 块里，
      那里用 !important 直接压 animation/transition 时长，不经过变量。 */
 
-  /* ---- 滚动条 ---- */
-  --scrollbar-thumb: #dcdcdc;
+  /* ---- 滚动条（方案 10：5px 极简隐形流体滚动条） ---- */
+  --scrollbar-thumb: color-mix(in oklab, var(--color-text-secondary) 25%, transparent);
   --scrollbar-track: transparent;
-  --scrollbar-width: 0.5rem;
+  --scrollbar-width: 5px;
 
   /* ---- color-scheme（2026-09-30）----
      让浏览器知道这套主题是明是暗：原生滚动条、下拉、日期面板、自动填充的
@@ -357,7 +357,7 @@
   --pill-ink-mix-color: black;
   --pill-ink-mix-amount: 60%;
   /* 卡片 hover 阴影。深色下投影几乎看不见，得靠一圈更亮的描边撑住卡片边界。 */
-  --card-hover-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 8px 24px -4px rgba(0, 0, 0, 0.08);
+  --card-hover-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 8px 24px -4px rgba(90, 60, 45, 0.08), 0 16px 32px -6px rgba(0, 0, 0, 0.03);
   /* 固定列渐隐阴影的颜色（日志表左/右固定列底下那条渐变，见下方 .log-table 段）：
      浅色族用黑 10% 就够；深色族的卡片本身已经比黑亮得多，需要更重的一档才看得见。 */
   --scroll-hint-color: rgba(0, 0, 0, 0.1);
@@ -420,7 +420,7 @@
   --color-primary: #c87864;
   --color-bg: #202020;
   --color-fg: #303030;
-  --color-fg-shadow: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 4px 20px -2px rgba(0, 0, 0, 0.6);
+  --color-fg-shadow: 0 0 0 1px rgba(255, 255, 255, 0.07), inset 0 1px 0 0 rgba(255, 255, 255, 0.08), 0 4px 20px -2px rgba(0, 0, 0, 0.65);
   --color-text: #c8c8c8;
   /* 与浅色主题同一个 alpha（0.70）：暗色卡片 #303030 上合成 rgb(154,154,154)
      → 4.69:1，过 AA。0.65 时是 4.30:1，不达标。 */
@@ -428,7 +428,7 @@
   --color-text-placeholder: #979797; /* 暗色卡片 4.52:1 */
   --color-text-tertiary: rgba(200, 200, 200, 0.55);
   --color-border: #424242;
-  --scrollbar-thumb: rgba(100, 100, 100);
+  --scrollbar-thumb: color-mix(in oklab, var(--color-text-secondary) 30%, transparent);
 
   /* 光标换一套（不光换色，轮廓也不同：浅色是长窄锐角，深色是短阔圆角）。
      必须在这里显式覆盖两个变量：光标变量是定义在 :root 上的，
@@ -507,7 +507,7 @@
   --pill-ink-mix-color: white;
   --pill-ink-mix-amount: 55%;
   --scroll-hint-color: rgba(0, 0, 0, 0.4);
-  --card-hover-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 8px 28px -4px rgba(0, 0, 0, 0.7);
+  --card-hover-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), inset 0 1px 0 0 rgba(255, 255, 255, 0.14), 0 8px 28px -4px rgba(0, 0, 0, 0.75);
 }
 
 /* ---- 主题预览色样（2026-09-30）----
@@ -540,6 +540,8 @@ html, body, #app {
 
 body {
   background-color: var(--color-bg);
+  background-image: radial-gradient(circle at 50% 0%, color-mix(in oklab, var(--color-primary) 3.5%, var(--color-bg)) 0%, var(--color-bg) 82%);
+  background-attachment: fixed;
   color: var(--color-text);
   font-family: var(--font-family-base);
   font-size: var(--font-size-base);
@@ -601,7 +603,18 @@ body {
 
 ::-webkit-scrollbar { width: var(--scrollbar-width); height: var(--scrollbar-width); }
 ::-webkit-scrollbar-track { background: var(--scrollbar-track); }
-::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: calc(var(--scrollbar-width) / 2); }
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: var(--radius-pill);
+  transition: background 0.2s ease;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--color-text-secondary) 50%, transparent);
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
 
 /* 链接文字用 --text-primary-ink，不用 --color-primary。
    #c87864 在白底上 3.32:1、米白底上 3.05:1，都不达 WCAG AA 正文的 4.5:1。
@@ -1247,4 +1260,82 @@ code,
   padding: 10px !important;
   border-radius: var(--radius-panel) !important;
   box-shadow: 0 10px 32px rgba(0, 0, 0, 0.28) !important;
+}
+
+/* ---- 全局弹窗与抽屉极客快捷键键帽注脚（方案 8） ---- */
+.ant-modal-footer .ant-btn-primary::after {
+  content: '↵';
+  margin-left: 6px;
+  font-size: var(--font-size-2xs);
+  font-family: var(--font-family-mono);
+  opacity: 0.8;
+  background: color-mix(in oklab, currentColor 18%, transparent);
+  border-radius: 2px;
+  padding: 0 3px;
+  line-height: 1;
+}
+
+.ant-modal-footer .ant-btn:not(.ant-btn-primary):not(.is-danger):not(.ant-btn-dangerous)::after {
+  content: 'Esc';
+  margin-left: 6px;
+  font-size: var(--font-size-2xs);
+  font-family: var(--font-family-mono);
+  opacity: 0.65;
+  background: color-mix(in oklab, var(--color-text-secondary) 15%, transparent);
+  border-radius: 2px;
+  padding: 0 3px;
+  line-height: 1;
+}
+
+/* ---- 模态弹窗与抽屉虚空光幕隔离（方案 7） ---- */
+.ant-modal-mask,
+.ant-drawer-mask {
+  backdrop-filter: blur(8px) brightness(94%);
+  -webkit-backdrop-filter: blur(8px) brightness(94%);
+  background: rgba(0, 0, 0, 0.35) !important;
+}
+
+:root[data-theme='dark'] .ant-modal-mask,
+:root[data-theme='dark'] .ant-drawer-mask {
+  backdrop-filter: blur(12px) brightness(85%);
+  -webkit-backdrop-filter: blur(12px) brightness(85%);
+  background: rgba(0, 0, 0, 0.62) !important;
+}
+
+:root[data-theme='dark'] .ant-modal-content,
+:root[data-theme='dark'] .ant-drawer-content {
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05), 0 20px 48px -8px rgba(0, 0, 0, 0.85) !important;
+}
+
+/* ---- 实体按钮触觉微倒角与按压阻尼（方案 11） ---- */
+.ant-btn-primary {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 1px 3px rgba(0, 0, 0, 0.12) !important;
+  transition: all 0.15s cubic-bezier(0.2, 0, 0, 1) !important;
+}
+
+.ant-btn-primary:active {
+  transform: translateY(1px) scale(0.99) !important;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.2) !important;
+}
+
+.table-icon-btn:active {
+  transform: scale(0.92) !important;
+  transition: transform 0.1s ease !important;
+}
+
+/* ---- 状态通电微晶发光管散射（深色模式 · 方案 8） ---- */
+:root[data-theme='dark'] .status-live-dot,
+:root[data-theme='dark'] .rtt-signal-dot,
+:root[data-theme='dark'] .proto-dot,
+:root[data-theme='dark'] .es-standby-dot,
+:root[data-theme='dark'] .flux-dot {
+  box-shadow: 0 0 6px currentColor;
+}
+
+/* ---- 昼夜切换光子色温插值过渡微羽化（方案 12） ---- */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  filter: blur(0.25px);
 }

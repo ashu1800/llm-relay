@@ -355,6 +355,124 @@ function bindingRows(items: ChannelBinding[]): WhitelistRow[] {
   }))
 }
 
+interface UpstreamPreset {
+  name: string
+  label: string
+  protocol: string
+  base_url: string
+  currency: 'CNY' | 'USD'
+  icon: string
+  models: { public_name: string; upstream_name: string }[]
+}
+
+const UPSTREAM_PRESETS: UpstreamPreset[] = [
+  {
+    name: 'DeepSeek 官方',
+    label: '🐳 DeepSeek 官方',
+    protocol: 'openai-chat',
+    base_url: 'https://api.deepseek.com/v1',
+    currency: 'CNY',
+    icon: 'https://api.deepseek.com/favicon.ico',
+    models: [
+      { public_name: 'deepseek-chat', upstream_name: 'deepseek-chat' },
+      { public_name: 'deepseek-reasoner', upstream_name: 'deepseek-reasoner' }
+    ]
+  },
+  {
+    name: 'SiliconFlow 硅基流动',
+    label: '⚡ 硅基流动',
+    protocol: 'openai-chat',
+    base_url: 'https://api.siliconflow.cn/v1',
+    currency: 'CNY',
+    icon: 'https://siliconflow.cn/favicon.ico',
+    models: [
+      { public_name: 'deepseek-ai/DeepSeek-V3', upstream_name: 'deepseek-ai/DeepSeek-V3' },
+      { public_name: 'deepseek-ai/DeepSeek-R1', upstream_name: 'deepseek-ai/DeepSeek-R1' },
+      { public_name: 'Qwen/Qwen2.5-72B-Instruct', upstream_name: 'Qwen/Qwen2.5-72B-Instruct' }
+    ]
+  },
+  {
+    name: 'Google Gemini',
+    label: '💎 Google Gemini',
+    protocol: 'gemini',
+    base_url: 'https://generativelanguage.googleapis.com',
+    currency: 'USD',
+    icon: 'https://www.gstatic.com/lamda/images/favicon_v1_150160cddff7f294ce30.svg',
+    models: [
+      { public_name: 'gemini-2.5-pro', upstream_name: 'gemini-2.5-pro' },
+      { public_name: 'gemini-2.5-flash', upstream_name: 'gemini-2.5-flash' }
+    ]
+  },
+  {
+    name: 'OpenRouter',
+    label: '🟣 OpenRouter',
+    protocol: 'openai-chat',
+    base_url: 'https://openrouter.ai/api/v1',
+    currency: 'USD',
+    icon: 'https://openrouter.ai/favicon.ico',
+    models: [
+      { public_name: 'deepseek/deepseek-r1', upstream_name: 'deepseek/deepseek-r1' },
+      { public_name: 'anthropic/claude-3.7-sonnet', upstream_name: 'anthropic/claude-3.7-sonnet' }
+    ]
+  },
+  {
+    name: 'OpenAI 官方',
+    label: '🤖 OpenAI 官方',
+    protocol: 'openai-chat',
+    base_url: 'https://api.openai.com/v1',
+    currency: 'USD',
+    icon: 'https://openai.com/favicon.ico',
+    models: [
+      { public_name: 'gpt-4o', upstream_name: 'gpt-4o' },
+      { public_name: 'gpt-4o-mini', upstream_name: 'gpt-4o-mini' },
+      { public_name: 'o3-mini', upstream_name: 'o3-mini' }
+    ]
+  },
+  {
+    name: 'Anthropic 官方',
+    label: '🌲 Anthropic 官方',
+    protocol: 'anthropic',
+    base_url: 'https://api.anthropic.com',
+    currency: 'USD',
+    icon: 'https://anthropic.com/favicon.ico',
+    models: [
+      { public_name: 'claude-3-7-sonnet-20250219', upstream_name: 'claude-3-7-sonnet-20250219' },
+      { public_name: 'claude-3-5-haiku-20241022', upstream_name: 'claude-3-5-haiku-20241022' }
+    ]
+  }
+]
+
+function applyUpstreamPreset(p: UpstreamPreset) {
+  if (!form.name || form.name === '新渠道') {
+    form.name = p.name
+  }
+  form.protocol = p.protocol
+  form.base_url = p.base_url
+  form.currency = p.currency
+  if (p.icon) form.icon = p.icon
+  if (p.models && p.models.length > 0) {
+    form.models = p.models.map((m) => ({
+      public_name: m.public_name,
+      upstream_name: m.upstream_name,
+      enabled: true,
+      proxy_id: 0,
+      supported_efforts: [],
+      ...emptyRate()
+    }))
+  }
+  message.success(`已应用「${p.name}」模版配置`)
+}
+
+function onBaseUrlBlur() {
+  let u = form.base_url.trim()
+  if (!u) return
+  if (!/^https?:\/\//i.test(u)) {
+    u = 'https://' + u
+  }
+  u = u.replace(/\/+$/, '')
+  form.base_url = u
+}
+
 // openSeq 是「表单被打开的次数」计数器：异步回填只认最后一次，更早的一律作废。
 //
 // 竞态形状（第三轮审查 F-中1）：点渠道 A 打开弹窗，趁请求没回来又点渠道 B。
@@ -1369,6 +1487,41 @@ onMounted(async () => {
            纵向一列排下来时每个字段要占掉「标签 + 控件 + 两三行说明」，
            十段表单就是一千多像素高，找字段得一路滚 -->
       <a-form ref="formRef" :model="form" :rules="rules" layout="vertical" class="channel-form">
+        <!-- 主流上游厂商一键模版预填充（方案 1） -->
+        <div v-if="!editing" class="upstream-presets-bar">
+          <span class="preset-title">主流上游模版：</span>
+          <div class="preset-chips-list">
+            <button
+              v-for="p in UPSTREAM_PRESETS"
+              :key="p.name"
+              type="button"
+              class="preset-chip"
+              @click="applyUpstreamPreset(p)"
+            >
+              {{ p.label }}
+            </button>
+          </div>
+        </div>
+
+        <!-- 编辑渠道时的只读安全锁与密钥指纹与就地连通性测试（方案 2 & 4） -->
+        <div v-else class="editing-channel-anchor">
+          <div class="channel-anchor-meta">
+            <span class="channel-anchor-id mono">ID #{{ editing.id }}</span>
+            <span class="channel-anchor-name">{{ editing.name }}</span>
+            <span v-if="editing.api_key_hint" class="channel-key-hint mono">
+              🔒 {{ editing.api_key_hint }}
+            </span>
+          </div>
+          <a-button
+            size="small"
+            class="live-probe-btn"
+            :loading="testingId === editing.id"
+            @click="openTest(editing)"
+          >
+            <ThunderboltOutlined /> 就地测试连通性
+          </a-button>
+        </div>
+
         <a-row :gutter="12">
           <a-col :span="12">
             <a-form-item label="渠道名称" name="name">
@@ -1376,13 +1529,6 @@ onMounted(async () => {
             </a-form-item>
           </a-col>
           <a-col :span="12">
-            <!-- 协议与币种只留 `required`（星号），**不绑 name、不写 rules**：
-                 两者的值域是固定的选项列表（PROTOCOLS / CURRENCY_OPTIONS），
-                 form 初值就落在列表内且下拉没有 allowClear —— 不可能为空。
-                 绑上 name 只会给 formRef.validate() 注册一条永远不可能失败的
-                 校验路径（antd 在无 name 时直接跳过校验，见 FormItem.js:220），
-                 所以维持原样：只出星号。
-                 星号本身不能省 —— 「用户看不出哪些是必填」正是本次审评要修的问题。 -->
             <a-form-item required>
               <template #label>
                 上游协议
@@ -1402,7 +1548,7 @@ onMounted(async () => {
               <InfoCircleOutlined class="label-hint" />
             </a-tooltip>
           </template>
-          <a-input v-model:value="form.base_url" placeholder="https://api.example.com/v1" />
+          <a-input v-model:value="form.base_url" placeholder="https://api.example.com/v1" @blur="onBaseUrlBlur" />
         </a-form-item>
 
         <a-row :gutter="12">
@@ -1729,6 +1875,94 @@ onMounted(async () => {
 .channel-form :deep(.ant-form-item) { margin-bottom: 12px; }
 .channel-form :deep(.ant-form-item-label) { padding-bottom: 2px; }
 .channel-form :deep(.ant-form-item-label > label) { height: 22px; }
+
+/* ---- 主流上游模版预填充与编辑锚点 ---- */
+.upstream-presets-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--color-bg) 75%, var(--color-fg));
+  border: 1px dashed var(--color-border);
+  margin-bottom: 14px;
+}
+
+.preset-title {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  font-weight: 600;
+  flex: none;
+}
+
+.preset-chips-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.preset-chip {
+  padding: 2px 8px;
+  border-radius: var(--radius-control);
+  font-size: var(--font-size-xs);
+  border: 1px solid var(--color-border);
+  background: color-mix(in oklab, var(--color-bg) 60%, var(--color-fg));
+  color: var(--color-text-secondary);
+  cursor: var(--cursor-hand);
+  transition: all 0.15s ease;
+}
+
+.preset-chip:hover {
+  border-color: var(--color-primary);
+  color: var(--text-primary-ink);
+  background: var(--color-icon-hover-bg);
+}
+
+.editing-channel-anchor {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--color-bg) 70%, var(--color-fg));
+  border: 1px solid var(--color-border);
+  margin-bottom: 14px;
+}
+
+.channel-anchor-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.channel-anchor-id {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  background: color-mix(in oklab, var(--color-text-secondary) 15%, transparent);
+  padding: 1px 6px;
+  border-radius: var(--radius-control);
+}
+
+.channel-anchor-name {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.channel-key-hint {
+  font-size: var(--font-size-xs);
+  color: var(--text-primary-ink);
+}
+
+.live-probe-btn {
+  border-color: color-mix(in oklab, var(--color-primary) 45%, var(--color-border)) !important;
+  color: var(--text-primary-ink) !important;
+  background: color-mix(in oklab, var(--color-primary) 10%, transparent) !important;
+  flex: none;
+}
 /* 标签旁的 ⓘ：说明文字收进 tooltip 后，标签本身要给出「这里有说明」的线索。
    用小一号的次要色，别让它跟标签抢注意力 */
 .label-hint {

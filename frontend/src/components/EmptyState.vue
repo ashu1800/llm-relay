@@ -43,7 +43,11 @@ defineProps<{
       aria-hidden="true"
       focusable="false"
     >
-      <!-- 电气工程美学待命参考线与网格（方案 10） -->
+      <!-- 电气工程美学待命参考线与网格（方案 10 & 方案 9） -->
+      <g class="es-radar">
+        <circle cx="48" cy="42" r="28" stroke-dasharray="2 4" stroke-width="1" />
+        <circle cx="48" cy="42" r="16" stroke-dasharray="1 3" stroke-width="0.8" opacity="0.5" />
+      </g>
       <g class="es-grid">
         <line x1="8" y1="56" x2="20" y2="56" stroke-dasharray="2 3" />
         <line x1="76" y1="56" x2="88" y2="56" stroke-dasharray="2 3" />
@@ -60,6 +64,12 @@ defineProps<{
     </svg>
 
     <p class="es-text">{{ text }}</p>
+
+    <!-- 工业就绪待命徽标（方案 9） -->
+    <div class="es-standby-pill" aria-hidden="true">
+      <span class="es-standby-dot" />
+      <span>STANDBY · 待命接入</span>
+    </div>
 
     <div v-if="$slots.action" class="es-action">
       <slot name="action" />
@@ -90,6 +100,34 @@ defineProps<{
 .es-grid {
   opacity: 0.6;
   stroke: color-mix(in oklab, var(--color-text) 22%, transparent);
+}
+
+.es-radar {
+  opacity: 0.35;
+  stroke: color-mix(in oklab, var(--color-primary) 40%, transparent);
+}
+
+.es-standby-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-2xs);
+  letter-spacing: 0.05em;
+  color: var(--color-text-secondary);
+  background: color-mix(in oklab, var(--color-border) 35%, transparent);
+  border: 1px solid var(--color-border);
+  margin-top: 2px;
+}
+
+.es-standby-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-green);
+  box-shadow: 0 0 5px var(--text-green);
 }
 
 @keyframes es-breathe {
