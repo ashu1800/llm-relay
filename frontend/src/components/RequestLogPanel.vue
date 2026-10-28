@@ -52,7 +52,7 @@ import { rafThrottle } from '@/utils/rafThrottle'
 import { fmtMs, latencyClass, latencyTicks, latencyTitle, latencyWaterfall } from '@/components/latency'
 // 速度的口径抽成独立模块（2026-09-29）：它出过「几千 tok/s」的假值事故，
 // 「一列一个口径」与四种量不到的情形在 speed.spec.ts 里逐条钉着
-import { speedMissReason, speedOf, speedText } from '@/components/speed'
+import { isOneShotStream, speedMissReason, speedOf, speedText } from '@/components/speed'
 import {
   COL_KEYS,
   allocateWidths,
@@ -1448,6 +1448,9 @@ function speedTitle(row: RequestLog) {
         : '首字后窗口 ' + fmtMs(r.denomMs) + '（此行没有交付观测，按总耗时 − 首字近似）'
     return '输出 ' + fmtTokens(row.completion_tokens) + ' 词元 ÷ ' + denom
   }
+  if (isOneShotStream(row)) {
+    return `上游将输出的 ${fmtTokens(row.completion_tokens)} 词元一次性全部返回，量不到逐帧生成时段`
+  }
   return speedMissTitle(row)
 }
 
@@ -2256,9 +2259,15 @@ onMounted(() => {
              方式才读得懂。失败请求通常没有输出词元，显示 — -->
         <a-table-column v-if="colShown.speed" title="速度" :width="colW.speed">
           <template #default="{ record }">
+            <!-- 正常流式计算出了速度（维持现有这套不变） -->
             <span v-if="tokPerSec(record)" class="spd-cell" :title="speedTitle(record)">
-              <span v-if="record.stream" class="stream-pill">流</span>
+              <span v-if="record.stream" class="stream-pill" :class="{ 'is-fast': (record.output_tokens || 0) > 80 }">流</span>
               <span class="spd">{{ tokPerSec(record) }} t/s</span>
+            </span>
+            <!-- 上游一次性整包返回 token：显示灰色胶囊「流」+ 输出 token 数（如 81tok） -->
+            <span v-else-if="isOneShotStream(record)" class="spd-cell is-oneshot" :title="speedTitle(record)">
+              <span class="stream-pill is-muted">流</span>
+              <span class="spd">{{ record.completion_tokens }}tok</span>
             </span>
             <span v-else class="muted" :title="speedTitle(record)">—</span>
           </template>
@@ -2270,15 +2279,15 @@ onMounted(() => {
           :width="colW.status"
         >
           <template #default="{ record }">
-            <!-- 状态徽标（2026-09-27 感官升级）：带前置指示点的轻质药丸取代 a-tag ——
-                 成功是安静的静态绿点、429 慢呼吸、5xx 快闪。动画只留给异常：
-                 一屏几十行 2xx，若绿点也闪，整个列表都在噪动。 -->
+            <!-- 状态徽标与光谱脉冲标尺（方案 6） -->
             <span
               class="status-pill"
-              :class="'is-' + statusColor(record.status_code)"
+              :class="['is-' + statusColor(record.status_code), { 'is-429': record.status_code === 429, 'is-504': record.status_code === 504 }]"
               :title="statusTitle(record.status_code)"
             >
               <i class="dot" aria-hidden="true" />
+              <span v-if="record.status_code === 429" class="status-spec-icon" aria-hidden="true">⏳</span>
+              <span v-else-if="record.status_code === 504" class="status-spec-icon" aria-hidden="true">⚡</span>
               {{ record.status_code }}
             </span>
           </template>
@@ -2461,7 +2470,7 @@ onMounted(() => {
               <span v-if="s.status_code" class="trail-code">{{ s.status_code }}</span>
               <span class="trail-err" :title="s.error">{{ s.error }}</span>
               <span v-if="s.usage && s.usage.total_tokens" class="trail-tokens">
-                另耗 {{ fmtTokens(s.usage.total_tokens) }} tokens
+                损耗 {{ fmtTokens(s.usage.total_tokens) }} tokens
               </span>
               <!-- 换渠道前的等待：只有「下一个候选打在同一台上游」才会有。
                    显示出来是为了让「有没有对同一上游连打」这件事可查 ——
@@ -2477,7 +2486,7 @@ onMounted(() => {
           总共 {{ fmtMs(current.total_ms) }}
           <!-- 速度口径与列表一致（见 tokPerSec）：量不到生成时段就显示 —，
                悬停说明讲原因 —— 与列表同款处理，不在这里悄悄少一段 -->
-          <span> · 速度 <span :title="speedTitle(current)">{{ tokPerSec(current) || '—' }}<template v-if="tokPerSec(current)"> t/s</template></span></span>
+          <span> · 速度 <span :title="speedTitle(current)"><template v-if="tokPerSec(current)">{{ tokPerSec(current) }} t/s</template><template v-else-if="isOneShotStream(current)">{{ current.completion_tokens }}tok（一次性返回）</template><template v-else>—</template></span></span>
           <!-- 时序瀑布：条长 = 该阶段占总耗时的比例，条色沿用耗时分级 -->
           <div v-if="waterfallRows.length" class="wf">
             <div v-for="r in waterfallRows" :key="r.label" class="wf-row">
@@ -3048,6 +3057,16 @@ onMounted(() => {
 .status-pill.is-red .dot {
   animation: status-blink 1.1s ease-in-out infinite;
 }
+.status-spec-icon {
+  font-size: var(--font-size-2xs);
+  line-height: 1;
+}
+.status-pill.is-429 {
+  border-color: color-mix(in oklab, var(--color-orange) 50%, transparent);
+}
+.status-pill.is-504 {
+  border-color: color-mix(in oklab, var(--color-red) 50%, transparent);
+}
 @keyframes status-breathe {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
@@ -3081,6 +3100,21 @@ onMounted(() => {
   font-weight: 500;
   line-height: 20px;
   white-space: nowrap;
+  transition: all 0.2s var(--ease-expo);
+}
+.stream-pill.is-fast {
+  background: color-mix(in oklab, var(--color-primary) 22%, transparent);
+  color: var(--text-primary-ink);
+  border-color: color-mix(in oklab, var(--color-primary) 45%, transparent);
+  box-shadow: 0 0 6px color-mix(in oklab, var(--color-primary) 20%, transparent);
+}
+.stream-pill.is-muted {
+  border-color: var(--color-border);
+  background: color-mix(in oklab, var(--color-text-secondary) 12%, transparent);
+  color: var(--color-text-secondary);
+}
+.spd-cell.is-oneshot .spd {
+  color: var(--color-text-secondary);
 }
 /* 数值轨道**定宽**（2026-09-23 修，站主反馈「速度数量不同时左边的『流』样式
    不在同一纵向水平线上」）：速度是「输出词元 ÷ 耗时」，位数随请求变
@@ -3237,12 +3271,15 @@ onMounted(() => {
 }
 
 /* 失败链路（retry_trail）：每次失败尝试一行 —— 渠道、状态码、错误摘要、
-   该次消耗。序号与状态码用次要色的小标签形态：它们是索引信息不是正文 */
+   该次消耗。组织为故障转移击穿管道（方案 4） */
 .trail-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   width: 100%;
+  position: relative;
+  padding-left: 14px;
+  border-left: 2px dashed color-mix(in oklab, var(--color-red) 35%, var(--color-border));
 }
 .trail-row {
   display: flex;
@@ -3251,6 +3288,18 @@ onMounted(() => {
   font-size: var(--font-size-sm);
   line-height: 20px;
   min-width: 0;
+  position: relative;
+}
+.trail-row::before {
+  content: '';
+  position: absolute;
+  left: -18px;
+  top: 7px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-red);
+  box-shadow: 0 0 4px var(--color-red);
 }
 .trail-idx {
   color: var(--color-text-secondary);

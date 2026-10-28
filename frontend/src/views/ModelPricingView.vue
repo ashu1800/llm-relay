@@ -198,10 +198,6 @@ function usedLabel(name: string): string {
     <div class="page-head">
       <div class="head-text">
         <h2 class="page-title">模型定价</h2>
-        <p class="page-desc">
-          按模型设置每 100 万 token 的单价，同一模型可同时填美元与人民币两套，<strong>互不换算</strong>。
-          记账时按所属渠道的币种取对应那一档；渠道只保留倍率（在渠道管理里设置）。
-        </p>
       </div>
       <div class="head-actions">
         <a-button :loading="loading" @click="load">
@@ -349,18 +345,10 @@ function usedLabel(name: string): string {
 }
 
 .page-title {
-  margin: 0 0 4px;
+  margin: 0;
   font-size: var(--font-size-display-sm);
   font-weight: 700;
   color: var(--color-text);
-}
-
-.page-desc {
-  margin: 0;
-  max-width: 62ch;
-  font-size: var(--font-size-sm);
-  line-height: 1.7;
-  color: var(--color-text-secondary);
 }
 
 .head-actions {

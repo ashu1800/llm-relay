@@ -145,3 +145,14 @@ export function speedText(row: RequestLog): string {
   const r = speedOf(row)
   return r ? r.tokPerSec.toFixed(0) : ''
 }
+
+/**
+ * 是否属于「流式请求但上游一次性把全部 token 返回」的形态：
+ * 满足：stream === true，completion_tokens > 0，且因为一次性送达量不到生成时段（speedOf 为 null）。
+ */
+export function isOneShotStream(row: RequestLog): boolean {
+  if (!row.stream) return false
+  const out = row.completion_tokens || 0
+  if (out <= 0) return false
+  return speedOf(row) === null
+}

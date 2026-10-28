@@ -402,6 +402,12 @@ onMounted(load)
                   {{ statusOf(record).text }}
                 </a-tag>
                 <span v-if="record.last_status === 'ok'" class="proxy-rtt" :class="proxyRttClass(record.last_latency_ms)">
+                  <span class="jitter-bars" aria-hidden="true">
+                    <i class="j-bar" :style="{ height: '4px' }" />
+                    <i class="j-bar" :style="{ height: '7px' }" />
+                    <i class="j-bar" :style="{ height: Math.min(10, Math.max(3, Math.round(record.last_latency_ms / 30))) + 'px' }" />
+                    <i class="j-bar" :style="{ height: '5px' }" />
+                  </span>
                   ⚡ {{ record.last_latency_ms }}ms
                 </span>
               </div>
@@ -629,6 +635,25 @@ onMounted(load)
   border-radius: var(--radius-pill);
   line-height: 18px;
   white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  transition: all 0.2s var(--ease-expo);
+}
+
+.jitter-bars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 1.5px;
+  height: 10px;
+  margin-right: 3px;
+}
+
+.j-bar {
+  display: inline-block;
+  width: 2px;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.75;
 }
 
 .proxy-rtt.is-fast {

@@ -11,7 +11,7 @@
 //   3. 有观测时不再用固定毫秒门槛，改成「算出来的速度是否物理上可能」（≤1000 tok/s）
 //      —— 固定门槛把「短而快」的回答一并砍掉了（站主 2026-09-30 追问的那批）。
 import { describe, expect, it } from 'vitest'
-import { speedMissReason, speedOf, speedText } from './speed'
+import { isOneShotStream, speedMissReason, speedOf, speedText } from './speed'
 import type { RequestLog } from '@/api/types'
 
 /** 只填本模块读的字段：其余字段与口径无关，缺了也不该影响判据 */
@@ -212,5 +212,23 @@ describe('非流式与算不出的情形', () => {
     const row = makeLog({ completion_tokens: 7344, total_ms: 10715, first_byte_ms: 3845 })
     expect(speedText(row)).toBe('1069')
     expect(speedMissReason(row)).toBeNull()
+  })
+
+  it('isOneShotStream 能准确判定上游一次性整包返回', () => {
+    // 正常逐帧返回：不是一次性
+    const normal = makeLog({ completion_tokens: 600, total_ms: 14000, first_byte_ms: 120, last_byte_ms: 3120, body_reads: 47 })
+    expect(isOneShotStream(normal)).toBe(false)
+
+    // 上游整包一次性发出（只读到 1 个分块）且有 81 个 token：是一次性
+    const oneShot = makeLog({ completion_tokens: 81, total_ms: 14180, first_byte_ms: 13520, last_byte_ms: 13520, body_reads: 1 })
+    expect(isOneShotStream(oneShot)).toBe(true)
+
+    // 非流式：不是一次性流式
+    const noStream = makeLog({ stream: false, completion_tokens: 81, total_ms: 1000 })
+    expect(isOneShotStream(noStream)).toBe(false)
+
+    // 无输出 token：不是一次性
+    const noOutput = makeLog({ completion_tokens: 0, total_ms: 1000 })
+    expect(isOneShotStream(noOutput)).toBe(false)
   })
 })

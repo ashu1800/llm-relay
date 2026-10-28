@@ -10,7 +10,6 @@ import {
   CheckOutlined,
   EditOutlined,
   KeyOutlined,
-  DashboardOutlined,
   StopOutlined,
   PlayCircleOutlined,
   SearchOutlined,
@@ -420,10 +419,39 @@ function limitText(v: number) {
   return v + ' 次/分钟'
 }
 
+function rpmClass(v: number) {
+  if (v < 0) return 'is-unlimited'
+  if (v === 0) return 'is-default'
+  return 'is-limit'
+}
+
+function rpmLabel(v: number) {
+  if (v < 0) return '无限制'
+  if (v === 0) return '全局默认'
+  return `${v} RPM`
+}
+
 /** 列表「模型路由」列的一行摘要：模型 → 渠道A > 渠道B（序即优先级） */
 function routeSummary(record: APIKey): { model: string; channels: number[] }[] {
   const routes = record.model_channels || {}
   return (record.allowed_models || []).map((m) => ({ model: m, channels: routes[m] || [] }))
+}
+
+function totalChannelCount(record: APIKey): number {
+  const routes = record.model_channels || {}
+  const allIds = new Set<number>()
+  for (const cidList of Object.values(routes)) {
+    for (const id of cidList) allIds.add(id)
+  }
+  return allIds.size
+}
+
+const routeModalOpen = ref(false)
+const routeModalKey = ref<APIKey | null>(null)
+
+function openRouteModal(record: APIKey) {
+  routeModalKey.value = record
+  routeModalOpen.value = true
 }
 
 // 模型白名单的候选只能来自渠道（选项下发），无需去空白去重，
@@ -589,37 +617,6 @@ async function submitLimit() {
   }
 }
 
-async function toggle(row: APIKey) {
-  // 切换后的动作名会翻（停用 ↔ 启用），焦点归还时要用**新的**那个前缀
-  const nextLabel = (!row.enabled ? '停用密钥 ' : '启用密钥 ') + row.name
-  // 同一时刻只允许**一行**在途（2026-10-11 修）。原来只挡同一行
-  // （`togglingId === row.id`），于是 A 行在途时点 B 行会照常发出第二个 PUT，
-  // 两条请求各自 `await load()` —— 先回来的那条被后回来的完整覆盖，
-  // 屏幕上于是有一行的启停状态与库里不一致，直到下一次刷新。
-  // 渠道页早就用 `:disabled="togglingId !== 0 && togglingId !== record.id"`
-  // 挡住了这一路，密钥页当时没跟上；现在两处口径一致：
-  // 按钮上 disabled + loading，这里再兜一道。
-  if (togglingId.value) {
-    if (togglingId.value !== row.id) message.info('上一项操作还在进行中，请稍候')
-    return
-  }
-  togglingId.value = row.id
-  try {
-    await api.put('/keys/' + row.id, { enabled: !row.enabled })
-    await load()
-    // 整表重拉销毁了触发按钮，焦点会掉回 body —— 找回同一行的同一个开关
-    await nextTick()
-    focusRowAction(tableWrap.value, row.id, nextLabel)
-  } catch (e: any) {
-    message.error(e.message)
-  } finally {
-    togglingId.value = 0
-  }
-}
-
-/** 正在切换的那一行（0 = 没有）。用它给开关加 loading 并把重复点击吃掉 */
-const togglingId = ref(0)
-
 function confirmDelete(row: APIKey) {
   modal.confirm({
     centered: true,
@@ -689,19 +686,6 @@ onUnmounted(() => {
           </button>
         </a-tooltip>
         <div class="toolbar-spacer" />
-        <!-- 批量启停（2026-10-11）：≥2 行才出现，作用范围是当前筛选结果，
-             按钮上写着数量（与渠道页同一套，见 useBatchToggle 的文件头） -->
-        <template v-if="filteredKeys.length >= 2">
-          <a-button size="small" :loading="batch.running.value" @click="batch.run(filteredKeys, true)">
-            <PlayCircleOutlined /> 批量启用{{ filteredKeys.length }} 个
-          </a-button>
-          <a-button size="small" danger :loading="batch.running.value" @click="confirmBatchDisable">
-            <StopOutlined /> 批量停用{{ filteredKeys.length }} 个
-          </a-button>
-          <span v-if="batch.running.value" class="batch-progress" role="status">
-            正在处理 {{ batch.progress.value.done }}/{{ batch.progress.value.total }}
-          </span>
-        </template>
         <!-- 本地搜索（2026-10-11）：列表接口一次返回全量密钥，几十把之后
              「按名字找那一把」只能靠眼睛扫。搜索是纯客户端的 —— 不额外发请求，
              也不会因为搜不到而让表格进入「加载中」的错觉。
@@ -785,58 +769,101 @@ onUnmounted(() => {
             </a-tooltip>
           </template>
         </a-table-column>
-        <a-table-column title="模型路由" :width="340" ellipsis>
+        <a-table-column title="模型路由" :width="340">
           <template #default="{ record }">
-            <!-- 每个模型一行：模型胶囊 + 有序渠道名（序即优先级）。
-                 渠道名解析失败（渠道被删）显示红色占位 —— 那条路由
-                 已失效，这把密钥调该模型时会被跳过它 -->
-            <div class="route-summary">
-              <div v-for="entry in routeSummary(record)" :key="entry.model" class="route-line">
-                <ModelTag :name="entry.model" />
-                <span class="route-arrow">➔</span>
-                <span v-if="!entry.channels.length" class="route-missing">未配置渠道</span>
-                <div v-else class="route-pipeline">
-                  <template v-for="(cid, i) in entry.channels" :key="cid">
-                    <span v-if="i > 0" class="pipe-arrow">›</span>
-                    <span
-                      class="route-channel-node"
-                      :class="{ 'is-missing': !channels.some((c) => c.id === cid) }"
-                      :title="'优先级 #' + (i + 1) + '：' + channelLabelOf(cid)"
-                    >
-                      <span class="node-idx">{{ i + 1 }}</span>
-                      {{ channelLabelOf(cid) }}
-                    </span>
-                  </template>
+            <span v-if="!routeSummary(record).length" class="muted">未配置模型</span>
+            <!-- 简略信息：悬浮出拓扑浮层，点击打开详情弹窗 -->
+            <a-popover
+              v-else
+              placement="topLeft"
+              trigger="hover"
+              overlay-class-name="route-detail-popover"
+            >
+              <button
+                type="button"
+                class="route-brief-pill"
+                title="悬停预览路由流向，点击查看完整拓扑"
+                @click="openRouteModal(record)"
+              >
+                <div class="brief-tags">
+                  <ModelTag :name="routeSummary(record)[0].model" />
+                  <span v-if="routeSummary(record).length > 1" class="brief-more">
+                    +{{ routeSummary(record).length - 1 }}
+                  </span>
                 </div>
-              </div>
-            </div>
+                <span class="brief-summary-count">
+                  {{ routeSummary(record).length }} 模型 · {{ totalChannelCount(record) }} 渠道
+                </span>
+              </button>
+              <template #content>
+                <div class="route-popover-content">
+                  <div class="route-pop-head">
+                    <span class="route-pop-title">{{ record.name }} 的模型路由</span>
+                    <span class="route-pop-badge">{{ routeSummary(record).length }} 个模型</span>
+                  </div>
+                  <div class="route-pop-list">
+                    <div v-for="entry in routeSummary(record)" :key="entry.model" class="route-line">
+                      <ModelTag :name="entry.model" />
+                      <span class="route-arrow">➔</span>
+                      <span v-if="!entry.channels.length" class="route-missing">未配置渠道</span>
+                      <div v-else class="route-pipeline">
+                        <template v-for="(cid, i) in entry.channels" :key="cid">
+                          <span v-if="i > 0" class="pipe-arrow">›</span>
+                          <span
+                            class="route-channel-node"
+                            :class="{ 'is-missing': !channels.some((c) => c.id === cid) }"
+                            :title="'优先级 #' + (i + 1) + '：' + channelLabelOf(cid)"
+                          >
+                            <span class="node-grip" aria-hidden="true">⋮</span>
+                            <span class="node-idx">{{ i + 1 }}</span>
+                            {{ channelLabelOf(cid) }}
+                          </span>
+                        </template>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="route-pop-foot">
+                    <button type="button" class="route-pop-edit-btn" @click="openRouteModal(record)">
+                      查看弹窗详情
+                    </button>
+                    <button type="button" class="route-pop-edit-btn is-primary" @click="openEdit(record)">
+                      <EditOutlined /> 编辑路由
+                    </button>
+                  </div>
+                </div>
+              </template>
+            </a-popover>
           </template>
         </a-table-column>
         <a-table-column title="最后使用" :width="150">
           <template #default="{ record }">{{ fmt(record.last_used_at) }}</template>
         </a-table-column>
         <a-table-column title="限流" :width="130">
-          <template #default="{ record }">{{ limitText(record.rate_limit_rpm) }}</template>
+          <template #default="{ record }">
+            <button
+              type="button"
+              class="rpm-tachometer-pill"
+              :class="rpmClass(record.rate_limit_rpm)"
+              :title="'点击调整限流（当前：' + limitText(record.rate_limit_rpm) + '）'"
+              @click="setLimit(record)"
+            >
+              <span v-if="record.rate_limit_rpm < 0" class="rpm-symbol">∞</span>
+              <span v-else-if="record.rate_limit_rpm === 0" class="rpm-symbol">⚙</span>
+              <span v-else class="rpm-symbol">⚡</span>
+              <span class="rpm-val">{{ rpmLabel(record.rate_limit_rpm) }}</span>
+            </button>
+          </template>
         </a-table-column>
         <a-table-column title="状态" :width="90">
           <template #default="{ record }">
             <a-tag :color="record.enabled ? 'green' : 'default'">{{ record.enabled ? '启用' : '停用' }}</a-tag>
           </template>
         </a-table-column>
-        <!-- 四个动作改成图标按钮，与渠道页同一个写法（.table-icon-btn）。
-             原来四个「图标 + 文字」链接实测占 181px，列宽因此要 200；
-             图标按钮每个 28px，四个加间距共 124px，列宽 132 就够，
-             表格总宽从 1230 降到 1162 —— 1440 与 1334 两个视口下都能完整装进
-             容器，横向滚动消失，也不再出现「固定列悬停提示被裁掉一截」。
-
-             四个动作里有两个不是自解释的：
-               · 「改限额」—— 图标只能是仪表盘/速度一类，看不出改的是「每分钟上限」
-               · 「启用/停用」—— 同一个按钮两种语义，图标必须跟着 :checked 换
-             这两处靠 tooltip 补名字，其余两个（编辑、删除）本就是通用约定。 -->
-        <a-table-column title="操作" :width="132" fixed="right">
+        <!-- 操作列：只保留编辑与删除（用户要求精简） -->
+        <a-table-column title="操作" :width="80" fixed="right">
           <template #default="{ record }">
             <a-space :size="4">
-              <a-tooltip title="编辑密钥：名称、白名单">
+              <a-tooltip title="编辑密钥：名称、限额、路由与状态">
                 <a-button
                   class="table-icon-btn"
                   type="text"
@@ -845,33 +872,6 @@ onUnmounted(() => {
                   @click="openEdit(record)"
                 >
                   <EditOutlined />
-                </a-button>
-              </a-tooltip>
-              <a-tooltip title="改限额：每分钟请求数上限">
-                <a-button
-                  class="table-icon-btn"
-                  type="text"
-                  size="small"
-                  :aria-label="'修改 ' + record.name + ' 的每分钟请求上限'"
-                  @click="setLimit(record)"
-                >
-                  <DashboardOutlined />
-                </a-button>
-              </a-tooltip>
-              <a-tooltip :title="record.enabled ? '停用：使用该密钥的客户端立即失效' : '启用：恢复这把密钥的调用'">
-                <a-button
-                  class="table-icon-btn"
-                  type="text"
-                  size="small"
-                  :loading="togglingId === record.id"
-                  :disabled="togglingId !== 0 && togglingId !== record.id"
-                  :aria-label="(record.enabled ? '停用密钥 ' : '启用密钥 ') + record.name"
-                  @click="toggle(record)"
-                >
-                  <!-- 图标跟着状态换，不只换颜色：色觉障碍下也要能分辨
-                       「这一下会把它关掉」还是「会把它打开」 -->
-                  <StopOutlined v-if="record.enabled" />
-                  <PlayCircleOutlined v-else />
                 </a-button>
               </a-tooltip>
               <a-tooltip title="删除密钥">
@@ -912,6 +912,12 @@ onUnmounted(() => {
         <a-form-item label="每分钟请求上限">
           <a-input-number v-model:value="form.rate_limit_rpm" :min="-1" :max="1000000" style="width: 100%" />
           <div class="field-hint">0 表示跟随全局默认；负数表示这把密钥完全不限流。</div>
+        </a-form-item>
+        <a-form-item label="状态">
+          <a-switch v-model:checked="form.enabled" />
+          <span style="margin-left: 8px; font-size: var(--font-size-sm); color: var(--color-text-secondary)">
+            {{ form.enabled ? '启用（客户端可正常鉴权调用）' : '停用（客户端请求将收到 401）' }}
+          </span>
         </a-form-item>
         <a-form-item label="可调用的模型" required>
           <!-- 受控多选而不是自由输入的 tags：值只能来自渠道白名单里真实存在的
@@ -1036,6 +1042,49 @@ onUnmounted(() => {
       </a-form>
       <div class="field-hint">
         填 0 表示跟随全局默认；填 -1 表示这把密钥完全不限流（适合本地压测）。
+      </div>
+    </a-modal>
+
+    <!-- 模型路由详情独立弹窗（点击时弹窗显示详细的模型和路由详情） -->
+    <a-modal
+      v-model:open="routeModalOpen"
+      :title="(routeModalKey?.name || '') + ' 的模型路由拓扑'"
+      :width="modalWidth(640)"
+      :footer="null"
+      centered
+    >
+      <div v-if="routeModalKey" class="route-modal-detail">
+        <div class="route-modal-desc">
+          共配置 <strong>{{ routeSummary(routeModalKey).length }}</strong> 个模型，
+          涉及 <strong>{{ totalChannelCount(routeModalKey) }}</strong> 条可用渠道候选。调用时将严格按每个模型的渠道顺序进行故障转移。
+        </div>
+        <div class="route-modal-list">
+          <div v-for="entry in routeSummary(routeModalKey)" :key="entry.model" class="route-line">
+            <ModelTag :name="entry.model" />
+            <span class="route-arrow">➔</span>
+            <span v-if="!entry.channels.length" class="route-missing">未配置渠道</span>
+            <div v-else class="route-pipeline">
+              <template v-for="(cid, i) in entry.channels" :key="cid">
+                <span v-if="i > 0" class="pipe-arrow">›</span>
+                <span
+                  class="route-channel-node"
+                  :class="{ 'is-missing': !channels.some((c) => c.id === cid) }"
+                  :title="'优先级 #' + (i + 1) + '：' + channelLabelOf(cid)"
+                >
+                  <span class="node-grip" aria-hidden="true">⋮</span>
+                  <span class="node-idx">{{ i + 1 }}</span>
+                  {{ channelLabelOf(cid) }}
+                </span>
+              </template>
+            </div>
+          </div>
+        </div>
+        <div class="route-modal-footer">
+          <a-button type="primary" @click="routeModalOpen = false; openEdit(routeModalKey)">
+            <EditOutlined /> 前往编辑此密钥路由
+          </a-button>
+          <a-button @click="routeModalOpen = false">关闭</a-button>
+        </div>
       </div>
     </a-modal>
 
@@ -1164,6 +1213,182 @@ onUnmounted(() => {
 }
 
 /* ---- 模型路由：列表摘要列（方案 3：流道管道与拓扑） ---- */
+/* ---- 简略路由胶囊（微型概览） ---- */
+.route-brief-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 2px 8px;
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--color-bg) 60%, var(--color-fg));
+  border: 1px solid var(--color-border);
+  cursor: var(--cursor-hand);
+  transition: all 0.2s var(--ease-expo);
+  text-align: left;
+  overflow: hidden;
+}
+
+.route-brief-pill:hover {
+  border-color: color-mix(in oklab, var(--color-primary) 50%, var(--color-border));
+  background: var(--color-icon-hover-bg);
+  transform: translateY(-1px);
+}
+
+.brief-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+
+.brief-tags :deep(.model-tag) {
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brief-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  padding: 0 4px;
+  height: 18px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklab, var(--color-text-secondary) 15%, transparent);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-2xs);
+  font-family: var(--font-family-mono);
+}
+
+.brief-summary-count {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  flex: none;
+}
+
+/* ---- 路由详情悬浮浮层（Popover） ---- */
+.route-popover-content {
+  width: min(440px, 85vw);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px;
+}
+
+.route-pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.route-pop-title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.route-pop-badge {
+  font-size: var(--font-size-xs);
+  font-family: var(--font-family-mono);
+  color: var(--text-primary-ink);
+  background: color-mix(in oklab, var(--color-primary) 12%, transparent);
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+}
+
+.route-pop-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.route-pop-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--color-border);
+}
+
+.route-pop-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: var(--radius-control);
+  font-size: var(--font-size-xs);
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: var(--cursor-hand);
+  transition: all 0.15s ease;
+}
+
+.route-pop-edit-btn:hover {
+  color: var(--color-text);
+  border-color: var(--color-text-secondary);
+}
+
+.route-pop-edit-btn.is-primary {
+  background: color-mix(in oklab, var(--color-primary) 15%, transparent);
+  border-color: color-mix(in oklab, var(--color-primary) 35%, transparent);
+  color: var(--text-primary-ink);
+}
+
+.route-pop-edit-btn.is-primary:hover {
+  background: color-mix(in oklab, var(--color-primary) 25%, transparent);
+}
+
+/* ---- 独立路由详情 Modal 弹窗 ---- */
+.route-modal-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 8px;
+}
+
+.route-modal-desc {
+  font-size: var(--font-size-sm);
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  padding: 8px 12px;
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--color-bg) 60%, var(--color-fg));
+  border: 1px solid var(--color-border);
+}
+
+.route-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 380px;
+  overflow-y: auto;
+  padding: 4px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+}
+
+.route-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
 .route-summary { display: flex; flex-direction: column; gap: 4px; }
 .route-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; min-width: 0; }
 .route-arrow { color: var(--text-primary-ink); font-size: var(--font-size-xs); opacity: 0.8; }
@@ -1193,6 +1418,12 @@ onUnmounted(() => {
   border-radius: 2px;
   padding: 0 3px;
   color: var(--color-text-secondary);
+}
+.node-grip {
+  color: var(--color-text-secondary);
+  opacity: 0.5;
+  font-size: var(--font-size-2xs);
+  margin-right: -2px;
 }
 .route-channel-node.is-missing, .route-missing {
   color: var(--text-red);
@@ -1308,6 +1539,48 @@ onUnmounted(() => {
 .dock-slide-leave-to {
   transform: translate(-50%, 28px);
   opacity: 0;
+}
+
+/* ---- 限流转速仪表盘微胶囊（方案 2） ---- */
+.rpm-tachometer-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border-radius: var(--radius-control);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+  line-height: 20px;
+  border: 1px solid var(--color-border);
+  background: color-mix(in oklab, var(--color-bg) 60%, var(--color-fg));
+  color: var(--color-text);
+  cursor: var(--cursor-hand);
+  transition: all 0.2s var(--ease-expo);
+}
+
+.rpm-tachometer-pill:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in oklab, var(--color-primary) 50%, var(--color-border));
+}
+
+.rpm-tachometer-pill.is-unlimited {
+  background: color-mix(in oklab, var(--color-blue) 12%, transparent);
+  color: var(--text-blue);
+  border-color: color-mix(in oklab, var(--color-blue) 30%, transparent);
+}
+
+.rpm-tachometer-pill.is-limit {
+  background: color-mix(in oklab, var(--color-green) 12%, transparent);
+  color: var(--text-green);
+  border-color: color-mix(in oklab, var(--color-green) 30%, transparent);
+}
+
+.rpm-tachometer-pill.is-default {
+  color: var(--color-text-secondary);
+}
+
+.rpm-symbol {
+  font-size: var(--font-size-2xs);
 }
 </style>
 

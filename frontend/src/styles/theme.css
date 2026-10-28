@@ -1218,3 +1218,33 @@ code,
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22) !important;
   background: var(--color-fg) !important;
 }
+
+/* ---- 看板时间范围罗盘物理滑动光标（方案 8） ---- */
+.ant-radio-group .ant-radio-button-wrapper {
+  transition: all 0.22s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
+}
+.ant-radio-group .ant-radio-button-wrapper-checked {
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
+  font-weight: 600 !important;
+}
+
+/* ---- 复制操作光子电荷微涟漪与触觉对勾（方案 10） ---- */
+.is-copied,
+.trace-copy-ok,
+.key-copy.is-copied,
+.baseurl-copy.is-copied {
+  position: relative;
+  animation: haptic-pop 0.24s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+}
+@keyframes haptic-pop {
+  0% { transform: scale(0.8); }
+  50% { transform: scale(1.22); }
+  100% { transform: scale(1); }
+}
+
+/* ---- 模型路由详情弹层与浮层 ---- */
+.route-detail-popover .ant-popover-inner {
+  padding: 10px !important;
+  border-radius: var(--radius-panel) !important;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.28) !important;
+}

@@ -110,6 +110,8 @@ const title = computed(() =>
   border-color: color-mix(in oklab, var(--text-amber) 60%, var(--color-border));
   box-shadow: 0 0 8px color-mix(in oklab, var(--color-orange) 20%, transparent);
   animation: ls-sentry-glow 2.4s ease-in-out infinite;
+  position: relative;
+  overflow: hidden;
 }
 
 .live-status.is-offline {
@@ -117,6 +119,27 @@ const title = computed(() =>
   border-color: color-mix(in oklab, var(--text-red) 60%, var(--color-border));
   box-shadow: 0 0 10px color-mix(in oklab, var(--color-red) 25%, transparent);
   animation: ls-sentry-glow 1.6s ease-in-out infinite;
+  position: relative;
+  overflow: hidden;
+}
+
+/* 全息声呐雷达巡航微波（方案 9） */
+.live-status.is-stale::after,
+.live-status.is-offline::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -60%;
+  width: 50%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, color-mix(in oklab, currentColor 20%, transparent), transparent);
+  animation: sonar-cruise 3s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  pointer-events: none;
+}
+
+@keyframes sonar-cruise {
+  0% { left: -60%; }
+  100% { left: 140%; }
 }
 
 @keyframes ls-sentry-glow {

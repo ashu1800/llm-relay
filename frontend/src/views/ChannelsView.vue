@@ -1047,31 +1047,6 @@ onMounted(async () => {
           </a-button>
         </div>
         <div class="toolbar-spacer" />
-        <!-- 批量启停（2026-10-11）：只有 ≥2 行时才出现（一行的「批量」没有意义），
-             作用范围是**当前筛选结果**，所以按钮上写着数量、
-             确认框里重复一遍筛选条件（见 batchScopeText）。
-             停用走确认、启用不用 —— 启用的后果是「这批重新接活」，
-             真弄错了再停一次即可，而停用会让正在用的客户端当场报错。 -->
-        <template v-if="filteredRows.length >= 2">
-          <a-button
-            size="small"
-            :loading="batch.running.value"
-            @click="batch.run(filteredRows, true)"
-          >
-            <PlayCircleOutlined /> 批量启用{{ filteredRows.length }} 个
-          </a-button>
-          <a-button
-            size="small"
-            danger
-            :loading="batch.running.value"
-            @click="confirmBatchDisable"
-          >
-            <StopOutlined /> 批量停用{{ filteredRows.length }} 个
-          </a-button>
-          <span v-if="batch.running.value" class="batch-progress" role="status">
-            正在处理 {{ batch.progress.value.done }}/{{ batch.progress.value.total }}
-          </span>
-        </template>
         <!-- 本地搜索（2026-10-11）：渠道是最容易变多的一张表，
              而「哪个渠道能用 glm」「哪条渠道里有 1.2.3.4」都靠它。 -->
         <a-input
@@ -1263,13 +1238,18 @@ onMounted(async () => {
                   :aria-label="'渠道 ' + record.name + ' 启用开关'"
                   @change="(v: any) => toggleChannel(record, !!v)"
                 />
-                <!-- 异常才额外给一个图标：开关本身只有「开/关」两态，
-                     表示不了「开着但连不上」。用图标而不是只换颜色，
-                     色觉障碍下同样能看见。
-                     图标不再挂自己的 title：它就在外层 tooltip 里，
-                     再挂一个原生 title 会同时冒出两个提示、内容还重复 -->
+                <!-- 熔断冷却中：电磁断路器微标（方案 1） -->
+                <span
+                  v-if="record.enabled && record.runtime && record.runtime.cooldown_ms > 0"
+                  class="cooldown-tripper"
+                  :title="`电磁断路器熔断保护中：剩余 ${Math.ceil(record.runtime.cooldown_ms / 1000)} 秒自愈（期间流量自动由下游备选渠道接管）`"
+                >
+                  <span class="tripper-icon" aria-hidden="true">⚡</span>
+                  <span class="tripper-text">{{ Math.ceil(record.runtime.cooldown_ms / 1000) }}s 熔断</span>
+                </span>
+                <!-- 异常才额外给一个警告图标 -->
                 <WarningOutlined
-                  v-if="record.enabled && healthInfo(record).degraded"
+                  v-else-if="record.enabled && healthInfo(record).degraded"
                   class="health-warn"
                 />
               </span>
@@ -1893,6 +1873,32 @@ onMounted(async () => {
 .enable-cell { display: inline-flex; align-items: center; gap: 6px; }
 /* 异常提示用橙色，与「未定价」那类待办同色系；只在探测失败时出现 */
 .health-warn { color: var(--text-amber); font-size: var(--font-size-md); }
+
+/* 电磁断路器熔断微标（方案 1） */
+.cooldown-tripper {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklab, var(--color-orange) 15%, transparent);
+  border: 1px solid color-mix(in oklab, var(--color-orange) 35%, transparent);
+  color: var(--text-amber);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-2xs);
+  line-height: 1.4;
+  white-space: nowrap;
+  animation: tripper-breathe 2s ease-in-out infinite;
+}
+
+@keyframes tripper-breathe {
+  0%, 100% { opacity: 0.85; box-shadow: 0 0 4px color-mix(in oklab, var(--color-orange) 20%, transparent); }
+  50% { opacity: 1; box-shadow: 0 0 8px color-mix(in oklab, var(--color-orange) 40%, transparent); }
+}
+
+.tripper-icon {
+  font-size: var(--font-size-2xs);
+}
 /* 「顺序」表头在 44px 的列里折成了上下两行，把整行表头从 39px 顶到 61px：
    antd 在每侧留 8px 内边距，44px 的列只剩 28px 给文字，而这两个字正好是
    28px 宽，卡在折行的边界上。这里只收窄这一列的内边距，**不加列宽** ——
