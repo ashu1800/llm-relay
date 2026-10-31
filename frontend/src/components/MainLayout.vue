@@ -402,7 +402,7 @@ onUnmounted(() => {
             <!-- 品牌区：点击回数据看板。
                  用 <button> 而不是 <div @click>（2026-10-11）：没有 tabindex 的 div
                  键盘永远聚焦不到、回车也触发不了 —— 它是导航，不是装饰。
-                 展开态的可访问名就是可见文字「LLM Relay」（不写 aria-label：
+                 展开态的可访问名就是可见文字「LLM管理平台」（不写 aria-label：
                  写了会让名字与可见文字不一致，违反 WCAG 2.5.3「名称中含可见标签」）；
                  收起态没有可见文字，才补 aria-label。 -->
             <button
@@ -412,8 +412,8 @@ onUnmounted(() => {
               :aria-label="railMode ? '回到数据看板' : undefined"
               @click="go('/console/dashboard')"
             >
-              <span class="brand-mark" aria-hidden="true">LR</span>
-              <span v-if="!railMode" class="brand-text">LLM Relay</span>
+              <span class="brand-mark" aria-hidden="true">LM</span>
+              <span v-if="!railMode" class="brand-text">LLM管理平台</span>
             </button>
 
             <!-- 版本号紧随品牌：它是这个应用的身份信息，与品牌同属一组。
@@ -727,7 +727,7 @@ onUnmounted(() => {
   flex: 0 0 32px;
   border-radius: var(--radius-pill);
   /* 白字压在主色 #c87864 上只有 3.32:1，不达 AA。
-     品牌标是首屏第一眼看到的东西，也是「LLM Relay」这个名字的载体，
+     品牌标是首屏第一眼看到的东西，也是「LLM管理平台」这个名字的载体，
      不该是整页最难读的一处。这里改用主色加深一档作底色：白字 4.84:1。
      深色主题会在下面再覆盖成提亮版（白字在深色底上本来就不合适）。 */
   background: var(--brand-mark-bg);
@@ -759,7 +759,7 @@ onUnmounted(() => {
    徽标本体（胶囊外观、配色、弹出面板）都在 VersionBadge 组件里，
    这里只负责它在侧栏里的位置与间距 —— 组件不该知道自己在哪个布局里。
 
-   与品牌名「LLM Relay」的左缘对齐，而不是与 LR 圆标对齐：
+   与品牌名「LLM管理平台」的左缘对齐，而不是与 LM 圆标对齐：
    .brand 的内边距 4px + 圆标 32px + 列间距 8px = 44px。
    改 .brand 的任何几何尺寸都要同步这两个 44px。 */
 .brand-version-slot {
@@ -921,7 +921,7 @@ onUnmounted(() => {
 /* 收起态：这一列只剩图标，而 .console-menu-item 的左右 10px 内边距是给展开态的
    文字留的。56px 宽减去侧栏自己左右各 8px 只剩 40px，图标 15px 加上左内边距
    之后左留白 18px、右留白 23px —— 实测（.shots/measure-sidebar.mjs）整列图标比
-   侧栏中轴偏左 5px，与上面居中的 LR 圆标（12/12）不在一条竖线上。
+   侧栏中轴偏左 5px，与上面居中的 LM 圆标（12/12）不在一条竖线上。
    收起态改成内容居中并去掉内边距，各处中心线统一落到中轴上
    （实测都是 28px，即 56/2）。 */
 .console-sidebar.is-collapsed .console-menu-item {
@@ -1029,7 +1029,7 @@ onUnmounted(() => {
 }
 
 /* 收起态（56px 宽，内容区 40px）放不下文字，只留图标 —— 图标居中，
-   中心线统一落到中轴 28px（=56/2），与上面的菜单图标、LR 圆标同一条线 */
+   中心线统一落到中轴 28px（=56/2），与上面的菜单图标、LM 圆标同一条线 */
 .console-sidebar.is-collapsed .sidebar-footer {
   align-items: center;
   gap: var(--gap);

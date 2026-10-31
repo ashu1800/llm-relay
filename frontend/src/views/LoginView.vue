@@ -143,8 +143,8 @@ watch(
   <div class="login-page">
     <div class="login-card" :class="{ 'is-wide': pane === 'wizard' }">
       <div class="login-brand">
-        <span class="brand-mark">LR</span>
-        <span class="brand-text">LLM Relay</span>
+        <span class="brand-mark">LM</span>
+        <span class="brand-text">LLM管理平台</span>
       </div>
 
       <!-- 终端安全准入徽标（方案 1） -->
@@ -253,7 +253,7 @@ watch(
 
 /* 品牌区与侧栏同款（见 MainLayout 的 .brand-mark / .brand-text）：
    底色/文字色走 --brand-mark-* 令牌，圆角与字号字重也逐项对齐 ——
-   同一个「LR」标记在登录页与侧栏里必须是同一个形状。 */
+   同一个「LM」标记在登录页与侧栏里必须是同一个形状。 */
 .login-brand {
   display: flex;
   align-items: center;
