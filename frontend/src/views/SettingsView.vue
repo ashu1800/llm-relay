@@ -215,6 +215,8 @@ async function saveAlias(row: { id: number; key: string }) {
       })
     } else if (res.icon_cached) {
       message.success('图标已抓取并缓存到本站，日志页不再请求外链')
+    } else if (res.icon_compressed) {
+      message.success('图标过大，已压缩后保存到本站')
     } else {
       message.success('已保存，日志列已按新叫法显示')
     }
@@ -593,8 +595,8 @@ onMounted(() => {
         一起换新叫法（库里仍保留识别当时的原名作快照，CSV 导出同样按映射后的名字）。
         图标可选内置库，或粘贴 data URI / 图片地址 / 单个字符。
         <strong>粘贴 http(s) 图片地址时，保存会先由后端抓一次、转成 data URI 存库</strong>
-        （与渠道图标同一套：抓不到就按原样存下，行上会标出来）——
-        之后日志列只从本站渲染，不再每次打开页面都去请求那个外链。
+        （与渠道图标同一套：超过 64KB 会自动压缩到图标尺寸，抓不到就按原样存下，
+        行上会标出来）—— 之后日志列只从本站渲染，不再每次打开页面都去请求那个外链。
       </div>
       <div v-if="sortedAliasRows.length === 0" class="span-line">
         还没有观测到任何客户端 —— 有请求进来后会自动出现在这里。

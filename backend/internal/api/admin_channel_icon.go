@@ -62,11 +62,16 @@ func (s *Server) channelIconPreview(c *gin.Context) {
 	}
 	// 自定义图标不需要抓取，直接回显（前端据此省掉一次往返）
 	if icon := strings.TrimSpace(p.Icon); icon != "" {
-		if len(icon) > maxIconBytes*2 {
-			writeUpstreamError(c, http.StatusBadRequest, "图标太大了（上限 128KB）", "invalid_request_error")
+		if len(icon) > maxIconInputBytes {
+			writeUpstreamError(c, http.StatusBadRequest, "图标太大了（上限 2MB）", "invalid_request_error")
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"ok": true, "icon": icon})
+		normalized, err := normalizePastedIcon(icon)
+		if err != nil {
+			writeUpstreamError(c, http.StatusBadRequest, "图标无法处理："+err.Error(), "invalid_request_error")
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true, "icon": normalized})
 		return
 	}
 
@@ -111,12 +116,19 @@ func (s *Server) channelIcon(c *gin.Context) {
 			return
 		}
 		icon = fetched
-	}
-	// 手工填的图标同样要有上限：抓取路径限了 64KB，这里不限的话
-	// 可以往 channels.icon（text）里塞任意大的内容，渠道列表与备份跟着膨胀
-	if len(icon) > maxIconBytes*2 {
-		writeUpstreamError(c, http.StatusBadRequest, "图标太大了（上限 128KB，抓取来的图标通常只有几 KB）", "invalid_request_error")
-		return
+	} else {
+		// 手工填的图标同样要有上限；data URI 超限时先压缩再入库，
+		// 否则 channels.icon（text）会被任意大的内容撑肥，渠道列表与备份跟着膨胀
+		if len(icon) > maxIconInputBytes {
+			writeUpstreamError(c, http.StatusBadRequest, "图标太大了（上限 2MB）", "invalid_request_error")
+			return
+		}
+		normalized, err := normalizePastedIcon(icon)
+		if err != nil {
+			writeUpstreamError(c, http.StatusBadRequest, "图标无法处理："+err.Error(), "invalid_request_error")
+			return
+		}
+		icon = normalized
 	}
 	if err := db.Model(&model.Channel{}).Where("id = ?", id).Update("icon", icon).Error; err != nil {
 		writeInternalError(c, err)
@@ -326,13 +338,7 @@ func findManifestHref(page string) string {
 	return ""
 }
 
-// maxDataURIBytes 是接受内联 data URI 图标的上限。
-//
-// 与 maxIconBytes 分开：data URI 是 base64，同样内容体积约为原文的 4/3，
-// 这里按解码后的原始字节判断，与 file 路径的上限口径一致。
-const maxDataURIBytes = maxIconBytes
-
-// readIconDataURI 校验页面里内联的 data: 图标并原样返回。
+// readIconDataURI 校验页面里内联的 data: 图标，超过上限时同样压缩后返回。
 //
 // 为什么要支持 data URI：一小部分站点（尤其用构建工具打包的文档站）
 // 把图标直接内联进 HTML，requests 里根本不存在对应的图标 URL。
@@ -353,15 +359,11 @@ func readIconDataURI(raw string) (string, error) {
 		// 抓取坏了，而实际上这个站点根本没有图标可抓
 		return "", errors.New("站点声明的图标是空的（data:,）")
 	}
+	if strings.TrimSpace(meta) == "" {
+		return "", errors.New("data URI 缺少媒体类型")
+	}
 	if !strings.Contains(strings.ToLower(meta), "base64") {
 		return "", errors.New("只支持 base64 编码的内联图标")
 	}
-	// 允许超限一点点再报错，避免把刚好等于上限的内容误判
-	if len(payload) > maxDataURIBytes*4/3+4 {
-		return "", fmt.Errorf("内联图标超过 %dKB", maxDataURIBytes>>10)
-	}
-	if meta == "" {
-		return "", errors.New("data URI 缺少媒体类型")
-	}
-	return raw, nil
+	return compressIconDataURI(raw)
 }

@@ -320,11 +320,11 @@ func TestReadIconResponse(t *testing.T) {
 		}
 	})
 
-	t.Run("超 1 字节就拒", func(t *testing.T) {
+	t.Run("超过 64KB 且内容不是图片：拒绝", func(t *testing.T) {
 		body := bytes.Repeat([]byte{'x'}, maxIconBytes+1)
 		_, err := readIconResponse(respOf(200, "image/png", body), "https://a.com/a.png")
 		if err == nil || !strings.Contains(err.Error(), "超过 64KB") {
-			t.Errorf("超限应当被拒，实际 %v", err)
+			t.Errorf("超限且无法压缩时应当被拒，实际 %v", err)
 		}
 	})
 }

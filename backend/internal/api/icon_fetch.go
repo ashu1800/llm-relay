@@ -25,8 +25,21 @@ import (
 // 所以这里只留一份实现，两个调用方各自只负责「要抓哪些地址」。
 //
 // 图标大小与超时。上游的 favicon 通常 1-5KB；给到 64KB 是留出
-// apple-touch-icon 这类大图的余量，再大就不是图标了，拉回来只会把备份撑肥。
+// apple-touch-icon 这类大图的余量，再大就压缩（见 icon_compress.go），
+// 而不是把整个文件塞进备份里。
 const maxIconBytes = 64 << 10
+
+// maxIconDownloadBytes 是压缩前允许下载的原始图片上限。
+//
+// 站点 favicon 常见 256/512px PNG 或包含多个尺寸的 ICO，几百 KB 很正常
+// （2026-11-03 实测 deepseek.com/favicon.ico 是 209KB）。2MB 足够覆盖这类
+// 素材；再大就不是图标了，下载和解码都不值得。
+const maxIconDownloadBytes = 2 << 20
+
+// maxIconInputBytes 是用户直接粘贴的图标内容上限（data URI 的字符串长度）。
+// base64 膨胀约 4/3，按 2MB 原图留出余量。
+const maxIconInputBytes = maxIconDownloadBytes*4/3 + 4096
+
 const iconFetchTimeout = 8 * time.Second
 
 // maxHTMLBytes 是读 HTML/Manifest 做图标发现时的上限。
@@ -263,15 +276,15 @@ func readIconResponse(resp *http.Response, src string) (string, error) {
 	if mt, _, err := mime.ParseMediaType(ct); err == nil && strings.HasPrefix(mt, "image/") {
 		mediaType = mt
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxIconBytes+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxIconDownloadBytes+1))
 	if err != nil {
 		return "", err
 	}
 	if len(data) == 0 {
 		return "", fmt.Errorf("%s 返回了空内容", src)
 	}
-	if len(data) > maxIconBytes {
-		return "", fmt.Errorf("%s 的图标超过 %dKB", src, maxIconBytes>>10)
+	if len(data) > maxIconDownloadBytes {
+		return "", fmt.Errorf("%s 的图标超过 %dMB", src, maxIconDownloadBytes>>20)
 	}
 	if mediaType == "" {
 		// Content-Type 不对或缺失，就自己认头像魔数
@@ -280,6 +293,17 @@ func readIconResponse(resp *http.Response, src string) (string, error) {
 			return "", fmt.Errorf("%s 返回的不是图片（%s）", src, ct)
 		}
 		mediaType = sniffed
+	}
+	// 超过 64KB 的图不再拒绝：解码后缩到图标显示所需的尺寸再编码成 PNG。
+	// 站点 favicon 动辄一两百 KB（多尺寸 ICO / 512px PNG），而界面只显示
+	// 十几像素 —— 直接拒掉只会把用户逼去手动压图。
+	if len(data) > maxIconBytes {
+		compressed, cerr := compressIcon(data, mediaType)
+		if cerr != nil {
+			return "", fmt.Errorf("%s 的图标超过 %dKB，且无法压缩（%v）", src, maxIconBytes>>10, cerr)
+		}
+		data = compressed
+		mediaType = "image/png"
 	}
 	// 用 ParseMediaType 的结果而不是原始头：Content-Type 是上游可控的，
 	// 原样拼进 data URI 会把 `image/png; x=<任意长参数>` 整段带进库里

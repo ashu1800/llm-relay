@@ -1611,7 +1611,7 @@ onMounted(async () => {
         <a-form-item>
           <template #label>
             渠道图标
-            <a-tooltip title="「从上游获取」会去上游站点找图标（先读页面里的图标声明与 manifest，再退回 /favicon.ico 等惯例路径），抓到就转成内置图标。只要填了上游地址就能用，不必先保存渠道。抓不到就用默认图标（渠道名首字母）。也可以直接填一个 emoji 或图片地址。">
+            <a-tooltip title="「从上游获取」会去上游站点找图标（先读页面里的图标声明与 manifest，再退回 /favicon.ico 等惯例路径），抓到就转成内置图标（超过 64KB 自动压缩到图标尺寸）。只要填了上游地址就能用，不必先保存渠道。抓不到就用默认图标（渠道名首字母）。也可以直接填一个 emoji、图片地址或 data URI。">
               <InfoCircleOutlined class="label-hint" />
             </a-tooltip>
           </template>
@@ -1629,6 +1629,7 @@ onMounted(async () => {
           <div class="field-hint">
             建议用「从上游获取」抓成内置图标：填外链地址的话，每次打开页面都要现去
             上游站点拉图，境内访问会很慢，上游一换图或加鉴权还会变成裂图。
+            粘贴的 data URI 超过 64KB 会自动压缩后再保存。
           </div>
         </a-form-item>
 

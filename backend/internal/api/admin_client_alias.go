@@ -68,9 +68,11 @@ func (s *Server) updateClientAlias(c *gin.Context) {
 		return
 	}
 	updates := map[string]any{}
-	// 这次保存有没有把图片外链抓成内置内容 / 抓失败的原因。
-	// 两个字段只出现在本次回执里，不落库（库里只认 icon 的最终值）。
+	// 这次保存有没有把图片外链抓成内置内容 / 有没有把过大的 data URI
+	// 压缩 / 抓失败的原因。这些字段只出现在本次回执里，不落库
+	// （库里只认 icon 的最终值）。
 	iconCached := false
+	iconCompressed := false
 	iconErr := ""
 	if p.Name != nil {
 		// 显式传空串 = 回到「待设置」（显示层回落内置/快照），是合法操作
@@ -85,8 +87,8 @@ func (s *Server) updateClientAlias(c *gin.Context) {
 		// 图标口径与渠道图标一致：data URI / 图片地址 / 一两个字符 /
 		// 内置图标文件名，形状由前端按内容识别，这里只限体量
 		icon := strings.TrimSpace(*p.Icon)
-		if len(icon) > 128<<10 {
-			writeUpstreamError(c, http.StatusBadRequest, "图标内容过长（上限 128KB）", "invalid_request_error")
+		if len(icon) > maxIconInputBytes {
+			writeUpstreamError(c, http.StatusBadRequest, "图标内容过长（上限 2MB）", "invalid_request_error")
 			return
 		}
 		// 图片外链就地抓下来缓存（见 cacheClientIcon）：存地址的话，
@@ -105,6 +107,18 @@ func (s *Server) updateClientAlias(c *gin.Context) {
 				icon = cached
 				iconCached = true
 			}
+		} else {
+			// 直接粘贴的 data URI 超过 64KB 时先压缩，保证任何常见格式的
+			// 大图都能变成 data URI 入库，而不是让用户自己找工具压图。
+			normalized, err := normalizePastedIcon(icon)
+			if err != nil {
+				writeUpstreamError(c, http.StatusBadRequest, "图标无法处理："+err.Error(), "invalid_request_error")
+				return
+			}
+			if normalized != icon {
+				iconCompressed = true
+			}
+			icon = normalized
 		}
 		updates["icon"] = icon
 	}
@@ -127,6 +141,9 @@ func (s *Server) updateClientAlias(c *gin.Context) {
 	if iconCached {
 		resp["icon_cached"] = true
 	}
+	if iconCompressed {
+		resp["icon_compressed"] = true
+	}
 	if iconErr != "" {
 		resp["icon_error"] = iconErr
 	}
@@ -136,14 +153,14 @@ func (s *Server) updateClientAlias(c *gin.Context) {
 // cacheClientIcon 抓一次图片外链并转成 data URI。
 //
 // 与渠道图标同一条链路（icon_fetch.go 的 iconFetcher）：同样的 SSRF 防护、
-// 同样的 64KB 上限、同样的 8 秒超时、只认 image/* 的 Content-Type。
+// 同样「超过 64KB 自动压缩」、同样的 8 秒超时、只认 image/* 的 Content-Type。
 // 差别只有一处：客户端映射上没有「出站代理」这一维，所以只吃环境变量里的
 // 系统代理（HTTP_PROXY 那套，见 netguard.EnvProxyAddrs）；渠道那种显式的
 // 出站代理不参与 —— 需要它才能出网的用户请改用内置图标，或把图片压成
 // data URI 粘贴。
 //
-// 抓回来的 data URI 最多约 87KB（64KB 的 base64 膨胀），仍在 icon 列
-// 128KB 的口径内，所以不额外卡上限。
+// 抓回来的 data URI 最多约 87KB（压缩到 64KB 后的 base64 膨胀），仍在
+// icon 列（text）能承受的量级，所以不额外卡上限。
 func (s *Server) cacheClientIcon(ctx context.Context, raw string) (string, error) {
 	fetcher, cleanup, err := s.newIconFetcher(ctx, 0)
 	if err != nil {

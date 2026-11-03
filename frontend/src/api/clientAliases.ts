@@ -15,6 +15,8 @@ interface AliasUpdateResult {
   item: ClientAlias
   /** 外链已抓取并缓存：item.icon 就是缓存下来的 data URI */
   icon_cached?: boolean
+  /** 粘贴的 data URI 超过 64KB，已压缩后保存（item.icon 是压缩后的 PNG） */
+  icon_compressed?: boolean
   /** 外链没抓下来（原因）：图标按原样入库，日志页仍会去请求它 */
   icon_error?: string
 }
