@@ -144,7 +144,7 @@ watch(
     <div class="login-card" :class="{ 'is-wide': pane === 'wizard' }">
       <div class="login-brand">
         <span class="brand-mark">LM</span>
-        <span class="brand-text">LLM管理平台</span>
+        <span class="brand-text">我的LLM信息</span>
       </div>
 
       <!-- 终端安全准入徽标（方案 1） -->
