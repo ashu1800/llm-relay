@@ -40,7 +40,7 @@ func TestForwarderHeadersByProtocol(t *testing.T) {
 		Binding: model.ChannelModel{PublicName: "m", UpstreamName: "m"},
 	}
 	body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":false}`)
-	if _, err := fwd.Do(t.Context(), cand, "/v1/chat/completions", body, inbound, false); err != nil {
+	if _, err := fwd.Do(t.Context(), cand, "/v1/chat/completions", body, inbound, false, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -66,7 +66,7 @@ func TestForwarderHeadersByProtocol(t *testing.T) {
 	// 非 Anthropic 渠道：这两个头不该跟过去
 	got = nil
 	cand.Channel.Protocol = model.ProtocolOpenAIChat
-	if _, err := fwd.Do(t.Context(), cand, "/v1/chat/completions", body, inbound, false); err != nil {
+	if _, err := fwd.Do(t.Context(), cand, "/v1/chat/completions", body, inbound, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if v := got.Get("anthropic-beta"); v != "" {

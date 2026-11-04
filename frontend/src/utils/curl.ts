@@ -76,6 +76,51 @@ export function buildCurlCommand(opts: CurlBuildOptions): string {
         2
       )
       break
+    case 'openai-images':
+      path = '/v1/images/generations'
+      headers.push('-H "Authorization: Bearer <YOUR_API_KEY>"')
+      fallbackBody = JSON.stringify(
+        {
+          model: model || 'dall-e-3',
+          prompt: 'A sunset over mountains',
+          n: 1,
+          size: '1024x1024'
+        },
+        null,
+        2
+      )
+      break
+    case 'openai-audio-speech':
+      path = '/v1/audio/speech'
+      headers.push('-H "Authorization: Bearer <YOUR_API_KEY>"')
+      fallbackBody = JSON.stringify(
+        {
+          model: model || 'tts-1',
+          input: 'Hello',
+          voice: 'alloy'
+        },
+        null,
+        2
+      )
+      break
+    case 'openai-audio-transcriptions':
+    case 'openai-audio-translations': {
+      // multipart 端点不能拼 -d：文件要走 -F。无论报文是否留存都给可运行的
+      // -F 形态 —— 报文里的 multipart 正文原样贴进 -d 是发不出去的
+      //（boundary 与文件都是二进制）
+      const audioPath =
+        protocol === 'openai-audio-translations' ? '/v1/audio/translations' : '/v1/audio/transcriptions'
+      const note = (opts.body || '').trim()
+        ? '# 注：multipart 报文不便原样复现，请替换为你的音频文件'
+        : '# 注：该请求未留存原始报文，已填充最小可运行形态（替换音频文件路径）'
+      return [
+        `curl -X POST "${baseUrl}${audioPath}"`,
+        `  -H "Authorization: Bearer <YOUR_API_KEY>"`,
+        `  -F model="${model || 'whisper-1'}" \\`,
+        `  -F file="@your-audio.mp3"`,
+        `  ${note}`
+      ].join(' \\\n')
+    }
     default:
       headers.push('-H "Authorization: Bearer <YOUR_API_KEY>"')
       break

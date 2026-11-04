@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"time"
 
+	"llm-relay/internal/model"
+	"llm-relay/internal/pricing"
 	"llm-relay/internal/relay"
 )
 
@@ -16,6 +18,12 @@ func (s *Server) finalizeLog(req *relay.RelayRequest, res *relay.RelayResult, us
 	respBody []byte, respHeader http.Header,
 ) {
 	entry := relay.BuildLog(req, res, usage, status, errMsg, tm)
+	// 缓存命中：不打上游，token 与金额如实为 0，快照只标「cached」。
+	// 下面的定价块要求 ChannelID > 0，命中请求天然跳过 —— 这里补上
+	// 标记快照，让详情页能说出「这笔 0 元是缓存给的」。
+	if req.CacheHit {
+		entry.PricingSnapshot = model.JSONMap{"cached": true}
+	}
 	// 价格是「渠道 × 模型」维度的：同一个模型名在不同渠道成本不同，
 	// 所以查价必须带上这次请求真正走的那条渠道（entry.ChannelID）。
 	//
@@ -32,8 +40,28 @@ func (s *Server) finalizeLog(req *relay.RelayRequest, res *relay.RelayResult, us
 		// 但它仍然属于某条渠道的账，币种留空只能靠人猜
 		entry.CostCurrency = s.deps.Pricing.CurrencyOf(context.Background(), entry.ChannelID)
 		if p, ok := s.deps.Pricing.Resolve(context.Background(), entry.ChannelID, priceModel, at); ok {
-			entry.EstimatedCost = p.Cost(usage)
-			entry.PricingSnapshot = p.Snapshot(at)
+			// 直通端点（图像/音频）按非 token 维度计费：金额来自
+			// 张数/字符数/秒数 × 对应单价，口径写进日志的 usage_kind
+			// 与快照的 billing_kind。判定与取数在 direct_billing.go
+			//（纯函数，见那里的注释）。
+			kind := ""
+			if req.Direct {
+				kind = directBillingKind(req.InboundProto)
+			}
+			if kind == "" {
+				entry.EstimatedCost = p.Cost(usage)
+				entry.PricingSnapshot = p.Snapshot(at)
+			} else {
+				cost, snapKind := directCost(kind, req.Body, directRespBody(res), usage, p)
+				entry.EstimatedCost = cost
+				entry.UsageKind = snapKind
+				// 非 token 口径时把口径带进快照（token 口径保持缺省，
+				// 与历史日志的快照形状一致）
+				if snapKind != pricing.BillingKindToken {
+					p.Kind = snapKind
+				}
+				entry.PricingSnapshot = p.Snapshot(at)
+			}
 		}
 	}
 	// 报文留存按模式决定：all 全留、errors 只留出错、none 不留

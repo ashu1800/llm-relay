@@ -102,6 +102,14 @@ gen-types:
 	@cd $(BACKEND_DIR) && tygo generate
 	@echo ">>> 已生成 $(FRONTEND_DIR)/src/api/generated/model.ts（记得提交）"
 
+# 更新内置的 LiteLLM 参考价库（backend/internal/pricing/catalog_data/litellm_prices.json）。
+# 抓的是上游原文件，裁剪与换算在 Go 侧（pricing.ParseCatalogRaw）—— 构建期与
+# 运行期「更新参考价库」共用同一段逻辑。抓完记得提交数据文件。
+# 国内直连失败时：make update-prices PROXY_PREFIX=https://gh-proxy.com
+PROXY_PREFIX ?=
+update-prices:
+	@python3 scripts/update-price-catalog.py $(if $(PROXY_PREFIX),--proxy-prefix $(PROXY_PREFIX))
+
 # 发布新版本。只做转发，逻辑在 scripts/release.sh（单一实现，避免两处漂移）。
 # 用法：make release VERSION_ARG=patch | minor | major | v0.1.5
 #        （也可附加 DRY_RUN=1 看将要做的事）

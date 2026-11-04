@@ -154,7 +154,7 @@ func TestErrorBodyUsageIsExtracted(t *testing.T) {
 	fwd := NewForwarder(5*time.Second, 5*time.Second)
 	att, err := fwd.Do(context.Background(), openAICand(srv.URL), "/v1/chat/completions",
 		[]byte(`{"model":"public","messages":[{"role":"user","content":"hi"}]}`),
-		http.Header{}, false)
+		http.Header{}, false, false)
 	if err != nil {
 		t.Fatalf("4xx 应答不报错（由调用方决定转移），实际 %v", err)
 	}
@@ -180,7 +180,7 @@ func TestErrorBodyWithoutUsageStaysZero(t *testing.T) {
 	fwd := NewForwarder(5*time.Second, 5*time.Second)
 	att, err := fwd.Do(context.Background(), openAICand(srv.URL), "/v1/chat/completions",
 		[]byte(`{"model":"public","messages":[{"role":"user","content":"hi"}]}`),
-		http.Header{}, false)
+		http.Header{}, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestClientGoneCancelsContextSeenByRelay(t *testing.T) {
 	fwd := NewForwarder(5*time.Second, 30*time.Second)
 	_, err := fwd.Do(ctx, openAICand(srv.URL), "/v1/chat/completions",
 		[]byte(`{"model":"public","messages":[{"role":"user","content":"hi"}]}`),
-		http.Header{}, false)
+		http.Header{}, false, false)
 	if err == nil {
 		t.Fatal("客户端断开后 fwd.Do 应返回错误")
 	}
@@ -238,7 +238,7 @@ func TestUpstreamSlowDoesNotCancelOuterContext(t *testing.T) {
 	fwd := NewForwarder(5*time.Second, 200*time.Millisecond)
 	_, err := fwd.Do(ctx, openAICand(srv.URL), "/v1/chat/completions",
 		[]byte(`{"model":"public","messages":[{"role":"user","content":"hi"}]}`),
-		http.Header{}, false)
+		http.Header{}, false, false)
 	if err == nil {
 		t.Fatal("上游超过总时长上限时 fwd.Do 应返回错误")
 	}

@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons-vue'
+import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, CloudDownloadOutlined } from '@ant-design/icons-vue'
 import { api } from '@/api/client'
 import { message, modal } from '@/utils/feedback'
 import DataState from '@/components/DataState.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ModelTag from '@/components/ModelTag.vue'
+import PriceCatalogModal from '@/components/PriceCatalogModal.vue'
 import { modalWidth } from '@/utils/modalWidth'
 import {
   RMB_FIELDS,
@@ -13,6 +14,7 @@ import {
   amountError,
   currencyLabel,
   emptyForm,
+  fillFormFromCatalog,
   formError,
   formFrom,
   missingTierWarning,
@@ -20,6 +22,8 @@ import {
   priceState,
   priceSummary,
   tierPriced,
+  type CatalogHit,
+  type CatalogStatus,
   type ModelPrice,
   type PriceForm,
   type PriceState
@@ -45,6 +49,54 @@ const unpricedModels = ref<string[]>([])
 const usedCurrencies = ref<Record<string, string[]>>({})
 const keyword = ref('')
 
+// ---- 参考价库（建议价源） ----
+// 目录元信息随定价列表一起拿不到（它是独立端点），页面加载时单独取一次；
+// 「更新参考价库」成功后刷新它。broken 非空说明 settings 里的副本坏了
+// （后端已回落内嵌版），必须提醒用户重新更新，不能让旧价无声顶替。
+const catalog = ref<CatalogStatus | null>(null)
+const catalogRefreshing = ref(false)
+
+async function loadCatalog() {
+  try {
+    catalog.value = await api.get<CatalogStatus>('/model-prices/catalog/status')
+  } catch {
+    // 目录状态拿不到只影响提示条，定价页主体照常可用：静默即可
+    catalog.value = null
+  }
+}
+
+function refreshCatalog() {
+  modal.confirm({
+    centered: true,
+    title: '更新参考价库？',
+    content: '从 LiteLLM 上游拉取最新价格表（需要能访问 GitHub，走「版本更新」配置的代理）。只更新建议价，不改动任何已保存的定价。',
+    okText: '更新',
+    cancelText: '取消',
+    onOk: async () => {
+      catalogRefreshing.value = true
+      try {
+        const res = await api.post<{ entries: number; fetched_at: string }>(
+          '/model-prices/catalog/refresh',
+          {},
+          120000
+        )
+        message.success(`参考价库已更新（${res.entries} 条）`)
+        await loadCatalog()
+      } catch (e: any) {
+        message.error(e?.message || '更新失败')
+      } finally {
+        catalogRefreshing.value = false
+      }
+    }
+  })
+}
+
+const catalogHint = computed(() => {
+  if (!catalog.value) return ''
+  const src = catalog.value.builtin ? '内置快照' : catalog.value.fetched_at.replace('T', ' ').slice(0, 16)
+  return `参考价库 ${src} · ${catalog.value.entries} 条`
+})
+
 async function load() {
   loading.value = true
   loadError.value = ''
@@ -64,7 +116,10 @@ async function load() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  void load()
+  void loadCatalog()
+})
 
 /**
  * 表格数据 = 已定价的行 + 未定价的白名单模型名。
@@ -107,8 +162,26 @@ const editingName = ref('')
 const form = ref<PriceForm>(emptyForm())
 const saving = ref(false)
 const saveError = ref('')
+// 参考价库搜索弹窗：从编辑弹窗唤起，初始词是正在编辑的模型名
+const catalogOpen = ref(false)
 
 const editingIsNew = computed(() => !rows.value.some((r) => r.model_name === editingName.value))
+
+/**
+ * 目录候选选中后的回填：只合并「有值的美元档」（fillFormFromCatalog 已经
+ * 保证 0 值不产出），人民币档与用户已填过的档不被抹掉。
+ * 合并进表单而不是直接落库 —— 保存永远走用户点的那次「保存」按钮。
+ */
+function applyCatalogHit(hit: CatalogHit) {
+  const fill = fillFormFromCatalog(hit.entry)
+  form.value = { ...form.value, ...fill }
+  const n = Object.keys(fill).length
+  if (n > 0) {
+    message.success(`已回填 ${hit.key} 的 ${n} 档美元单价，确认后保存`)
+  } else {
+    message.warning(`${hit.key} 在目录里没有价格信息`)
+  }
+}
 
 function startCreate() {
   editingName.value = ''
@@ -241,6 +314,13 @@ function priceTiers(form: PriceForm): PriceTierItem[] {
         <h2 class="page-title">模型定价</h2>
       </div>
       <div class="head-actions">
+        <span v-if="catalogHint" class="catalog-chip">{{ catalogHint }}</span>
+        <a-tooltip title="从 LiteLLM 上游拉取最新价格表（建议价源，不改动已保存的定价）">
+          <a-button :loading="catalogRefreshing" @click="refreshCatalog">
+            <template #icon><CloudDownloadOutlined /></template>
+            更新参考价库
+          </a-button>
+        </a-tooltip>
         <a-button :loading="loading" @click="load">
           <template #icon><ReloadOutlined /></template>
           刷新
@@ -251,6 +331,16 @@ function priceTiers(form: PriceForm): PriceTierItem[] {
         </a-button>
       </div>
     </div>
+
+    <!-- 参考价库副本损坏的提醒：后端已回落到内嵌版，但用户该知道要重新更新 -->
+    <a-alert
+      v-if="catalog?.broken"
+      type="warning"
+      show-icon
+      :message="`参考价库副本异常：${catalog.broken}`"
+      description="已自动回落到内置快照。建议点「更新参考价库」重建副本。"
+      class="catalog-broken"
+    />
 
     <!-- 未定价高危赤字警报雷达舱（方案 2） -->
     <div
@@ -345,12 +435,23 @@ function priceTiers(form: PriceForm): PriceTierItem[] {
 
       <a-form layout="vertical">
         <a-form-item label="模型名（对外名称，必须与渠道白名单里的一致）" required>
-          <a-input
-            v-model:value="editingName"
-            :disabled="!editingIsNew"
-            placeholder="例如 gpt-5、claude-sonnet-4"
-            class="mono"
-          />
+          <div class="name-row">
+            <a-input
+              v-model:value="editingName"
+              :disabled="!editingIsNew"
+              placeholder="例如 gpt-5、claude-sonnet-4"
+              class="mono"
+            />
+            <a-tooltip title="从参考价库（LiteLLM 官方价格表）搜索并回填美元档">
+              <a-button
+                :disabled="!editingName.trim()"
+                @click="catalogOpen = true"
+              >
+                <template #icon><CloudDownloadOutlined /></template>
+                参考价库填充
+              </a-button>
+            </a-tooltip>
+          </div>
         </a-form-item>
 
         <div class="tier is-usd">
@@ -359,7 +460,7 @@ function priceTiers(form: PriceForm): PriceTierItem[] {
             <span class="muted">用于币种为美元的渠道</span>
           </div>
           <div class="tier-grid">
-            <a-form-item v-for="f in USD_FIELDS" :key="f.key" :label="f.label + '（$ / 1M）'">
+            <a-form-item v-for="f in USD_FIELDS" :key="f.key" :label="`${f.label}（${f.unit}）`">
               <a-input v-model:value="form[f.key]" placeholder="0" class="mono" />
               <div v-if="amountError(form[f.key])" class="field-err">{{ amountError(form[f.key]) }}</div>
             </a-form-item>
@@ -372,7 +473,7 @@ function priceTiers(form: PriceForm): PriceTierItem[] {
             <span class="muted">用于币种为人民币的渠道</span>
           </div>
           <div class="tier-grid">
-            <a-form-item v-for="f in RMB_FIELDS" :key="f.key" :label="f.label + '（¥ / 1M）'">
+            <a-form-item v-for="f in RMB_FIELDS" :key="f.key" :label="`${f.label}（${f.unit}）`">
               <a-input v-model:value="form[f.key]" placeholder="0" class="mono" />
               <div v-if="amountError(form[f.key])" class="field-err">{{ amountError(form[f.key]) }}</div>
             </a-form-item>
@@ -381,10 +482,16 @@ function priceTiers(form: PriceForm): PriceTierItem[] {
       </a-form>
 
       <p class="modal-note">
-        留空的档位按 0 计 —— 只有一档是合法状态（例如只按输入计价）。两档互不换算，
-        各自独立生效。
+        留空的档位按 0 计 —— 只有一档是合法状态（例如只按输入计价，或图像模型只填每张价）。
+        两档互不换算，各自独立生效。
       </p>
     </a-modal>
+
+    <PriceCatalogModal
+      v-model:open="catalogOpen"
+      :initial-query="editingName"
+      @select="applyCatalogHit"
+    />
   </div>
 </template>
 
@@ -414,6 +521,33 @@ function priceTiers(form: PriceForm): PriceTierItem[] {
 .head-actions {
   display: flex;
   gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* 参考价库新鲜度徽标：只陈述事实（来源 + 条目数），不引导点击 */
+.catalog-chip {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  padding: 3px 10px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--color-border);
+  background: color-mix(in oklab, var(--color-border) 18%, transparent);
+}
+
+.catalog-broken {
+  margin: 0;
+}
+
+.name-row {
+  display: flex;
+  gap: 8px;
+}
+
+.name-row .a-input,
+.name-row > .ant-input-affix-wrapper {
+  flex: 1;
+  min-width: 0;
 }
 
 .search {

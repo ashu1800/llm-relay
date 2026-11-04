@@ -18,7 +18,10 @@
 
 ### 转发与协议
 
-- **多协议入站**：OpenAI Chat Completions / Responses、Anthropic Messages、Gemini generateContent、Embeddings
+- **多协议入站**：OpenAI Chat Completions / Responses、Anthropic Messages、Gemini generateContent、Embeddings，
+  以及直通端点（图像 `images/generations`、语音合成 `audio/speech`、
+  语音转写/翻译 `audio/transcriptions|translations`）—— 直通端点不做协议转换，
+  只路由到 OpenAI 兼容协议渠道，按「张 / 字符 / 秒」维度计费
 - **渠道协议 = 上游协议**：入站先归一成 OpenAI Chat，再按渠道的 `protocol` 转成
   上游格式（`anthropic-messages` / `gemini-generateContent` / `openai-*` / `custom`
   自定义鉴权头），鉴权头按协议自动选择（`x-api-key`、`x-goog-api-key`、`Bearer`）
@@ -32,13 +35,24 @@
   与下载走代理
 - **限流与并发**：密钥级每分钟配额、渠道并发上限、全局在途闸门；上游 429 自动
   冷却并切走
+- **响应缓存**（默认关）：精确匹配的「相同请求 → 相同答案」内存缓存，键建在
+  协议归一化层 —— Gemini 请求能命中 OpenAI 请求存下的缓存；命中不打上游、
+  不记账，日志标「缓存命中」。总闸在配置里（`RELAY_CACHE_ENABLED`），按密钥
+  逐把开启；流式响应可缓存重放，`X-Relay-Cache: no-cache` 强制回源
 
 ### 计量与成本
 
 - **精细计量**：输入 / 输出 / 缓存命中 / 缓存写入 / 推理 Token，区分「子集型」与
-  「并列型」缓存口径
+  「并列型」缓存口径；图像 / 音频直通端点按各自的计量口径记账
+  （张数取自响应、TTS 取输入字符数、转写认上游 usage 或 verbose_json 的时长），
+  日志的 `usage_kind` 列标明每笔账的口径
 - **价格按模型设置**（「模型定价」菜单）：同一个模型可同时填**美元与人民币两套**
-  单价，互不换算；记账时按所属渠道的币种取对应那一档。单位是每 100 万 token
+  单价，互不换算；记账时按所属渠道的币种取对应那一档。token 单价的单位是
+  每 100 万 token，另有三个非 token 维度：图像每张、音频每秒、TTS 每字符
+- **参考价库（建议价源）**：内置 LiteLLM 上游维护的数百个模型官方价格表
+  （4000+ 条），定价页可搜索并一键回填美元档（人民币档与已填过的档不动）；
+  管理台可随时从上游更新（复用「版本更新」配置的代理）。建议价只在用户确认
+  保存后落库，漏配价仍然记 0 并点名 —— **不做自动兜底**
 - **渠道只保留倍率**：固定倍率与按时段倍率（4 位小数，按服务器本地时区判断，
   时段优先）表达「这条渠道比标价贵/便宜多少」。漏配价的模型会在定价页与渠道
   列表点名「N 个未定价」—— 漏配的后果是这笔调用被记成 0 元，账面上看不出异常
@@ -327,6 +341,11 @@ curl -s http://127.0.0.1:8888/system/info | python3 -m json.tool
 | `RELAY_MAX_CONCURRENCY` | `64` | 全局在途请求上限，超出排队（最多 60 秒）；`0` 不限 |
 | `RELAY_DEFAULT_RPM` | `0` | 密钥默认每分钟配额；单把密钥可覆盖，负数表示该密钥不限 |
 | `RELAY_RETRY_SAME_UPSTREAM_DELAY` | `500ms` | 换渠道前后仍打同一台上游时的等待间隔，`0` 关闭 |
+| `RELAY_CACHE_ENABLED` | `false` | 响应缓存总闸（实际生效还需密钥逐把开启） |
+| `RELAY_CACHE_TTL` | `1h` | 缓存条目存活时长，`0` 永久 |
+| `RELAY_CACHE_MAX_ENTRIES` | `1024` | 缓存条目数上限（LRU） |
+| `RELAY_CACHE_MAX_TOTAL_MB` | `128` | 缓存字节总量上限（LRU） |
+| `RELAY_CACHE_MAX_RESPONSE_KB` | `256` | 单条响应缓存上限，超过整体不缓存 |
 | `RELAY_CLIENT_MAP_LIMIT` | `2048` | 客户端显示映射的进程内缓存上限；满了淘汰最久未用的，不拒绝新客户端 |
 | `RELAY_CLIENT_MAP_TTL` | `168h` | 映射缓存条目的闲置过期时间，`0` 表示只靠容量淘汰 |
 | `TZ` | `Asia/Shanghai` | 进程本地时区：可用时段与时段倍率按它判断 |

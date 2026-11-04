@@ -68,6 +68,12 @@ const (
 	allowedSourceHost   = "codeload.github.com"
 	allowedAssetHost    = "objects.githubusercontent.com"
 	allowedAltAssetHost = "release-assets.githubusercontent.com"
+	// raw.githubusercontent.com 只服务于参考价库的运行期更新（FetchRaw）：
+	// LiteLLM 的价格表就发布在它的 main 分支上。与其它白名单主机同一个
+	// 信任模型 —— 固定主机、强制 https、每一跳仍要过公网 IP 校验；
+	// 它承载的是「价格建议」，校验和核对那套强约束（sha256 对不上即拒绝安装）
+	// 不适用，但解析失败会原样报错、绝不进账本（见 pricing.ParseLiteLLMRaw）。
+	allowedRawHost = "raw.githubusercontent.com"
 
 	// apiUserAgent 是 GitHub API 要求必须带的（不带会被拒）。
 	apiUserAgent = "llm-relay-updater"
@@ -457,7 +463,7 @@ func validateDownloadURL(rawURL string) error {
 		return fmt.Errorf("下载地址缺少主机名")
 	}
 	switch host {
-	case allowedHTMLHost, allowedSourceHost, allowedAssetHost, allowedAltAssetHost:
+	case allowedHTMLHost, allowedSourceHost, allowedAssetHost, allowedAltAssetHost, allowedRawHost:
 		return nil
 	default:
 		return fmt.Errorf("下载地址指向不受信任的主机: %s", host)
@@ -595,6 +601,20 @@ func (c *Client) FetchChecksums(ctx context.Context, rawURL string) ([]byte, err
 	const maxChecksumSize = 1 << 20
 
 	return fetchSmallFile(ctx, c.api, strings.TrimSpace(rawURL), maxChecksumSize, checkDownloadTarget)
+}
+
+// FetchRaw 抓取一个中小体量的原始文件（当前唯一用途：参考价库整表，
+// 上游约 3.2MB）。与 FetchChecksums 同一条 fetchSmallFile 链路：
+// 手动跟随跳转、每一跳重跑白名单 + 公网 IP 校验、暂时性失败自动重试。
+func (c *Client) FetchRaw(ctx context.Context, rawURL string, maxSize int64) ([]byte, error) {
+	if strings.TrimSpace(rawURL) == "" {
+		return nil, fmt.Errorf("没有文件地址")
+	}
+	if maxSize <= 0 || maxSize > 64<<20 {
+		// 上限收在 64MB：调用方传入的值只允许更小，不允许撑破
+		maxSize = 64 << 20
+	}
+	return fetchSmallFile(ctx, c.fetcher, strings.TrimSpace(rawURL), maxSize, checkDownloadTarget)
 }
 
 // checkDownloadTarget 是「这个地址能不能下」的完整判定：

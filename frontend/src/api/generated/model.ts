@@ -81,6 +81,38 @@ export const ColPriceRMBCacheReadPer1M = "rmb_cache_read_per1_m";
  * （model.UpsertModelPrice / InsertModelPriceIfAbsent）引用；两处必须逐字一致。
  */
 export const ColPriceRMBWritePer1M = "rmb_cache_write_per1_m";
+/**
+ * 非 token 计价维度（图像按张、音频按秒、TTS 按字符），单位都是「每单位」
+ * 而不是「每百万」—— 参考价库（LiteLLM）对这三档的原始口径就是单价
+ * （如 dall-e-3 每张 0.04 美元、whisper 每秒 0.0001 美元），照单全收，
+ * 不自创一个「每百万张」的口径让用户换算。
+ */
+export const ColPriceUSDPerImage = "usd_per_image";
+/**
+ * model.ModelPrice 的列名。实体上用 column: 显式声明，这里供原生 SQL
+ * （model.UpsertModelPrice / InsertModelPriceIfAbsent）引用；两处必须逐字一致。
+ */
+export const ColPriceUSDPerSecond = "usd_per_second";
+/**
+ * model.ModelPrice 的列名。实体上用 column: 显式声明，这里供原生 SQL
+ * （model.UpsertModelPrice / InsertModelPriceIfAbsent）引用；两处必须逐字一致。
+ */
+export const ColPriceUSDPerCharacter = "usd_per_character";
+/**
+ * model.ModelPrice 的列名。实体上用 column: 显式声明，这里供原生 SQL
+ * （model.UpsertModelPrice / InsertModelPriceIfAbsent）引用；两处必须逐字一致。
+ */
+export const ColPriceRMBPerImage = "rmb_per_image";
+/**
+ * model.ModelPrice 的列名。实体上用 column: 显式声明，这里供原生 SQL
+ * （model.UpsertModelPrice / InsertModelPriceIfAbsent）引用；两处必须逐字一致。
+ */
+export const ColPriceRMBPerSecond = "rmb_per_second";
+/**
+ * model.ModelPrice 的列名。实体上用 column: 显式声明，这里供原生 SQL
+ * （model.UpsertModelPrice / InsertModelPriceIfAbsent）引用；两处必须逐字一致。
+ */
+export const ColPriceRMBPerCharacter = "rmb_per_character";
 
 //////////
 // source: currency.go
@@ -330,6 +362,16 @@ export interface APIKey {
    */
   rate_limit_rpm: number /* int */;
   /**
+   * CacheEnabled 是该密钥是否参与响应缓存（2026-11 P3）。缓存**按密钥显式
+   * 开启**：temperature>0 的请求命中缓存会拿到与上次相同的答案 —— 这对
+   * 编码 agent 的幂等重放是对的，对「每次都要新鲜输出」的场景是错的；
+   * 谁该被缓存由密钥的用途决定，不该由网关猜。全局开关
+   * （config.Relay.Cache.Enabled）关闭时本字段无效。
+   * 不带 gorm default（规则 11 的坑）；列由 migrateLegacySchema 补齐
+   * （DEFAULT false = 默认不缓存，保留）。
+   */
+  cache_enabled: boolean;
+  /**
    * ModelRoutes 是每个模型的候选渠道优先级：{"模型名": [渠道ID按优先级升序]}。
    * 分组已移除（2026-10-26 破坏性重构）：转发时在「白名单含该模型的启用渠道」
    * 与本表条目的交集内、按列表顺序做故障转移 —— 顺序完全由密钥自己决定，
@@ -376,11 +418,29 @@ export interface RequestLog {
    */
   fallback_mapped: boolean;
   /**
+   * CacheHit 表示这次响应来自缓存而不是上游（2026-11 P3）。命中请求
+   * 不打渠道、不消耗上游，token 与金额如实为 0（不是漏抓）—— 这是
+   * 「缓存命中」与「上游没计量」两种 0 的区分标志，看板据此剔除它
+   * 以免把「0 上游消耗」算进渠道统计。与 FallbackMapped 同款不带 default。
+   */
+  cache_hit: boolean;
+  /**
    * ThinkingLevel 是入站请求体里思考参数的归一档位
    * （off/minimal/low/medium/high/on/auto，见 relay.ExtractThinkingLevel）。
    * 空串 = 请求没带思考参数 —— 不是「关」，是「没说」，前端据此显示 —。
    */
   thinking_level: string;
+  /**
+   * UsageKind 是这次调用的计量口径（2026-11 P1 引入，随图像/音频端点上线路）：
+   *   空串        按 token 计（对话类端点，绝大多数日志都是这种）；
+   *   image      按张计（文生图，费用 = 张数 × PerImage）；
+   *   audio      按秒计（语音转写，费用 = 秒数 × PerSecond）；
+   *   tts        按字符计（文本转语音，费用 = 字符数 × PerCharacter）。
+   * 与 PricingSnapshot 里的 billing_kind 是同一件事：快照里那份管
+   * 「这笔账当时怎么算的」（历史不可漂移），这一列管「列表按什么口径筛」。
+   * 空串语义与 ThinkingLevel 相同：NULL（老行）与空串一视同仁。
+   */
+  usage_kind: string;
   stream: boolean;
   status_code: number /* int */;
   error: string;
@@ -539,6 +599,25 @@ export interface ModelPrice {
   rmb_output_per_1m: string;
   rmb_cache_read_per_1m: string;
   rmb_cache_write_per_1m: string;
+  /**
+   * ---- 非 token 维度单价（每单位，不是每百万）----
+   * 三个维度对应三类非对话端点（2026-11 P1 引入）：
+   *   PerImage     文生图，每张（dall-e-3 标准档 0.04 美元/张）
+   *   PerSecond    语音转写，每秒音频（whisper 0.0001 美元/秒）
+   *   PerCharacter 文本转语音，每字符（tts-1 0.000015 美元/字符）
+   * 单位刻意沿用参考价库的原始口径（每单位），与上面四档的「每百万」不同：
+   * 「每百万张」和「每百万秒」都是没人能直觉换算的口径，参考价填充时还得
+   * 自作主张乘 1e6，填错了账面直接错一个数量级且无人报警。
+   * 0 表示这一维没配；带 default:0 是安全的（0 恰好是想要的语义，与
+   * Multiplier 同一条注释的道理），AutoMigrate 可以直接给已有数据的表
+   * 加 NOT NULL DEFAULT 0 的列。
+   */
+  usd_per_image: string;
+  usd_per_second: string;
+  usd_per_character: string;
+  rmb_per_image: string;
+  rmb_per_second: string;
+  rmb_per_character: string;
   created_at: string;
   updated_at: string;
 }
@@ -553,6 +632,14 @@ export interface PriceSet {
   OutputPer1M: string;
   CacheReadPer1M: string;
   CacheWritePer1M: string;
+  /**
+   * 非 token 维度（每单位）：与四档 token 价同一语义，0 = 该维没配。
+   * 计价引擎按端点种类取对应维度（对话端点只用 token 四档，
+   * 图像端点只用 PerImage，见 pricing.Price 的 Cost* 系列）。
+   */
+  PerImage: string;
+  PerSecond: string;
+  PerCharacter: string;
 }
 
 //////////
@@ -570,7 +657,3 @@ export type JSONList = { [key: string]: any}[];
  * StringList 映射到 jsonb 字符串数组（模型白名单等）。
  */
 export type StringList = string[];
-
-//////////
-// source: model_price_store.go
-

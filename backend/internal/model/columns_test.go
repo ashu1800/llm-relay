@@ -32,6 +32,12 @@ func TestModelPriceColumnNames(t *testing.T) {
 		{"RMBOutputPer1M", "rmb_output_per1_m"},
 		{"RMBCacheReadPer1M", "rmb_cache_read_per1_m"},
 		{"RMBCacheWritePer1M", "rmb_cache_write_per1_m"},
+		{"USDPerImage", "usd_per_image"},
+		{"USDPerSecond", "usd_per_second"},
+		{"USDPerCharacter", "usd_per_character"},
+		{"RMBPerImage", "rmb_per_image"},
+		{"RMBPerSecond", "rmb_per_second"},
+		{"RMBPerCharacter", "rmb_per_character"},
 	}
 	for _, c := range cases {
 		got := ns.ColumnName("", c.field)
@@ -58,6 +64,12 @@ func TestModelPriceExplicitColumnTags(t *testing.T) {
 		"RMBOutputPer1M":     "rmb_output_per1_m",
 		"RMBCacheReadPer1M":  "rmb_cache_read_per1_m",
 		"RMBCacheWritePer1M": "rmb_cache_write_per1_m",
+		"USDPerImage":        "usd_per_image",
+		"USDPerSecond":       "usd_per_second",
+		"USDPerCharacter":    "usd_per_character",
+		"RMBPerImage":        "rmb_per_image",
+		"RMBPerSecond":       "rmb_per_second",
+		"RMBPerCharacter":    "rmb_per_character",
 	}
 	for field, col := range want {
 		f := s.LookUpField(field)
@@ -87,6 +99,8 @@ func TestModelPriceColumnTypesAreParsed(t *testing.T) {
 	for _, name := range []string{
 		"USDInputPer1M", "USDOutputPer1M", "USDCacheReadPer1M", "USDCacheWritePer1M",
 		"RMBInputPer1M", "RMBOutputPer1M", "RMBCacheReadPer1M", "RMBCacheWritePer1M",
+		"USDPerImage", "USDPerSecond", "USDPerCharacter",
+		"RMBPerImage", "RMBPerSecond", "RMBPerCharacter",
 	} {
 		field := s.LookUpField(name)
 		if field == nil {

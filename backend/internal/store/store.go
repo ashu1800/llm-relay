@@ -256,6 +256,17 @@ func (s *Store) migrateLegacySchema() error {
 		slog.Info("代理表已补充「用于自动更新」列（既有代理默认不用于更新）")
 	}
 
+	// api_keys.cache_enabled（响应缓存按密钥开启，2026-11 P3）与
+	// for_update 完全同一类坑、同一个解法：实体无 default，列在这里补，
+	// DEFAULT false（默认不缓存）是正确语义，保留。
+	if s.hasTable("api_keys") && !s.hasColumn("api_keys", "cache_enabled") {
+		if err := s.db.Exec(
+			"ALTER TABLE api_keys ADD COLUMN cache_enabled boolean NOT NULL DEFAULT false").Error; err != nil {
+			return fmt.Errorf("迁移 api_keys.cache_enabled 失败: %w", err)
+		}
+		slog.Info("密钥表已补充「响应缓存」列（既有密钥默认不缓存）")
+	}
+
 	// model_pricings 是**最早一代**的定价表（模型名 → 单价），比「价格挂渠道」
 	// 还早。这段只在极老库上触发，且必须与新结构互斥：一旦 model_prices
 	// 已存在，channel_models 上的四个单价列可能已被删掉，此时任何 UPDATE

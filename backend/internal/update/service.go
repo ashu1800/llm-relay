@@ -334,6 +334,22 @@ func (s *Service) OnProxyChanged() {
 	s.applyConfig(s.GetConfig())
 }
 
+// FetchFile 用更新通道的下载链路抓取一个内容不大的文件。
+//
+// 目前唯一的调用方是参考价库的运行期更新（pricing.CatalogStore 的
+// 「更新参考价库」）：它与版本更新同源 —— 同一份代理优先级（勾选代理 >
+// 设置页手填 > 直连）、同一套目标校验（https + 主机白名单 + 公网 IP）。
+// 管理台里能为版本更新配的代理，对参考价库同样生效，不需要第二份配置。
+func (s *Service) FetchFile(ctx context.Context, rawURL string, maxSize int64) ([]byte, error) {
+	s.mu.RLock()
+	client := s.client
+	s.mu.RUnlock()
+	if client == nil {
+		return nil, fmt.Errorf("更新客户端不可用（构造失败或服务未就绪）")
+	}
+	return client.FetchRaw(ctx, rawURL, maxSize)
+}
+
 // resolveUpdateProxyURL 决定重建客户端时用哪个代理。
 //
 // 优先级：代理管理里勾选「用于自动更新」且启用中的代理（单选互斥，

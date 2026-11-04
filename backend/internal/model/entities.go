@@ -188,6 +188,15 @@ type APIKey struct {
 	AllowedModels StringList `gorm:"type:jsonb" json:"allowed_models"`
 	// RateLimitRPM 是该密钥每分钟允许的请求数；0 表示用全局默认值，负值表示不限
 	RateLimitRPM int `gorm:"not null;default:0" json:"rate_limit_rpm"`
+	// CacheEnabled 是该密钥是否参与响应缓存（2026-11 P3）。缓存**按密钥显式
+	// 开启**：temperature>0 的请求命中缓存会拿到与上次相同的答案 —— 这对
+	// 编码 agent 的幂等重放是对的，对「每次都要新鲜输出」的场景是错的；
+	// 谁该被缓存由密钥的用途决定，不该由网关猜。全局开关
+	//（config.Relay.Cache.Enabled）关闭时本字段无效。
+	//
+	// 不带 gorm default（规则 11 的坑）；列由 migrateLegacySchema 补齐
+	//（DEFAULT false = 默认不缓存，保留）。
+	CacheEnabled bool `gorm:"not null" json:"cache_enabled"`
 	// ModelRoutes 是每个模型的候选渠道优先级：{"模型名": [渠道ID按优先级升序]}。
 	//
 	// 分组已移除（2026-10-26 破坏性重构）：转发时在「白名单含该模型的启用渠道」
@@ -231,14 +240,29 @@ type RequestLog struct {
 	// 带默认值的 bool 在零值时会被 GORM 从 INSERT 里整列省掉（见
 	// api/channels_test.go 的 TestBooleanFieldsHaveNoGormDefault）。
 	FallbackMapped bool `json:"fallback_mapped"`
+	// CacheHit 表示这次响应来自缓存而不是上游（2026-11 P3）。命中请求
+	// 不打渠道、不消耗上游，token 与金额如实为 0（不是漏抓）—— 这是
+	// 「缓存命中」与「上游没计量」两种 0 的区分标志，看板据此剔除它
+	// 以免把「0 上游消耗」算进渠道统计。与 FallbackMapped 同款不带 default。
+	CacheHit bool `json:"cache_hit"`
 	// ThinkingLevel 是入站请求体里思考参数的归一档位
 	// （off/minimal/low/medium/high/on/auto，见 relay.ExtractThinkingLevel）。
 	// 空串 = 请求没带思考参数 —— 不是「关」，是「没说」，前端据此显示 —。
 	ThinkingLevel string `gorm:"size:16" json:"thinking_level"`
-	IsStream      bool   `json:"stream"`
-	StatusCode    int    `json:"status_code"`
-	Error         string `gorm:"size:1024" json:"error"`
-	RetryCount    int    `json:"retry_count"`
+	// UsageKind 是这次调用的计量口径（2026-11 P1 引入，随图像/音频端点上线路）：
+	//   空串        按 token 计（对话类端点，绝大多数日志都是这种）；
+	//   image      按张计（文生图，费用 = 张数 × PerImage）；
+	//   audio      按秒计（语音转写，费用 = 秒数 × PerSecond）；
+	//   tts        按字符计（文本转语音，费用 = 字符数 × PerCharacter）。
+	//
+	// 与 PricingSnapshot 里的 billing_kind 是同一件事：快照里那份管
+	// 「这笔账当时怎么算的」（历史不可漂移），这一列管「列表按什么口径筛」。
+	// 空串语义与 ThinkingLevel 相同：NULL（老行）与空串一视同仁。
+	UsageKind  string `gorm:"size:16" json:"usage_kind"`
+	IsStream   bool   `json:"stream"`
+	StatusCode int    `json:"status_code"`
+	Error      string `gorm:"size:1024" json:"error"`
+	RetryCount int    `json:"retry_count"`
 
 	PromptTokens        int  `json:"prompt_tokens"`
 	CompletionTokens    int  `json:"completion_tokens"`
@@ -385,6 +409,27 @@ type ModelPrice struct {
 	RMBCacheReadPer1M  decimal.Decimal `gorm:"column:rmb_cache_read_per1_m;type:numeric(18,8);not null;default:0" json:"rmb_cache_read_per_1m"`
 	RMBCacheWritePer1M decimal.Decimal `gorm:"column:rmb_cache_write_per1_m;type:numeric(18,8);not null;default:0" json:"rmb_cache_write_per_1m"`
 
+	// ---- 非 token 维度单价（每单位，不是每百万）----
+	//
+	// 三个维度对应三类非对话端点（2026-11 P1 引入）：
+	//   PerImage     文生图，每张（dall-e-3 标准档 0.04 美元/张）
+	//   PerSecond    语音转写，每秒音频（whisper 0.0001 美元/秒）
+	//   PerCharacter 文本转语音，每字符（tts-1 0.000015 美元/字符）
+	//
+	// 单位刻意沿用参考价库的原始口径（每单位），与上面四档的「每百万」不同：
+	// 「每百万张」和「每百万秒」都是没人能直觉换算的口径，参考价填充时还得
+	// 自作主张乘 1e6，填错了账面直接错一个数量级且无人报警。
+	//
+	// 0 表示这一维没配；带 default:0 是安全的（0 恰好是想要的语义，与
+	// Multiplier 同一条注释的道理），AutoMigrate 可以直接给已有数据的表
+	// 加 NOT NULL DEFAULT 0 的列。
+	USDPerImage     decimal.Decimal `gorm:"column:usd_per_image;type:numeric(18,8);not null;default:0" json:"usd_per_image"`
+	USDPerSecond    decimal.Decimal `gorm:"column:usd_per_second;type:numeric(18,8);not null;default:0" json:"usd_per_second"`
+	USDPerCharacter decimal.Decimal `gorm:"column:usd_per_character;type:numeric(18,8);not null;default:0" json:"usd_per_character"`
+	RMBPerImage     decimal.Decimal `gorm:"column:rmb_per_image;type:numeric(18,8);not null;default:0" json:"rmb_per_image"`
+	RMBPerSecond    decimal.Decimal `gorm:"column:rmb_per_second;type:numeric(18,8);not null;default:0" json:"rmb_per_second"`
+	RMBPerCharacter decimal.Decimal `gorm:"column:rmb_per_character;type:numeric(18,8);not null;default:0" json:"rmb_per_character"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -399,6 +444,12 @@ type PriceSet struct {
 	OutputPer1M     decimal.Decimal
 	CacheReadPer1M  decimal.Decimal
 	CacheWritePer1M decimal.Decimal
+	// 非 token 维度（每单位）：与四档 token 价同一语义，0 = 该维没配。
+	// 计价引擎按端点种类取对应维度（对话端点只用 token 四档，
+	// 图像端点只用 PerImage，见 pricing.Price 的 Cost* 系列）。
+	PerImage     decimal.Decimal
+	PerSecond    decimal.Decimal
+	PerCharacter decimal.Decimal
 }
 
 // PriceFor 返回指定币种的一组单价。
@@ -413,6 +464,9 @@ func (m ModelPrice) PriceFor(currency string) PriceSet {
 			OutputPer1M:     m.RMBOutputPer1M,
 			CacheReadPer1M:  m.RMBCacheReadPer1M,
 			CacheWritePer1M: m.RMBCacheWritePer1M,
+			PerImage:        m.RMBPerImage,
+			PerSecond:       m.RMBPerSecond,
+			PerCharacter:    m.RMBPerCharacter,
 		}
 	}
 	return PriceSet{
@@ -420,11 +474,17 @@ func (m ModelPrice) PriceFor(currency string) PriceSet {
 		OutputPer1M:     m.USDOutputPer1M,
 		CacheReadPer1M:  m.USDCacheReadPer1M,
 		CacheWritePer1M: m.USDCacheWritePer1M,
+		PerImage:        m.USDPerImage,
+		PerSecond:       m.USDPerSecond,
+		PerCharacter:    m.USDPerCharacter,
 	}
 }
 
-// IsZero 报告这一币种的四档单价是否全为 0（= 该币种没配价）。
+// IsZero 报告这一币种的全部档位（token 四档 + 三个非 token 维度）是否
+// 全为 0（= 该币种没配价）。只配了图像价（token 四档全 0）的模型在这里
+// 是「有价」—— 图像端点靠它计费，不能因为对话端点用不上就当漏配。
 func (p PriceSet) IsZero() bool {
 	return p.InputPer1M.IsZero() && p.OutputPer1M.IsZero() &&
-		p.CacheReadPer1M.IsZero() && p.CacheWritePer1M.IsZero()
+		p.CacheReadPer1M.IsZero() && p.CacheWritePer1M.IsZero() &&
+		p.PerImage.IsZero() && p.PerSecond.IsZero() && p.PerCharacter.IsZero()
 }

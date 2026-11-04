@@ -30,4 +30,15 @@ const (
 	ColPriceRMBOutputPer1M    = "rmb_output_per1_m"
 	ColPriceRMBCacheReadPer1M = "rmb_cache_read_per1_m"
 	ColPriceRMBWritePer1M     = "rmb_cache_write_per1_m"
+
+	// 非 token 计价维度（图像按张、音频按秒、TTS 按字符），单位都是「每单位」
+	// 而不是「每百万」—— 参考价库（LiteLLM）对这三档的原始口径就是单价
+	// （如 dall-e-3 每张 0.04 美元、whisper 每秒 0.0001 美元），照单全收，
+	// 不自创一个「每百万张」的口径让用户换算。
+	ColPriceUSDPerImage     = "usd_per_image"
+	ColPriceUSDPerSecond    = "usd_per_second"
+	ColPriceUSDPerCharacter = "usd_per_character"
+	ColPriceRMBPerImage     = "rmb_per_image"
+	ColPriceRMBPerSecond    = "rmb_per_second"
+	ColPriceRMBPerCharacter = "rmb_per_character"
 )

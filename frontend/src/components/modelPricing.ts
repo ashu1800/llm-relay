@@ -17,9 +17,16 @@ export interface ModelPrice {
   rmb_output_per_1m: string
   rmb_cache_read_per_1m: string
   rmb_cache_write_per_1m: string
+  /** 非 token 维度（每单位，不是每百万）：图像按张、音频按秒、TTS 按字符 */
+  usd_per_image: string
+  usd_per_second: string
+  usd_per_character: string
+  rmb_per_image: string
+  rmb_per_second: string
+  rmb_per_character: string
 }
 
-/** 表单里的编辑态：八个单价都是字符串（空串 = 未填）。 */
+/** 表单里的编辑态：全部单价都是字符串（空串 = 未填）。 */
 export type PriceForm = Pick<
   ModelPrice,
   | 'usd_input_per_1m'
@@ -30,20 +37,35 @@ export type PriceForm = Pick<
   | 'rmb_output_per_1m'
   | 'rmb_cache_read_per_1m'
   | 'rmb_cache_write_per_1m'
+  | 'usd_per_image'
+  | 'usd_per_second'
+  | 'usd_per_character'
+  | 'rmb_per_image'
+  | 'rmb_per_second'
+  | 'rmb_per_character'
 >
 
+// 字段清单分两组：token 四档（每百万）与非 token 维度（每单位）。
+// 单位的标签后缀不同，所以 unit 字段自己带 —— 表单里直接拼 label+unit。
+// 新增档位只改这里，emptyForm / formFrom / payloadFrom / formError 都按清单遍历。
 export const USD_FIELDS = [
-  { key: 'usd_input_per_1m', label: '输入' },
-  { key: 'usd_output_per_1m', label: '输出' },
-  { key: 'usd_cache_read_per_1m', label: '缓存读' },
-  { key: 'usd_cache_write_per_1m', label: '缓存写' }
+  { key: 'usd_input_per_1m', label: '输入', unit: '$ / 1M token' },
+  { key: 'usd_output_per_1m', label: '输出', unit: '$ / 1M token' },
+  { key: 'usd_cache_read_per_1m', label: '缓存读', unit: '$ / 1M token' },
+  { key: 'usd_cache_write_per_1m', label: '缓存写', unit: '$ / 1M token' },
+  { key: 'usd_per_image', label: '图像', unit: '$ / 张' },
+  { key: 'usd_per_second', label: '音频', unit: '$ / 秒' },
+  { key: 'usd_per_character', label: 'TTS', unit: '$ / 字符' }
 ] as const
 
 export const RMB_FIELDS = [
-  { key: 'rmb_input_per_1m', label: '输入' },
-  { key: 'rmb_output_per_1m', label: '输出' },
-  { key: 'rmb_cache_read_per_1m', label: '缓存读' },
-  { key: 'rmb_cache_write_per_1m', label: '缓存写' }
+  { key: 'rmb_input_per_1m', label: '输入', unit: '¥ / 1M token' },
+  { key: 'rmb_output_per_1m', label: '输出', unit: '¥ / 1M token' },
+  { key: 'rmb_cache_read_per_1m', label: '缓存读', unit: '¥ / 1M token' },
+  { key: 'rmb_cache_write_per_1m', label: '缓存写', unit: '¥ / 1M token' },
+  { key: 'rmb_per_image', label: '图像', unit: '¥ / 张' },
+  { key: 'rmb_per_second', label: '音频', unit: '¥ / 秒' },
+  { key: 'rmb_per_character', label: 'TTS', unit: '¥ / 字符' }
 ] as const
 
 /** 空表单。 */
@@ -56,7 +78,13 @@ export function emptyForm(): PriceForm {
     rmb_input_per_1m: '',
     rmb_output_per_1m: '',
     rmb_cache_read_per_1m: '',
-    rmb_cache_write_per_1m: ''
+    rmb_cache_write_per_1m: '',
+    usd_per_image: '',
+    usd_per_second: '',
+    usd_per_character: '',
+    rmb_per_image: '',
+    rmb_per_second: '',
+    rmb_per_character: ''
   }
 }
 
@@ -223,4 +251,93 @@ export function currencyLabel(code: string): string {
   if (code === 'CNY' || code === 'RMB') return '人民币'
   if (code === 'USD') return '美元'
   return code
+}
+
+// ---- 参考价库（建议价源，2026-11 P1）----
+//
+// 后端内嵌 LiteLLM 价格表（pricing.CatalogStore），这里负责「把候选折算成
+// 表单值」。填充只发生在编辑表单里：用户看到值、点保存才落库 ——
+// 与后端「建议价永远不直接进账本」是同一条哲学的两半。
+
+/** 目录条目（与后端 pricing.CatalogEntry 的 json 对应；短 json 名是刻意的）。 */
+export interface CatalogEntry {
+  mode: string
+  provider: string
+  /** token 四档：每 100 万 token */
+  in?: number
+  out?: number
+  cr?: number
+  cw?: number
+  /** 非 token 维度：每张 / 每秒 / 每字符 */
+  img?: number
+  sec?: number
+  chr?: number
+  max_in?: number
+  max_out?: number
+}
+
+export interface CatalogHit {
+  key: string
+  entry: CatalogEntry
+  score: number
+}
+
+export interface CatalogStatus {
+  source: string
+  fetched_at: string
+  entries: number
+  builtin: boolean
+  broken?: string
+}
+
+/**
+ * 把一条目录候选折算成表单的**美元档**值，由调用方合并进表单。
+ *
+ * 规则：0 / 缺失的档不产出（留空 = 未配）—— 覆盖语义只对「有值的档」生效，
+ * 否则一次填充会把用户已填过的美元档抹成空。人民币档一概不碰：
+ * 参考价是美元口径，换算需要汇率，而汇率不该出现在这条链路上。
+ */
+export function fillFormFromCatalog(entry: CatalogEntry): Partial<PriceForm> {
+  const out: Partial<PriceForm> = {}
+  const put = (key: keyof PriceForm, v?: number) => {
+    if (v && v > 0) out[key] = trimCatalogNumber(v)
+  }
+  put('usd_input_per_1m', entry.in)
+  put('usd_output_per_1m', entry.out)
+  put('usd_cache_read_per_1m', entry.cr)
+  put('usd_cache_write_per_1m', entry.cw)
+  put('usd_per_image', entry.img)
+  put('usd_per_second', entry.sec)
+  put('usd_per_character', entry.chr)
+  return out
+}
+
+/**
+ * 数字 → 金额字符串。toFixed(8) 对齐 numeric(18,8) 的库内精度；
+ * 去尾零是为了别把 2.5 显示成 "2.50000000"（用户会以为精度有玄机）。
+ * 不用 String(v)：小金额会出科学计数法（0.000015 → "1.5e-05"），
+ * 而金额输入框明确拒绝 e 记数（amountError）。
+ */
+export function trimCatalogNumber(v: number): string {
+  if (!Number.isFinite(v) || v <= 0) return ''
+  return v.toFixed(8).replace(/0+$/, '').replace(/\.$/, '')
+}
+
+/** mode → 界面文案。搜索弹窗的下拉框与目录状态条共用。 */
+export function catalogModeLabel(mode: string): string {
+  const labels: Record<string, string> = {
+    chat: '对话',
+    responses: '对话（Responses）',
+    completion: '补全',
+    embedding: '向量化',
+    image_generation: '文生图',
+    image_edit: '图片编辑',
+    audio_transcription: '语音转写',
+    audio_speech: '语音合成',
+    rerank: '重排序',
+    moderation: '内容审核',
+    realtime: '实时',
+    video_generation: '视频生成'
+  }
+  return labels[mode] || mode || '（未标注）'
 }

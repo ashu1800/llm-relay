@@ -855,7 +855,7 @@ MCP 工具名以纯文本列在 system prompt 里。模型先调客户端侧的 
 
 | 概念 | 归属 | 表 |
 |---|---|---|
-| 单价（美元四档 + 人民币四档） | 模型 | `model_prices`（`ModelPrice`） |
+| 单价（美元/人民币各：token 四档 + 图像每张 + 音频每秒 + TTS 每字符） | 模型 | `model_prices`（`ModelPrice`） |
 | 倍率 / 时段规则 | 渠道 × 模型 | `channel_models`（`Multiplier` / `PeakRules`） |
 | 记账币种 | 渠道 | `channels.Currency` |
 
@@ -910,6 +910,157 @@ MCP 工具名以纯文本列在 system prompt 里。模型先调客户端侧的 
 账单出错时最误导人的画面），并提示「有 X 个模型还没定价」。渠道页的定价入口
 收窄成 `ChannelRateEditor`（只剩倍率与时段规则），原来的 740 行
 `ModelPricingEditor` 随之删除。
+
+### 参考价库与非 token 计价维度（2026-11 P1）
+
+对齐 LiteLLM 的第一步：把它持续维护的官方价格表（`model_prices_and_context_window.json`，
+4000+ 条）接进来当**建议价源**，并给 `model_prices` 补了三个非 token 维度
+（图像每张 / 音频每秒 / TTS 每字符），为图像与音频端点（P2）的计费铺路。
+
+**「建议价源」与「自动同步」的分界线**（这是本次最重要的取舍）：
+
+- 填充发生在**前端编辑表单里**：搜索弹窗选中候选 → 只回填美元档 → 用户
+  点「保存」才走既有的 PUT upsert 落库。后端没有任何「参考价直接写账本」
+  的路径 —— 与 main.go 定价段注释里「宁可让人自己填，也不要有会漂移的
+  假数据」是同一条哲学，只是把「手填」升级成「填之前有个像样的参考」。
+- 人民币档**永不回填**：参考价是美元口径，换算需要汇率，而汇率不该出现在
+  这条链路上（与「两档互不换算」同一理由）。
+- 已填过的档不被抹掉：`fillFormFromCatalog` 只产出有值的档（0/缺失不产出）。
+- 漏配价照旧记 0 并点名，不做自动兜底。
+
+**数据链路**（两个来源、一段解析）：
+
+- 编译期内嵌 `pricing/catalog_data/litellm_prices.json`（**上游原文件**，
+  `go:embed`；`make update-prices` / `scripts/update-price-catalog.py` 更新）。
+  embed 原文件而不是裁剪版：可溯源（与上游逐字节一致）、解析失败能明确
+  归因到上游，代价是二进制 +3.2MB。
+- 运行期 `POST /admin/model-prices/catalog/refresh`：走 `update.Service.FetchFile`
+  （与版本更新同一份代理优先级 + 主机白名单 + 公网 IP 校验，为此白名单加了
+  `raw.githubusercontent.com`）→ `ParseLiteLLMRaw` 裁剪 → 存 `settings` 表
+  （key=`price_catalog_v1`）。查找优先级 DB 副本 > 内嵌；副本坏了回落内嵌
+  并在 status 里报 `broken`，界面提醒重建。
+- **裁剪与换算只在 Go 一处**（`pricing.ParseLiteLLMRaw`）：Python 脚本只抓
+  原文件。两个来源共用一段裁剪逻辑，否则两边迟早漂移。
+
+**归一化匹配**（`NormalizeModelName`）：小写 → 剥**目录里出现过的**供应商
+前缀（`openai/gpt-4o` 的 openai 剥，未知前缀不剥 —— 剥了会把不同目录项混进
+同一个桶）→ 剥日期后缀（`-2024-08-06` / `-20241022` 两种写法）。`MatchBest`
+三级：精确 → 归一化相等 → 同族取字典序最大（日期后缀是唯一让字典序与
+新旧同向的特征）。无命中就如实说没有，硬凑会让一键填充填上不相干的价格。
+
+**非 token 维度的单位**（易混点）：token 四档是「每百万」，三个新维度是
+**每单位**（每张 / 每秒 / 每字符）—— 参考价库的原始口径就是单价
+（whisper 0.0001 美元/秒），照单全收不自创「每百万秒」这种没人能换算的口径。
+`PriceSet.IsZero` 因此扩成「七档全 0 才算没配价」：只配图像价的模型必须是
+「有价」，否则 Resolve 会把它当漏配、图像账全部记 0（有测试钉住）。
+
+**跑参考价相关的 PG 集成测试**：`TestDimensionPriceRoundtripAndResolve`、
+`TestCatalogStorePersistsInSettings`（`LLMRELAY_TEST_DSN` 门控，Windows 侧
+自动跳过）。纯函数测试（裁剪/折算/匹配/搜索）不依赖库，随时可跑。
+
+### 直通端点：图像与音频（2026-11 P2）
+
+`/v1/images/generations`、`/v1/audio/speech`、`/v1/audio/transcriptions`、
+`/v1/audio/translations` 四个 OpenAI 兼容端点。对话端点的架构是「归一成
+OpenAI Chat → 按渠道协议转上游」，这四个端点**没有中间语可言**——请求体就是
+上游要的形状（JSON 或 multipart），响应也是（JSON 或音频二进制）。所以引入了
+第二条转发形态：
+
+**Direct 直通**（`inboundProfile.Direct` → `RelayRequest.Direct` → `Forwarder.Do` 的
+direct 分支）：请求体不做归一化、不做 `convert.UpstreamRequest`、响应不做
+`UpstreamResponseBody` 转换，原样转发原样回传。白名单、密钥路由、故障转移、
+冷却熔断、渠道并发、全局闸门、出站代理、日志**全部复用**，只有两处差异：
+
+1. **渠道资格**：直通请求带 `RequireProtocols`（openai-chat / responses /
+   embeddings / custom），在 router 的 SQL 粗筛层排除 Anthropic / Gemini 协议
+   渠道 ——「渠道根本不能受理」是硬条件，与启用状态同级，不该靠转发失败兜底。
+2. **multipart 模型改写**（`RewriteMultipartModel`）：JSON 请求的模型名由
+   `RewriteModel` 浅解析替换；multipart（转写）必须重编码整个报文 —— 所以只有
+   「对外名 ≠ 上游名」时才重编码（整份文件要复制一遍），同名直通零成本。
+   重编码后 boundary 变了，`Do` 里同步替换出站 Content-Type —— 漏了这步的
+   表现是上游按旧 boundary 切分直接解析失败。
+   还有个隐蔽坑：`multipart.Writer.CreatePart` **不会**自动补
+   Content-Disposition —— 新部件不带这个头就没有字段名，解析侧直接丢掉 model
+   （单测 `TestRewriteMultipartModel` 用标准库 `ParseMultipartForm` 交叉验证过）。
+
+**计费**（`direct_billing.go`，纯函数）：图像按响应 `data` 数组的张数（上游可能
+比请求的 n 少给，按响应计费才与账单一致）；TTS 按请求 `input` 的 **Unicode
+码点数**（按字节会把中文账单放大三倍）；转写认上游真实回报的 usage（token 四档），
+没有就退 `verbose_json` 的 duration（按秒），两者都没有记 0 —— 不猜。
+直通端点**不做**「按报文长度折 token」的兜底估算（`relay_handler` 里对
+`p.Direct` 跳过 EstimateUsage）：一段 25MB 的 mp3 会折出几百万「token」。
+口径写进 `RequestLog.UsageKind` 与快照 `billing_kind`（词表见
+`pricing.BillingKind*`）。
+
+**响应 Content-Type**：对话端点按入站协议声明（响应已被改写成该协议形状）；
+直通端点用**上游的原值** —— 语音合成回 audio/mpeg，硬标 application/json
+客户端就废了。
+
+**语音合成的缓冲取舍**：方案里写过「io.Copy 边到边写」，实现时改成了走既有
+非流式缓冲（128MB 上限内）。理由：OpenAI TTS 本来就是整段返回、没有渐进流，
+流式化没有首字节收益，却要多一条与日志/报文留存/错误处理平行的写路径。
+MB 量级的音频在既有上限内有界，个人场景无压力。
+
+**验证**：`api/direct_endpoints_integration_test.go`（LLMRELAY_TEST_DSN 门控）
+四条用例走真实链路（handler → router 协议过滤 → forward 直通/改写 → 维度计费
+落账），假上游用 httptest；纯函数判据在 `direct_billing_test.go` 与
+`relay/multipart_test.go`。没有为 verify-all.sh 加 shell 用例 —— 那套用例要靠
+admin API 建夹具，而这里 Go 集成测试已全链路覆盖。
+
+### 响应缓存（2026-11 P3）
+
+精确匹配的「相同请求 → 相同答案」内存缓存，对齐 LiteLLM 的 cache 的个人版
+最小实现：无 Redis、无语义缓存，只有精确匹配 + TTL + 双界 LRU
+（`relay/cache` 包，nil 接收者安全 = 功能关闭形态）。
+
+**两层开关**：全局总闸（`RELAY_CACHE_ENABLED`，默认关，关闭时不装配 Cache、
+全部路径空转）× 密钥级「参与响应缓存」（`api_keys.cache_enabled`）。总闸是
+部署者的决定，密钥开关是「这把密钥的用途适不适合被缓存」的决定 ——
+temperature>0 命中缓存拿到相同答案，对编码 agent 是幂等重放、对别的场景
+是行为改变，所以由密钥用途决定而不是网关猜。
+
+**键建在归一化层**（本方案最大的杠杆）：键 = sha256(模型名 + 归一化 OpenAI
+Chat body 规范形 + 流式形态)。三个设计点都有明确理由：
+
+1. **规范形**：键序无关（map 序列化天然排序）、删 `stream` 字段、数字用
+   `json.Number` 保真（float64 往返会把 2^53 以上的整数变形，两个相同请求
+   会错开成不同键）。
+2. **流式形态进键**：「要流式的客户端」与「要整段的客户端」互相不命中本来
+   就是对齐 LiteLLM 的行为；若共用键还会互相覆盖，把命中率打成 0
+   （混合客户端场景实测就是抖动，集成测试钉住了两种形态各自命中）。
+3. **归一化 body 而不是原始报文**：上游响应在进 Attempt 前已被换回
+   OpenAI Chat 形状，回给客户端前还要过入站 Translator —— 所以缓存里存
+   OpenAI Chat 形状、重放走**同一个** Translator，任何入站协议都能命中同一份
+   缓存（Gemini 请求命中 OpenAI 请求存下的缓存，集成测试
+   `TestResponseCacheCrossProtocol` 验证了 anthropic 重放后的响应确实是
+   anthropic 形状）。注意这是**保守的等价**：归一化结果不完全一致就不命中
+   —— anthropic 的 max_tokens 会进翻译产物，openai 请求不带它就命中不了
+   （max_tokens 影响输出，进键是正确行为）。
+
+**行为规则**：
+
+- 命中不占全局并发闸门（查询点在 Acquire 之前），**仍计 RPM**（鉴权中间件
+  在前，保护的是客户端行为不是上游）；不打渠道、token 与金额如实为 0，
+  日志 `cache_hit=true` + 快照 `{"cached":true}`，响应头 `X-Relay-Cache: hit`。
+- 回源条件 `X-Relay-Cache: no-cache`。
+- 只缓存**完整成功**的响应：非流式 200 且 ≤ MaxResponseKB；流式要 streamErr==nil
+  且未截断（捕获长度 == tee.Bytes()）。截断的应答重放出来是残次品。
+- 缓存捕获与报文留存相互独立：留存是排障采样（可能截断），缓存必须是完整
+  可重放应答。
+- 直通端点（图像/音频）与 embeddings 不缓存：图像生成天然随机、embeddings
+  量小频低（`profileCacheable`）。
+- Flush 保留命中统计：命中率是「这个功能有没有用」的长期证据，清空条目的
+  动作不该抹掉它。
+
+**迁移**：`api_keys.cache_enabled` 走 for_update 同款（migrateLegacySchema 补列
+DEFAULT false 保留）；`request_logs.cache_hit` 是普通可空 bool（与
+FallbackMapped 同款）。**测试直连 AutoMigrate 时必须先手工补
+api_keys.cache_enabled** —— AutoMigrate 给已有数据的表加 NOT NULL 无默认列
+会被 PG 拒（规则 12），集成测试夹具里有这条 ALTER。
+
+**验证**：`api/cache_integration_test.go` 五条真库用例（命中重放/密钥开关/
+no-cache/流式重放/跨协议）+ `relay/cache` 包的 LRU/TTL/并发单测。
+状态与清空在「系统设置 → 概览 → 响应缓存」；密钥开关在「密钥管理」表单。
 
 ### 管理台双认证（2026-10-27：TOTP 2FA 与密钥二选一）
 

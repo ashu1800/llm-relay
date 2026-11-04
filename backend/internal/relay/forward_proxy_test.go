@@ -35,7 +35,7 @@ func TestForwarderRefusesToFallBackToDirect(t *testing.T) {
 		Binding: model.ChannelModel{PublicName: "m", UpstreamName: "m"},
 	}
 	_, err := f.Do(context.Background(), cand, "/v1/chat/completions",
-		[]byte(`{"model":"m","messages":[]}`), http.Header{}, false)
+		[]byte(`{"model":"m","messages":[]}`), http.Header{}, false, false)
 	if err == nil {
 		t.Fatal("代理不可用时不该成功")
 	}

@@ -100,7 +100,7 @@ func (s *Service) Probe(ctx context.Context, cand Candidate, body []byte) (*Atte
 	// （Anthropic -> /v1/messages，Responses -> /v1/responses，Gemini 把模型名写进路径）。
 	// 这里**不要**提前把路径换成目标协议的端点：那样会被 isChatPath 判成非对话请求，
 	// 于是报文不再被转换，上游收到一个 Chat 形状的请求，报「input is required」。
-	return s.fwd.Do(ctx, cand, "/v1/chat/completions", body, http.Header{}, false)
+	return s.fwd.Do(ctx, cand, "/v1/chat/completions", body, http.Header{}, false, false)
 }
 
 // SetProxyResolver 把「按 id 查代理配置」的能力交给转发器。
@@ -138,6 +138,17 @@ type RelayRequest struct {
 	// 2026-10-26 的破坏性重构一起移除，路由范围改由密钥的每模型渠道路由
 	// 决定 —— 那个字段连同它的解析链路一并删掉了。
 	AllowedChannels []uint
+	// RequireProtocols 限定候选渠道的出站协议（直通端点用，见 CandidateQuery）。
+	RequireProtocols []string
+	// Direct 标记这是一次「直通」请求（图像/音频端点，2026-11 P2）：
+	// 请求体**不经过** OpenAI Chat 归一化，响应也**不经过**协议转换 ——
+	// 原样转发、原样回传。转发层据此跳过 convert.UpstreamRequest /
+	// UpstreamResponseBody（见 forward.go Do）。
+	Direct bool
+	// CacheHit 由 api 层在命中响应缓存时置位（2026-11 P3），随 BuildLog
+	// 落进日志行：命中的请求不打上游，token 与金额如实为 0 —— 这列是
+	// 「缓存给的 0」与「上游没计量的 0」的唯一区分标志。
+	CacheHit bool
 	// Body 是归一化后发给上游的载荷；InboundBody 是客户端原始报文，仅用于留存排障
 	Body        []byte
 	InboundBody []byte
@@ -476,8 +487,9 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 	// 附带修正轮转语义：RR 游标每个请求只前进一格 —— 原先每次重试都
 	// 推一格，带 3 次重试的请求让游标跳 4 格，轮转分布被故障转移流量扭曲。
 	allCands, err := s.router.Candidates(ctx, CandidateQuery{
-		PublicModel:     req.PublicModel,
-		AllowedChannels: req.AllowedChannels,
+		PublicModel:      req.PublicModel,
+		AllowedChannels:  req.AllowedChannels,
+		RequireProtocols: req.RequireProtocols,
 	})
 	if err != nil {
 		return res, err
@@ -546,7 +558,7 @@ func (s *Service) Relay(ctx context.Context, req *RelayRequest) (*RelayResult, e
 				"channel_id", cand.Channel.ID, "channel", cand.Channel.Name)
 		}
 
-		attempt, err := s.fwd.Do(ctx, cand, req.UpstreamPath, req.Body, req.Headers, s.opts.InjectStreamUsage)
+		attempt, err := s.fwd.Do(ctx, cand, req.UpstreamPath, req.Body, req.Headers, s.opts.InjectStreamUsage, req.Direct)
 		if err != nil {
 			// 这一次没成，名额当场归还，让其它请求能用
 			if acquired {

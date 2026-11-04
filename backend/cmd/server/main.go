@@ -33,6 +33,7 @@ import (
 	"llm-relay/internal/pricing"
 	"llm-relay/internal/proxy"
 	"llm-relay/internal/relay"
+	relaycache "llm-relay/internal/relay/cache"
 	"llm-relay/internal/secure"
 	"llm-relay/internal/service"
 	"llm-relay/internal/update"
@@ -234,10 +235,37 @@ func run(ctx context.Context) error {
 	// logs.CloseAndFlush(...)，给它一个明确的上限。
 
 	// ---- 定价 ----
-	// 单价一律手工录入：外部价格表（LiteLLM / 官网）里的模型命名与本站
+	// 单价一律**显式录入**：外部价格表（LiteLLM / 官网）里的模型命名与本站
 	// 对外模型名并不一致，自动同步会写进大量用不上的行，还会在用户改价后
 	// 被下一轮同步覆盖。宁可让人自己填，也不要有会漂移的假数据。
+	//
+	// 2026-11 P1 起多了一层「建议」：内嵌 LiteLLM 参考价库（CatalogStore）
+	// 供定价页搜索与一键填充，但填充发生在前端表单里、用户确认后才走
+	// 既有的保存接口落库 —— 建议价永远不直接进账本（与「自动同步」的
+	// 分界线就在这一步人眼确认）。
 	priceEngine := pricing.NewEngine(st.DB(), 5*time.Minute)
+	priceCatalog := pricing.NewCatalogStore(st.DB())
+
+	// ---- 响应缓存（2026-11 P3）----
+	//
+	// 全局开关关闭时不装配（Deps.Cache 为 nil，缓存相关路径全部空转）：
+	// 「功能存在但关闭」与「功能开启但没有条目」是两种状态，nil 让前者
+	// 在装配层就可见。生效还要密钥自己勾「参与缓存」—— 总闸 + 密钥开关
+	// 双层确认，误伤面最小。
+	var respCache *relaycache.Cache
+	if cfg.Relay.Cache.Enabled {
+		respCache = relaycache.New(
+			cfg.Relay.Cache.TTL,
+			cfg.Relay.Cache.MaxEntries,
+			int64(cfg.Relay.Cache.MaxTotalMB)<<20,
+		)
+		logger.Info("响应缓存已启用",
+			"ttl", cfg.Relay.Cache.TTL.String(),
+			"max_entries", cfg.Relay.Cache.MaxEntries,
+			"max_total_mb", cfg.Relay.Cache.MaxTotalMB,
+			"max_response_kb", cfg.Relay.Cache.MaxResponseKB,
+		)
+	}
 
 	// ---- 版本更新 ----
 	//
@@ -278,6 +306,11 @@ func run(ctx context.Context) error {
 
 		// 版本更新：Update 提供检测 / 应用 / 回滚的全套服务
 		Update: updateSvc,
+		// 参考价库：定价页「从参考价库填充」的建议价源。下载走 Update 的
+		// 代理与目标校验（FetchFile），内嵌快照兜底 —— 管理台离线也能搜
+		Catalog: priceCatalog,
+		// 响应缓存：全局总闸关闭时为 nil（合法形态，全部路径 nil 安全）
+		Cache: respCache,
 		// State 之前被清出过 Deps（「没有读取方，是路由分析页的残留」）。
 		// 现在读它的地方回来了：渠道列表把运行期状态（冷却剩余/连击/在途）
 		// 并进响应，让「熔断早已生效但谁也看不见」变成看得见 ——

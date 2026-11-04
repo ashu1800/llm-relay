@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"strings"
 	"time"
 
@@ -203,6 +207,159 @@ func ExtractStream(raw []byte) bool {
 		return false
 	}
 	return payload.Stream
+}
+
+// IsMultipartContentType 判断 Content-Type 是否为 multipart/form-data。
+// 语音转写端点的请求体是 multipart，模型名在表单字段里而不是 JSON 里 ——
+// RewriteModel（JSON 浅解析）对它无能为力，也绝不能去「解析」一个 25MB 的
+// 音频字节流当 JSON。
+func IsMultipartContentType(contentType string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)),
+		"multipart/form-data")
+}
+
+// multipartFormValue 遍历 multipart 报文，返回指定表单字段的值。
+//
+// 刻意不使用 multipart.Reader.ReadForm：它会把超过 maxMemory 的部件写到
+// 临时文件再让我们删 —— 音频文件动辄十几 MB，纯粹多一轮磁盘 IO。这里
+// 手动逐部件读：只关心 form 字段（模型名，几十字节），文件部件原样跳过
+// （内容已在调用方的字节切片里，为「跳过」再读一遍只是 CPU 成本）。
+//
+// 返回 (值, 是否找到)。字段值截断在 4KB：模型名不会那么长，截断只发生在
+// 报文被人为构造坏掉的场景 —— 那时值本身已不可信。
+func multipartFormValue(raw []byte, contentType, field string) (string, bool, error) {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return "", false, fmt.Errorf("解析 Content-Type 失败: %w", err)
+	}
+	boundary := params["boundary"]
+	if boundary == "" {
+		return "", false, fmt.Errorf("multipart 报文缺少 boundary")
+	}
+	reader := multipart.NewReader(bytes.NewReader(raw), boundary)
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			return "", false, nil
+		}
+		if err != nil {
+			return "", false, fmt.Errorf("解析 multipart 报文失败: %w", err)
+		}
+		if part.FileName() != "" {
+			// 文件部件：清空内容后才能继续遍历（Reader 要求读尽当前部件）
+			_, _ = io.Copy(io.Discard, part)
+			_ = part.Close()
+			continue
+		}
+		if name := part.FormName(); name == field {
+			value, _ := io.ReadAll(io.LimitReader(part, 4096))
+			_ = part.Close()
+			return strings.TrimSpace(string(value)), true, nil
+		}
+		_, _ = io.Copy(io.Discard, part)
+		_ = part.Close()
+	}
+}
+
+// MultipartModelField 从 multipart 请求体里取模型名（语音转写端点用）。
+// 没有 model 字段时返回空串 —— 与 ExtractModel 对 JSON 缺字段的行为一致。
+func MultipartModelField(raw []byte, contentType string) string {
+	v, _, _ := multipartFormValue(raw, contentType, "model")
+	return v
+}
+
+// RewriteMultipartModel 把 multipart 报文里 model 字段的值替换成上游模型名。
+//
+// 与 RewriteModel（JSON）的对称物，但有两个绕不开的差异：
+//  1. 改字段值必须**重新编码整个报文**（multipart 的部件带长度边界），
+//     新报文用新 boundary，返回值里带新的 Content-Type —— 调用方必须
+//     用它替换出站请求头，否则上游按旧 boundary 切分直接解析失败；
+//  2. 大文件会被整体复制一遍（读写两个缓冲都在内存）。所以只有
+//     「对外名 ≠ 上游名」时才走重编码 —— 同名直通（绝大多数部署的
+//     配置）零成本原样转发。
+//
+// 没有 model 字段时原样返回（交给上游去报缺参数，语义比我们猜的准）。
+func RewriteMultipartModel(raw []byte, contentType, upstreamModel string) ([]byte, string, error) {
+	if upstreamModel == "" {
+		return raw, contentType, nil
+	}
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return nil, "", fmt.Errorf("解析 Content-Type 失败: %w", err)
+	}
+	boundary := params["boundary"]
+	if boundary == "" {
+		return nil, "", fmt.Errorf("multipart 报文缺少 boundary")
+	}
+
+	// 先探测 model 字段的当前值：值已一致时直接原样返回。
+	// multipart.Reader 消费完就回不去了，而「值是否相同」只有读完才知道
+	// —— 重编码除了换 boundary 什么都没改，却要把整份文件复制一遍，
+	// 所以宁可多遍历一次报文（内存里的字节拷贝，成本可忽略）。
+	current := MultipartModelField(raw, contentType)
+	if current == upstreamModel {
+		return raw, contentType, nil
+	}
+
+	reader := multipart.NewReader(bytes.NewReader(raw), boundary)
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	rewritten := false
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("解析 multipart 报文失败: %w", err)
+		}
+		name := part.FormName()
+		isModelField := part.FileName() == "" && name == "model"
+
+		header := textproto.MIMEHeader{}
+		for k, vs := range part.Header {
+			if isModelField && strings.EqualFold(k, "Content-Disposition") {
+				// 旧 disposition 描述的是原字段名，下面按 name=model 重写。
+				// 注意 CreatePart **不会**自动补 disposition：不带这个头的
+				// 部件没有字段名，解析侧会直接丢掉 model —— 必须显式设置
+				continue
+			}
+			for _, v := range vs {
+				header.Add(k, v)
+			}
+		}
+		if isModelField {
+			header.Set("Content-Disposition",
+				fmt.Sprintf(`form-data; name="%s"`, escapeQuotes(name)))
+		}
+		dst, err := writer.CreatePart(header)
+		if err != nil {
+			return nil, "", err
+		}
+		if isModelField {
+			if _, err := dst.Write([]byte(upstreamModel)); err != nil {
+				return nil, "", err
+			}
+			rewritten = true
+		} else if _, err := io.Copy(dst, part); err != nil {
+			return nil, "", fmt.Errorf("复制 multipart 部件失败: %w", err)
+		}
+		_ = part.Close()
+	}
+	if !rewritten {
+		// 没有 model 字段：交给上游去报缺参数，语义比我们猜的准
+		return raw, contentType, nil
+	}
+	if err := writer.Close(); err != nil {
+		return nil, "", err
+	}
+	return buf.Bytes(), "multipart/form-data; boundary=" + writer.Boundary(), nil
+}
+
+// escapeQuotes 转义 Content-Disposition 里的引号（multipart.Writer 的
+// EscapeQuotes 是私有函数，这里复刻一份 —— 语义单一，不值得为此引依赖）。
+func escapeQuotes(s string) string {
+	return strings.ReplaceAll(s, `"`, `\"`)
 }
 
 // UsageTee 在透传字节流的同时旁路解析 SSE，抓取上游返回的 usage。

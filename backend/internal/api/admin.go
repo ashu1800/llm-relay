@@ -1217,6 +1217,9 @@ type keyPayload struct {
 	ModelChannels map[string][]uint `json:"model_channels"`
 	// 用指针区分「没传」与「显式设为 0」
 	RateLimitRPM *int `json:"rate_limit_rpm"`
+	// CacheEnabled 是「参与响应缓存」的开关。指针三态与 RateLimitRPM 同理：
+	// 未传不动、传 false 存 false（bool 零值陷阱，见 CacheEnabled 实体注释）
+	CacheEnabled *bool `json:"cache_enabled"`
 }
 
 // normalizeKeyRoutes 校验并规整「每模型的候选渠道路由」。
@@ -1364,6 +1367,9 @@ func (s *Server) createKey(c *gin.Context) {
 	if p.RateLimitRPM != nil {
 		k.RateLimitRPM = *p.RateLimitRPM
 	}
+	if p.CacheEnabled != nil {
+		k.CacheEnabled = *p.CacheEnabled
+	}
 	if err := s.deps.Store.DB().Create(&k).Error; err != nil {
 		writeInternalError(c, err)
 		return
@@ -1394,6 +1400,9 @@ func (s *Server) updateKey(c *gin.Context) {
 	}
 	if p.RateLimitRPM != nil {
 		updates["rate_limit_rpm"] = *p.RateLimitRPM
+	}
+	if p.CacheEnabled != nil {
+		updates["cache_enabled"] = *p.CacheEnabled
 	}
 	// 白名单与路由是**一对**数据：更新时必须同时提交（模型集合与路由键
 	// 要对得上，单改一边必然产生「有模型没路由」或「路由里有幽灵模型」）。

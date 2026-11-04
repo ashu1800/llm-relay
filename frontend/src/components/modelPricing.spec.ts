@@ -1,14 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import {
   amountError,
+  catalogModeLabel,
   emptyForm,
+  fillFormFromCatalog,
   formError,
   formFrom,
   missingTierWarning,
   payloadFrom,
   priceState,
   priceSummary,
-  tierPriced
+  tierPriced,
+  trimCatalogNumber
 } from './modelPricing'
 
 describe('formFrom 回填', () => {
@@ -205,5 +208,80 @@ describe('payloadFrom 提交载荷', () => {
     expect(p.model_name).toBe('gpt-5')
     expect(p.usd_input_per_1m).toBe('1.25')
     expect(p.rmb_output_per_1m).toBe('')
+  })
+})
+
+describe('参考价库回填 fillFormFromCatalog', () => {
+  it('折算目录条目为美元档字符串', () => {
+    const fill = fillFormFromCatalog({
+      mode: 'chat',
+      provider: 'openai',
+      in: 2.5,
+      out: 10,
+      cr: 1.25,
+      cw: 3.75
+    })
+    expect(fill.usd_input_per_1m).toBe('2.5')
+    expect(fill.usd_output_per_1m).toBe('10')
+    expect(fill.usd_cache_read_per_1m).toBe('1.25')
+    expect(fill.usd_cache_write_per_1m).toBe('3.75')
+  })
+
+  it('非 token 维度照单全收（每单位口径，不折算）', () => {
+    const fill = fillFormFromCatalog({
+      mode: 'image_generation',
+      provider: 'openai',
+      img: 0.04,
+      sec: 0.0001,
+      chr: 0.000015
+    })
+    expect(fill.usd_per_image).toBe('0.04')
+    expect(fill.usd_per_second).toBe('0.0001')
+    expect(fill.usd_per_character).toBe('0.000015')
+  })
+
+  it('0 / 缺失的档不产出：已填过的档不被一次填充抹掉', () => {
+    const fill = fillFormFromCatalog({ mode: 'chat', provider: 'openai', in: 2.5 })
+    expect('usd_output_per_1m' in fill).toBe(false)
+    expect('usd_per_image' in fill).toBe(false)
+  })
+
+  it('人民币档永不产出：参考价是美元口径，换算需要汇率', () => {
+    const fill = fillFormFromCatalog({
+      mode: 'chat',
+      provider: 'openai',
+      in: 2.5,
+      out: 10
+    }) as Record<string, unknown>
+    for (const k of Object.keys(fill)) {
+      expect(k.startsWith('rmb_')).toBe(false)
+    }
+  })
+})
+
+describe('trimCatalogNumber 金额字符串', () => {
+  it('去尾零、去孤立小数点', () => {
+    expect(trimCatalogNumber(2.5)).toBe('2.5')
+    expect(trimCatalogNumber(10)).toBe('10')
+    expect(trimCatalogNumber(0.000015)).toBe('0.000015')
+  })
+  it('小金额不得出科学计数法（金额输入框拒绝 e 记数）', () => {
+    expect(trimCatalogNumber(1.5e-5)).not.toContain('e')
+    expect(trimCatalogNumber(1.5e-5)).toBe('0.000015')
+  })
+  it('非正数 / 非有限值给空串', () => {
+    expect(trimCatalogNumber(0)).toBe('')
+    expect(trimCatalogNumber(-1)).toBe('')
+    expect(trimCatalogNumber(NaN)).toBe('')
+    expect(trimCatalogNumber(Infinity)).toBe('')
+  })
+})
+
+describe('catalogModeLabel', () => {
+  it('常见 mode 有中文文案，未知 mode 原样透出', () => {
+    expect(catalogModeLabel('chat')).toBe('对话')
+    expect(catalogModeLabel('image_generation')).toBe('文生图')
+    expect(catalogModeLabel('some_new_mode')).toBe('some_new_mode')
+    expect(catalogModeLabel('')).toBe('（未标注）')
   })
 })

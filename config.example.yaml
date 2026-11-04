@@ -51,6 +51,21 @@ relay:
   client_map_limit: 2048
   client_map_ttl: 168h
 
+  # 响应缓存（2026-11 P3，默认关）：相同请求直接回放缓存答案，不打上游。
+  # enabled 是总闸；实际生效还需要在「密钥管理」里给密钥逐把勾选
+  # 「参与响应缓存」。命中请求在日志里标「缓存命中」，token 与金额如实为 0。
+  # 注意：temperature>0 的请求命中缓存会拿到与上次相同的答案 ——
+  # 编码 agent 的幂等重放适合开启；要求每次新鲜输出的密钥不要开。
+  cache:
+    enabled: false
+    # 条目存活时长（0 = 永久，不推荐：改了模型配置后旧答案还在）
+    ttl: 1h
+    # 条目数上限；字节总量上限（超限按最久未使用淘汰）
+    max_entries: 1024
+    max_total_mb: 128
+    # 单条响应缓存上限，超过整体不缓存（对话回复 KB 级，256KB 很宽裕）
+    max_response_kb: 256
+
 security:
   # AES-GCM 加密上游渠道密钥的主密钥；生产环境务必换成随机长字符串。
   secret: llm-relay-dev-secret-change-me

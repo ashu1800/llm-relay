@@ -13,6 +13,7 @@ import (
 	"llm-relay/internal/model"
 	"llm-relay/internal/pricing"
 	"llm-relay/internal/relay"
+	relaycache "llm-relay/internal/relay/cache"
 	"llm-relay/internal/secure"
 	"llm-relay/internal/store"
 	"llm-relay/internal/update"
@@ -47,6 +48,14 @@ type Deps struct {
 	// 「我现在跑的是哪一版」不该依赖更新功能是否启用。
 	// 能否一键更新没有独立探测：/update/check 的 can_apply 就是答案。
 	Update *update.Service
+	// Catalog 是参考价库（LiteLLM 价格表的建议价源，定价页搜索与填充用）。
+	// 为 nil 时目录相关接口回 500 —— 装配层漏了它属于程序缺陷，
+	// 不是运行时可降级的状态（内嵌快照永远可用）。
+	Catalog *pricing.CatalogStore
+	// Cache 是响应缓存（2026-11 P3）。全局开关关闭时为 nil —— 与 Catalog
+	// 不同，这是**合法的运行形态**（缓存默认关），所有读它的路径都必须
+	// nil 安全（cache 包的方法本身已 nil 安全）。
+	Cache *relaycache.Cache
 }
 
 // Server 持有 HTTP 层状态。
@@ -122,6 +131,11 @@ func (s *Server) Register(r *gin.Engine) {
 		v1.POST("/embeddings", s.embeddings)
 		// Anthropic Messages 兼容端点，供 Claude Code 等客户端直连
 		v1.POST("/messages", s.anthropicMessages)
+		// 直通端点（2026-11 P2）：图像 / 音频，请求与响应原样转发
+		v1.POST("/images/generations", s.imagesGenerations)
+		v1.POST("/audio/speech", s.audioSpeech)
+		v1.POST("/audio/transcriptions", s.audioTranscriptions)
+		v1.POST("/audio/translations", s.audioTranslations)
 	}
 
 	// ---- Gemini 兼容端点：模型名写在路径里而不是请求体，故单独一组 ----
@@ -162,6 +176,7 @@ func (s *Server) registerAdminRoutes(r *gin.Engine) {
 	{
 		admin.GET("/system/info", s.systemInfo)
 		registerSystemRoutes(admin, s)
+		registerCacheRoutes(admin, s)
 		registerChannelRoutes(admin, s)
 		// 模型级定价（2026-10-27 从渠道白名单里拆出来）
 		registerModelPriceRoutes(admin, s)

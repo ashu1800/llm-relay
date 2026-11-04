@@ -2110,6 +2110,15 @@ onMounted(() => {
                 :style="{ '--pill-color': FALLBACK_COLOR }"
                 :title="'模型名没命中白名单，已改用 ' + (record.model_upstream || '默认模型') + ' 请求上游'"
               >兜底</span>
+              <!-- 缓存命中胶囊：这条响应来自缓存而不是上游（token 与金额
+                   如实为 0，不是漏抓）。与兜底同款形状、借用思考档位里
+                   低调的绿色系，扫列表时能认出「这行没花钱」。 -->
+              <span
+                v-if="record.cache_hit"
+                class="think-pill"
+                :style="{ '--pill-color': 'var(--text-green)' }"
+                :title="'响应来自缓存（不打上游，token 与金额为 0）'"
+              >缓存</span>
             </span>
           </template>
         </a-table-column>
@@ -2435,6 +2444,10 @@ onMounted(() => {
         <a-descriptions-item label="思考等级">
           <span v-if="current.thinking_level" class="think-pill" :style="{ '--pill-color': thinkingColor(current.thinking_level) }">{{ current.thinking_level }}</span>
           <template v-else>-</template>
+        </a-descriptions-item>
+        <a-descriptions-item v-if="current.cache_hit" label="响应来源">
+          <span class="think-pill" :style="{ '--pill-color': 'var(--text-green)' }">缓存命中</span>
+          <span style="margin-left: 6px; color: var(--color-text-secondary)">未打上游，token 与金额为 0 是缓存给的</span>
         </a-descriptions-item>
         <a-descriptions-item label="协议转译流">
           <div class="proto-flow">

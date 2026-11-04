@@ -15,6 +15,7 @@ import (
 
 	"llm-relay/internal/model"
 	"llm-relay/internal/relay"
+	relaycache "llm-relay/internal/relay/cache"
 	"llm-relay/internal/relay/convert"
 )
 
@@ -165,6 +166,32 @@ func (s *Server) embeddings(c *gin.Context) {
 	s.relayRequest(c, profileEmbeddings, "", false)
 }
 
+// ---- 直通端点（2026-11 P2）：图像 / 音频 ----
+//
+// 与对话端点走同一条 relayRequest 主流程（白名单、密钥路由、故障转移、
+// 并发闸门、日志、计费全部复用），差异只有两点：请求体不做归一化（Direct），
+// 模型名可能要从 multipart 表单字段里提取（ExtractModel）。
+
+// imagesGenerations 是 OpenAI 图像生成入口（文生图）。
+func (s *Server) imagesGenerations(c *gin.Context) {
+	s.relayRequest(c, profileImageGenerations, "", false)
+}
+
+// audioSpeech 是 OpenAI 语音合成入口（TTS，响应是音频二进制）。
+func (s *Server) audioSpeech(c *gin.Context) {
+	s.relayRequest(c, profileAudioSpeech, "", false)
+}
+
+// audioTranscriptions 是 OpenAI 语音转写入口（multipart，含音频文件）。
+func (s *Server) audioTranscriptions(c *gin.Context) {
+	s.relayRequest(c, profileAudioTranscriptions, "", false)
+}
+
+// audioTranslations 是 OpenAI 语音翻译入口（multipart，同转写形状）。
+func (s *Server) audioTranslations(c *gin.Context) {
+	s.relayRequest(c, profileAudioTranslations, "", false)
+}
+
 // gateWaitTimeout 是全局并发闸门的最长排队时间。
 // 超过它说明本地确实过载了，此时快速失败比让客户端无限等待更有用。
 const gateWaitTimeout = 60 * time.Second
@@ -190,14 +217,27 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 		return
 	}
 
-	// 先把入站载荷归一化成 OpenAI Chat，再交给上游
+	// 先把入站载荷归一化成 OpenAI Chat，再交给上游。
+	// 直通端点（Direct）不做归一化：body 就是原始报文，原样转发。
 	body, err := p.translateBody(rawBody, pathModel, pathStream)
 	if err != nil {
 		p.writeError(c, http.StatusBadRequest, "请求体转换失败: "+err.Error(), "invalid_request_error")
 		return
 	}
 
-	publicModel := relay.ExtractModel(body)
+	// 模型名：默认按 JSON 的 "model" 字段读；multipart 端点走 profile 的
+	// 提取器（表单字段）。二者都以原始报文为准 —— 归一化不会动模型名，
+	// 但 multipart 报文根本不是 JSON，relay.ExtractModel 对它必然返回空。
+	publicModel := ""
+	if p.ExtractModel != nil {
+		publicModel, err = p.ExtractModel(rawBody, c.Request.Header.Get("Content-Type"))
+		if err != nil {
+			p.writeError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
+			return
+		}
+	} else {
+		publicModel = relay.ExtractModel(body)
+	}
 	if publicModel == "" && pathModel != "" {
 		publicModel = pathModel
 	}
@@ -238,24 +278,53 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 	clientID, clientName, clientUA := relay.ExtractClient(c.Request.Header)
 
 	req := &relay.RelayRequest{
-		TraceID:         traceID,
-		InboundProto:    p.Name,
-		UpstreamPath:    p.UpstreamPath,
-		PublicModel:     publicModel,
-		Body:            body,
-		InboundBody:     rawBody,
-		Headers:         c.Request.Header,
-		ClientIP:        c.ClientIP(),
-		ClientID:        clientID,
-		ClientName:      clientName,
-		ClientUA:        clientUA,
-		Stream:          relay.ExtractStream(body),
-		ThinkingLevel:   relay.ExtractThinkingLevel(p.Name, rawBody),
-		AllowedChannels: allowedChannels,
+		TraceID:          traceID,
+		InboundProto:     p.Name,
+		UpstreamPath:     p.UpstreamPath,
+		PublicModel:      publicModel,
+		Body:             body,
+		InboundBody:      rawBody,
+		Headers:          c.Request.Header,
+		ClientIP:         c.ClientIP(),
+		ClientID:         clientID,
+		ClientName:       clientName,
+		ClientUA:         clientUA,
+		Stream:           relay.ExtractStream(body),
+		ThinkingLevel:    relay.ExtractThinkingLevel(p.Name, rawBody),
+		AllowedChannels:  allowedChannels,
+		RequireProtocols: nil,
+		Direct:           p.Direct,
+	}
+	if p.Direct {
+		// 直通端点只允许 OpenAI 兼容协议渠道：Anthropic/Gemini 协议的
+		// 转换对图像/音频请求毫无意义，在路由层就排除（见 router.go）
+		req.RequireProtocols = directChannelProtocols
 	}
 	if key != nil {
 		req.APIKeyID = key.ID
 		req.APIKeyName = key.Name
+	}
+
+	// ---- 响应缓存（2026-11 P3）----
+	//
+	// 查询点在并发闸门**之前**：命中不打上游，占着闸门名额纯属浪费。
+	// 请求计入 RPM 的事实发生在更早的鉴权中间件里（requireAPIKey）——
+	// 命中也计 RPM 是刻意的：限流保护的是客户端行为，不是上游。
+	//
+	// 生效条件是四层合取：全局开了（Cache 非 nil）、端点可缓存（对话族）、
+	// 密钥勾了「参与缓存」、客户端没有 X-Relay-Cache: no-cache。
+	// 任何一层不满足都当作缓存不存在，行为与本功能引入前完全一致。
+	cacheKey := ""
+	cacheStore := false
+	if s.deps.Cache != nil && profileCacheable(p) && key != nil && key.CacheEnabled &&
+		!strings.EqualFold(strings.TrimSpace(c.Request.Header.Get("X-Relay-Cache")), "no-cache") {
+		cacheKey = cacheKeyOf(p, publicModel, body, req.Stream)
+		if entry, ok := s.deps.Cache.Get(cacheKey); ok && entry.Stream == req.Stream {
+			s.serveCacheHit(c, p, req, entry, started)
+			return
+		}
+		// 只有「缓存可用且本次未命中」的请求才会在成功后回填缓存
+		cacheStore = true
 	}
 
 	// 全局并发闸门：排队等待，而不是把压力一股脑推给上游。
@@ -336,13 +405,22 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 	}
 
 	if att.Stream != nil {
-		s.streamToClient(c, p, req, res, att, started)
+		s.streamToClient(c, p, req, res, att, started, cacheKey, cacheStore)
 		return
 	}
 
 	// 非流式成功：经改写器输出，透传协议下即原样写出
 	copyHeader(c.Writer.Header(), att.Headers)
-	c.Writer.Header().Set("Content-Type", p.ContentType)
+	// 响应 Content-Type：对话端点按入站协议声明（响应已被改写成该协议的
+	// 形状）；直通端点用上游的原值 —— 语音合成回的是 audio/mpeg，
+	// 硬标成 application/json 会让客户端把音频当 JSON 解析失败
+	contentType := p.ContentType
+	if p.Direct {
+		if v := att.Headers.Get("Content-Type"); v != "" {
+			contentType = v
+		}
+	}
+	c.Writer.Header().Set("Content-Type", contentType)
 	c.Status(att.StatusCode)
 	tr := p.translator(c.Writer, publicModel, false)
 	if _, err := tr.Write(att.Body); err != nil {
@@ -351,9 +429,13 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 	if err := tr.Close(); err != nil {
 		slog.Default().Warn("响应改写收尾失败", "trace_id", traceID, "err", err)
 	}
-	// 上游未回传 usage 时按报文长度兜底估算，避免统计全为零
+	// 上游未回传 usage 时按报文长度兜底估算，避免统计全为零。
+	// 直通端点不做这个估算：图像/音频根本没有 token 语义，把响应字节按
+	// 1/3 折成「token」是纯粹的垃圾数（一段 25MB 的 mp3 会折出几百万），
+	// 它们按维度计费（每张/每字符/每秒，见 finalizeLog 的 direct 分支），
+	// token 全为 0 是如实计量而不是漏抓。
 	usage := att.Usage
-	if !att.HasUsage {
+	if !att.HasUsage && !p.Direct {
 		usage = relay.EstimateUsage(len(rawBody), len(att.Body))
 	}
 	s.finalizeLog(req, res, usage, att.StatusCode, "",
@@ -362,6 +444,18 @@ func (s *Server) relayRequest(c *gin.Context, p *inboundProfile, pathModel strin
 			FirstByteMs: att.HeaderMs,
 			TotalMs:     int(time.Since(started).Milliseconds()),
 		}, att.Body, att.Headers)
+	// 成功回填缓存。body 尺寸的截断在 cache.Put 内部有总量判定，
+	// 单条上限（MaxResponseKB）在这里判 —— 超限响应不进缓存，免得
+	// 把「一条就撑爆」的大响应换进来挤掉一堆小响应（Put 的 LRU 淘汰
+	// 是给「合法但多」的场景准备的）。
+	if cacheStore && att.StatusCode == http.StatusOK &&
+		len(att.Body) <= s.deps.Config.Relay.Cache.MaxResponseKB<<10 {
+		s.deps.Cache.Put(cacheKey, &relaycache.Entry{
+			Body:      att.Body,
+			Stream:    false,
+			CreatedAt: time.Now(),
+		})
+	}
 }
 
 // attemptUsage 取最后一次上游尝试回报的用量，供失败路径落账。
@@ -376,9 +470,58 @@ func attemptUsage(res *relay.RelayResult) relay.Usage {
 	return relay.Usage{}
 }
 
+// serveCacheHit 把缓存命中的响应回给客户端。
+//
+// 关键性质：重放走的是与实时路径**同一个** Translator —— 缓存体是归一化层
+// 的 OpenAI Chat 形状（转发层在响应进 Attempt 前已完成协议转换），Translator
+// 把它改写成入站协议。这保证了「Gemini 请求命中 OpenAI 请求的缓存」时客户端
+// 看到的响应形状与实时链路逐字段一致。
+//
+// 计量：命中不打上游，token 与金额如实为 0（req.CacheHit 让日志标出这是
+// 缓存给的 0，与「上游没计量」区分）；时序只有总耗时是真的（没有上游环节）。
+func (s *Server) serveCacheHit(c *gin.Context, p *inboundProfile, req *relay.RelayRequest, entry *relaycache.Entry, started time.Time) {
+	req.CacheHit = true
+	elapsed := int(time.Since(started).Milliseconds())
+
+	if req.Stream {
+		// 流式重放：缓存的 SSE 字节过同一个流式 Translator，
+		// 客户端看到的事件序列与实时链路完全一致
+		h := c.Writer.Header()
+		h.Set("Content-Type", "text/event-stream")
+		h.Set("Cache-Control", "no-cache")
+		h.Set("X-Accel-Buffering", "no")
+		h.Set("X-Relay-Cache", "hit")
+		c.Status(http.StatusOK)
+		c.Writer.Flush()
+		tr := p.translator(c.Writer, req.PublicModel, true)
+		if _, err := tr.Write(entry.Body); err != nil {
+			slog.Default().Warn("缓存重放写出失败", "trace_id", req.TraceID, "err", err)
+		}
+		if err := tr.Close(); err != nil {
+			slog.Default().Warn("缓存重放收尾失败", "trace_id", req.TraceID, "err", err)
+		}
+	} else {
+		c.Writer.Header().Set("Content-Type", p.ContentType)
+		c.Writer.Header().Set("X-Relay-Cache", "hit")
+		c.Status(http.StatusOK)
+		tr := p.translator(c.Writer, req.PublicModel, false)
+		if _, err := tr.Write(entry.Body); err != nil {
+			slog.Default().Warn("缓存重放写出失败", "trace_id", req.TraceID, "err", err)
+		}
+		if err := tr.Close(); err != nil {
+			slog.Default().Warn("缓存重放收尾失败", "trace_id", req.TraceID, "err", err)
+		}
+	}
+
+	s.finalizeLog(req, nil, relay.Usage{}, http.StatusOK, "",
+		relay.Timing{FirstByteMs: elapsed, TotalMs: elapsed}, entry.Body, nil)
+}
+
 // streamToClient 边转发边旁路抓取用量。
 // 首包时间以真正写出第一个字节为准，而非上游响应头到达时间。
-func (s *Server) streamToClient(c *gin.Context, p *inboundProfile, req *relay.RelayRequest, res *relay.RelayResult, att *relay.Attempt, started time.Time) {
+// cacheKey/cacheStore 供响应缓存的流捕获：本次请求成功收尾时把完整
+// SSE 字节流（经协议转换、OpenAI Chat 形状）存进缓存，供流式重放。
+func (s *Server) streamToClient(c *gin.Context, p *inboundProfile, req *relay.RelayRequest, res *relay.RelayResult, att *relay.Attempt, started time.Time, cacheKey string, cacheStore bool) {
 	defer att.Stream.Close()
 
 	h := c.Writer.Header()
@@ -413,6 +556,18 @@ func (s *Server) streamToClient(c *gin.Context, p *inboundProfile, req *relay.Re
 	}
 	var streamCapture []byte
 
+	// 缓存捕获用：与报文留存相互独立（留存是排障采样、可能截断；
+	// 缓存必须是完整可重放的应答）。cacheLimit 用缓存自己的单条上限，
+	// 超限的流不缓存 —— 省内存的同时也保住「缓存的是完整应答」这条性质。
+	cacheLimit := 0
+	var cacheCapture []byte
+	if cacheStore {
+		cacheLimit = s.deps.Config.Relay.Cache.MaxResponseKB << 10
+		if cacheLimit <= 0 {
+			cacheLimit = 256 << 10
+		}
+	}
+
 	for {
 		n, readErr := att.Stream.Read(buf)
 		if n > 0 {
@@ -428,6 +583,16 @@ func (s *Server) streamToClient(c *gin.Context, p *inboundProfile, req *relay.Re
 					room = n
 				}
 				streamCapture = append(streamCapture, buf[:room]...)
+			}
+			// 缓存捕获：只在本请求「缓存可用且未命中」时进行。
+			// 超出上限后停止追加（cacheCapture 长度 < tee.Bytes() 即知截断，
+			// 收尾时据此放弃缓存），不中断转发。
+			if cacheStore && len(cacheCapture) < cacheLimit {
+				room := cacheLimit - len(cacheCapture)
+				if room > n {
+					room = n
+				}
+				cacheCapture = append(cacheCapture, buf[:room]...)
 			}
 			if _, writeErr := tr.Write(buf[:n]); writeErr != nil {
 				if errors.Is(writeErr, convert.ErrUpstreamReported) {
@@ -504,4 +669,16 @@ func (s *Server) streamToClient(c *gin.Context, p *inboundProfile, req *relay.Re
 			BodyReads:   body.Reads,
 			TotalMs:     int(time.Since(started).Milliseconds()),
 		}, streamCapture, att.Headers)
+
+	// 只有完整收尾的流才配进缓存：上游中断（截断的应答）与客户端断开
+	//（根本没有完整应答）重放出来都是残次品。截断判定用捕获长度与
+	// 总字节数对比 —— 超限截断时两者必然不等。
+	if cacheStore && streamErr == nil && !clientGone &&
+		len(cacheCapture) == int(tee.Bytes()) {
+		s.deps.Cache.Put(cacheKey, &relaycache.Entry{
+			Body:      cacheCapture,
+			Stream:    true,
+			CreatedAt: time.Now(),
+		})
+	}
 }

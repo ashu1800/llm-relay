@@ -123,6 +123,29 @@ type RelayConfig struct {
 	// 容量满时淘汰最久未使用的条目，**不会**拒绝新客户端。
 	ClientMapLimit int           `yaml:"client_map_limit"`
 	ClientMapTTL   time.Duration `yaml:"client_map_ttl"`
+
+	// Cache 是响应缓存的配置（2026-11 P3）。全局开关**默认关**：
+	// 命中缓存会把 temperature>0 的重复请求回以相同答案，这对幂等场景
+	// 是优化、对别的场景是行为改变 —— 开不开由部署者显式决定。
+	// 它只是总闸；实际生效还要密钥自己勾「参与缓存」（APIKey.CacheEnabled）。
+	//
+	// 与其它 Relay 配置一样走 env/yaml、改后重启生效；运行期的观察与
+	// 清空走管理台（/api/admin/cache/stats、DELETE /api/admin/cache）。
+	Cache CacheConfig `yaml:"cache"`
+}
+
+// CacheConfig 是响应缓存的配置项。
+type CacheConfig struct {
+	// Enabled 是总闸。关闭时缓存组件不装配，密钥上的开关不起作用。
+	Enabled bool `yaml:"enabled"`
+	// TTL 是条目存活时长，0 表示永久（不推荐：改了模型配置后旧答案还在）。
+	TTL time.Duration `yaml:"ttl"`
+	// MaxEntries 是条目数上限；MaxTotalMB 是字节总量上限。
+	// 双界都是 LRU 淘汰线：单条超过 MaxResponseKB 的响应**整体不缓存**
+	//（一条就撑爆的响应不该挤掉别的条目）。
+	MaxEntries    int `yaml:"max_entries"`
+	MaxTotalMB    int `yaml:"max_total_mb"`
+	MaxResponseKB int `yaml:"max_response_kb"`
 }
 
 type LogConfig struct {
@@ -174,6 +197,15 @@ func Default() *Config {
 			// 靠这条注释互相指认，改一个必须看另一个。
 			ClientMapLimit: 2048,
 			ClientMapTTL:   7 * 24 * time.Hour,
+			// 响应缓存默认关（见 CacheConfig.Enabled 的注释）。默认容量
+			// 对个人自用足够：128MB 总量 / 1024 条 / 单条 256KB / 一小时。
+			Cache: CacheConfig{
+				Enabled:       false,
+				TTL:           time.Hour,
+				MaxEntries:    1024,
+				MaxTotalMB:    128,
+				MaxResponseKB: 256,
+			},
 		},
 		Log: LogConfig{Level: "info", Format: "text", MaxSizeMB: 100},
 	}
@@ -242,6 +274,12 @@ func applyEnv(c *Config) {
 	setInt(&c.Relay.ClientMapLimit, "RELAY_CLIENT_MAP_LIMIT")
 	setDuration(&c.Relay.ClientMapTTL, "RELAY_CLIENT_MAP_TTL")
 
+	setBool(&c.Relay.Cache.Enabled, "RELAY_CACHE_ENABLED")
+	setDuration(&c.Relay.Cache.TTL, "RELAY_CACHE_TTL")
+	setInt(&c.Relay.Cache.MaxEntries, "RELAY_CACHE_MAX_ENTRIES")
+	setInt(&c.Relay.Cache.MaxTotalMB, "RELAY_CACHE_MAX_TOTAL_MB")
+	setInt(&c.Relay.Cache.MaxResponseKB, "RELAY_CACHE_MAX_RESPONSE_KB")
+
 	setStr(&c.Security.Secret, "RELAY_SECRET")
 	// 管理台引导密钥与会话时长。密钥缺失不报错（保持旧部署可升级），
 	// 但「鉴权未启用」会体现在启动日志与 /api/admin/system/info 里，
@@ -284,6 +322,11 @@ func envKeys() map[string]string {
 		"retry_same_upstream_delay_ms": "RELAY_RETRY_SAME_UPSTREAM_DELAY",
 		"client_map_limit":             "RELAY_CLIENT_MAP_LIMIT",
 		"client_map_ttl_hours":         "RELAY_CLIENT_MAP_TTL",
+		"cache_enabled":                "RELAY_CACHE_ENABLED",
+		"cache_ttl":                    "RELAY_CACHE_TTL",
+		"cache_max_entries":            "RELAY_CACHE_MAX_ENTRIES",
+		"cache_max_total_mb":           "RELAY_CACHE_MAX_TOTAL_MB",
+		"cache_max_response_kb":        "RELAY_CACHE_MAX_RESPONSE_KB",
 		"secret":                       "RELAY_SECRET",
 		"console_auth_enabled":         "RELAY_ADMIN_KEY",
 		"session_ttl_hours":            "RELAY_SESSION_TTL",
@@ -428,4 +471,20 @@ func setCsv(dst *[]string, key string) {
 		}
 	}
 	*dst = items
+}
+
+// setBool 读取布尔环境变量：1/true/yes/on（大小写不敏感）为真，
+// 0/false/no/off 为假。其它值不改动默认值 —— 与 setInt 对非法值静默跳过
+// 同一策略：环境变量写错不该让服务起不来，但也不该把 false 意外变成 true。
+func setBool(dst *bool, key string) {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		*dst = true
+	case "0", "false", "no", "off":
+		*dst = false
+	}
 }

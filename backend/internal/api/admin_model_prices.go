@@ -276,4 +276,7 @@ func registerModelPriceRoutes(admin *gin.RouterGroup, s *Server) {
 	// 真出现了走 catch-all 反而会与别的路由抢匹配。
 	g.PUT("/:name", s.upsertModelPrice)
 	g.DELETE("/:name", s.deleteModelPrice)
+	// 参考价库（建议价源）：/model-prices/catalog/status|search|refresh。
+	// 静态分支与 :name 参数分支共存是 gin 支持的（静态优先匹配）。
+	registerCatalogRoutes(g, s)
 }

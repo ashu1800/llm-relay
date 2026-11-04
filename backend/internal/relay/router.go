@@ -78,6 +78,11 @@ type CandidateQuery struct {
 	// 空表示不按密钥限制（探测、部分测试路径）——候选取全部能跑这个模型的渠道。
 	// 非空时只在列表内的渠道中选，且排序以列表顺序为第一优先（见 sortCandidates）。
 	AllowedChannels []uint
+	// RequireProtocols 限定候选渠道的出站协议（图像/音频等直通端点用）：
+	// 这些端点不做协议转换，Anthropic / Gemini 协议渠道根本无法受理 ——
+	// 在 SQL 粗筛层就排除，而不是靠转发层失败。
+	// 空表示不限制（对话端点的行为不变）。
+	RequireProtocols []string
 	// Exclude 里的渠道 ID 会被跳过，用于重试时避免再次命中同一渠道
 	Exclude []uint
 }
@@ -173,6 +178,13 @@ func (r *Router) queryCandidates(ctx context.Context, q CandidateQuery, fallback
 	// 空切片与 nil 都表示不限制 —— 不带密钥上下文的调用方不该被影响。
 	if len(q.AllowedChannels) > 0 {
 		query = query.Where("channels.id IN ?", q.AllowedChannels)
+	}
+	// 直通端点的协议限定（见 RequireProtocols 注释）。放进 SQL 而不是
+	// buildCandidates 的内存过滤：这属于「渠道根本不能受理」的硬条件，
+	// 与启用状态同级 —— 粗筛掉的渠道不进 candidateRow，也不会出现在
+	// 「无可用渠道」的可用性统计里迷惑人。
+	if len(q.RequireProtocols) > 0 {
+		query = query.Where("channels.protocol IN ?", q.RequireProtocols)
 	}
 	if err := query.Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("查询候选渠道失败: %w", err)

@@ -419,6 +419,59 @@ function sumOf(m: Record<string, number>) {
   return Object.values(m).reduce((a, b) => a + b, 0)
 }
 
+// ---- 响应缓存状态（只读 + 清空；开关与容量在服务端配置里，改后重启生效）----
+interface CacheStats {
+  enabled: boolean
+  entries: number
+  bytes: number
+  max_bytes: number
+  hits: number
+  misses: number
+  hit_rate: number
+  ttl_seconds: number
+  max_entries: number
+}
+const cacheStats = ref<CacheStats | null>(null)
+const cacheFlushing = ref(false)
+
+async function loadCache() {
+  try {
+    cacheStats.value = await api.get<CacheStats>('/cache/stats')
+  } catch {
+    // 缓存状态拿不到只影响这块面板，其余设置照常
+    cacheStats.value = null
+  }
+}
+
+function flushCache() {
+  modal.confirm({
+    centered: true,
+    title: '清空响应缓存？',
+    content: '全部缓存条目立即作废，后续请求重新回源。命中统计保留不清。',
+    okText: '清空',
+    cancelText: '取消',
+    okType: 'danger',
+    onOk: async () => {
+      cacheFlushing.value = true
+      try {
+        const res = await api.del<{ cleared: number }>('/cache')
+        message.success('已清空 ' + res.cleared + ' 条缓存')
+        await loadCache()
+      } catch (e: any) {
+        message.error(e?.message || '清空失败')
+      } finally {
+        cacheFlushing.value = false
+      }
+    }
+  })
+}
+
+function fmtBytes(n: number): string {
+  if (n >= 1 << 20) return (n / (1 << 20)).toFixed(1) + ' MB'
+  if (n >= 1 << 10) return (n / (1 << 10)).toFixed(1) + ' KB'
+  return n + ' B'
+}
+
 onMounted(() => {
   void load()
   // 更新设置独立加载：更新服务可能整体不可用（源码部署等），
@@ -426,6 +479,8 @@ onMounted(() => {
   void loadUpdateCfg()
   // 显示映射独立加载并已降级（失败只回落内置显示），不挡这一页
   void loadAliases(true)
+  // 缓存状态独立加载：缓存可能整体未启用（默认关），失败不挡这一页
+  void loadCache()
 })
 </script>
 
@@ -465,6 +520,40 @@ onMounted(() => {
       </div>
       <div class="span-line">
         日志时间跨度：{{ fmtTime(span.earliest) }} ~ {{ fmtTime(span.latest) }}
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">响应缓存</h2>
+      <template v-if="cacheStats?.enabled">
+        <div class="count-grid">
+          <div class="count-item">
+            <div class="count-value">{{ cacheStats.entries }}</div>
+            <div class="count-label">缓存条目</div>
+          </div>
+          <div class="count-item">
+            <div class="count-value">{{ fmtBytes(cacheStats.bytes) }}</div>
+            <div class="count-label">占用 / 上限 {{ fmtBytes(cacheStats.max_bytes) }}</div>
+          </div>
+          <div class="count-item">
+            <div class="count-value">{{ (cacheStats.hit_rate * 100).toFixed(1) }}%</div>
+            <div class="count-label">命中率（{{ cacheStats.hits }}/{{ cacheStats.hits + cacheStats.misses }}）</div>
+          </div>
+          <div class="count-item">
+            <div class="count-value">{{ cacheStats.ttl_seconds > 0 ? cacheStats.ttl_seconds + 's' : '永久' }}</div>
+            <div class="count-label">TTL / 上限 {{ cacheStats.max_entries }} 条</div>
+          </div>
+        </div>
+        <div class="span-line">
+          命中的请求不打上游、不记 token 与金额；日志以「缓存命中」标记区分。
+        </div>
+        <a-button size="small" danger :loading="cacheFlushing" @click="flushCache">清空缓存</a-button>
+      </template>
+      <div v-else class="note">
+        响应缓存未启用。要启用请在部署环境设置 <span class="mono">RELAY_CACHE_ENABLED=true</span>
+        （可选：RELAY_CACHE_TTL / RELAY_CACHE_MAX_ENTRIES / RELAY_CACHE_MAX_TOTAL_MB /
+        RELAY_CACHE_MAX_RESPONSE_KB），重启后在这里就能看到状态，再到
+        「密钥管理」为需要的密钥逐把开启。
       </div>
     </section>
 

@@ -420,6 +420,7 @@ func BuildLog(req *RelayRequest, res *RelayResult, usage Usage, status int, errM
 		ModelRequested: req.PublicModel,
 		ThinkingLevel:  req.ThinkingLevel,
 		IsStream:       req.Stream,
+		CacheHit:       req.CacheHit,
 		StatusCode:     status,
 		// 兜底截断：errMsg 的来源不止一处（上游错误体、无渠道提示拼接的
 		// 可用模型列表……），在这里统一压进 varchar(1024)，谁超长都丢不了日志

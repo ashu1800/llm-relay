@@ -120,6 +120,8 @@ const form = reactive({
   name: '',
   rate_limit_rpm: 0,
   enabled: true,
+  // 响应缓存按密钥显式开启（总闸在服务端配置里，默认关）
+  cache_enabled: false,
   // 模型集合（必填非空）：键与 model_entries 一一对应
   allowed_models: [] as string[],
   // 每模型的候选渠道（有序）。条目顺序跟随 allowed_models，
@@ -374,6 +376,7 @@ function blankForm() {
   form.name = ''
   form.rate_limit_rpm = 0
   form.enabled = true
+  form.cache_enabled = false
   form.allowed_models = []
   form.model_entries = []
 }
@@ -403,6 +406,7 @@ function openEdit(row: APIKey) {
   form.name = row.name
   form.rate_limit_rpm = row.rate_limit_rpm
   form.enabled = row.enabled
+  form.cache_enabled = row.cache_enabled
   form.allowed_models = [...(row.allowed_models || [])]
   // 路由条目按 allowed_models 的顺序重建（channels 是数字 ID 的有序数组）。
   // model_channels 里可能有 allowed_models 之外的孤儿键（老数据 / 直接改库），
@@ -579,6 +583,7 @@ async function save() {
     const body = {
       name: form.name.trim(),
       rate_limit_rpm: form.rate_limit_rpm,
+      cache_enabled: form.cache_enabled,
       allowed_models: [...form.allowed_models],
       model_channels: Object.fromEntries(
         form.model_entries.map((e) => [e.model, e.channels])
@@ -1022,6 +1027,19 @@ onUnmounted(() => {
           <span style="margin-left: 8px; font-size: var(--font-size-sm); color: var(--color-text-secondary)">
             {{ form.enabled ? '启用（客户端可正常鉴权调用）' : '停用（客户端请求将收到 401）' }}
           </span>
+        </a-form-item>
+
+        <a-form-item label="参与响应缓存">
+          <a-switch v-model:checked="form.cache_enabled" />
+          <span style="margin-left: 8px; font-size: var(--font-size-sm); color: var(--color-text-secondary)">
+            {{ form.cache_enabled
+              ? '开启（相同请求直接回放缓存答案，不打上游、不记账）'
+              : '关闭（每次请求都打上游）' }}
+          </span>
+          <div class="field-hint">
+            需要服务端先开启缓存总闸（RELAY_CACHE_ENABLED）。temperature&gt;0 的请求命中缓存会拿到与上次相同的答案 ——
+            编码 agent 的幂等重放适合开启；要求每次新鲜输出的密钥不要开。
+          </div>
         </a-form-item>
 
         <a-form-item label="可调用的模型" required>

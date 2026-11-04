@@ -28,6 +28,16 @@ type Price struct {
 	OutputPer1M     decimal.Decimal
 	CacheReadPer1M  decimal.Decimal
 	CacheWritePer1M decimal.Decimal
+	// 非 token 维度单价（每单位，已乘倍率）：按端点种类取用，
+	// 对话端点不碰它们（Cost 系列各自只算自己的维度）。
+	PerImage     decimal.Decimal
+	PerSecond    decimal.Decimal
+	PerCharacter decimal.Decimal
+	// Kind 是这次计费的口径（image / audio / tts / 空串=token）。
+	// 由调用方按端点种类设置（Resolve 无法从单价推断端点种类 ——
+	// 同一个模型可能既配了 token 价又配了图像价）。写进 Snapshot 的
+	// billing_kind，事后能看出这笔账按什么口径算的。
+	Kind string
 	// Multiplier 是最终生效的倍率（时段倍率优先，其次固定倍率，都没有则为 1）
 	Multiplier decimal.Decimal
 	// Source 说明倍率来自哪里：peak / fixed / none
@@ -41,6 +51,15 @@ type Price struct {
 	Priced bool
 }
 
+// 计费口径（Price.Kind / RequestLog.UsageKind / 快照 billing_kind 共用词表）。
+// 空串与 Token 等价：token 是默认口径，日志里绝大多数行都是它。
+const (
+	BillingKindToken = "token"
+	BillingKindImage = "image"
+	BillingKindAudio = "audio"
+	BillingKindTTS   = "tts"
+)
+
 // 倍率来源，写进定价快照，事后能一眼看出这笔钱是按时段算的还是按固定倍率算的。
 const (
 	MultiplierSourcePeak  = "peak"
@@ -48,7 +67,7 @@ const (
 	MultiplierSourceNone  = "none"
 )
 
-// Cost 按归一化后的用量计算预估费用。
+// Cost 按归一化后的用量计算预估费用（token 口径，对话类端点用）。
 // PromptTokens 是未命中缓存的输入，与 CachedTokens 互不重叠。
 func (p Price) Cost(u relay.Usage) decimal.Decimal {
 	total := decimal.Zero
@@ -64,27 +83,36 @@ func (p Price) Cost(u relay.Usage) decimal.Decimal {
 	return total
 }
 
-// Snapshot 是可写入日志的定价快照，保证历史账目不会因日后改价而漂移。
-func (p Price) Snapshot(at time.Time) model.JSONMap {
-	return model.JSONMap{
-		// model_key 保留原键名：历史日志的解析与界面展示都按它取值，
-		// 换名字只会让新旧日志长得不一样
-		"model_key":          p.ModelName,
-		"channel_id":         p.ChannelID,
-		"currency":           p.Currency,
-		"input_per_1m":       p.InputPer1M.String(),
-		"output_per_1m":      p.OutputPer1M.String(),
-		"cache_read_per_1m":  p.CacheReadPer1M.String(),
-		"cache_write_per_1m": p.CacheWritePer1M.String(),
-		"multiplier":         p.Multiplier.String(),
-		"multiplier_source":  p.Source,
-		"fixed_multiplier":   strconv.FormatFloat(p.Base.Multiplier, 'f', -1, 64),
-		"peak_applied":       p.PeakApplied,
-		"peak_label":         p.PeakLabel,
-		// 带时区偏移的本地时间：时段规则是按本地时间判断的，
-		// 只记 UTC 的话事后核对「到底算不算峰时」要自己换算
-		"resolved_at": at.Format(time.RFC3339),
+// CostImages 计算文生图费用：张数 × 每张单价（已含倍率）。
+// 上游（OpenAI 图像端点）不回 token 用量，张数是图像端点唯一可靠的计量。
+func (p Price) CostImages(n int) decimal.Decimal {
+	return mulCount(p.PerImage, n)
+}
+
+// CostAudioSeconds 计算语音转写费用：秒数 × 每秒单价（已含倍率）。
+// 秒数来自上游 verbose_json 的 duration；没有时长信息时调用方不该走这里
+// （费用记 0 并在快照里如实标注），不要拿 0 秒凑数 —— 那和漏配价一样难分辨。
+func (p Price) CostAudioSeconds(seconds decimal.Decimal) decimal.Decimal {
+	if seconds.Sign() <= 0 || p.PerSecond.IsZero() {
+		return decimal.Zero
 	}
+	return p.PerSecond.Mul(seconds)
+}
+
+// CostCharacters 计算 TTS 费用：字符数 × 每字符单价（已含倍率）。
+// 字符数取自请求体 input 字段的文本长度 —— TTS 的「输入」就是它，
+// 上游按字符计价（tts-1 每字符 0.000015 美元），没有 token 可言。
+func (p Price) CostCharacters(n int) decimal.Decimal {
+	return mulCount(p.PerCharacter, n)
+}
+
+// mulCount 是「单价 × 数量」的公共实现（CostImages / CostCharacters 用）。
+// 与 scale 的区别：不走 /1e6 —— 这两个维度的单价本来就是每单位口径。
+func mulCount(unitPrice decimal.Decimal, n int) decimal.Decimal {
+	if n <= 0 || unitPrice.IsZero() {
+		return decimal.Zero
+	}
+	return unitPrice.Mul(decimal.NewFromInt(int64(n)))
 }
 
 // scale 计算 price * tokens / 1e6，先乘后除以保留精度。
@@ -93,6 +121,39 @@ func scale(price decimal.Decimal, tokens int) decimal.Decimal {
 		return decimal.Zero
 	}
 	return price.Mul(decimal.NewFromInt(int64(tokens))).Div(per1M)
+}
+
+// Snapshot 是可写入日志的定价快照，保证历史账目不会因日后改价而漂移。
+func (p Price) Snapshot(at time.Time) model.JSONMap {
+	kind := p.Kind
+	if kind == "" {
+		kind = BillingKindToken
+	}
+	return model.JSONMap{
+		// model_key 保留原键名：历史日志的解析与界面展示都按它取值，
+		// 换名字只会让新旧日志长得不一样
+		"model_key":          p.ModelName,
+		"channel_id":         p.ChannelID,
+		"currency":           p.Currency,
+		"billing_kind":       kind,
+		"input_per_1m":       p.InputPer1M.String(),
+		"output_per_1m":      p.OutputPer1M.String(),
+		"cache_read_per_1m":  p.CacheReadPer1M.String(),
+		"cache_write_per_1m": p.CacheWritePer1M.String(),
+		// 非 token 维度的单价也进快照：图像/音频模型的价改了之后，
+		// 历史那笔「每张 0.04」不能被改写成新价
+		"per_image":         p.PerImage.String(),
+		"per_second":        p.PerSecond.String(),
+		"per_character":     p.PerCharacter.String(),
+		"multiplier":        p.Multiplier.String(),
+		"multiplier_source": p.Source,
+		"fixed_multiplier":  strconv.FormatFloat(p.Base.Multiplier, 'f', -1, 64),
+		"peak_applied":      p.PeakApplied,
+		"peak_label":        p.PeakLabel,
+		// 带时区偏移的本地时间：时段规则是按本地时间判断的，
+		// 只记 UTC 的话事后核对「到底算不算峰时」要自己换算
+		"resolved_at": at.Format(time.RFC3339),
+	}
 }
 
 // Engine 负责把「渠道 + 模型名 + 时刻」解析成单价，带进程内缓存。
@@ -200,10 +261,10 @@ func (e *Engine) Resolve(ctx context.Context, channelID uint, modelName string, 
 	if priced {
 		unit = row.PriceFor(currency)
 	}
-	// 该币种四档全 0 = 这个模型没配这一档价。与「配成 0 元」在账面等价，
-	// 但语义不同：前者会让整笔费用记 0 且不标价，后者同样是 0。
-	// 两者都记 0，所以这里只要求「有白名单行」即可继续 —— 未配价时
-	// 金额自然是 0（见下面 Price.Cost），但倍率与快照仍有意义。
+	// 该币种全部档位（token 四档 + 三个非 token 维度）全 0 = 这个模型没配价。
+	// 与「配成 0 元」在账面等价，但语义不同：前者会让整笔费用记 0 且不标价，
+	// 后者同样是 0。两者都记 0，所以这里只要求「有白名单行」即可继续 ——
+	// 未配价时金额自然是 0（见下面 Price.Cost），但倍率与快照仍有意义。
 	if !priced || unit.IsZero() {
 		// 没有价格也没有倍率：如实说「没价」，不让调用方以为这里有账可看
 		if base.Multiplier <= 1 && len(base.PeakRules) == 0 {
@@ -242,6 +303,9 @@ func (e *Engine) Resolve(ctx context.Context, channelID uint, modelName string, 
 		OutputPer1M:     unit.OutputPer1M.Mul(dec),
 		CacheReadPer1M:  unit.CacheReadPer1M.Mul(dec),
 		CacheWritePer1M: unit.CacheWritePer1M.Mul(dec),
+		PerImage:        unit.PerImage.Mul(dec),
+		PerSecond:       unit.PerSecond.Mul(dec),
+		PerCharacter:    unit.PerCharacter.Mul(dec),
 		Multiplier:      dec,
 		Source:          source,
 		PeakLabel:       label,

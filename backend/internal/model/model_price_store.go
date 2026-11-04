@@ -27,11 +27,21 @@ var modelPriceColumns = []string{
 	ColPriceModel,
 	ColPriceUSDInputPer1M, ColPriceUSDOutputPer1M, ColPriceUSDCacheReadPer1M, ColPriceUSDWritePer1M,
 	ColPriceRMBInputPer1M, ColPriceRMBOutputPer1M, ColPriceRMBCacheReadPer1M, ColPriceRMBWritePer1M,
+	ColPriceUSDPerImage, ColPriceUSDPerSecond, ColPriceUSDPerCharacter,
+	ColPriceRMBPerImage, ColPriceRMBPerSecond, ColPriceRMBPerCharacter,
 }
 
 // modelPriceColumnList 生成 「(a, b, c)」 形式的列清单（含 created_at/updated_at）。
 func modelPriceColumnList() string {
 	return "(" + strings.Join(modelPriceColumns, ", ") + ", created_at, updated_at)"
+}
+
+// modelPricePlaceholders 生成与 modelPriceColumns 等长的占位符串。
+// 数量曾经是手写的「?, ?, …」：加一列时只改了列清单忘了数占位符，
+// VALUES 错位在编译期看不出来，只能靠运行时报错（或更糟：错位写入）。
+// 改成按列数生成后，加列只需要动 modelPriceColumns 一处。
+func modelPricePlaceholders() string {
+	return "(" + strings.TrimSuffix(strings.Repeat("?, ", len(modelPriceColumns)), ", ") + ", now(), now())"
 }
 
 // modelPriceArgs 按列顺序取值，保证参数与占位符一一对应。
@@ -41,6 +51,8 @@ func modelPriceArgs(p ModelPrice) []any {
 		p.ModelName,
 		p.USDInputPer1M, p.USDOutputPer1M, p.USDCacheReadPer1M, p.USDCacheWritePer1M,
 		p.RMBInputPer1M, p.RMBOutputPer1M, p.RMBCacheReadPer1M, p.RMBCacheWritePer1M,
+		p.USDPerImage, p.USDPerSecond, p.USDPerCharacter,
+		p.RMBPerImage, p.RMBPerSecond, p.RMBPerCharacter,
 	}
 }
 
@@ -55,7 +67,7 @@ func UpsertModelPrice(db *gorm.DB, p ModelPrice) error {
 		set = append(set, c+" = EXCLUDED."+c)
 	}
 	sql := "INSERT INTO model_prices " + modelPriceColumnList() +
-		" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, now(), now())" +
+		" VALUES " + modelPricePlaceholders() +
 		" ON CONFLICT (" + ColPriceModel + ") DO UPDATE SET " +
 		strings.Join(set, ", ") + ", updated_at = now()"
 	return db.Exec(sql, modelPriceArgs(p)...).Error
@@ -67,7 +79,7 @@ func UpsertModelPrice(db *gorm.DB, p ModelPrice) error {
 // 否则用旧备份或迁移结果覆盖掉用户后来改的值。
 func InsertModelPriceIfAbsent(db *gorm.DB, p ModelPrice) (bool, error) {
 	sql := "INSERT INTO model_prices " + modelPriceColumnList() +
-		" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, now(), now())" +
+		" VALUES " + modelPricePlaceholders() +
 		" ON CONFLICT (" + ColPriceModel + ") DO NOTHING"
 	res := db.Exec(sql, modelPriceArgs(p)...)
 	if res.Error != nil {
@@ -93,6 +105,8 @@ func (m ModelPrice) NegativePriceField() string {
 		{"美元缓存读单价", m.USDCacheReadPer1M}, {"美元缓存写单价", m.USDCacheWritePer1M},
 		{"人民币输入单价", m.RMBInputPer1M}, {"人民币输出单价", m.RMBOutputPer1M},
 		{"人民币缓存读单价", m.RMBCacheReadPer1M}, {"人民币缓存写单价", m.RMBCacheWritePer1M},
+		{"美元每图单价", m.USDPerImage}, {"美元每秒单价", m.USDPerSecond}, {"美元每字符单价", m.USDPerCharacter},
+		{"人民币每图单价", m.RMBPerImage}, {"人民币每秒单价", m.RMBPerSecond}, {"人民币每字符单价", m.RMBPerCharacter},
 	} {
 		if f.v.IsNegative() {
 			return f.label

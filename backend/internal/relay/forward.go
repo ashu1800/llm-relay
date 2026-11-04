@@ -158,6 +158,10 @@ func (f *Forwarder) clientFor(proxyID uint) (*http.Client, proxy.Config, error) 
 
 // Do 向上游发起一次请求。
 // inboundBody 是客户端原始请求体；injectUsage 为真且为流式时补上 usage 回传开关。
+// direct 为真表示直通请求（图像/音频端点，2026-11 P2）：跳过出站协议转换
+// 与响应协议转换，报文与路径原样使用 —— 这类端点没有「归一化成 OpenAI Chat」
+// 的中间语，Anthropic/Gemini 形状的转换对它们毫无意义（能受理它们的渠道
+// 在路由层就已被 RequireProtocols 限定为 OpenAI 兼容协议）。
 func (f *Forwarder) Do(
 	ctx context.Context,
 	cand Candidate,
@@ -165,6 +169,7 @@ func (f *Forwarder) Do(
 	inboundBody []byte,
 	inboundHeaders http.Header,
 	injectUsage bool,
+	direct bool,
 ) (*Attempt, error) {
 	att := &Attempt{StartedAt: time.Now()}
 
@@ -172,22 +177,44 @@ func (f *Forwarder) Do(
 	// 之后正文挂起的话请求会被无限拖住（客户端不断开就一直挂着）。
 	// 流式请求不能加 —— 长流的正文时长没有合理上限，ctx 一断流就死了。
 	// 依据入站 body 里的 stream 标记判断（站内通用语始终带这个字段）。
+	// 直通请求（图像/音频）没有 stream 字段，一律按非流式计 —— 上游
+	// 返回的是整段 JSON 或音频文件，总时长上限正是想要的保护。
 	if f.bodyTimeout > 0 && !ExtractStream(inboundBody) {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, f.bodyTimeout)
 		defer cancel()
 	}
 
-	body, err := RewriteModel(inboundBody, cand.Binding.UpstreamName, injectUsage)
-	if err != nil {
-		return nil, fmt.Errorf("改写请求体失败: %w", err)
-	}
-
-	// 出站协议转换：站内统一是 OpenAI Chat，渠道声明的是上游协议。
-	// 路径也要一起换（Anthropic 是 /v1/messages，Gemini 的模型名在路径里）。
-	path, body, err := convert.UpstreamRequest(cand.Channel.Protocol, upstreamPath, body, cand.Binding.UpstreamName)
-	if err != nil {
-		return nil, fmt.Errorf("转换上游请求失败: %w", err)
+	path := upstreamPath
+	var body []byte
+	var err error
+	if direct && IsMultipartContentType(inboundHeaders.Get("Content-Type")) {
+		// multipart（语音转写）：JSON 浅解析对它无能为力。模型名映射只在
+		// 「对外名 ≠ 上游名」时重编码报文（重编码要把整份文件复制一遍），
+		// 同名直通零成本；重编码后的 boundary 变了，Content-Type 必须同步替换
+		rewritten, newCT, rErr := RewriteMultipartModel(inboundBody, inboundHeaders.Get("Content-Type"), cand.Binding.UpstreamName)
+		if rErr != nil {
+			return nil, fmt.Errorf("改写 multipart 请求体失败: %w", rErr)
+		}
+		body = rewritten
+		if newCT != inboundHeaders.Get("Content-Type") {
+			inboundHeaders = inboundHeaders.Clone()
+			inboundHeaders.Set("Content-Type", newCT)
+		}
+	} else {
+		body, err = RewriteModel(inboundBody, cand.Binding.UpstreamName, injectUsage)
+		if err != nil {
+			return nil, fmt.Errorf("改写请求体失败: %w", err)
+		}
+		if !direct {
+			// 出站协议转换：站内统一是 OpenAI Chat，渠道声明的是上游协议。
+			// 路径也要一起换（Anthropic 是 /v1/messages，Gemini 的模型名在路径里）。
+			// 直通请求跳过：body 原样、路径原样（见函数头注释）。
+			path, body, err = convert.UpstreamRequest(cand.Channel.Protocol, upstreamPath, body, cand.Binding.UpstreamName)
+			if err != nil {
+				return nil, fmt.Errorf("转换上游请求失败: %w", err)
+			}
+		}
 	}
 
 	url := BuildUpstreamURL(cand.Channel.BaseURL, path)
@@ -241,7 +268,13 @@ func (f *Forwarder) Do(
 			}
 		}
 	}
-	req.Header.Set("Accept", "text/event-stream, application/json")
+	// 直通端点的应答是 JSON 或音频二进制，SSE 不在预期内 —— 如实声明，
+	// 别让上游误会这是一个「期待事件流」的客户端
+	if direct {
+		req.Header.Set("Accept", "application/json, */*")
+	} else {
+		req.Header.Set("Accept", "text/event-stream, application/json")
+	}
 
 	ApplyAuth(req, cand.Channel.Protocol, cand.APIKeyPlain, cand.Channel.CustomMap)
 	applyExtraHeaders(req, cand.Channel)
@@ -291,7 +324,9 @@ func (f *Forwarder) Do(
 	// 成功响应体也要有上限：请求体有 MaxRequestBodyMB 保护，响应体原先没有 ——
 	// 上游异常放大响应（或大批量 embeddings）时单请求可吃掉数百 MB 内存，
 	// 而 MaxConcurrency 只限并发数、不限单请求体量。128MB 远超正常的
-	// 非流式回复（KB~几 MB 量级），超限按上游故障处理，给故障转移一个机会
+	// 非流式回复（KB~几 MB 量级），超限按上游故障处理，给故障转移一个机会。
+	// 直通的语音合成也在这条上限内：TTS 产物是 MB 量级的音频文件，
+	// 上游本就是整段返回（没有渐进流），缓冲的代价可控且有界。
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamResponseBody))
 	if err != nil {
 		return att, fmt.Errorf("读取上游响应失败: %w", err)
@@ -299,7 +334,12 @@ func (f *Forwarder) Do(
 	if len(raw) >= maxUpstreamResponseBody {
 		return att, fmt.Errorf("上游响应体超过上限 %d MB，已中止读取", maxUpstreamResponseBody>>20)
 	}
-	att.Body = convert.UpstreamResponseBody(cand.Channel.Protocol, raw, cand.Binding.UpstreamName)
+	if !direct {
+		raw = convert.UpstreamResponseBody(cand.Channel.Protocol, raw, cand.Binding.UpstreamName)
+	}
+	att.Body = raw
+	// 直通的音频二进制不是 JSON，解析必然失败返回无 usage —— 语义正确
+	//（TTS 没有用量可言）；图像/转写的 JSON 照常提取（部分上游带 usage）
 	att.Usage, att.HasUsage = extractUsageFromJSON(att.Body)
 	return att, nil
 }

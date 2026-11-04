@@ -6,6 +6,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"llm-relay/internal/model"
+	"llm-relay/internal/relay"
 	"llm-relay/internal/relay/convert"
 )
 
@@ -31,6 +33,26 @@ type inboundProfile struct {
 	NewTranslator func(w io.Writer, model string, stream bool) convert.Translator
 	// ErrorBody 生成错误响应体；nil 表示使用 OpenAI 错误结构
 	ErrorBody func(status int, message string) []byte
+	// Direct 标记直通端点（图像/音频，2026-11 P2）：请求体不做 OpenAI Chat
+	// 归一化、响应不做协议转换，原样转发原样回传。候选渠道被限定为
+	// OpenAI 兼容协议（directChannelProtocols），转换对它们本来就不适用。
+	Direct bool
+	// ExtractModel 从原始请求体里取模型名；nil 表示按 JSON 的 "model" 字段读
+	// （relay.ExtractModel）。multipart 端点（语音转写）用 multipartFormModel。
+	ExtractModel func(raw []byte, contentType string) (string, error)
+}
+
+// directChannelProtocols 是直通端点允许的渠道出站协议。
+//
+// 图像/音频请求不做协议转换，Anthropic / Gemini 协议渠道根本无法受理 ——
+// 在路由层就排除（relay.CandidateQuery.RequireProtocols），而不是等转发失败。
+// custom 是「自定义鉴权头」的 OpenAI 兼容渠道：鉴权方式不同、报文形状相同，
+// 直通对它完全适用。
+var directChannelProtocols = []string{
+	model.ProtocolOpenAIChat,
+	model.ProtocolOpenAIResponses,
+	model.ProtocolEmbeddings,
+	model.ProtocolCustom,
 }
 
 var (
@@ -69,7 +91,45 @@ var (
 		UpstreamPath: "/v1/embeddings",
 		ContentType:  "application/json; charset=utf-8",
 	}
+
+	// ---- 直通端点（2026-11 P2）：图像 / 音频 ----
+	//
+	// 这些端点没有「归一化成 OpenAI Chat」可言：请求体就是上游要的形状
+	//（JSON 或 multipart），响应也是上游的形状（JSON 或音频二进制）。
+	// Direct 让 relayRequest 跳过翻译、让转发层跳过协议转换。
+	// 计费按非 token 维度（每张/每秒/每字符），见 directBillingKind。
+	profileImageGenerations = &inboundProfile{
+		Name:         "openai-images",
+		UpstreamPath: "/v1/images/generations",
+		ContentType:  "application/json; charset=utf-8",
+		Direct:       true,
+	}
+	profileAudioSpeech = &inboundProfile{
+		Name:         "openai-audio-speech",
+		UpstreamPath: "/v1/audio/speech",
+		ContentType:  "application/json; charset=utf-8",
+		Direct:       true,
+	}
+	profileAudioTranscriptions = &inboundProfile{
+		Name:         "openai-audio-transcriptions",
+		UpstreamPath: "/v1/audio/transcriptions",
+		ContentType:  "application/json; charset=utf-8",
+		Direct:       true,
+		ExtractModel: multipartModel,
+	}
+	profileAudioTranslations = &inboundProfile{
+		Name:         "openai-audio-translations",
+		UpstreamPath: "/v1/audio/translations",
+		ContentType:  "application/json; charset=utf-8",
+		Direct:       true,
+		ExtractModel: multipartModel,
+	}
 )
+
+// multipartModel 从 multipart 报文里取模型名（语音转写的 model 在表单字段里）。
+func multipartModel(raw []byte, contentType string) (string, error) {
+	return relay.MultipartModelField(raw, contentType), nil
+}
 
 // translator 构造本次响应要用的改写器，默认透传。
 func (p *inboundProfile) translator(w io.Writer, model string, stream bool) convert.Translator {
