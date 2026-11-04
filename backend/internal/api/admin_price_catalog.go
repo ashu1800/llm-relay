@@ -93,7 +93,11 @@ func (s *Server) catalogRefresh(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
 	defer cancel()
 
-	data, err := s.deps.Update.FetchFile(ctx, catalogURL, pricing.MaxCatalogRawBytes)
+	// FetchFile 内部带镜像回退链（直连 → gh-proxy 等加速前缀，见
+	// update.rawMirrorPrefixes）：国内直连 raw.githubusercontent.com 常年
+	// 被重置，实测 gh-proxy.com 可用且返回完整 JSON。effectiveURL 记进
+	// settings 的 source，管理台能看出这份目录从哪条路拿的。
+	data, effectiveURL, err := s.deps.Update.FetchFile(ctx, catalogURL, pricing.MaxCatalogRawBytes)
 	if err != nil {
 		if ctx.Err() != nil {
 			writeUpstreamError(c, http.StatusGatewayTimeout, "下载参考价库超时（90 秒），可在「系统设置 → 版本更新」配代理后重试", "upstream_error")
@@ -104,7 +108,7 @@ func (s *Server) catalogRefresh(c *gin.Context) {
 	}
 
 	fetchedAt := time.Now().UTC().Format(time.RFC3339)
-	cat, err := s.deps.Catalog.ReplaceCatalog(c.Request.Context(), data, fetchedAt, catalogURL)
+	cat, err := s.deps.Catalog.ReplaceCatalog(c.Request.Context(), data, fetchedAt, effectiveURL)
 	if err != nil {
 		// 解析失败说明上游内容变了或传输损坏：这类错误不值得重试，
 		// 500 带原文比 502 更能引导用户来看具体原因
@@ -115,7 +119,7 @@ func (s *Server) catalogRefresh(c *gin.Context) {
 		"ok":         true,
 		"entries":    len(cat.Entries),
 		"fetched_at": fetchedAt,
-		"source":     catalogURL,
+		"source":     effectiveURL,
 	})
 }
 

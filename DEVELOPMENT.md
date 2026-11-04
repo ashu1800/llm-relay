@@ -1062,6 +1062,32 @@ api_keys.cache_enabled** —— AutoMigrate 给已有数据的表加 NOT NULL �
 no-cache/流式重放/跨协议）+ `relay/cache` 包的 LRU/TTL/并发单测。
 状态与清空在「系统设置 → 概览 → 响应缓存」；密钥开关在「密钥管理」表单。
 
+#### 参考价库更新的镜像回退（2026-11-04 事故修复）
+
+「更新参考价库」在国内部署实测失败：直连 `raw.githubusercontent.com` 被
+connection reset，**走本机代理也被 reset**（代理出口同样被墙打）——这与
+release 资产不同，后者走 `objects.githubusercontent.com` CDN 没有这个问题，
+所以版本更新从来不需要镜像，裸文件需要。
+
+修法是镜像回退链（`update.FetchRawWithMirrors`）：主地址失败后逐个尝试
+`rawMirrorPrefixes` 里的加速前缀（前缀 + 原样 URL 的拼接型镜像）。
+三条边界：
+
+1. **镜像名单硬编码在 update 包**（`gh-proxy.com` 唯一成员，2026-11-04
+   实测返回完整 4526 条；`mirror.ghproxy.com` 实测不可用未进名单），
+   不能由配置注入 —— 一个可配置的「从任意主机下载」等于没有白名单。
+   gh-proxy.com 同时进了下载主机白名单（`allowedRawMirrorHost`），候选
+   URL 仍走完整校验链（https + 主机白名单 + 公网 IP + 手动跳转）。
+2. **内容正确性不靠镜像自觉**：半截响应/改写响应活不过 `ParseLiteLLMRaw`
+   的解析关，解析失败原样报错、绝不进账本。传输完整性由「解析成功才算数」
+   兜底（没有 sha256 可对——裸文件没有官方校验和）。
+3. **ctx 取消不换下一个候选**：管理台 90 秒超时或用户关页面后，重试任何
+   候选都是白费。
+
+实际生效的 URL 记进 settings 的 source，管理台能看出这份目录从哪条路拿的。
+测试：`update/mirror_fallback_test.go` 三条（回退顺序/白名单拒绝任意主机/
+取消不重试）。
+
 ### 管理台双认证（2026-10-27：TOTP 2FA 与密钥二选一）
 
 原来的管理台是一把 `RELAY_ADMIN_KEY` 定终身。新模型把「认证方式」变成用户

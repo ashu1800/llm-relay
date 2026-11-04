@@ -340,14 +340,18 @@ func (s *Service) OnProxyChanged() {
 // 「更新参考价库」）：它与版本更新同源 —— 同一份代理优先级（勾选代理 >
 // 设置页手填 > 直连）、同一套目标校验（https + 主机白名单 + 公网 IP）。
 // 管理台里能为版本更新配的代理，对参考价库同样生效，不需要第二份配置。
-func (s *Service) FetchFile(ctx context.Context, rawURL string, maxSize int64) ([]byte, error) {
+//
+// 国内直连 raw.githubusercontent.com 常年被重置，而 release 资产有 CDN
+// 兜着没有这个问题 —— 所以这里走镜像回退链（FetchRawWithMirrors，镜像
+// 名单在 release.go 里硬编码，实测过才加），第二返回值是实际生效的 URL。
+func (s *Service) FetchFile(ctx context.Context, rawURL string, maxSize int64) ([]byte, string, error) {
 	s.mu.RLock()
 	client := s.client
 	s.mu.RUnlock()
 	if client == nil {
-		return nil, fmt.Errorf("更新客户端不可用（构造失败或服务未就绪）")
+		return nil, "", fmt.Errorf("更新客户端不可用（构造失败或服务未就绪）")
 	}
-	return client.FetchRaw(ctx, rawURL, maxSize)
+	return client.FetchRawWithMirrors(ctx, rawURL, maxSize)
 }
 
 // resolveUpdateProxyURL 决定重建客户端时用哪个代理。

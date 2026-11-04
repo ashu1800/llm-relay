@@ -74,6 +74,11 @@ const (
 	// 它承载的是「价格建议」，校验和核对那套强约束（sha256 对不上即拒绝安装）
 	// 不适用，但解析失败会原样报错、绝不进账本（见 pricing.ParseLiteLLMRaw）。
 	allowedRawHost = "raw.githubusercontent.com"
+	// gh-proxy.com 是 raw 的加速镜像（rawMirrorPrefixes 唯一成员）。
+	// 镜像主机进白名单与「镜像不可配置」是配套的：FetchRawWithMirrors 的
+	// 候选 URL 硬编码在这份名单约束下，配置注入的主机过不了这里的校验。
+	//（2026-11-04 实测可用；mirror.ghproxy.com 不可用，不进名单。）
+	allowedRawMirrorHost = "gh-proxy.com"
 
 	// apiUserAgent 是 GitHub API 要求必须带的（不带会被拒）。
 	apiUserAgent = "llm-relay-updater"
@@ -463,7 +468,7 @@ func validateDownloadURL(rawURL string) error {
 		return fmt.Errorf("下载地址缺少主机名")
 	}
 	switch host {
-	case allowedHTMLHost, allowedSourceHost, allowedAssetHost, allowedAltAssetHost, allowedRawHost:
+	case allowedHTMLHost, allowedSourceHost, allowedAssetHost, allowedAltAssetHost, allowedRawHost, allowedRawMirrorHost:
 		return nil
 	default:
 		return fmt.Errorf("下载地址指向不受信任的主机: %s", host)
@@ -615,6 +620,59 @@ func (c *Client) FetchRaw(ctx context.Context, rawURL string, maxSize int64) ([]
 		maxSize = 64 << 20
 	}
 	return fetchSmallFile(ctx, c.fetcher, strings.TrimSpace(rawURL), maxSize, checkDownloadTarget)
+}
+
+// rawMirrorPrefixes 是 raw.githubusercontent.com 的加速前缀，按可靠性排序。
+//
+// 为什么需要它：raw.githubusercontent.com 在国内直连经常被重置（实测
+// connection reset by peer 是常态而不是偶发），而 GitHub 的 release 资产
+// 下载有 objects.githubusercontent.com 这类已签名 CDN 兜着、没有这个问题
+// —— 所以版本更新不需要镜像，参考价库（发布在 main 分支的裸文件）需要。
+//
+// 名单刻意只有两台、且都是「前缀拼接」型镜像（原样转发完整 GitHub URL）：
+//
+//	gh-proxy.com   —— 2026-11-04 实测可用，返回完整合法 JSON（4526 条）；
+//	mirror.ghproxy.com —— 同一项目的历史域名，实测不可用（已从名单剔除，
+//	                  保留这条注释作为实测记录）。
+//
+// 与 install.sh 的 GH_PROXY 参数同一信任模型：加速前缀只改「从哪条路走」，
+// 不改「拿到什么」—— 内容的正确性由解析层兜底（ParseLiteLLMRaw 解析失败
+// 即报错，半截响应进不了账本）。名单只加**拼 URL** 型镜像：会改写响应的
+// （如某些缓存代理）拿不到合法 JSON，天然活不过解析关。
+var rawMirrorPrefixes = []string{
+	"https://gh-proxy.com/",
+}
+
+// FetchRawWithMirrors 按主地址 → 镜像前缀逐个尝试，返回第一个成功的结果。
+// 每个候选 URL 仍走 FetchRaw 的完整校验链（https + 主机白名单 + 公网 IP +
+// 手动跳转），镜像主机不在这份名单里就过不了校验 —— 加镜像要改这份名单
+// 并实测，不能由配置注入（一个可配置的「从任意主机下载」等于没有白名单）。
+//
+// 返回值带实际生效的 URL：调用方（参考价库）把它记进 settings 的 source，
+// 管理台能看出这份目录是从哪条路拿的。
+func (c *Client) FetchRawWithMirrors(ctx context.Context, rawURL string, maxSize int64) ([]byte, string, error) {
+	candidates := make([]string, 0, 1+len(rawMirrorPrefixes))
+	candidates = append(candidates, rawURL)
+	for _, p := range rawMirrorPrefixes {
+		candidates = append(candidates, p+rawURL)
+	}
+
+	var firstErr error
+	for _, url := range candidates {
+		data, err := c.FetchRaw(ctx, url, maxSize)
+		if err == nil {
+			return data, url, nil
+		}
+		// 上下文取消（管理台请求超时/用户关页面）不重试下一个候选：
+		// ctx 已死，换谁下载都一样
+		if ctx.Err() != nil {
+			return nil, "", err
+		}
+		if firstErr == nil {
+			firstErr = err // 主地址的错误最先发生，最有诊断价值
+		}
+	}
+	return nil, "", firstErr
 }
 
 // checkDownloadTarget 是「这个地址能不能下」的完整判定：
