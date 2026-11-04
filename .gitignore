@@ -85,3 +85,9 @@ Thumbs.db
 # 注：这条只影响**之后**的提交。历史上已推送的文档仍留在 git 历史里，
 # 需要清理历史得单独做 filter-repo，不在本次范围。
 docs/
+
+# ===== Unison 文件同步的临时文件（多机同步工作区）=====
+# 形态：.unison.<名字>.<哈希>.unison.tmp（文件）与目录 .unison.<名>.<哈希>.unison.tmp/。
+# 同步进行中会瞬时出现，同步结束即消失 —— 入库只会污染 git status，
+# 让「工作区干净」的前置检查永远过不去。
+.unison.*.unison.tmp
