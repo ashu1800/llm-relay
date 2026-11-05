@@ -6,6 +6,7 @@ import {
   clientAliasStatus,
   clientKey,
   isRemoteIcon,
+  maskIconFile,
   pendingAliasCount,
   resolveClientIcon,
   resolveClientLabel
@@ -84,6 +85,27 @@ describe('resolveClientIcon（图标形态识别）', () => {
     expect(resolveClientIcon('zcode', 'ZCode', m)).toEqual({ kind: 'builtin', file: 'default.svg' })
     expect(resolveClientIcon('codex', 'Codex CLI', m)).toEqual({ kind: 'builtin', file: 'codex.svg' })
     expect(resolveClientIcon('', '', m)).toEqual({ kind: 'builtin', file: 'default.svg' })
+  })
+})
+
+// mask 画哪份 SVG。这条钉住一个上线过的 bug（2026-11-05 用户反馈
+// 「这些内置图标怎么都长一个样」）：模板里曾写成 `showImg ? maskFile :
+// fallbackFile`，而承载 mask 的 span 只在 !showImg 时渲染 —— 三元永远取
+// fallbackFile，内置图标全画成 default.svg，图标下拉 90 多个选项同脸。
+describe('maskIconFile（内置图标画哪份 SVG）', () => {
+  it('内置图标用它自己那份文件，与 id 无关', () => {
+    expect(maskIconFile({ kind: 'builtin', file: 'codex.svg' }, undefined, false)).toBe('codex.svg')
+    expect(maskIconFile({ kind: 'builtin', file: 'zhipu.svg' }, 'codex', false)).toBe('zhipu.svg')
+  })
+
+  it('位图正常时不画 mask；挂了回落该客户端的内置图标', () => {
+    expect(maskIconFile({ kind: 'img', src: 'data:image/png;base64,xxx' }, 'codex', false)).toBe('')
+    expect(maskIconFile({ kind: 'img', src: 'https://a.com/x.png' }, 'codex', true)).toBe('codex.svg')
+    expect(maskIconFile({ kind: 'img', src: 'https://a.com/x.png' }, undefined, true)).toBe('default.svg')
+  })
+
+  it('文字形态不画 mask', () => {
+    expect(maskIconFile({ kind: 'text', ch: '🤖' }, 'codex', false)).toBe('')
   })
 })
 

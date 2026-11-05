@@ -8,7 +8,7 @@
 //     否则登记与解析对不上键；
 //   · 优先级与后端 exportLogs 的 clientCell 同一条（映射名 > 快照名），
 //     CSV 与界面才不会是两个名字。
-import { CLIENT_META, ICON_LIBRARY } from './clientMeta'
+import { CLIENT_META, ICON_LIBRARY, clientIconFile } from './clientMeta'
 import type { ClientAlias } from '@/api/types'
 
 /** 显示映射的查找键：id 非空取 id，否则取观测到的 name token。
@@ -91,6 +91,31 @@ export function aliasIconSpec(icon: string): ClientIconSpec | null {
   // 手改过的 JSON 里带首尾空白时，用原始值比对会静默落回默认图标。
   if (ICON_LIBRARY.includes(trimmed)) return { kind: 'builtin', file: trimmed }
   return null
+}
+
+/**
+ * 内置图标的 mask 目标文件（ClientIcon 那一格 CSS mask 的 url）。
+ *
+ * 三条规则，按顺序：
+ *   · 位图且已加载失败 → 该客户端的内置图标（未知 id 由 clientIconFile
+ *     兜底成 default.svg）—— 外链按原样入库是设计上的状态，迟早会挂；
+ *   · 内置图标 → spec 里那份文件；
+ *   · 其余（位图正常 / 文字）→ 空串，调用方本来也不渲染 mask。
+ *
+ * 为什么是纯函数而不是模板里的三元（2026-11-05）：模板里曾写成
+ * `showImg ? maskFile : fallbackFile`，而承载 mask 的 span 只在 !showImg
+ * 时渲染 —— 三元永远取 fallbackFile，内置图标全部画成 default.svg，
+ * 映射面板的图标下拉 90 多个选项全长一个样（用户原话「这些内置图标怎么
+ * 都长一个样」）。模板里的判据没有单测能挂，抽出来才钉得住（CLAUDE.md
+ * 前端约定 10：判据抽成纯函数 + 单测）。
+ */
+export function maskIconFile(
+  spec: ClientIconSpec,
+  id: string | null | undefined,
+  imgFailed: boolean
+): string {
+  if (spec.kind === 'img') return imgFailed ? clientIconFile(id) : ''
+  return spec.kind === 'builtin' ? spec.file : ''
 }
 
 /** 是不是「图片外链」（http(s) 地址）。

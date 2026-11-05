@@ -22,7 +22,7 @@
 // （用户明确要过「不支持的设定一个默认图标」），派生色不进这条链路。
 import { computed, ref, watch } from 'vue'
 import { clientIconFile } from '@/components/clientMeta'
-import type { ClientIconSpec } from '@/components/clientDisplay'
+import { maskIconFile, type ClientIconSpec } from '@/components/clientDisplay'
 
 const props = withDefaults(
   defineProps<{ id?: string | null; spec?: ClientIconSpec | null; size?: number }>(),
@@ -34,11 +34,6 @@ const props = withDefaults(
 const resolved = computed<ClientIconSpec>(
   () => props.spec ?? { kind: 'builtin', file: clientIconFile(props.id) }
 )
-// mask 的 url 走内联自定义属性：/client-icons/ 是 public 目录下的静态资源
-// （与 fonts、主题光标同一条路），vite 构建时原样拷到 dist 根，url 里不能
-// 带 hash。不用 `?raw` / `@/assets` import —— 那条路会产出带 hash 的文件名，
-// 而这里的 src 是运行时拼的字符串，拿不到 hash。
-const maskFile = computed(() => (resolved.value.kind === 'builtin' ? resolved.value.file : ''))
 
 // 图片加载失败时的兜底：<img> 没有 onerror 处理就是一格裂图（浏览器还会
 // 显示一段 alt 或占位边框）。这种值不是异常 —— 后端在抓取失败时会**按原样**
@@ -55,7 +50,14 @@ watch(
 )
 const showImg = computed(() => resolved.value.kind === 'img' && !imgFailed.value)
 const imgSrc = computed(() => (resolved.value.kind === 'img' ? resolved.value.src : ''))
-const fallbackFile = computed(() => clientIconFile(props.id))
+// mask 的 url 走内联自定义属性：/client-icons/ 是 public 目录下的静态资源
+// （与 fonts、主题光标同一条路），vite 构建时原样拷到 dist 根，url 里不能
+// 带 hash。不用 `?raw` / `@/assets` import —— 那条路会产出带 hash 的文件名，
+// 而这里的 src 是运行时拼的字符串，拿不到 hash。
+//
+// 「画哪份文件」的判据在 clientDisplay.maskIconFile（纯函数 + 单测）：
+// 内置图标用 spec 里的文件，位图挂了才回落内置链路。
+const maskFile = computed(() => maskIconFile(resolved.value, props.id, imgFailed.value))
 </script>
 
 <template>
@@ -88,8 +90,9 @@ const fallbackFile = computed(() => clientIconFile(props.id))
     v-else
     class="cli-icon"
     :style="{
-      // 图片挂了就回落到内置图标（见 script 里 imgFailed 的说明）
-      '--cli-icon': `url(/client-icons/${showImg ? maskFile : fallbackFile})`,
+      // 内置图标用它自己那份 SVG；位图挂了才回落到内置链路（判据见
+      // clientDisplay.maskIconFile —— 2026-11-05 那个「全都长一个样」的 bug）
+      '--cli-icon': `url(/client-icons/${maskFile})`,
       width: size + 'px',
       height: size + 'px'
     }"
