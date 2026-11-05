@@ -43,12 +43,16 @@ openrouter、yi、trae、qoder、junie、langchain 这几个就属于这种情�
 它们继续走单色。OpenAI / Cursor / Copilot 这类官方就是黑白标的，**故意**
 留在单色档。
 
+例外是 `COLOR_ONLY_ICONS`（目前只有 zcode）：**自带底色**的图标在深色主题
+也画原图。它的 alpha 是一整个圆角方块，回落成 mask 会得到一块实心方块、
+Z 直接消失 —— 比「深色下糊掉」更糟，所以它没有回落档。
+
 ## 来源
 
 | 文件 | 来源 | 说明 |
 |---|---|---|
 | 品牌图标（客户端 / 厂商 / 网关，完整清单见 `ICON_LIBRARY`） | [lobe-icons](https://github.com/lobehub/lobe-icons) `packages/static-svg/icons/`（MIT） | 每个品牌取官方轮廓，统一 24×24 viewBox。2026-11-05 起，能取到 `<slug>-color.svg` 的换成彩色版（进 `COLOR_ICONS`），取不到的留单色 |
-| zcode | ZCode 官网 hero logo `zcode.z.ai/images/hero-visual/zcode-logo@2x.png` | 官方站点未公开 SVG（应用图标只有带底色的 PNG），这里取透明底的标志本体，二值化 alpha 后缩到 128px 内嵌进 SVG —— 18px 下与矢量无差别 |
+| zcode | ZCode 官网应用图标 `zcode.z.ai/favicon-192x192.png` | 官方站点未公开 SVG。站主确认要的就是这张「黑色圆角方块 + 白色 Z」的应用图标（不是 hero 里那个灰色钩形标记），缩到 96px 内嵌进 SVG；因为自带底色，它同时登记在 `COLOR_ICONS` 与 `COLOR_ONLY_ICONS` |
 | continue / chatbox / nextchat / librechat | 各自官方仓库的矢量资产：`continuedev/continue` 的 `docs/logo/light.svg`、`chatboxai/chatbox` 的 `src/renderer/static/icons/icon-chatbox.svg`、`ChatGPTNextWeb/NextChat` 的 `app/icons/logo.svg`、`danny-avila/LibreChat` 的 `client/public/assets/logo.svg` | 这几个客户端在两个图标库里都没有收录，直接从官方仓库取（ChatBox 取的是符号图标，不是带底色的应用图标） |
 | 通用工具图标（curl / go-http-client / python-urllib / python-requests / aiohttp / axios / postman / insomnia / browser / deepseek） | [simple-icons](https://github.com/simple-icons/simple-icons) `icons/<slug>.svg`（CC0） | 无品牌方 UI 资产可用的库，取其官方 logo 轮廓（python-urllib 用 Python 官方 logo —— 标准库与语言同源）；deepseek 同时是映射面板常用的厂商图标 |
 | default.svg | 本项目自绘 | 终端提示符「>_」：认不出的客户端绝大多数是 CLI/脚本；用问号会暗示「出错了」，而未知是完全正常的状态 |

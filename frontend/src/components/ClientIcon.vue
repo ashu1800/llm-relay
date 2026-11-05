@@ -25,7 +25,7 @@
 // 因为渠道图标是**用户可配**的；客户端的默认兜底是统一 default.svg
 // （用户明确要过「不支持的设定一个默认图标」），派生色不进这条链路。
 import { computed, ref, watch } from 'vue'
-import { COLOR_ICONS, clientIconFile } from '@/components/clientMeta'
+import { COLOR_ICONS, COLOR_ONLY_ICONS, clientIconFile } from '@/components/clientMeta'
 import { maskIconFile, type ClientIconSpec } from '@/components/clientDisplay'
 
 const props = withDefaults(
@@ -70,6 +70,9 @@ const maskFile = computed(() => maskIconFile(resolved.value, props.id, imgFailed
 const colorFile = computed(() =>
   resolved.value.kind === 'builtin' && COLOR_ICONS.has(resolved.value.file) ? resolved.value.file : ''
 )
+// 自带底色的图标（COLOR_ONLY_ICONS）：连深色主题也画原图 —— 它们的 mask
+// 只会得到一块实心方块，没有可用的回落形态。
+const colorOnly = computed(() => colorFile.value !== '' && COLOR_ONLY_ICONS.has(colorFile.value))
 const sizeStyle = computed(() => ({ width: props.size + 'px', height: props.size + 'px' }))
 const maskStyle = computed(() => ({
   '--cli-icon': `url(/client-icons/${maskFile.value})`,
@@ -110,13 +113,14 @@ const maskStyle = computed(() => ({
   <template v-else-if="colorFile">
     <img
       class="cli-img cli-color"
+      :class="{ 'cli-always': colorOnly }"
       :src="`/client-icons/${colorFile}`"
       :style="sizeStyle"
       alt=""
       aria-hidden="true"
       referrerpolicy="no-referrer"
     />
-    <span class="cli-icon cli-mono" :style="maskStyle" aria-hidden="true" />
+    <span v-if="!colorOnly" class="cli-icon cli-mono" :style="maskStyle" aria-hidden="true" />
   </template>
   <!-- 单色内置图标（官方本来就是黑白标，或没有彩色版）：mask + 主题色。
        内置图标用它自己那份 SVG；位图挂了才回落到内置链路（判据见
@@ -155,6 +159,11 @@ const maskStyle = computed(() => ({
   display: none;
 }
 :root[data-tone='dark'] .cli-mono {
+  display: inline-block;
+}
+/* 自带底色的图标（ZCode 的黑色圆角方块）没有回落档：深色主题也画原图。
+   两个类 + :root 前缀，压过上面那条隐藏规则。 */
+:root[data-tone='dark'] .cli-color.cli-always {
   display: inline-block;
 }
 

@@ -263,5 +263,16 @@ export const COLOR_ICONS: ReadonlySet<string> = new Set([
   'wenxin.svg',
   'workbuddy.svg',
   'yuanbao.svg',
+  'zcode.svg',
   'zhipu.svg'
 ])
+
+/**
+ * 自带底色的图标：**任何主题**都直接画原图，不回落单色轮廓。
+ *
+ * 目前只有 ZCode：它的图标是「黑色圆角方块 + 白色 Z」的应用图标（站主
+ * 2026-11-05 指出要的就是这张，不是官网 hero 里那个灰色钩形标记）。
+ * mask 只取 alpha —— 这张图的 alpha 是一整个方块，回落出来就是一块实心
+ * 圆角方块、Z 直接消失，比「深色下糊掉」更糟，所以它没有回落档。
+ */
+export const COLOR_ONLY_ICONS: ReadonlySet<string> = new Set(['zcode.svg'])
