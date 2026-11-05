@@ -21,7 +21,8 @@
 //   unavailable 采集不到：显示「—」与原因。**不能显示成 0** ——
 //              空闲站点整夜都是 0，两者混在一起时采集坏了永远发现不了。
 //
-// 展开后能看到收 / 发分开的速率、本进程观测到的累计流量、以及网卡名。
+// 展开后能看到收 / 发分开的速率、累计流量（跨服务重启保留，见后端
+// live_bandwidth_persist.go）、以及网卡名。
 // 网卡名是排障时第一个要问的问题（「我明明走了专线，读数怎么是 0」），
 // 但它平时不需要占位置，所以收在展开区里。
 import { computed, onUnmounted, ref } from 'vue'
@@ -159,7 +160,7 @@ onUnmounted(() => {
           <SwapOutlined class="bw-dir is-up" aria-hidden="true" />
           {{ formatRate(tx) }}
         </span>
-        <span class="bw-item bw-total" title="本进程启动以来观测到的累计流量">
+        <span class="bw-item bw-total" title="累计流量（跨服务重启保留；机器重启 / 换网卡期间不补）">
           ↓{{ formatBytes(latest.rx_total_bytes) }} ↑{{ formatBytes(latest.tx_total_bytes) }}
         </span>
         <span v-if="latest.interface" class="bw-iface">{{ latest.interface }}</span>

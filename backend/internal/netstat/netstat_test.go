@@ -131,6 +131,138 @@ func TestClockZeroElapsed(t *testing.T) {
 	}
 }
 
+// 跨重启恢复（2026-11-05）：累计从上次的数字接着走；同一张网卡且计数器
+// 没有回退时，把「上次保存 → 本次启动」的增量补进来，但速率报 0 ——
+// 那段间隔是服务不在的时间，不是采样窗口。
+func TestClockResumeAddsGapBytesWithoutRate(t *testing.T) {
+	stubReader(t, Counter{Interface: "eth0", RxBytes: 10_000, TxBytes: 5_000})
+	savedAt := time.Unix(1_700_000_000, 0)
+	c := NewClock("")
+	c.now = func() time.Time { return savedAt.Add(10 * time.Second) }
+	c.Resume(Persisted{
+		RxTotal: 1_000_000, TxTotal: 2_000_000,
+		RxCounter: 4_000, TxCounter: 2_000,
+		Interface: "eth0", SavedAt: savedAt,
+	})
+
+	got := c.Sample()
+	if got.RxTotal != 1_006_000 || got.TxTotal != 2_003_000 {
+		t.Fatalf("停机期间的增量应补进累计，期望 rx=1006000 tx=2003000，实际 rx=%d tx=%d", got.RxTotal, got.TxTotal)
+	}
+	if got.RxBps != 0 || got.TxBps != 0 {
+		t.Fatalf("跨重启的第一拍不该算速率（间隔不是采样窗口），实际 rx=%.2f tx=%.2f", got.RxBps, got.TxBps)
+	}
+}
+
+// 机器重启 / 网卡重新枚举后计数器归零：只保留累计总数，不补增量 ——
+// 归零前后的差值不属于同一本账。
+func TestClockResumeIgnoresCounterReset(t *testing.T) {
+	stubReader(t, Counter{Interface: "eth0", RxBytes: 100, TxBytes: 50})
+	c := NewClock("")
+	c.now = func() time.Time { return time.Unix(1_700_000_100, 0) }
+	c.Resume(Persisted{
+		RxTotal: 5_000, TxTotal: 6_000,
+		RxCounter: 10_000, TxCounter: 20_000,
+		Interface: "eth0", SavedAt: time.Unix(1_700_000_000, 0),
+	})
+
+	got := c.Sample()
+	if got.RxTotal != 5_000 || got.TxTotal != 6_000 {
+		t.Fatalf("计数器回退时累计应原样保留，实际 rx=%d tx=%d", got.RxTotal, got.TxTotal)
+	}
+	if got.RxBps != 0 || got.TxBps != 0 {
+		t.Fatalf("回退的那一拍速率应为 0，实际 rx=%.2f tx=%.2f", got.RxBps, got.TxBps)
+	}
+}
+
+// 换了网卡（默认路由变化 / 改了 bandwidth_interface）时，两边的计数器
+// 不是同一本账：保留累计总数，但不拿旧网卡的计数当基线。
+func TestClockResumeIgnoresInterfaceChange(t *testing.T) {
+	stubReader(t, Counter{Interface: "eth1", RxBytes: 10_000, TxBytes: 5_000})
+	c := NewClock("")
+	c.now = func() time.Time { return time.Unix(1_700_000_100, 0) }
+	c.Resume(Persisted{
+		RxTotal: 5_000, TxTotal: 6_000,
+		RxCounter: 4_000, TxCounter: 2_000,
+		Interface: "eth0", SavedAt: time.Unix(1_700_000_000, 0),
+	})
+
+	got := c.Sample()
+	if got.RxTotal != 5_000 || got.TxTotal != 6_000 {
+		t.Fatalf("换网卡时累计应原样保留，实际 rx=%d tx=%d", got.RxTotal, got.TxTotal)
+	}
+	if got.RxBps != 0 || got.TxBps != 0 {
+		t.Fatalf("跨网卡的第一拍速率应为 0，实际 rx=%.2f tx=%.2f", got.RxBps, got.TxBps)
+	}
+}
+
+// 正常运行中默认路由换了网卡，也不能跨网卡相减；新网卡从当前值起算。
+func TestClockInterfaceChangeStartsNewBaseline(t *testing.T) {
+	stubReader(t,
+		Counter{Interface: "eth0", RxBytes: 10_000, TxBytes: 10_000},
+		Counter{Interface: "eth1", RxBytes: 1_000_000, TxBytes: 2_000_000},
+		Counter{Interface: "eth1", RxBytes: 1_001_000, TxBytes: 2_000_500},
+	)
+	c := NewClock("")
+	c.now = at(t, time.Unix(1_700_000_000, 0), time.Second)
+
+	c.Sample()
+	switched := c.Sample()
+	if switched.RxBps != 0 || switched.TxBps != 0 {
+		t.Fatalf("换网卡那一拍不该相减，实际 rx=%.2f tx=%.2f", switched.RxBps, switched.TxBps)
+	}
+	if switched.RxTotal != 0 || switched.TxTotal != 0 {
+		t.Fatalf("换网卡不该产生累计增量，实际 rx=%d tx=%d", switched.RxTotal, switched.TxTotal)
+	}
+
+	next := c.Sample()
+	if next.RxBps != 1000 || next.TxBps != 500 {
+		t.Fatalf("新网卡应从当前值起算，期望 rx=1000 tx=500，实际 rx=%.2f tx=%.2f", next.RxBps, next.TxBps)
+	}
+}
+
+// Snapshot 要把累计与「最后一拍成功读到的原始计数」一起交出来 ——
+// 后者是重启后补账的唯一依据。
+func TestClockSnapshot(t *testing.T) {
+	stubReader(t,
+		Counter{Interface: "eth0", RxBytes: 1_000, TxBytes: 2_000},
+		Counter{Interface: "eth0", RxBytes: 3_000, TxBytes: 4_000},
+	)
+	c := NewClock("")
+	base := time.Unix(1_700_000_000, 0)
+	c.now = at(t, base, time.Second)
+	c.Sample()
+	c.Sample()
+
+	p := c.Snapshot()
+	if p.RxTotal != 2_000 || p.TxTotal != 2_000 {
+		t.Fatalf("累计不对：rx=%d tx=%d", p.RxTotal, p.TxTotal)
+	}
+	if p.RxCounter != 3_000 || p.TxCounter != 4_000 {
+		t.Fatalf("原始计数应是最后一拍的值：rx=%d tx=%d", p.RxCounter, p.TxCounter)
+	}
+	if p.Interface != "eth0" {
+		t.Fatalf("网卡名不对：%q", p.Interface)
+	}
+	if !p.SavedAt.Equal(base.Add(time.Second)) {
+		t.Fatalf("SavedAt 应是最后一拍的时刻，实际 %v", p.SavedAt)
+	}
+}
+
+// 还没采样过就退出：快照只带累计（可能来自 Resume），计数器信息留空，
+// 下次启动仍能接着累计，只是补不了停机期间的增量。
+func TestClockSnapshotBeforeFirstSample(t *testing.T) {
+	c := NewClock("")
+	c.Resume(Persisted{RxTotal: 123, TxTotal: 456})
+	p := c.Snapshot()
+	if p.RxTotal != 123 || p.TxTotal != 456 {
+		t.Fatalf("累计应保留，实际 rx=%d tx=%d", p.RxTotal, p.TxTotal)
+	}
+	if p.Interface != "" || !p.SavedAt.IsZero() {
+		t.Fatalf("没有采样时不该带计数器信息：%+v", p)
+	}
+}
+
 // 读取失败要与「速率为 0」区分开：前者要能在界面上说出来。
 func TestClockUnavailableIsDistinguishable(t *testing.T) {
 	stubReader(t) // 空序列 → 返回 ErrUnsupported

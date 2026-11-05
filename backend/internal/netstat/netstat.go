@@ -29,6 +29,24 @@ type Counter struct {
 	TxBytes   uint64
 }
 
+// Persisted 是跨进程重启保存的累计状态（2026-11-05 站主要求持久化）。
+//
+// 为什么不只存 RxTotal / TxTotal：只存总数的话，上次保存到进程退出之间的
+// 增量只能丢掉（最多一个保存间隔）。连**最后一次成功读到的原始计数器**
+// 一起存下来，重启后如果还是同一张网卡、计数器没有回退（说明机器没重启），
+// 就能把这段增量补回来，一个字节都不丢。
+//
+// SavedAt 是那个原始计数器的读取时刻。补账时**不拿它算速率** ——
+// 那段间隔是服务不在的时间，不是一秒采样窗口（见 Clock.Resume）。
+type Persisted struct {
+	RxTotal   uint64
+	TxTotal   uint64
+	RxCounter uint64
+	TxCounter uint64
+	Interface string
+	SavedAt   time.Time
+}
+
 // readCounter 由各平台的实现（read_linux.go / read_windows.go）在 init 里挂上。
 //
 // 做成变量而不是带 build tag 的导出函数：这样本文件的换算逻辑、Stats 结构与
@@ -67,9 +85,10 @@ type Stats struct {
 	// 少一处写错的机会；要显示成 Mbps 的调用方乘 8 即可。
 	RxBps float64 `json:"rx_bytes_per_sec"`
 	TxBps float64 `json:"tx_bytes_per_sec"`
-	// RxTotal / TxTotal 是**本进程观测到的**累计字节，不是网卡自开机以来的。
-	// 进程重启后从 0 开始 —— 这与「这段时间走了多少」的语义一致，
-	// 拿网卡的累计值会让界面上的总数在重启后倒着跳。
+	// RxTotal / TxTotal 是**本服务累计观测到的**字节，不是网卡自开机以来的。
+	// 它会持久化到数据库，进程重启后接着上次的数字继续涨（2026-11-05）——
+	// 直接拿网卡的累计值不行：机器重启 / 换网卡都会让它倒着跳。
+	// 服务停机期间如果网卡计数器仍然连续，这段增量也会补进来（见 Clock.Resume）。
 	RxTotal uint64 `json:"rx_total_bytes"`
 	TxTotal uint64 `json:"tx_total_bytes"`
 	// Available=false 表示这次没读到（权限、平台不支持、网卡消失），
@@ -81,7 +100,10 @@ type Stats struct {
 	Error     string `json:"error,omitempty"`
 }
 
-// Clock 把逐次采样换算成速率，并维护进程内的累计字节。
+// Clock 把逐次采样换算成速率，并维护累计字节。
+//
+// 累计值本身不持久化 —— 由调用方通过 Snapshot / Resume 存到数据库
+// （api 层把它落在 settings 表里），本包只负责「怎么算」。
 //
 // 它持有上一拍的状态，因此不是并发安全的 —— 由调用方（api 层的推送循环）
 // 保证只有一个 goroutine 在采样。
@@ -98,10 +120,51 @@ type Clock struct {
 
 	rxTotal uint64
 	txTotal uint64
+
+	// resumed 表示上一拍是「从持久化状态恢复」的：第一次成功采样要把
+	// 停机期间的增量补进累计，但不能把它当成采样窗口算速率。
+	resumed bool
 }
 
 // NewClock 构造一个采样器。iface 为空时自动选择承载默认路由的网卡。
 func NewClock(iface string) *Clock { return &Clock{now: time.Now, iface: iface} }
+
+// Resume 用上次持久化的状态初始化采样器（2026-11-05）。
+//
+// 累计总数从 p 接着走；p 里带着完整的原始计数器信息时，把它当作「上一拍」——
+// 首次 Sample 会把「上次保存 → 本次启动」之间的增量补进累计
+// （要求同一张网卡且计数器没有回退），但**不计算速率**：那段间隔是服务
+// 不在的时间，不是采样窗口，算出来的只会是一个没有意义的平均值。
+//
+// 机器重启后网卡计数器归零（cur < p.RxCounter）：此时只保留累计总数，
+// 不补增量 —— 归零前后的差值不属于同一本账；那段时间的流量只能放弃。
+// 换网卡（默认路由变化 / 改了 bandwidth_interface）同理。
+func (c *Clock) Resume(p Persisted) {
+	c.rxTotal = p.RxTotal
+	c.txTotal = p.TxTotal
+	if p.Interface == "" || p.SavedAt.IsZero() {
+		return
+	}
+	c.prev = Counter{Interface: p.Interface, RxBytes: p.RxCounter, TxBytes: p.TxCounter}
+	c.hasPrev = true
+	c.lastSeen = p.SavedAt
+	c.resumed = true
+}
+
+// Snapshot 返回可持久化的累计状态。
+//
+// 还没成功采样过时，计数器与网卡名留空（SavedAt 为零值）—— 调用方据此
+// 只保存累计总数，下次启动仍能接着累计，只是补不了停机期间的增量。
+func (c *Clock) Snapshot() Persisted {
+	p := Persisted{RxTotal: c.rxTotal, TxTotal: c.txTotal}
+	if c.hasPrev {
+		p.RxCounter = c.prev.RxBytes
+		p.TxCounter = c.prev.TxBytes
+		p.Interface = c.prev.Interface
+		p.SavedAt = c.lastSeen.UTC()
+	}
+	return p
+}
 
 // Sample 读一次网卡计数并返回换算后的读数。
 //
@@ -129,23 +192,31 @@ func (c *Clock) Sample() Stats {
 
 	if c.hasPrev {
 		elapsed := now.Sub(c.lastSeen).Seconds()
+		// 网卡换了（默认路由切换 / 运维改了 bandwidth_interface）：两边的
+		// 计数器不是同一本账，相减会得到一个无意义的增量 —— 只换基线。
+		sameIface := cur.Interface == c.prev.Interface
 		// 时间没走（测试里的同一拍、或系统时钟回拨）：算不出速率，
 		// 也不能拿上次的旧值冒充 —— 直接按「本拍没有观测」处理。
-		if elapsed > 0 {
+		if elapsed > 0 && sameIface {
 			// 计数器变小只有两种可能：网卡被重新枚举（切换网络）或计数器回绕。
 			// 两种情况下做减法都会得到一个巨大的假速率（16 EB/s 这种），
 			// 所以在阈值上直接放弃这一拍，把当前值当新基线。
 			if cur.RxBytes >= c.prev.RxBytes && cur.TxBytes >= c.prev.TxBytes {
 				rxDelta := cur.RxBytes - c.prev.RxBytes
 				txDelta := cur.TxBytes - c.prev.TxBytes
-				st.RxBps = float64(rxDelta) / elapsed
-				st.TxBps = float64(txDelta) / elapsed
 				c.rxTotal += rxDelta
 				c.txTotal += txDelta
+				// 跨重启恢复的第一拍：增量照记（那些字节确实流过去了），
+				// 但速率报 0 —— 间隔是服务不在的那段时间，不是采样窗口。
+				if !c.resumed {
+					st.RxBps = float64(rxDelta) / elapsed
+					st.TxBps = float64(txDelta) / elapsed
+				}
 			}
 		}
 	}
 
+	c.resumed = false
 	c.prev = cur
 	c.hasPrev = true
 	c.lastSeen = now

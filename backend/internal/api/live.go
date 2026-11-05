@@ -248,13 +248,58 @@ func (s *Server) liveBandwidthLoop(ctx context.Context) {
 		iface = s.deps.Config.Server.BandwidthInterface
 	}
 	clock := netstat.NewClock(iface)
+
+	// 载入上次的累计值（2026-11-05 站主要求持久化，见 live_bandwidth_persist.go）。
+	// 读失败时本次运行**不写盘**：一次启动期的读失败不该把历史累计清零。
+	var db *gorm.DB
+	if s.deps.Store != nil {
+		db = s.deps.Store.DB()
+	}
+	persist := db != nil
+	if persist {
+		loadCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		p, found, err := loadBandwidthState(loadCtx, db)
+		cancel()
+		switch {
+		case err != nil:
+			persist = false
+			if s.deps.Logger != nil {
+				s.deps.Logger.Warn("读取带宽累计值失败，本次运行不持久化（避免覆盖已有数据）", "err", err)
+			}
+		case found:
+			clock.Resume(p)
+			if s.deps.Logger != nil {
+				s.deps.Logger.Info("带宽累计值已恢复", "rx_total", p.RxTotal, "tx_total", p.TxTotal)
+			}
+		}
+	}
+
+	lastSave := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
+			if persist {
+				// 优雅退出补一次：传进来的 ctx 已经取消，必须换一个独立的。
+				saveCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				if err := saveBandwidthState(saveCtx, db, clock.Snapshot()); err != nil && s.deps.Logger != nil {
+					s.deps.Logger.Warn("退出前保存带宽累计值失败", "err", err)
+				}
+				cancel()
+			}
 			return
 		case <-ticker.C:
 		}
 		s.deps.Live.recordBandwidth(clock.Sample())
+		if persist && time.Since(lastSave) >= bandwidthPersistInterval {
+			// 无论成败都推进时间：库暂时不可用时按间隔重试，而不是每拍都打一次。
+			lastSave = time.Now()
+			saveCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			err := saveBandwidthState(saveCtx, db, clock.Snapshot())
+			cancel()
+			if err != nil && s.deps.Logger != nil {
+				s.deps.Logger.Warn("保存带宽累计值失败", "err", err)
+			}
+		}
 	}
 }
 
