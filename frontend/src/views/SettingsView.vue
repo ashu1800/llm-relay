@@ -730,10 +730,28 @@ onMounted(() => {
               :options="iconOptions"
               :aria-label="`第 ${i + 1} 行内置图标`"
               placeholder="搜索内置图标"
+              :dropdown-match-select-width="false"
               show-search
               allow-clear
               @change="(v: any) => (getDraft(row).icon = v ?? '')"
-            />
+            >
+              <!-- 选项与选中值都画「图标 + 文件名」：只给文件名的话，90 多个
+                   图标要靠脑补形状来挑（2026-11-05 用户反馈「内置图标没办法预览」）。
+                   选中值那格顺带就是保存前的预览 —— 选完立刻能看到效果。
+                   两个插槽是 antd 的两处渲染，内容必须一致（同 ChannelOption 的坑）。 -->
+              <template #option="opt">
+                <span class="icon-opt">
+                  <ClientIcon :spec="aliasIconSpec(opt.value)" :size="16" />
+                  <span class="icon-opt-text">{{ opt.label }}</span>
+                </span>
+              </template>
+              <template #optionLabel="opt">
+                <span class="icon-opt">
+                  <ClientIcon :spec="aliasIconSpec(opt.value)" :size="16" />
+                  <span class="icon-opt-text">{{ opt.label }}</span>
+                </span>
+              </template>
+            </a-select>
             <a-input
               :value="ICON_LIBRARY.includes(getDraft(row).icon) ? '' : getDraft(row).icon"
               :aria-label="`第 ${i + 1} 行自定义图标`"
@@ -1190,6 +1208,22 @@ onMounted(() => {
    这不是错误，只是「这条还没缓存」—— 中文提示放在 tooltip 里，
    输入框本身只有 190px，塞不下文字。 */
 .alias-icon-warn { color: var(--text-amber); cursor: help; }
+/* 图标下拉的选项 / 选中值：图标 + 文件名。文字层要 min-width: 0 + 省略号，
+   否则长文件名会顶破 140px 的列宽而不是出现「…」（与 ChannelOption 同一坑）。
+   浮层虽被 teleport 到 body，但插槽内容在父作用域渲染、带本文件的 scope 属性，
+   所以 scoped 样式照样命中。 */
+.icon-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+.icon-opt-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* ---- 存储生命周期衰减时间轴（方案 3） ---- */
 .storage-lifecycle-timeline {
