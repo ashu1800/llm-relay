@@ -729,7 +729,8 @@ onMounted(() => {
               :value="ICON_LIBRARY.includes(getDraft(row).icon) ? getDraft(row).icon : undefined"
               :options="iconOptions"
               :aria-label="`第 ${i + 1} 行内置图标`"
-              placeholder="默认图标"
+              placeholder="搜索内置图标"
+              show-search
               allow-clear
               @change="(v: any) => (getDraft(row).icon = v ?? '')"
             />
