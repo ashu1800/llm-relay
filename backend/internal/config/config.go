@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -19,6 +20,7 @@ type Config struct {
 	Relay    RelayConfig    `yaml:"relay"`
 	Security SecurityConfig `yaml:"security"`
 	Log      LogConfig      `yaml:"log"`
+	Display  DisplayConfig  `yaml:"display"`
 }
 
 // SecurityConfig 保管加密主密钥、管理台登录密钥与出站凭据。
@@ -148,6 +150,22 @@ type CacheConfig struct {
 	MaxResponseKB int `yaml:"max_response_kb"`
 }
 
+// DisplayConfig 是**纯展示口径**的配置：只影响界面怎么画，不参与任何记账。
+type DisplayConfig struct {
+	// USDCNYRate 是美元兑人民币汇率，只用于看板「消耗金额」卡决定哪个币种
+	// 当大字（2026-11-05 站主要求：按折算后的价值比大小，而不是比账面数字 ——
+	// $2.84 折 ¥20.2，比 ¥11.23 花得多，该它排在上面）。
+	//
+	// 它**不参与计价、不参与落库**：库里的金额永远是渠道开账单的那个币种，
+	// 换算只发生在「谁排大字」这一次比较里（见 frontend/src/utils/money.ts
+	// 的 primaryCurrency）。所以汇率漂移不会污染历史账目 —— 这正是
+	// model.Channel 与 pricing 都不做换算的理由（见 DEVELOPMENT.md）。
+	//
+	// 默认 7.1 是 2026-11 的参考值。汇率会变，部署侧自己调
+	// （DISPLAY_USD_CNY_RATE），不必改代码。
+	USDCNYRate float64 `yaml:"usd_cny_rate"`
+}
+
 type LogConfig struct {
 	Level  string `yaml:"level"`  // debug | info | warn | error
 	Format string `yaml:"format"` // text | json
@@ -208,6 +226,9 @@ func Default() *Config {
 			},
 		},
 		Log: LogConfig{Level: "info", Format: "text", MaxSizeMB: 100},
+		// 汇率默认值见 DisplayConfig.USDCNYRate 的说明：只是「谁排大字」的
+		// 比较口径，改它不影响任何已落库的金额。
+		Display: DisplayConfig{USDCNYRate: 7.1},
 	}
 	// TrustedProxies 不能写进上面的字面量后统一返回 —— 切片是可变值，
 	// 两个调用方拿到同一底层数组会互相改写；每次现造一份。
@@ -290,6 +311,8 @@ func applyEnv(c *Config) {
 
 	setStr(&c.Log.Level, "LOG_LEVEL")
 	setStr(&c.Log.Format, "LOG_FORMAT")
+
+	setFloat(&c.Display.USDCNYRate, "DISPLAY_USD_CNY_RATE")
 }
 
 // envKeys 列出所有被 applyEnv 识别的环境变量。
@@ -330,6 +353,7 @@ func envKeys() map[string]string {
 		"secret":                       "RELAY_SECRET",
 		"console_auth_enabled":         "RELAY_ADMIN_KEY",
 		"session_ttl_hours":            "RELAY_SESSION_TTL",
+		"usd_cny_rate":                 "DISPLAY_USD_CNY_RATE",
 		"database":                     "DB_HOST / DB_PORT / DB_USER / DB_PASSWORD / DB_NAME / DB_SSLMODE / DB_TIMEZONE",
 	}
 }
@@ -410,6 +434,12 @@ func (c *Config) validate() error {
 	if c.Relay.ClientMapTTL < 0 {
 		return fmt.Errorf("relay.client_map_ttl 不能为负: %s", c.Relay.ClientMapTTL)
 	}
+	// 汇率只用于看板排序，但 0 / 负数 / NaN 会让「折算后谁更大」失去意义
+	//（所有美元金额折成 0，排序退化成永远人民币优先，且界面上看不出异常）。
+	// 默认值可用，这里只拦显式配错。
+	if math.IsNaN(c.Display.USDCNYRate) || math.IsInf(c.Display.USDCNYRate, 0) || c.Display.USDCNYRate <= 0 {
+		return fmt.Errorf("display.usd_cny_rate 必须为正数，当前: %v", c.Display.USDCNYRate)
+	}
 	return nil
 }
 
@@ -434,6 +464,16 @@ func setInt(dst *int, key string) {
 	if v, ok := os.LookupEnv(key); ok {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 			*dst = n
+		}
+	}
+}
+
+// setFloat 读取浮点环境变量（汇率这类带小数的配置）。
+// 与 setInt 同一策略：解析失败保留默认值，不因为写错一个数字就起不来。
+func setFloat(dst *float64, key string) {
+	if v, ok := os.LookupEnv(key); ok {
+		if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+			*dst = f
 		}
 	}
 }

@@ -85,8 +85,11 @@ func (s *Server) getSettings(c *gin.Context) {
 			"console_auth_enabled": s.consoleAuthEnabled(),
 			"console_auth_method":  string(s.authMethod()),
 			"session_ttl_hours":    int(cfg.Security.SessionTTL.Hours()),
-			"database_ok":          dbVersion != "",
-			"database_version":     dbVersion,
+			// 看板「消耗金额」按折算后的价值决定哪个币种当大字，
+			// 汇率在这里露出来，页面上才能告诉用户改哪个变量。
+			"usd_cny_rate":     cfg.Display.USDCNYRate,
+			"database_ok":      dbVersion != "",
+			"database_version": dbVersion,
 		},
 		"counts": gin.H{
 			"logs": counts.Logs, "payloads": counts.Payloads, "priced": counts.Priced,

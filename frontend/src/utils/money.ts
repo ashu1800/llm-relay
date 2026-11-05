@@ -1,8 +1,11 @@
 // 金额展示：把「一串数字 + 它的币种」渲染出来。
 //
-// 这里**不做任何汇率换算**，这是刻意的：上游按什么币种开账单，库里就存那个
+// 这里**不做任何记账换算**，这是刻意的：上游按什么币种开账单，库里就存那个
 // 币种的数字（见 model.Channel.Currency）。人民币和美元不能相加，所以「合计」
 // 只在同一币种内成立 —— 看板按币种分别统计，日志按各自渠道的币种显示。
+//
+// 唯一用到汇率的地方是 primaryCurrency 的**排序**：决定哪个币种当大字。
+// 它只比较一次、不改变任何一个要显示的数字（2026-11-05 站主要求）。
 //
 // 全站只保留这一份符号表：金额符号散落在各页面里写过一次（'$' 硬编码在
 // 看板、日志、计价器三处），改口径时漏掉一处就会出现「同一个数两种符号」。
@@ -95,29 +98,45 @@ export function currencyKeys(costs?: Record<string, string> | null): string[] {
 /**
  * 主币种：金额卡片的大数字用它，其余币种并排列在下面。
  *
- * **哪个币种的金额大就用哪个**（2026-11-05 站主要求）。以前是按固定顺序
- * （CNY 优先）取第一个 —— 顺序稳定，但「稳定」不等于「该被突出」：一段
- * 时间只记美元账时，大数字会是 ¥0.0000，真实金额缩在「另有 $…」里。
+ * **按折算后的价值比大小**（2026-11-05 站主要求）。以前是两个阶段：
+ * 固定 CNY 优先 → 按账面数字比。前者在只记美元账时会把大数字显示成 ¥0.0000；
+ * 后者又走偏了另一头 —— 账面数字大不等于花得多，$2.84 折 ¥20.2 比 ¥11.23
+ * 花得多，但 2.84 < 11.23，美元会被错误地缩进「另有 …」里。
+ *
+ * 现在：先用汇率把各币种折到同一口径（USD × rate，其余币种按 1:1），
+ * 谁大谁当大字。换算只发生在这**一次比较**里 —— 卡片上显示的数字仍是各币种
+ * 自己的账面值，本文件头那条「记账不换算」不受影响。
+ *
+ * rate 缺省或非法（≤0 / NaN）时退化为直接比账面数字：旧后端不带这个字段，
+ * 那时宁可保持旧行为，也不要凭空造一个汇率。并列（含都为 0 / 非法值）时
+ * 退回固定顺序，保证两次刷新之间不会自己换位置。
+ *
  * 筛了渠道的场景另有钉死规则（见 DashboardView 的 scopeCurrency），
  * 这里管的是默认视角。
- *
- * 比较的是**账面数字本身**，不是折算后的价值：本文件头已经写明不在币种
- * 之间换算，「哪个大」只能是数字大小。并列（含都为 0 / 非法值）时退回
- * 固定顺序，保证两次刷新之间不会自己换位置。
  */
-export function primaryCurrency(costs?: Record<string, string> | null): string {
+export function primaryCurrency(
+  costs?: Record<string, string> | null,
+  usdCnyRate?: number | null
+): string {
   const keys = currencyKeys(costs)
   if (!keys.length) return ''
+  const rate =
+    typeof usdCnyRate === 'number' && Number.isFinite(usdCnyRate) && usdCnyRate > 0 ? usdCnyRate : 1
   let best = keys[0]
-  let bestVal = costAmount(costs?.[best])
+  let bestVal = costAmount(costs?.[best]) * valueFactor(best, rate)
   for (let i = 1; i < keys.length; i++) {
-    const v = costAmount(costs?.[keys[i]])
+    const v = costAmount(costs?.[keys[i]]) * valueFactor(keys[i], rate)
     if (v > bestVal) {
       best = keys[i]
       bestVal = v
     }
   }
   return best
+}
+
+/** 折算系数：只有美元要乘汇率，其余币种按 1:1 比账面数字 */
+function valueFactor(currency: string, usdCnyRate: number): number {
+  return currency === 'USD' ? usdCnyRate : 1
 }
 
 /** 金额字符串转数字；非法值按 0（与 amountText 的口径一致，不抛错） */

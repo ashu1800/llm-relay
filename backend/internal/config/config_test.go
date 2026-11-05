@@ -157,3 +157,41 @@ func TestClientMapEnv(t *testing.T) {
 		}
 	}
 }
+
+// 汇率：默认值可用、非法值拒绝启动、环境变量入口真的接上。
+// 它与 client_map 是同一类「部署侧必须能自己调」的配置（CLAUDE.md 硬约定 13），
+// 差别只在它是浮点、且 0 比「不配」更糟（全部美元折算成 0，排序静默退化成
+// 永远人民币优先，界面上看不出任何异常）。
+func TestDisplayRate(t *testing.T) {
+	t.Run("默认值可用", func(t *testing.T) {
+		c := Default()
+		if c.Display.USDCNYRate <= 0 {
+			t.Fatalf("默认汇率 = %v，必须为正", c.Display.USDCNYRate)
+		}
+		if err := c.validate(); err != nil {
+			t.Fatalf("默认配置不该报错：%v", err)
+		}
+	})
+
+	t.Run("非正汇率拒绝启动", func(t *testing.T) {
+		for _, v := range []float64{0, -7.1} {
+			c := Default()
+			c.Display.USDCNYRate = v
+			if err := c.validate(); err == nil || !strings.Contains(err.Error(), "usd_cny_rate") {
+				t.Fatalf("汇率 %v 应被拒绝，实际 %v", v, err)
+			}
+		}
+	})
+
+	t.Run("环境变量入口", func(t *testing.T) {
+		t.Setenv("DISPLAY_USD_CNY_RATE", "7.35")
+		c := Default()
+		applyEnv(c)
+		if c.Display.USDCNYRate != 7.35 {
+			t.Errorf("汇率 = %v，期望 7.35", c.Display.USDCNYRate)
+		}
+		if envKeys()["usd_cny_rate"] != "DISPLAY_USD_CNY_RATE" {
+			t.Errorf("envKeys 缺少 usd_cny_rate —— 部署侧看不到可用的环境变量名")
+		}
+	})
+}

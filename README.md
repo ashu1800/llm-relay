@@ -348,6 +348,7 @@ curl -s http://127.0.0.1:8888/system/info | python3 -m json.tool
 | `RELAY_CACHE_MAX_RESPONSE_KB` | `256` | 单条响应缓存上限，超过整体不缓存 |
 | `RELAY_CLIENT_MAP_LIMIT` | `2048` | 客户端显示映射的进程内缓存上限；满了淘汰最久未用的，不拒绝新客户端 |
 | `RELAY_CLIENT_MAP_TTL` | `168h` | 映射缓存条目的闲置过期时间，`0` 表示只靠容量淘汰 |
+| `DISPLAY_USD_CNY_RATE` | `7.1` | 美元兑人民币汇率，**只**用于看板「消耗金额」卡决定哪个币种当大字（按折算后的价值比大小）；不参与计价与落库 |
 | `TZ` | `Asia/Shanghai` | 进程本地时区：可用时段与时段倍率按它判断 |
 
 ## 密钥与安全

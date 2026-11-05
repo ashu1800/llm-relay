@@ -390,6 +390,10 @@ func (s *Server) summarySnapshotCtx(ctx context.Context, start, end time.Time, f
 		"costs":                 costs.json(),
 		"avg_first_byte_ms":     row.AvgFirstByte,
 		"avg_total_ms":          row.AvgTotal,
+		// 汇率只给前端决定「哪个币种当大字」用（见 config.DisplayConfig）。
+		// 挂在汇总里而不是单开一个接口：看板本来只有这一个请求，
+		// 为拿一个常量再跑一次往返不值得；实时推送也自动带上它。
+		"usd_cny_rate": s.deps.Config.Display.USDCNYRate,
 	}, nil
 }
 

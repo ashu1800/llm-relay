@@ -297,7 +297,8 @@ const runtimeRows = [
   { key: 'payload_max_kb', label: '单条报文上限（KB）' },
   { key: 'max_concurrency', label: '上游并发上限' },
   { key: 'default_rpm', label: '默认每分钟请求上限' },
-  { key: 'retry_same_upstream_delay_ms', label: '同上游重试等待（毫秒）' }
+  { key: 'retry_same_upstream_delay_ms', label: '同上游重试等待（毫秒）' },
+  { key: 'usd_cny_rate', label: '美元兑人民币汇率（看板排序用）' }
 ]
 
 // listen 的提示是特殊的一条：它由 SERVER_HOST/SERVER_PORT 决定，
