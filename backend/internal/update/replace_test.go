@@ -209,3 +209,34 @@ func TestReplaceSelfRejectsForeignDirectory(t *testing.T) {
 		t.Fatalf("拒绝后原文件必须原封未动: %q (err=%v)", got, err)
 	}
 }
+
+// canonicalExePath：更新/回滚会把**正在运行的那个文件**改名成 .backup /
+// .rollback-from / <时间戳>，此后 os.Executable() 解析到的就是这些名字。
+//
+// 拿它们去替换或重启会锚错文件。2026-11-05 线上真实踩到：更新到 0.8.0 后
+// 点重启，无感交接照着 .backup 启动，新进程报的版本还是 0.7.0 —— 更新装了、
+// 进程没换，前端自然还是旧包。
+func TestCanonicalExePath(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "llm-relay")
+	writeReplaceFixture(t, exe, "current")
+
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"正位原样返回", exe, exe},
+		{"backup 还原成正位", exe + ".backup", exe},
+		{"rollback-from 还原成正位", exe + ".rollback-from", exe},
+		{"moveAside 还原成正位", exe + ".20261105-142709", exe},
+		{"moveAside 带序号也还原", exe + ".20261105-142709-2", exe},
+		{"正位不存在时原样返回", filepath.Join(dir, "gone.backup"), filepath.Join(dir, "gone.backup")},
+		{"名字里没有点的不动", filepath.Join(dir, "llm-relay-2"), filepath.Join(dir, "llm-relay-2")},
+	}
+	for _, c := range cases {
+		if got := canonicalExePath(c.in); got != c.want {
+			t.Errorf("%s: canonicalExePath(%q) = %q，期望 %q", c.name, c.in, got, c.want)
+		}
+	}
+}

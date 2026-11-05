@@ -28,6 +28,11 @@ const backupSuffix = ".backup"
 // 而 os.Executable() 可能返回软链路径本身。若按软链路径替换，
 // 结果是「把软链换成了一个真实文件」，而 systemd 指向的那个
 // （或用户自己敲的那个）路径行为会变得莫名其妙。
+//
+// 还要再**还原成安装路径**（见 canonicalExePath）：更新时进程先把自己
+// 正在跑的那个文件改名成 <exe>.backup，再把新文件放到正位 —— 此后
+// os.Executable() 解析的是「运行中那个 inode 的当前名字」，于是返回
+// /opt/llm-relay/llm-relay.backup。拿它去替换/重启就会锚错文件。
 func SelfPath() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -39,7 +44,45 @@ func SelfPath() (string, error) {
 		// 这不应该让整个更新功能不可用
 		return exe, nil
 	}
-	return resolved, nil
+	return canonicalExePath(resolved), nil
+}
+
+// canonicalExePath 把「运行中那个 inode 的当前名字」还原成「安装路径」。
+//
+// 三种会被误当成安装路径的名字，都由本包的替换流程产生：
+//   - <exe>.backup        —— 替换时旧文件的让位名（回滚目标）；
+//   - <exe>.rollback-from —— 回滚时「回滚前正在跑的那一版」的临时名；
+//   - <exe>.<时间戳>[-N]  —— moveAside 给「删不掉只好挪开」的运行中影像
+//     起的名字（Windows 上是刚需，Linux 上同一套逻辑照用）。
+//
+// 判据是「去掉后缀后的文件真的存在」：只有正位上有文件才认它是安装路径，
+// 否则原样返回 —— 宁可让调用方拿到真实路径，也不要凭空拼一个不存在的。
+//
+// 这条规则救过一次真实的线上事故（2026-11-05）：更新到 0.8.0 后点重启，
+// 无感交接照着 .backup 启动，新进程报的版本还是 0.7.0 —— 更新装了、进程
+// 没换，前端自然还是旧包（站主看到的是「图标怎么还是黑白的」）。
+func canonicalExePath(p string) string {
+	dir, name := filepath.Split(p)
+	exists := func(base string) (string, bool) {
+		full := filepath.Join(dir, base)
+		if _, err := os.Stat(full); err == nil {
+			return full, true
+		}
+		return "", false
+	}
+	for _, suffix := range []string{backupSuffix, ".rollback-from"} {
+		if base, ok := strings.CutSuffix(name, suffix); ok && base != "" {
+			if full, ok := exists(base); ok {
+				return full
+			}
+		}
+	}
+	if i := strings.Index(name, "."); i > 0 && isMovedAsideName(name, name[:i]) {
+		if full, ok := exists(name[:i]); ok {
+			return full
+		}
+	}
+	return p
 }
 
 // BackupPath 返回给定可执行文件对应的备份路径。
