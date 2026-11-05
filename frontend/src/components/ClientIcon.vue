@@ -4,7 +4,7 @@
 //   · img     —— 用户映射的位图（data URI / 图片地址）；
 //   · text    —— 用户映射的一两个字符（emoji / 缩写）。
 //
-// **为什么内置图标用 CSS mask 而不是 <img src>**（这里试过 img，结论写下来免得回去）：
+// **为什么单色图标用 CSS mask 而不是 <img src>**（这里试过 img，结论写下来免得回去）：
 // <img> 引的 SVG 是一份独立文档，拿不到页面级 CSS —— 品牌 logo 里大量
 // fill="#000"（Cursor、Ollama、JetBrains 这些官方色就是纯黑），在深色主题
 // 下会直接隐形。给每个品牌准备「亮版/暗版」两份资产、再按 12 套主题挑一份，
@@ -15,13 +15,17 @@
 // 紧要，只有 alpha 参与），颜色由 background-color 决定 —— 直接读全局的
 // 图标色令牌，随主题自动变，对比度落在 check-theme-contrast 已有的
 // 「非文本 on 卡片 ≥ 3:1」红线上。一套资产、12 套主题全适配。
+//
+// 2026-11-05 起多了一条支路：**有官方配色的图标**（COLOR_ICONS）在浅色
+// 主题下直接 <img> 画彩色原图，深色主题仍回落到 mask 单色轮廓。
+// 判据与理由写在下面 colorFile / .cli-color 的注释里。
 // 用户映射的 img / text 没有这个问题（位图与字符自带颜色），直接渲染。
 //
 // 与渠道列 ChannelIcon 的分工：那个的三态是「图片/文字/首字母派生色」，
 // 因为渠道图标是**用户可配**的；客户端的默认兜底是统一 default.svg
 // （用户明确要过「不支持的设定一个默认图标」），派生色不进这条链路。
 import { computed, ref, watch } from 'vue'
-import { clientIconFile } from '@/components/clientMeta'
+import { COLOR_ICONS, clientIconFile } from '@/components/clientMeta'
 import { maskIconFile, type ClientIconSpec } from '@/components/clientDisplay'
 
 const props = withDefaults(
@@ -58,6 +62,20 @@ const imgSrc = computed(() => (resolved.value.kind === 'img' ? resolved.value.sr
 // 「画哪份文件」的判据在 clientDisplay.maskIconFile（纯函数 + 单测）：
 // 内置图标用 spec 里的文件，位图挂了才回落内置链路。
 const maskFile = computed(() => maskIconFile(resolved.value, props.id, imgFailed.value))
+
+// 有官方配色的内置图标（COLOR_ICONS）：浅色主题画彩色原图，深色主题回落
+// 单色轮廓。为什么不一概画彩色：彩色 logo 里常有深色部分（axios 的深紫、
+// curl 的近黑蓝），压在深色卡片上会糊成一团；而 OpenAI / Cursor / Copilot
+// 这些官方本来就是黑白标，用主题色反而是对的形态。
+const colorFile = computed(() =>
+  resolved.value.kind === 'builtin' && COLOR_ICONS.has(resolved.value.file) ? resolved.value.file : ''
+)
+const sizeStyle = computed(() => ({ width: props.size + 'px', height: props.size + 'px' }))
+const maskStyle = computed(() => ({
+  '--cli-icon': `url(/client-icons/${maskFile.value})`,
+  width: props.size + 'px',
+  height: props.size + 'px'
+}))
 </script>
 
 <template>
@@ -86,18 +104,24 @@ const maskFile = computed(() => maskIconFile(resolved.value, props.id, imgFailed
     aria-hidden="true"
     >{{ resolved.ch }}</span
   >
-  <span
-    v-else
-    class="cli-icon"
-    :style="{
-      // 内置图标用它自己那份 SVG；位图挂了才回落到内置链路（判据见
-      // clientDisplay.maskIconFile —— 2026-11-05 那个「全都长一个样」的 bug）
-      '--cli-icon': `url(/client-icons/${maskFile})`,
-      width: size + 'px',
-      height: size + 'px'
-    }"
-    aria-hidden="true"
-  />
+  <!-- 有官方配色的内置图标：浅色主题画彩色原图，深色主题回落单色轮廓。
+       两个节点都渲染、由 CSS 按 <html data-tone> 二选一 —— 比在 JS 里读
+       主题状态少一份耦合，浮层（teleport 到 body）也能正确切换。 -->
+  <template v-else-if="colorFile">
+    <img
+      class="cli-img cli-color"
+      :src="`/client-icons/${colorFile}`"
+      :style="sizeStyle"
+      alt=""
+      aria-hidden="true"
+      referrerpolicy="no-referrer"
+    />
+    <span class="cli-icon cli-mono" :style="maskStyle" aria-hidden="true" />
+  </template>
+  <!-- 单色内置图标（官方本来就是黑白标，或没有彩色版）：mask + 主题色。
+       内置图标用它自己那份 SVG；位图挂了才回落到内置链路（判据见
+       clientDisplay.maskIconFile —— 2026-11-05 那个「全都长一个样」的 bug）。 -->
+  <span v-else class="cli-icon" :style="maskStyle" aria-hidden="true" />
 </template>
 
 <style scoped>
@@ -116,6 +140,22 @@ const maskFile = computed(() => maskIconFile(resolved.value, props.id, imgFailed
   flex: 0 0 auto;
   vertical-align: middle;
   object-fit: contain;
+}
+
+/* 品牌彩色版的二选一（2026-11-05 站主要求「图标要和官方一样，包括颜色」）：
+   浅色主题画彩色原图，深色主题换成单色轮廓 —— 彩色 logo 里的深色部分
+   （axios 深紫、curl 近黑蓝）压在深色卡片上会糊掉，而黑白标的官方形态
+   本来就是「随背景反色」。
+   两条规则都写在 .cli-icon / .cli-img 之后：同为单类选择器时后者胜出，
+   深色那两条靠 :root 前缀提权。 */
+.cli-mono {
+  display: none;
+}
+:root[data-tone='dark'] .cli-color {
+  display: none;
+}
+:root[data-tone='dark'] .cli-mono {
+  display: inline-block;
 }
 
 .cli-glyph {

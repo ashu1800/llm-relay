@@ -46,7 +46,7 @@ export const CLIENT_META: Record<string, ClientMeta> = {
   'gemini-cli': { name: 'Gemini CLI', file: 'gemini-cli.svg' },
   'qwen-code': { name: 'Qwen Code', file: 'qwen-code.svg' },
   trae: { name: 'Trae', file: 'trae.svg' },
-  zcode: { name: 'ZCode', file: 'default.svg' },
+  zcode: { name: 'ZCode', file: 'zcode.svg' },
 
   // ---- 桌面 / Web 聊天客户端 ----
   'cherry-studio': { name: 'Cherry Studio', file: 'cherry-studio.svg' },
@@ -104,8 +104,8 @@ export function clientIconFile(id: string | null | undefined): string {
  *   · 模型厂商：自建工具常以厂商命名（如 deepseek-harness），映射时
  *     需要一个官方 logo，而不是被迫用默认图标；
  *   · 网关/平台：OpenRouter、SiliconCloud、Ollama、vLLM 等。
- * 图标只描述「形状」，颜色由主题决定（见 ClientIcon.vue），因此同一份
- * 资产在 12 套主题下都能用；这也是不按品牌色维护的原因。
+ * 颜色分两档：COLOR_ICONS 里的是品牌彩色版，其余是单色轮廓 + 主题色
+ * （为什么这么分见 COLOR_ICONS 的说明）。
  */
 export const ICON_LIBRARY: string[] = [
   'aiohttp.svg',
@@ -195,7 +195,73 @@ export const ICON_LIBRARY: string[] = [
   'workbuddy.svg',
   'yi.svg',
   'yuanbao.svg',
+  'zcode.svg',
   'zed.svg',
   'zencoder.svg',
   'zhipu.svg'
 ]
+
+/**
+ * 带**官方配色**的图标（其余是单色轮廓，颜色由主题给）。
+ *
+ * 2026-11-05 站主要求「图标要和官方一样，包括颜色」：这批文件已经换成了
+ * 品牌彩色版（lobe-icons 的 `<slug>-color.svg`，少数品牌按官方色注入 fill），
+ * 渲染时走 `<img>` 直接显示原色（见 ClientIcon.vue）。
+ *
+ * 为什么不是全部：另外 47 个图标官方本来就是单色（OpenAI / Cursor / Copilot
+ * 的黑白标）、lobe-icons 没有彩色版、或者整幅颜色太浅（openrouter 的荧光黄、
+ * yi 的荧光绿，压在白卡片上对白底不到 2:1，等于隐形）。它们继续走 CSS mask +
+ * 主题色 —— 那正是官方在深浅背景下的正确形态，硬涂一个颜色反而不像。
+ * 浅色可见性阈值取 2:1 而不是 WCAG 的 3:1：图标旁边永远有客户端名字，
+ * 它承担的是「一眼认出是谁」，按 3:1 会把 Postman 橙、NVIDIA 绿这些
+ * 一眼能认出的官方色全砍掉。
+ *
+ * 为什么深色主题回落成 mask：彩色 logo 里常有深色部分（axios 的深紫、
+ * curl 的近黑蓝），压在深色卡片上会糊掉。所以浅色主题显示原色，
+ * 深色主题回落单色轮廓（见 ClientIcon.vue 的 .cli-color 规则）。
+ */
+export const COLOR_ICONS: ReadonlySet<string> = new Set([
+  'aiohttp.svg',
+  'amp.svg',
+  'anthropic-python.svg',
+  'anthropic-ts.svg',
+  'antigravity.svg',
+  'axios.svg',
+  'cherry-studio.svg',
+  'claude.svg',
+  'codegeex.svg',
+  'cohere.svg',
+  'curl.svg',
+  'deepseek.svg',
+  'devin.svg',
+  'dify.svg',
+  'doubao.svg',
+  'fireworks.svg',
+  'gemini-cli.svg',
+  'gemini.svg',
+  'go-http-client.svg',
+  'google-genai.svg',
+  'huggingface.svg',
+  'hunyuan.svg',
+  'kimi.svg',
+  'kiro.svg',
+  'mistral.svg',
+  'nvidia.svg',
+  'openhands.svg',
+  'perplexity.svg',
+  'postman.svg',
+  'python-requests.svg',
+  'python-urllib.svg',
+  'qwen-code.svg',
+  'qwen.svg',
+  'sensenova.svg',
+  'siliconcloud.svg',
+  'sillytavern.svg',
+  'spark.svg',
+  'together.svg',
+  'vllm.svg',
+  'wenxin.svg',
+  'workbuddy.svg',
+  'yuanbao.svg',
+  'zhipu.svg'
+])

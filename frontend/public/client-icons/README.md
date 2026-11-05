@@ -26,19 +26,29 @@
 
 ## 渲染方式
 
-图标以 **CSS mask** 渲染（见 `ClientIcon.vue`）：SVG 只提供轮廓（alpha），
-颜色由 CSS 变量给（`--color-text-secondary`，随主题走）。因此：
+图标有两条渲染支路（见 `ClientIcon.vue`）：
 
-- 图标**不需要**是单色文件，任何 fill（品牌色或 currentColor）在 mask 下
-  都只是「不透明的形状」——换色与主题无关；
-- 反过来，**不要**把图标当成彩色资产来维护：浅色主题下是深灰、深色主题下
-  是浅灰，12 套主题共用一套文件。
+- **单色轮廓**（多数）：CSS mask —— SVG 只提供形状（alpha），颜色由 CSS 变量
+  给（`--color-text-secondary`，随主题走）。图标文件里写什么 fill 都不影响
+  形状，但**不要**把它当彩色资产维护；
+- **官方配色**（`components/clientMeta.ts` 的 `COLOR_ICONS`，43 个）：文件本身
+  就是品牌彩色版，浅色主题直接 `<img>` 显示原色；深色主题回落到上面那条
+  mask 单色轮廓 —— 彩色 logo 里的深色部分（axios 深紫、curl 近黑蓝）压在
+  深色卡片上会糊掉，而黑白标的官方形态本来就是随背景反色。
+
+哪些进 COLOR_ICONS：lobe-icons 有 `<slug>-color.svg` 的（取其彩色版），
+加上少数品牌官方色公认、但 lobe-icons 没出彩色版的（按官方色注入 fill）。
+**整幅颜色太浅的会被排除**（对白底不到 2:1，压在白卡片上等于隐形）：
+openrouter、yi、trae、qoder、junie、langchain 这几个就属于这种情况，
+它们继续走单色。OpenAI / Cursor / Copilot 这类官方就是黑白标的，**故意**
+留在单色档。
 
 ## 来源
 
 | 文件 | 来源 | 说明 |
 |---|---|---|
-| 品牌图标（客户端 / 厂商 / 网关，完整清单见 `ICON_LIBRARY`） | [lobe-icons](https://github.com/lobehub/lobe-icons) `packages/static-svg/icons/`（MIT） | 每个品牌取官方单色轮廓（不带 `-text` / `-color` 后缀的那份），统一 24×24 viewBox |
+| 品牌图标（客户端 / 厂商 / 网关，完整清单见 `ICON_LIBRARY`） | [lobe-icons](https://github.com/lobehub/lobe-icons) `packages/static-svg/icons/`（MIT） | 每个品牌取官方轮廓，统一 24×24 viewBox。2026-11-05 起，能取到 `<slug>-color.svg` 的换成彩色版（进 `COLOR_ICONS`），取不到的留单色 |
+| zcode | ZCode 官网 hero logo `zcode.z.ai/images/hero-visual/zcode-logo@2x.png` | 官方站点未公开 SVG（应用图标只有带底色的 PNG），这里取透明底的标志本体，二值化 alpha 后缩到 128px 内嵌进 SVG —— 18px 下与矢量无差别 |
 | continue / chatbox / nextchat / librechat | 各自官方仓库的矢量资产：`continuedev/continue` 的 `docs/logo/light.svg`、`chatboxai/chatbox` 的 `src/renderer/static/icons/icon-chatbox.svg`、`ChatGPTNextWeb/NextChat` 的 `app/icons/logo.svg`、`danny-avila/LibreChat` 的 `client/public/assets/logo.svg` | 这几个客户端在两个图标库里都没有收录，直接从官方仓库取（ChatBox 取的是符号图标，不是带底色的应用图标） |
 | 通用工具图标（curl / go-http-client / python-urllib / python-requests / aiohttp / axios / postman / insomnia / browser / deepseek） | [simple-icons](https://github.com/simple-icons/simple-icons) `icons/<slug>.svg`（CC0） | 无品牌方 UI 资产可用的库，取其官方 logo 轮廓（python-urllib 用 Python 官方 logo —— 标准库与语言同源）；deepseek 同时是映射面板常用的厂商图标 |
 | default.svg | 本项目自绘 | 终端提示符「>_」：认不出的客户端绝大多数是 CLI/脚本；用问号会暗示「出错了」，而未知是完全正常的状态 |
@@ -49,7 +59,6 @@
 
 - `aider` —— 官方 logo 是 200×60 的字标（`<text>` + 内嵌字体），缩到 18px
   不可读，不适合当图标；
-- `zcode` —— 应用图标只有 PNG，官方站点未公开 SVG，暂不转描；
 - `wget`、`httpx`、`node-fetch`、`undici`、`okhttp`
   （五个库没有品牌 logo —— 它们的设计目标就是「不带身份地发请求」）
 

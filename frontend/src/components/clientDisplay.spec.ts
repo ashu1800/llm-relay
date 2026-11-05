@@ -82,7 +82,8 @@ describe('resolveClientIcon（图标形态识别）', () => {
 
   it('无映射时维持原有两级：CLIENT_META → default', () => {
     const m = aliasMap([])
-    expect(resolveClientIcon('zcode', 'ZCode', m)).toEqual({ kind: 'builtin', file: 'default.svg' })
+    // zcode 2026-11-05 补上了官方图标（此前一直是 default.svg）
+    expect(resolveClientIcon('zcode', 'ZCode', m)).toEqual({ kind: 'builtin', file: 'zcode.svg' })
     expect(resolveClientIcon('codex', 'Codex CLI', m)).toEqual({ kind: 'builtin', file: 'codex.svg' })
     expect(resolveClientIcon('', '', m)).toEqual({ kind: 'builtin', file: 'default.svg' })
   })

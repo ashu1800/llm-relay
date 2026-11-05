@@ -37,6 +37,10 @@ export const useThemeStore = defineStore('theme', () => {
 
   function apply(id: string) {
     document.documentElement.setAttribute('data-theme', id)
+    // 深浅档位单独挂一个属性：客户端图标的品牌彩色版只在浅色主题显示，
+    // 深色主题回落成单色轮廓（理由见 ClientIcon.vue 的 .cli-color 注释）。
+    // 挂在 <html> 上而不是传 prop，是为了让 teleport 到 body 的浮层也能命中。
+    document.documentElement.setAttribute('data-tone', themeById(id).tone)
     const meta = document.querySelector('meta[name="theme-color"]')
     if (meta) meta.setAttribute('content', themeById(id).shell)
   }
