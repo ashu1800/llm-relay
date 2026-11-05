@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { amountText, costText, moneyText, splitCostParts } from './money'
+import { amountText, costText, currencyKeys, moneyText, primaryCurrency, splitCostParts } from './money'
 
 // 金额展示规则。这个文件此前没有测试，而它是全站唯一一份小数位规则 ——
 // 看板、日志列表、日志详情、价格试算都走它。规则悄悄变了的表现是
@@ -73,6 +73,49 @@ describe('moneyText', () => {
   it('看板合计：0 就是 0，写 ¥0.00 是对的', () => {
     expect(moneyText(0, 'CNY')).toBe('¥0.00')
     expect(moneyText('12.5', 'USD')).toBe('$12.5000')
+  })
+})
+
+describe('currencyKeys 固定顺序（只用于并列兜底与列表展示）', () => {
+  it('CNY 在 USD 前，未知币种按字母排在后面', () => {
+    expect(currencyKeys({ USD: '1', CNY: '2', EUR: '3' })).toEqual(['CNY', 'USD', 'EUR'])
+  })
+
+  it('空值返回空数组', () => {
+    expect(currencyKeys(undefined)).toEqual([])
+    expect(currencyKeys(null)).toEqual([])
+    expect(currencyKeys({})).toEqual([])
+  })
+})
+
+describe('primaryCurrency 金额大者优先（2026-11-05 站主要求）', () => {
+  it('美元金额大时主显示美元（以前固定 CNY 优先，会把 $0.0361 缩进提示里）', () => {
+    expect(primaryCurrency({ CNY: '0.00000000', USD: '0.03610000' })).toBe('USD')
+  })
+
+  it('人民币金额大时主显示人民币（截图里的 11.2316 vs 0.0361）', () => {
+    expect(primaryCurrency({ CNY: '11.23160000', USD: '0.03610000' })).toBe('CNY')
+  })
+
+  it('按数字比较，不受字符串字典序影响（9 vs 10）', () => {
+    expect(primaryCurrency({ CNY: '9', USD: '10' })).toBe('USD')
+    expect(primaryCurrency({ CNY: '10', USD: '9' })).toBe('CNY')
+  })
+
+  it('只有一个币种时就是它', () => {
+    expect(primaryCurrency({ USD: '0.00093800' })).toBe('USD')
+    expect(primaryCurrency({ CNY: '0' })).toBe('CNY')
+  })
+
+  it('并列 / 都为 0 / 非法值 → 固定顺序兜底，刷新之间不跳位置', () => {
+    expect(primaryCurrency({ USD: '1', CNY: '1' })).toBe('CNY')
+    expect(primaryCurrency({ CNY: '0', USD: '0' })).toBe('CNY')
+    expect(primaryCurrency({ USD: 'abc', CNY: 'xyz' })).toBe('CNY')
+  })
+
+  it('没有金额时返回空串（卡片显示 -- 而不是凭空造一个币种）', () => {
+    expect(primaryCurrency(undefined)).toBe('')
+    expect(primaryCurrency({})).toBe('')
   })
 })
 

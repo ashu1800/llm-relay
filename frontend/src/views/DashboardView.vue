@@ -555,11 +555,12 @@ async function load(opts: { silent?: boolean } = {}) {
 }
 
 const costCurrencies = computed(() => currencyKeys(summary.value?.costs))
-// 筛选范围把币种钉死时就用它，否则按原来的规则（CNY 优先，其余进提示）。
+// 筛选范围把币种钉死时就用它，否则取金额大的那个（见 money.primaryCurrency）。
 //
-// 为什么需要：筛到一条只记美元账的渠道时，若还按「人民币优先」，
+// 为什么需要钉死：筛到一条只记美元账的渠道时，若还按「人民币优先」，
 // 大数字会是 ¥0.0000、真实金额被塞进「另有 $…」—— 同一块卡片上，
-// 最显眼的位置显示的是一个恒为 0 的数。
+// 最显眼的位置显示的是一个恒为 0 的数。默认视角下同一件事由
+// primaryCurrency 的「金额大者优先」负责（2026-11-05）。
 const scopeCurrency = computed(() => {
   if (channelFilter.value !== ALL) {
     const c = filterChannels.value.find((x) => String(x.id) === channelFilter.value)

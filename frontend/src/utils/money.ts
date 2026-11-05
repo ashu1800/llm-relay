@@ -92,9 +92,38 @@ export function currencyKeys(costs?: Record<string, string> | null): string[] {
   return keys.sort((a, b) => (rank(a) !== rank(b) ? rank(a) - rank(b) : a.localeCompare(b)))
 }
 
-/** 主币种：金额卡片的大数字用它，其余币种并排列在下面 */
+/**
+ * 主币种：金额卡片的大数字用它，其余币种并排列在下面。
+ *
+ * **哪个币种的金额大就用哪个**（2026-11-05 站主要求）。以前是按固定顺序
+ * （CNY 优先）取第一个 —— 顺序稳定，但「稳定」不等于「该被突出」：一段
+ * 时间只记美元账时，大数字会是 ¥0.0000，真实金额缩在「另有 $…」里。
+ * 筛了渠道的场景另有钉死规则（见 DashboardView 的 scopeCurrency），
+ * 这里管的是默认视角。
+ *
+ * 比较的是**账面数字本身**，不是折算后的价值：本文件头已经写明不在币种
+ * 之间换算，「哪个大」只能是数字大小。并列（含都为 0 / 非法值）时退回
+ * 固定顺序，保证两次刷新之间不会自己换位置。
+ */
 export function primaryCurrency(costs?: Record<string, string> | null): string {
-  return currencyKeys(costs)[0] ?? ''
+  const keys = currencyKeys(costs)
+  if (!keys.length) return ''
+  let best = keys[0]
+  let bestVal = costAmount(costs?.[best])
+  for (let i = 1; i < keys.length; i++) {
+    const v = costAmount(costs?.[keys[i]])
+    if (v > bestVal) {
+      best = keys[i]
+      bestVal = v
+    }
+  }
+  return best
+}
+
+/** 金额字符串转数字；非法值按 0（与 amountText 的口径一致，不抛错） */
+function costAmount(v: string | number | null | undefined): number {
+  const n = Number(v ?? 0)
+  return Number.isFinite(n) ? n : 0
 }
 
 /** 把 costs 渲染成一行「¥12.34 / $5.67」；没有金额时返回空串。

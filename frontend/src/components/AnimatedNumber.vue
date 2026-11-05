@@ -145,6 +145,28 @@ onUnmounted(() => {
   cancelAnimationFrame(raf)
   if (fallbackTimer !== null) window.clearTimeout(fallbackTimer)
 })
+
+// 币种切换不补间（2026-11-05）：主币种现在按「金额大者优先」动态选
+//（见 utils/money.primaryCurrency），所以 currency 会在 ¥ 与 $ 之间换。
+// 换的那一刻 props.value 也从人民币金额变成美元金额 —— 两个数属于不同
+// 币种、不能相减。若照常补间，中间帧会显示「$11.23」（从 ¥11.2316 滚向
+// $0.0361），而那个数从未存在过。与「上一帧为空」同理：这不是数值变化，
+// 是口径变化，直接落值。
+//
+// 注册在 value 的 watch 之后：两者同一拍触发时，这里后跑，取消掉刚排上的
+// 补间（此时 rAF 回调尚未执行），最终停在目标值。
+watch(
+  () => props.currency,
+  () => {
+    cancelAnimationFrame(raf)
+    if (fallbackTimer !== null) {
+      window.clearTimeout(fallbackTimer)
+      fallbackTimer = null
+    }
+    isUpdating.value = false
+    shown.value = props.value ?? 0
+  }
+)
 </script>
 
 <template>
