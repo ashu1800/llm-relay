@@ -80,6 +80,9 @@ func (s *Server) getSettings(c *gin.Context) {
 			// 毫秒而非秒：默认值 500ms 换算成整秒是 0，界面上会显示成
 			// 「已关闭」——那是与实际相反的误导。
 			"retry_same_upstream_delay_ms": int(cfg.Relay.RetrySameUpstreamDelay.Milliseconds()),
+			// 无感更新的排空上限（老进程等在途对话跑完的时间）。
+			// 同样是毫秒：默认 5 分钟，用秒会显示成 300，不如毫秒直白。
+			"update_drain_timeout_ms": int(cfg.Update.DrainTimeout.Milliseconds()),
 			// 登录鉴权状态与会话时长。密钥本身（哪怕哈希）永远不出接口；
 			// auth_method 告诉前端当前是二选一里的哪一种（unset=待初始化）
 			"console_auth_enabled": s.consoleAuthEnabled(),

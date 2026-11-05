@@ -174,18 +174,22 @@ func (s *Server) rollback(c *gin.Context) {
 
 // restartService 重启服务以应用更新。
 //
-// # 为什么这里不直接 os.Exit
+// # 为什么不在这里 os.Exit
 //
 // 进程自己退出、靠 systemd 的 Restart=always 拉起来，是最简洁的做法，
 // 但它只在 systemd 托管下成立 —— 官方部署形态（install.sh）正是如此，
 // 而开发者的 source 构建本来就不该由网页远程重启。
 //
-// 所以走一条在 systemd 托管下成立的路：**先回响应、再退出**。
-// 进程退出后 Restart=always 会用（更新流程刚刚原子替换好的）可执行文件
-// 把服务拉起来。
+// 而且「退出 → 托管方拉起」这条路上有 3~5 秒没有任何进程在 listen
+// （RestartSec=3 + 新进程连库跑迁移），在途的对话流会被直接切断。
+// 2026-11-05 站主要求做成无感更新，于是切换方式改由装配层决定：
 //
-// 之前必须先把 HTTP 响应写出去：直接 os.Exit 会让前端拿到一个
-// 连接被重置的错误，用户看到的是「重启失败」，而实际上重启成功了。
+//   - systemd Type=notify 下走**无感交接**（新进程接手监听套接字，
+//     老进程把手上的请求跑完再退，见 internal/upgrade）；
+//   - 其余情况退回老路（本函数只置位，退出由 cmd/server 做）。
+//
+// 无论哪条路，都必须**先把 HTTP 响应写出去**：直接退进程会让前端拿到
+// 一个连接被重置的错误，用户看到的是「重启失败」，而实际上重启成功了。
 func (s *Server) restartService(c *gin.Context) {
 	// 用 202 而不是 200：语义上是「已接受，正在执行」，
 	// 而连接随时可能断，前端不该把它当成一次普通的成功响应
@@ -197,23 +201,32 @@ func (s *Server) restartService(c *gin.Context) {
 	//
 	// gin 的 c.JSON 只是写进了 ResponseWriter 的缓冲，
 	// 真正的 flush 发生在 handler 返回之后 —— 所以这里要显式 Flush，
-	// 否则 os.Exit 会在数据发出前把进程干掉，前端拿到的是连接重置。
+	// 否则进程退出会在数据发出前把连接干掉，前端拿到的是连接重置。
 	if f, ok := c.Writer.(http.Flusher); ok {
 		f.Flush()
 	}
 
+	if s.deps.RequestRestart != nil {
+		s.deps.RequestRestart()
+		return
+	}
+
+	// 没接线（测试装配）：保持老行为，自己退出让托管方拉起。
 	// 稍等一下再退，给 TCP 一点时间把上面那个响应送出去。
 	// 200ms 是实测够用的值（同一个机房/本机的往返通常 < 5ms，
 	// 经反代也不过几十毫秒），同时短到用户察觉不到。
 	go func() {
 		time.Sleep(200 * time.Millisecond)
-		code := restartExitCode()
+		code := RestartExitCode()
 		slog.Info("收到重启请求，进程即将退出以触发托管方拉起", "exit_code", code)
 		os.Exit(code)
 	}()
 }
 
-// restartExitCode 返回「主动退出以让托管方重新拉起」时该用的退出码。
+// RestartExitCode 返回「主动退出以让托管方重新拉起」时该用的退出码。
+//
+// 导出是因为退出动作搬到了 cmd/server：无感交接不可用时由它自己 os.Exit，
+// 判据必须仍然只有一份（写错的表现见下）。
 //
 // 两个平台的判据不同，而写错的表现都是「点了重启，服务再也没回来」：
 //
@@ -225,7 +238,7 @@ func (s *Server) restartService(c *gin.Context) {
 //
 // 用 75 而不是 1：1 与「启动失败」的退出码撞了，运维看事件日志时
 // 分不清这次退出是「用户点了重启」还是「程序起不来」。
-func restartExitCode() int {
+func RestartExitCode() int {
 	if runtime.GOOS == "windows" {
 		return 75
 	}

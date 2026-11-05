@@ -195,3 +195,39 @@ func TestDisplayRate(t *testing.T) {
 		}
 	})
 }
+
+// 无感更新的排空上限：默认值可用、非正值拒绝启动、环境变量入口真的接上。
+// 与汇率同一类「部署侧必须能自己调」的配置（CLAUDE.md 硬约定 13）。
+func TestUpdateDrainTimeout(t *testing.T) {
+	t.Run("默认值可用", func(t *testing.T) {
+		c := Default()
+		if c.Update.DrainTimeout <= 0 {
+			t.Fatalf("默认排空上限 = %s，必须为正", c.Update.DrainTimeout)
+		}
+		if err := c.validate(); err != nil {
+			t.Fatalf("默认配置不该报错：%v", err)
+		}
+	})
+
+	t.Run("非正上限拒绝启动", func(t *testing.T) {
+		for _, v := range []time.Duration{0, -time.Minute} {
+			c := Default()
+			c.Update.DrainTimeout = v
+			if err := c.validate(); err == nil || !strings.Contains(err.Error(), "drain_timeout") {
+				t.Fatalf("排空上限 %s 应被拒绝，实际 %v", v, err)
+			}
+		}
+	})
+
+	t.Run("环境变量入口", func(t *testing.T) {
+		t.Setenv("UPDATE_DRAIN_TIMEOUT", "90s")
+		c := Default()
+		applyEnv(c)
+		if c.Update.DrainTimeout != 90*time.Second {
+			t.Errorf("排空上限 = %s，期望 90s", c.Update.DrainTimeout)
+		}
+		if envKeys()["update_drain_timeout_ms"] != "UPDATE_DRAIN_TIMEOUT" {
+			t.Errorf("envKeys 缺少 update_drain_timeout_ms —— 部署侧看不到可用的环境变量名")
+		}
+	})
+}

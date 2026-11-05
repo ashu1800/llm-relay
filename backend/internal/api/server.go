@@ -56,6 +56,12 @@ type Deps struct {
 	// 不同，这是**合法的运行形态**（缓存默认关），所有读它的路径都必须
 	// nil 安全（cache 包的方法本身已 nil 安全）。
 	Cache *relaycache.Cache
+
+	// RequestRestart 触发「重启以应用更新」，**非阻塞**：它只负责置位，
+	// 真正怎么切换（无感交接 / 退出让 systemd 拉起）由 cmd/server 决定 ——
+	// 那需要监听套接字与进程生命周期，API 层两样都没有。
+	// 为 nil 时退回「回完响应就 os.Exit」的老行为（测试装配用）。
+	RequestRestart func()
 }
 
 // Server 持有 HTTP 层状态。

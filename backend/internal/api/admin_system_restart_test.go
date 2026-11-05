@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// restartExitCode 是「进程退出、让托管方把自己拉起来」时的退出码。
+// RestartExitCode 是「进程退出、让托管方把自己拉起来」时的退出码。
 //
 // 两个平台的判据完全不同，而写错的表现都是「点了重启，服务再也没回来」：
 //
@@ -16,7 +16,7 @@ import (
 //     exit(0) 被 SCM 视为「服务正常停止」，恢复策略不会触发，
 //     服务就永远停在那儿。所以 Windows 必须用非零码。
 func TestRestartExitCode(t *testing.T) {
-	got := restartExitCode()
+	got := RestartExitCode()
 
 	if runtime.GOOS == "windows" {
 		if got == 0 {

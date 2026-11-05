@@ -298,6 +298,7 @@ const runtimeRows = [
   { key: 'max_concurrency', label: '上游并发上限' },
   { key: 'default_rpm', label: '默认每分钟请求上限' },
   { key: 'retry_same_upstream_delay_ms', label: '同上游重试等待（毫秒）' },
+  { key: 'update_drain_timeout_ms', label: '无感更新排空上限（毫秒）' },
   { key: 'usd_cny_rate', label: '美元兑人民币汇率（看板排序用）' }
 ]
 

@@ -296,6 +296,24 @@ Get-Content -Wait "$env:ProgramData\llm-relay\logs\llm-relay.log"   # 实时日�
 - **更新完不自动重启**：新版本若启动就崩，自动重启会变成崩溃循环，而留在旧进程上的
   管理台正是唯一的救援入口。
 
+### 无感更新（Linux + systemd）
+
+更新时线上请求**不会中断**：老进程把监听套接字交给新进程，新进程立刻接手新连接，
+老进程把手上的请求（包括正在流式返回的对话）跑完再退出 —— 期间没有任何一刻
+端口是关着的。实现见 `backend/internal/upgrade`。
+
+前提是 systemd 单元为 `Type=notify`（`deploy/install.sh` 写的就是它）：
+
+- 老进程最多等 `UPDATE_DRAIN_TIMEOUT`（默认 5 分钟）让在途请求跑完，超时的会被切断；
+- 任何一步失败（新进程没起来 / 交接不被 systemd 接受）都退回老方式：进程退出、
+  `Restart=always` 用新二进制拉起。更新一定落地，只是会中断几秒；
+- **从旧版本升上来要重跑一次 `deploy/install.sh`**：它把单元从 `Type=simple`
+  改成 `Type=notify`。没换单元之前更新仍走老方式，日志里会写明原因；
+- 破坏性迁移（删列/删表）在排空窗口内会出现新旧两代代码同跑，这类变更应按
+  expand/contract 拆到两个版本；
+- `systemctl restart llm-relay` 这类外部重启仍是硬重启（systemd 先停后起）：
+  无感只覆盖「管理台一键更新 / 立即重启」这条应用内路径。
+
 检测走 GitHub Releases API，未配 token 限额每小时 60 次。**服务端每 5 分钟自己检测一次**
 （后台定时，进程启动一分钟后开始；未配 token 时每小时 12 次，占共享限额的五分之一），
 结果落在与手动检测同一份缓存里，打开面板或侧栏徽标读到的就是它，检测时间最多差 5 分钟；
@@ -349,6 +367,7 @@ curl -s http://127.0.0.1:8888/system/info | python3 -m json.tool
 | `RELAY_CLIENT_MAP_LIMIT` | `2048` | 客户端显示映射的进程内缓存上限；满了淘汰最久未用的，不拒绝新客户端 |
 | `RELAY_CLIENT_MAP_TTL` | `168h` | 映射缓存条目的闲置过期时间，`0` 表示只靠容量淘汰 |
 | `DISPLAY_USD_CNY_RATE` | `7.1` | 美元兑人民币汇率，**只**用于看板「消耗金额」卡决定哪个币种当大字（按折算后的价值比大小）；不参与计价与落库 |
+| `UPDATE_DRAIN_TIMEOUT` | `5m` | 无感更新时老进程等在途请求跑完的上限；只在 systemd `Type=notify` 下生效 |
 | `TZ` | `Asia/Shanghai` | 进程本地时区：可用时段与时段倍率按它判断 |
 
 ## 密钥与安全

@@ -21,6 +21,7 @@ type Config struct {
 	Security SecurityConfig `yaml:"security"`
 	Log      LogConfig      `yaml:"log"`
 	Display  DisplayConfig  `yaml:"display"`
+	Update   UpdateConfig   `yaml:"update"`
 }
 
 // SecurityConfig 保管加密主密钥、管理台登录密钥与出站凭据。
@@ -166,6 +167,21 @@ type DisplayConfig struct {
 	USDCNYRate float64 `yaml:"usd_cny_rate"`
 }
 
+// UpdateConfig 是「应用新版本时怎么切换」的配置。
+type UpdateConfig struct {
+	// DrainTimeout 是无感更新时**老进程**等在途请求跑完的上限。
+	//
+	// 为什么是分钟级：一次对话就是一条 SSE 长连接，跑几分钟很正常 ——
+	// 老进程要一直陪着它跑完，这期间新连接由新进程接。给太短等于
+	// 「更新时照样切对话」；给太长，老进程（连同它的数据库连接）留得太久。
+	// 默认 5 分钟：绝大多数对话在这个量级内结束，同时不会让两个进程长期并存。
+	// 超时还没跑完的请求会被切断 —— 那是「更新」这件事本身的边界，
+	// 不是本机制的缺陷。
+	//
+	// 只在 systemd Type=notify 的部署下生效（判据见 internal/upgrade）。
+	DrainTimeout time.Duration `yaml:"drain_timeout"`
+}
+
 type LogConfig struct {
 	Level  string `yaml:"level"`  // debug | info | warn | error
 	Format string `yaml:"format"` // text | json
@@ -229,6 +245,8 @@ func Default() *Config {
 		// 汇率默认值见 DisplayConfig.USDCNYRate 的说明：只是「谁排大字」的
 		// 比较口径，改它不影响任何已落库的金额。
 		Display: DisplayConfig{USDCNYRate: 7.1},
+		// 无感更新的排空上限，取值理由见 UpdateConfig.DrainTimeout 的说明。
+		Update: UpdateConfig{DrainTimeout: 5 * time.Minute},
 	}
 	// TrustedProxies 不能写进上面的字面量后统一返回 —— 切片是可变值，
 	// 两个调用方拿到同一底层数组会互相改写；每次现造一份。
@@ -313,6 +331,8 @@ func applyEnv(c *Config) {
 	setStr(&c.Log.Format, "LOG_FORMAT")
 
 	setFloat(&c.Display.USDCNYRate, "DISPLAY_USD_CNY_RATE")
+
+	setDuration(&c.Update.DrainTimeout, "UPDATE_DRAIN_TIMEOUT")
 }
 
 // envKeys 列出所有被 applyEnv 识别的环境变量。
@@ -354,6 +374,7 @@ func envKeys() map[string]string {
 		"console_auth_enabled":         "RELAY_ADMIN_KEY",
 		"session_ttl_hours":            "RELAY_SESSION_TTL",
 		"usd_cny_rate":                 "DISPLAY_USD_CNY_RATE",
+		"update_drain_timeout_ms":      "UPDATE_DRAIN_TIMEOUT",
 		"database":                     "DB_HOST / DB_PORT / DB_USER / DB_PASSWORD / DB_NAME / DB_SSLMODE / DB_TIMEZONE",
 	}
 }
@@ -439,6 +460,12 @@ func (c *Config) validate() error {
 	// 默认值可用，这里只拦显式配错。
 	if math.IsNaN(c.Display.USDCNYRate) || math.IsInf(c.Display.USDCNYRate, 0) || c.Display.USDCNYRate <= 0 {
 		return fmt.Errorf("display.usd_cny_rate 必须为正数，当前: %v", c.Display.USDCNYRate)
+	}
+	// 排空上限必须是正数：0 或负数等于「交接完立刻退出」，在途对话照样被切，
+	// 而界面上看不出任何异常（用户会以为无感更新生效了）。显式配错就拒绝启动。
+	if c.Update.DrainTimeout <= 0 {
+		return fmt.Errorf("update.drain_timeout 必须为正数（当前 %s）：0 或负数等于不排空，"+
+			"更新时在途对话会被直接切断", c.Update.DrainTimeout)
 	}
 	return nil
 }

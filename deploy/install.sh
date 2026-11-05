@@ -289,7 +289,13 @@ Wants=network-online.target
 Requires=postgresql.service
 
 [Service]
-Type=simple
+# Type=notify 是「无感更新」的前提，不是可选项：
+# 更新时老进程会把监听套接字交给新进程，然后用 MAINPID= 把主进程身份
+# 交给它，再自己退出。单元必须是 notify 类型，systemd 才认这条交接；
+# 否则老进程一退，默认的 KillMode=control-group 会把新进程一起清掉。
+# 进程在监听开始后上报 READY=1，所以启动判定也比 simple 更准。
+Type=notify
+NotifyAccess=main
 WorkingDirectory=${INSTALL_DIR}
 # 配置以环境变量注入，.env 里可能含数据库密码，因此不让 systemd 读取整个文件，
 # 而是由 EnvironmentFile 解析后逐条传入（systemd 原生支持这种写法）

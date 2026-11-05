@@ -37,6 +37,7 @@ import (
 	"llm-relay/internal/secure"
 	"llm-relay/internal/service"
 	"llm-relay/internal/update"
+	"llm-relay/internal/upgrade"
 	"llm-relay/internal/version"
 )
 
@@ -290,6 +291,14 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("配置可信代理失败: %w", err)
 	}
 
+	// 「重启以应用更新」的触发点：API 层只置位（非阻塞），
+	// 具体走无感交接还是退出让 systemd 拉起，由下面的主循环决定 ——
+	// 那需要监听套接字和进程生命周期，API 层两样都没有。
+	// 用 sync.Once 包一层：连点两次「立即重启」不该触发两次交接。
+	restartCh := make(chan struct{})
+	var restartOnce sync.Once
+	requestRestart := func() { restartOnce.Do(func() { close(restartCh) }) }
+
 	srv := api.New(&api.Deps{
 		Config:  cfg,
 		Store:   st,
@@ -306,6 +315,8 @@ func run(ctx context.Context) error {
 
 		// 版本更新：Update 提供检测 / 应用 / 回滚的全套服务
 		Update: updateSvc,
+		// 重启触发点：只置位，切换方式由主循环决定（见上面 restartCh）
+		RequestRestart: requestRestart,
 		// 参考价库：定价页「从参考价库填充」的建议价源。下载走 Update 的
 		// 代理与目标校验（FetchFile），内嵌快照兜底 —— 管理台离线也能搜
 		Catalog: priceCatalog,
@@ -356,20 +367,34 @@ func run(ctx context.Context) error {
 	// 这里不再自己 signal.NotifyContext —— 两处各接一次的话，
 	// Windows 服务下 SCM 的请求会没人理，进程只能被 TerminateProcess。
 
-	// 推送循环跟着进程生命周期走：退出时 ctx 结束，两个 goroutine 自行收尾
-	srv.StartLive(ctx)
+	// 后台循环挂在 bgCtx 上，而不是 ctx：无感交接时只停循环、不停 HTTP ——
+	// 排空期间老进程还要把手上的对话跑完（见下面 restartCh 分支）。
+	// 托管方要求停止时两者一起取消，行为与以前一致。
+	bgCtx, bgCancel := context.WithCancel(ctx)
+	defer bgCancel()
+
+	// 推送循环跟着进程生命周期走：退出时 bgCtx 结束，两个 goroutine 自行收尾
+	srv.StartLive(bgCtx)
 
 	// 密钥限流窗口的定期回收 + 日志保留期的自动清理，都跟着进程生命周期走；
 	// 渠道状态（冷却条目）同样挂上回收 —— 它的 map 只在被动访问时清理，
 	// 删除的渠道会留永久残余
-	rateLimiter.StartSweeper(ctx, 10*time.Minute)
-	state.StartSweeper(ctx, 10*time.Minute)
-	srv.StartRetentionLoop(ctx)
+	rateLimiter.StartSweeper(bgCtx, 10*time.Minute)
+	state.StartSweeper(bgCtx, 10*time.Minute)
+	srv.StartRetentionLoop(bgCtx)
 
 	// 版本检测同理：服务端每 5 分钟自己查一次发布源，结果写进更新服务的缓存。
 	// 原先只在打开版本面板时检测，于是「有没有新版本」在没人打开面板时
 	// 永远没有答案（见 update.BackgroundCheckInterval 的说明）。
-	updateSvc.StartCheckLoop(ctx, update.BackgroundCheckInterval)
+	updateSvc.StartCheckLoop(bgCtx, update.BackgroundCheckInterval)
+
+	// 监听套接字：无感交接时由老进程交过来（见 internal/upgrade）。
+	// 拿到继承的套接字就**不能**再 bind —— 端口正在老进程手里，
+	// 重复 bind 会 EADDRINUSE，交接当场失败。
+	ln, inherited, err := openListener(cfg.Server.Addr(), logger)
+	if err != nil {
+		return err
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -378,22 +403,118 @@ func run(ctx context.Context) error {
 			"version", version.Version,
 			"mode", cfg.Server.Mode,
 		)
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
+
+	// 就绪上报，两件事一起做：
+	//   · systemd 的 Type=notify 单元要收到 READY=1 才把服务标成 active，
+	//     否则启动超时会被判失败；
+	//   · 交接出来的子进程要告诉父进程「我已经能服务了，你可以放手」。
+	// 子进程跳过 READY=1：它此刻还不是 systemd 的主进程，报了也会被忽略
+	// （NotifyAccess=main），MAINPID= 那条由父进程发。
+	if !inherited {
+		upgrade.NotifyReady()
+	}
+	if err := upgrade.NotifyChildReady(); err != nil {
+		logger.Warn("通知老进程就绪失败", "err", err)
+	}
 
 	select {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
 		logger.Info("收到停止请求，开始优雅关闭", "os", runtime.GOOS)
+		bgCancel()
+		// 退出预算按平台取：Windows 的停机宽限只有约 5 秒，
+		// 用 Linux 的 5.0s 会踩线被强杀（见常量处的说明）。
+		httpTimeout, flushTimeout, headerGrace := shutdownBudget()
+		stopServing(httpSrv, conns, logs, headerGrace, httpTimeout, flushTimeout, logger)
+		logger.Info("已退出")
+		return nil
+	case <-restartCh:
+		bgCancel()
+		if handoff(ln, logger) {
+			// 新进程已经接手新连接：这里只负责把手上的请求跑完。
+			// 排空上限是分钟级（一次对话本来就可能跑几分钟），而这段时间
+			// 服务由新进程提供，老进程多留一会儿不影响任何人。
+			stopServing(httpSrv, conns, logs, shutdownHeaderGrace, cfg.Update.DrainTimeout, 5*time.Second, logger)
+			logger.Info("排空完成，老进程退出（服务由新进程继续提供）")
+			return nil
+		}
+		// 退回老路：立刻退出，由 systemd 的 Restart=always 用新二进制拉起。
+		// 这里**不排空** —— 老进程还占着端口，多等一秒就多一秒没人服务。
+		code := api.RestartExitCode()
+		logger.Info("按传统方式重启以应用更新", "exit_code", code)
+		time.Sleep(200 * time.Millisecond)
+		os.Exit(code)
+		return nil
 	}
+}
 
-	// 退出预算按平台取：Windows 的停机宽限只有约 5 秒，
-	// 用 Linux 的 5.0s 会踩线被强杀（见常量处的说明）。
-	httpTimeout, flushTimeout, headerGrace := shutdownBudget()
+// handoffTimeout 是等新进程就绪的上限。
+//
+// 新进程要重连数据库、跑迁移，正常在一秒内完成；30 秒是留给
+// 「数据库正好慢一下」的余量。超过这个时间说明它大概率起不来，
+// 继续等只会让用户点了更新之后长时间看不到任何反应。
+const handoffTimeout = 30 * time.Second
 
+// openListener 返回要服务的监听器。
+//
+// 第二个返回值表示「这是老进程交接过来的套接字」：调用方据此跳过 READY=1
+// （它还不是 systemd 的主进程，见调用处）。
+func openListener(addr string, logger *slog.Logger) (net.Listener, bool, error) {
+	if ln, ok := upgrade.InheritedListener(); ok {
+		logger.Info("接续老进程交过来的监听套接字，开始服务", "addr", addr)
+		return ln, true, nil
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, false, err
+	}
+	return ln, false, nil
+}
+
+// handoff 尝试无感交接：新进程接手监听套接字并开始服务。
+//
+// 返回 true 表示可以开始排空（调用方之后只负责把在途请求跑完再退出）。
+// 任何一步失败都返回 false，调用方退回「退出让 systemd 拉起」的老路 ——
+// 更新必须落地：宁可中断一次，也不能让用户点了更新之后什么都没发生。
+func handoff(ln net.Listener, logger *slog.Logger) bool {
+	if reason := upgrade.UnsupportedReason(); reason != "" {
+		logger.Info("本次更新无法无感交接，将按传统方式重启", "reason", reason)
+		return false
+	}
+	exe, err := update.SelfPath()
+	if err != nil {
+		logger.Warn("无法定位可执行文件，按传统方式重启", "err", err)
+		return false
+	}
+	child, err := upgrade.Spawn(exe, ln, os.Args[1:], handoffTimeout)
+	if err != nil {
+		logger.Warn("新进程没有起来，老进程继续服务（本次更新未应用）", "err", err)
+		return false
+	}
+	// 先把 systemd 的主进程身份交出去，再让老进程退出。
+	// 顺序不能反：老进程一退，systemd 就按 cgroup 清理，
+	// 那时还没换主进程的话新进程会被一起杀掉。
+	if err := upgrade.NotifyMainPID(child.Pid); err != nil {
+		logger.Warn("移交 systemd 主进程身份失败，终止新进程并按传统方式重启", "err", err)
+		_ = child.Kill()
+		return false
+	}
+	logger.Info("新进程已接手，老进程开始排空在途请求", "child_pid", child.Pid)
+	return true
+}
+
+// stopServing 停止接受新连接、等在途请求收尾，然后冲刷日志队列。
+//
+// httpTimeout 是「等在途请求」的上限，两个调用方给的量级差很远：
+//   - 托管方要求停止时是秒级预算：Windows 的停机宽限只有约 5 秒，
+//     Linux 上真实停机时间就等于用户感知的不可用时长；
+//   - 无感交接时是分钟级：对话流本来就长，且服务此时由新进程提供。
+func stopServing(httpSrv *http.Server, conns *newConnTracker, logs *relay.LogWriter, headerGrace, httpTimeout, flushTimeout time.Duration, logger *slog.Logger) {
 	// 先叫醒那些「连上了但一个字节都没发」的连接，再 Shutdown。
 	//
 	// Shutdown 内部会关掉所有空闲连接，但它对 StateNew 的连接有 5 秒特判
@@ -434,8 +555,7 @@ func run(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), httpTimeout)
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-		// 超时也要往下走：日志队列里还有没落库的记录，直接 return 会连它一起丢。
-		// （原样返回 err 会让 run() 走 os.Exit(1)，defer 里的收尾不会执行。）
+		// 超时也要往下走：日志队列里还有没落库的记录，直接返回会连它一起丢。
 		logger.Warn("优雅关闭未在预算内完成，继续收尾", "err", err)
 	}
 	close(shutdownDone)
@@ -444,9 +564,6 @@ func run(ctx context.Context) error {
 	// 而它只 close 通道、不等写完 —— 进程一退出，队列里剩下的请求日志就没了。
 	// 队列上限 2048，必须在宽限期内做完，所以给它一个明确的上限。
 	logs.CloseAndFlush(flushTimeout, logger)
-
-	logger.Info("已退出")
-	return nil
 }
 
 // newConnTracker 记录「已连接但请求头还没收完」的连接。

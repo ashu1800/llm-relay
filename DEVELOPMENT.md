@@ -1201,6 +1201,51 @@ TTL 让长期不出现的条目退场，两者合起来才有界且不误伤。
 零淘汰、LRU 顺序、5000 键容量有界、TTL 回收、并发（`-race`）、告警限频；
 `config_test.go` 钉住默认值与两个环境变量入口。
 
+### 无感更新：套接字交接 + 排空（2026-11-05）
+
+**问题**：站主反馈「每次更新，正在对话的请求都断」。原来的路径是
+`/system/restart` → `os.Exit(0)` → systemd `Restart=always` 拉起新进程，
+两个伤口都是结构性的：
+
+1. `os.Exit` 直接杀掉进程，在途的 SSE 对话流当场断掉；
+2. `RestartSec=3` 加上新进程连库跑迁移，这 3~5 秒里没有任何进程在 listen，
+   新连接被拒（`ECONNREFUSED`）。
+
+**做法**（`internal/upgrade` + `cmd/server`）：老进程把监听套接字交给新进程
+（`exec.Cmd.ExtraFiles` → 子进程 fd 3），新进程在**老进程还在服务**的情况下
+完成初始化并开始 accept，然后往管道写一行 READY；老进程收到后才
+`http.Server.Shutdown`（关掉自己那份监听器、等在途请求跑完，上限
+`UPDATE_DRAIN_TIMEOUT`，默认 5 分钟）再退出。交接窗口里任何一刻都有人在
+accept，新连接不会撞上空窗。
+
+**为什么必须有 systemd `Type=notify`**：老进程退出时，默认的
+`KillMode=control-group` 会把整个 cgroup 一起清掉 —— 包括刚接手的新进程。
+`Type=notify` 下老进程可以用 `MAINPID=` 把「主进程」身份交给子进程，systemd
+才认这次交接。没有 `NOTIFY_SOCKET`（旧单元 / 非 systemd / Windows）时
+`upgrade.Supported()` 返回 false，**退回原路径** —— 只是会中断，不会坏。
+
+**失败兜底**（都退回原路径，更新一定落地）：
+
+- 新进程 30 秒内没 READY → 杀掉它，老进程继续服务，本次更新未应用；
+- `MAINPID=` 发送失败 → 杀掉新进程，老进程继续服务；
+- 其余情况 → 老进程 `os.Exit`，systemd 用新二进制拉起。
+
+**已知边界**：
+
+- `systemctl restart llm-relay` 仍是硬重启（systemd 先停后起），无感只覆盖
+  应用内的「一键更新 / 立即重启」；
+- 排空窗口内新旧两代代码同跑，破坏性迁移（删列/删表）要按 expand/contract
+  拆到两个版本 —— 这是零停机部署的通病，不是本实现的缺陷；
+- 老进程排空期间后台循环已经停了（`bgCtx` 取消），但 WebSocket 连接要等
+  老进程退出才断，前端会自动重连。
+
+**验证**：`internal/upgrade/upgrade_test.go` 钉住判据（没有 `NOTIFY_SOCKET`
+必须报不支持、非法 fd 不接受、`MAINPID=0` 拒绝、环境变量去重、通知真能写到
+unixgram）。**真正的交接只能在 Linux + systemd 上验**（开发机是 Windows，
+没有 WSL/Docker）：升级后 `journalctl -u llm-relay` 应当看到「新进程已接手，
+老进程开始排空在途请求」与「排空完成，老进程退出」，同时用一个长请求
+（`curl` 一个 SSE 接口）确认它没有断。
+
 ## UI 还原说明
 
 设计令牌与布局尺寸均通过 Chrome DevTools Protocol 抓取参考站（`llm.ohub.vip`）
