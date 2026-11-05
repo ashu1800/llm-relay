@@ -24,7 +24,7 @@
 // 仍用 PanelCard，不传 title 时它不会渲染标题栏。
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { message } from '@/utils/feedback'
-import { ArrowUpOutlined, CheckOutlined, CloseOutlined, CodeOutlined, CopyOutlined } from '@ant-design/icons-vue'
+import { ArrowUpOutlined, CheckOutlined, CloseOutlined, CopyOutlined } from '@ant-design/icons-vue'
 import { buildCurlCommand } from '@/utils/curl'
 import { api } from '@/api/client'
 import DataState from '@/components/DataState.vue'
@@ -2371,17 +2371,8 @@ onMounted(() => {
            键盘用户不必先 Tab 到按钮上（见 onDetailKeydown）。 -->
       <template #extra>
         <a-space>
-          <a-button
-            size="small"
-            class="table-icon-btn"
-            title="复制终端 cURL 复现命令"
-            aria-label="复制终端 cURL 复现命令"
-            @click="copyCurl"
-          >
-            <CodeOutlined v-if="copiedWhat !== 'curl'" />
-            <CheckOutlined v-else class="trace-copy-ok" />
-            <span style="margin-left: 4px">{{ copiedWhat === 'curl' ? '已复制 cURL' : '复制 cURL' }}</span>
-          </a-button>
+          <!-- 复制 cURL 的入口只在下面的「终端复现」框里保留一份
+               （2026-11-05 站主要求移除这里重复的按钮）。 -->
           <a-button
             size="small"
             :disabled="detailIndex <= 0"
