@@ -47,6 +47,7 @@ export const CLIENT_META: Record<string, ClientMeta> = {
   'qwen-code': { name: 'Qwen Code', file: 'qwen-code.svg' },
   trae: { name: 'Trae', file: 'trae.svg' },
   zcode: { name: 'ZCode', file: 'zcode.svg' },
+  pi: { name: 'Pi', file: 'pi.svg' },
 
   // ---- 桌面 / Web 聊天客户端 ----
   'cherry-studio': { name: 'Cherry Studio', file: 'cherry-studio.svg' },
@@ -173,6 +174,7 @@ export const ICON_LIBRARY: string[] = [
   'openhands.svg',
   'openrouter.svg',
   'perplexity.svg',
+  'pi.svg',
   'poe.svg',
   'postman.svg',
   'python-requests.svg',
@@ -249,6 +251,7 @@ export const COLOR_ICONS: ReadonlySet<string> = new Set([
   'nvidia.svg',
   'openhands.svg',
   'perplexity.svg',
+  'pi.svg',
   'postman.svg',
   'python-requests.svg',
   'python-urllib.svg',
@@ -270,9 +273,14 @@ export const COLOR_ICONS: ReadonlySet<string> = new Set([
 /**
  * 自带底色的图标：**任何主题**都直接画原图，不回落单色轮廓。
  *
- * 目前只有 ZCode：它的图标是「黑色圆角方块 + 白色 Z」的应用图标（站主
- * 2026-11-05 指出要的就是这张，不是官网 hero 里那个灰色钩形标记）。
- * mask 只取 alpha —— 这张图的 alpha 是一整个方块，回落出来就是一块实心
- * 圆角方块、Z 直接消失，比「深色下糊掉」更糟，所以它没有回落档。
+ * 目前只有 ZCode 与 Pi，两种原因：
+ *   · ZCode 的图标是「黑色圆角方块 + 白色 Z」的应用图标（站主
+ *     2026-11-05 指出要的就是这张，不是官网 hero 里那个灰色钩形标记）。
+ *     mask 只取 alpha —— 这张图的 alpha 是一整个方块，回落出来就是一块实心
+ *     圆角方块、Z 直接消失，比「深色下糊掉」更糟，所以它没有回落档。
+ *   · Pi 的官方标志是珊瑚 / 蓝 / 黄三色（2026-11-06 站主要求「要彩色的
+ *     图标」）。三色在深色卡片（--color-fg #303030）上的对比度都在 4:1
+ *     以上（红 5.7:1、蓝 4.2:1、黄 7.7:1），不存在别的彩色 logo 那种
+ *     「深色部分糊进背景」的问题 —— 回落到单色反而丢掉了用户要的形态。
  */
-export const COLOR_ONLY_ICONS: ReadonlySet<string> = new Set(['zcode.svg'])
+export const COLOR_ONLY_ICONS: ReadonlySet<string> = new Set(['zcode.svg', 'pi.svg'])

@@ -70,8 +70,10 @@ const maskFile = computed(() => maskIconFile(resolved.value, props.id, imgFailed
 const colorFile = computed(() =>
   resolved.value.kind === 'builtin' && COLOR_ICONS.has(resolved.value.file) ? resolved.value.file : ''
 )
-// 自带底色的图标（COLOR_ONLY_ICONS）：连深色主题也画原图 —— 它们的 mask
-// 只会得到一块实心方块，没有可用的回落形态。
+// 深色主题也画原图的图标（COLOR_ONLY_ICONS）：zcode 的自带底色让 mask
+// 退化成一块实心方块（没有可用的回落形态）；pi 的三色（珊瑚/蓝/黄）压在
+// 深色卡片上对比度都在 4:1 以上，没有「深色部分糊掉」的问题，回落反而
+// 丢掉了要的彩色形态。
 const colorOnly = computed(() => colorFile.value !== '' && COLOR_ONLY_ICONS.has(colorFile.value))
 const sizeStyle = computed(() => ({ width: props.size + 'px', height: props.size + 'px' }))
 const maskStyle = computed(() => ({
@@ -161,8 +163,8 @@ const maskStyle = computed(() => ({
 :root[data-tone='dark'] .cli-mono {
   display: inline-block;
 }
-/* 自带底色的图标（ZCode 的黑色圆角方块）没有回落档：深色主题也画原图。
-   两个类 + :root 前缀，压过上面那条隐藏规则。 */
+/* 深色主题也画原图的图标（COLOR_ONLY_ICONS：ZCode 的自带底色、Pi 的三色
+   官方标志）没有回落档：两个类 + :root 前缀，压过上面那条隐藏规则。 */
 :root[data-tone='dark'] .cli-color.cli-always {
   display: inline-block;
 }

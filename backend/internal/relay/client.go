@@ -76,6 +76,11 @@ type clientRule struct {
 	name string
 	// ua 是 UA 里要出现的子串（大小写不敏感），任一命中即可
 	ua []string
+	// uaToken 是 UA 首个 product token（去掉 /版本 后，大小写不敏感）要
+	// **精确等于**的名字列表。给「名字本身太短、子串匹配必然误伤」的
+	// 客户端用（pi）：`pi/` 出现在 `api/1.0` 里，按 ua 子串会认错
+	// （见 TestExtractClient 的对照用例）。
+	uaToken []string
 	// hdr 是 header 名 → 期望值子串（大小写不敏感）；空 = 不看头。
 	// 头信号通常比 UA 可靠：客户端自己加的头不受运行环境（Electron 壳、
 	// Node 的 undici、Go 的 http.Transport）改写，而 UA 常被这些环境顶掉。
@@ -89,6 +94,16 @@ func (r clientRule) match(h http.Header, lua string) bool {
 	for _, s := range r.ua {
 		if strings.Contains(lua, s) {
 			return true
+		}
+	}
+	if len(r.uaToken) > 0 {
+		// 只在有 uaToken 的规则上算一次：绝大多数规则没有这一项，
+		// 每次匹配都跑 firstProductToken 是白花钱。
+		token := strings.ToLower(firstProductToken(lua))
+		for _, s := range r.uaToken {
+			if token == s {
+				return true
+			}
 		}
 	}
 	for k, want := range r.hdr {
@@ -159,6 +174,14 @@ var clientRules = []clientRule{
 	// 必须排在下面的 SDK 规则之前，否则先被 ai-sdk/ 吞掉（本条正是为
 	// 「ZCode 的请求被显示成 Vercel AI SDK」这个 case 补的）。
 	{id: "zcode", name: "ZCode", ua: []string{"zcode/"}, hdr: map[string]string{"x-app": "zcode"}},
+	// Pi（pi-coding-agent 的 CLI）：UA 由它自己拼，形态是
+	// `pi/<版本> (平台; 运行时; 架构)`（如 pi/1.5.0 (win32; node/24.13.0; x64)），
+	// identity 设成 short 时就是一个裸 `pi`（见其 formatUserAgent）。
+	// 名字只有两个字母，**不能**写成 ua: ["pi/"] —— 子串会命中
+	// `api/1.0`、`spider/2.0` 这类无关 UA；按首个 product token 精确比对。
+	// 走自定义 provider（中转/自建端点）时它也不追加别的产品名，UA 就是它
+	// 自己这一份，所以只靠 UA 认它，不依赖任何自报头。
+	{id: "pi", name: "Pi", uaToken: []string{"pi"}},
 
 	// ---------- 桌面 / Web 聊天客户端 ----------
 	{id: "cherry-studio", name: "Cherry Studio", ua: []string{"cherrystudio/", "cherry-studio/"}},

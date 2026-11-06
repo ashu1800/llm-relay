@@ -84,6 +84,9 @@ describe('resolveClientIcon（图标形态识别）', () => {
     const m = aliasMap([])
     // zcode 2026-11-05 补上了官方图标（此前一直是 default.svg）
     expect(resolveClientIcon('zcode', 'ZCode', m)).toEqual({ kind: 'builtin', file: 'zcode.svg' })
+    // pi 的短 UA 就是一个裸 "pi"（identity.userAgent = short）：id 与 name
+    // 同值也能按 id 找回内置图标，不会掉到 default.svg
+    expect(resolveClientIcon('pi', 'pi', m)).toEqual({ kind: 'builtin', file: 'pi.svg' })
     expect(resolveClientIcon('codex', 'Codex CLI', m)).toEqual({ kind: 'builtin', file: 'codex.svg' })
     expect(resolveClientIcon('', '', m)).toEqual({ kind: 'builtin', file: 'default.svg' })
   })

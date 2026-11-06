@@ -87,6 +87,23 @@ func TestExtractClient(t *testing.T) {
 			want: want{"zcode", "ZCode"},
 		},
 		{
+			// 实测形态：pi/<版本> (平台; 运行时; 架构)，由客户端自己拼（formatUserAgent）
+			name: "Pi（详细 UA）",
+			ua:   "pi/1.5.0 (win32; node/24.13.0; x64)",
+			want: want{"pi", "Pi"},
+		},
+		{
+			// identity.userAgent = "short" 时 UA 就是一个裸 pi
+			name: "Pi（短 UA）",
+			ua:   "pi",
+			want: want{"pi", "Pi"},
+		},
+		{
+			name: "Pi 大写 UA 也认",
+			ua:   "PI/1.5.0 (linux; bun/1.2.0; arm64)",
+			want: want{"pi", "Pi"},
+		},
+		{
 			name: "curl 大写",
 			ua:   "CURL/8.4.0",
 			want: want{"curl", "curl"},
@@ -151,6 +168,13 @@ func TestExtractClient(t *testing.T) {
 			ua:      "ai-sdk/openai-compatible/1.0.6 runtime/node.js/v22.14.0",
 			headers: map[string]string{"X-App": "zcode"},
 			want:    want{"zcode", "ZCode"},
+		},
+		{
+			// 对照组："pi/" 作为子串会命中这里的 api/1.0，所以 pi 规则按
+			// 首个 product token 精确比对。这条一旦退化成子串匹配就会红。
+			name: "含 pi/ 子串的无关 UA 不被当成 Pi",
+			ua:   "api/1.0 (my-service)",
+			want: want{"api", "api"},
 		},
 		{
 			// 对照组：没有自报头的裸 SDK UA 就该显示 SDK —— 那是线上仅有
