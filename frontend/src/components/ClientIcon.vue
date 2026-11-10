@@ -70,9 +70,9 @@ const maskFile = computed(() => maskIconFile(resolved.value, props.id, imgFailed
 const colorFile = computed(() =>
   resolved.value.kind === 'builtin' && COLOR_ICONS.has(resolved.value.file) ? resolved.value.file : ''
 )
-// 深色主题也画原图的图标（COLOR_ONLY_ICONS）：zcode 的自带底色让 mask
-// 退化成一块实心方块（没有可用的回落形态）；pi 的三色（珊瑚/蓝/黄）压在
-// 深色卡片上对比度都在 4:1 以上，没有「深色部分糊掉」的问题，回落反而
+// 深色主题也画原图的图标（COLOR_ONLY_ICONS）：zcode / omp 的自带底色让
+// mask 退化成一块实心方块（没有可用的回落形态）；pi 的三色（珊瑚/蓝/黄）
+// 压在深色卡片上对比度都在 4:1 以上，没有「深色部分糊掉」的问题，回落反而
 // 丢掉了要的彩色形态。
 const colorOnly = computed(() => colorFile.value !== '' && COLOR_ONLY_ICONS.has(colorFile.value))
 const sizeStyle = computed(() => ({ width: props.size + 'px', height: props.size + 'px' }))

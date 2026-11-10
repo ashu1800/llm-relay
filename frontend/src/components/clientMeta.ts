@@ -48,6 +48,7 @@ export const CLIENT_META: Record<string, ClientMeta> = {
   trae: { name: 'Trae', file: 'trae.svg' },
   zcode: { name: 'ZCode', file: 'zcode.svg' },
   pi: { name: 'Pi', file: 'pi.svg' },
+  omp: { name: 'Oh My Pi', file: 'omp.svg' },
 
   // ---- 桌面 / Web 聊天客户端 ----
   'cherry-studio': { name: 'Cherry Studio', file: 'cherry-studio.svg' },
@@ -166,6 +167,7 @@ export const ICON_LIBRARY: string[] = [
   'nextchat.svg',
   'nvidia.svg',
   'ollama.svg',
+  'omp.svg',
   'open-webui.svg',
   'openai-node.svg',
   'openai-python.svg',
@@ -249,6 +251,7 @@ export const COLOR_ICONS: ReadonlySet<string> = new Set([
   'kiro.svg',
   'mistral.svg',
   'nvidia.svg',
+  'omp.svg',
   'openhands.svg',
   'perplexity.svg',
   'pi.svg',
@@ -273,7 +276,7 @@ export const COLOR_ICONS: ReadonlySet<string> = new Set([
 /**
  * 自带底色的图标：**任何主题**都直接画原图，不回落单色轮廓。
  *
- * 目前只有 ZCode 与 Pi，两种原因：
+ * 目前有 ZCode、Pi 与 Oh My Pi，两种原因：
  *   · ZCode 的图标是「黑色圆角方块 + 白色 Z」的应用图标（站主
  *     2026-11-05 指出要的就是这张，不是官网 hero 里那个灰色钩形标记）。
  *     mask 只取 alpha —— 这张图的 alpha 是一整个方块，回落出来就是一块实心
@@ -282,5 +285,8 @@ export const COLOR_ICONS: ReadonlySet<string> = new Set([
  *     图标」）。三色在深色卡片（--color-fg #303030）上的对比度都在 4:1
  *     以上（红 5.7:1、蓝 4.2:1、黄 7.7:1），不存在别的彩色 logo 那种
  *     「深色部分糊进背景」的问题 —— 回落到单色反而丢掉了用户要的形态。
+ *   · Oh My Pi（omp）的官方 favicon 是深色圆角方块 + 品红/紫/青渐变 Pi
+ *     （omp.sh/favicon.svg）：与 ZCode 一样自带底色，mask 回落会变成一块
+ *     实心方块、Pi 直接消失，所以任何主题都直接画原图。
  */
-export const COLOR_ONLY_ICONS: ReadonlySet<string> = new Set(['zcode.svg', 'pi.svg'])
+export const COLOR_ONLY_ICONS: ReadonlySet<string> = new Set(['zcode.svg', 'pi.svg', 'omp.svg'])

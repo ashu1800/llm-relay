@@ -78,8 +78,8 @@ type clientRule struct {
 	ua []string
 	// uaToken 是 UA 首个 product token（去掉 /版本 后，大小写不敏感）要
 	// **精确等于**的名字列表。给「名字本身太短、子串匹配必然误伤」的
-	// 客户端用（pi）：`pi/` 出现在 `api/1.0` 里，按 ua 子串会认错
-	// （见 TestExtractClient 的对照用例）。
+	// 客户端用（pi、omp）：`pi/` 出现在 `api/1.0` 里、`omp/` 出现在
+	// `llm-comp/1.0` 里，按 ua 子串会认错（见 TestExtractClient 的对照用例）。
 	uaToken []string
 	// hdr 是 header 名 → 期望值子串（大小写不敏感）；空 = 不看头。
 	// 头信号通常比 UA 可靠：客户端自己加的头不受运行环境（Electron 壳、
@@ -182,6 +182,11 @@ var clientRules = []clientRule{
 	// 走自定义 provider（中转/自建端点）时它也不追加别的产品名，UA 就是它
 	// 自己这一份，所以只靠 UA 认它，不依赖任何自报头。
 	{id: "pi", name: "Pi", uaToken: []string{"pi"}},
+	// Oh My Pi（omp，Pi 的增强分支）：官方 USER_AGENT 是 `omp/<semver>`
+	// （pi-utils 的 USER_AGENT 常量；对外请求由 SDK 注入）。同样只有三个
+	// 字母，且 `llm-comp/1.0` 这类 UA 里也含 `omp/` —— 按首个 product
+	// token 精确比对，不能写成 ua: ["omp/"]。
+	{id: "omp", name: "Oh My Pi", uaToken: []string{"omp"}},
 
 	// ---------- 桌面 / Web 聊天客户端 ----------
 	{id: "cherry-studio", name: "Cherry Studio", ua: []string{"cherrystudio/", "cherry-studio/"}},

@@ -104,6 +104,17 @@ func TestExtractClient(t *testing.T) {
 			want: want{"pi", "Pi"},
 		},
 		{
+			// 实测形态：omp/<semver>（pi-utils 的 USER_AGENT 常量）
+			name: "Oh My Pi（omp）",
+			ua:   "omp/1.2.3",
+			want: want{"omp", "Oh My Pi"},
+		},
+		{
+			name: "Oh My Pi 大写 UA 也认",
+			ua:   "OMP/0.9.0",
+			want: want{"omp", "Oh My Pi"},
+		},
+		{
 			name: "curl 大写",
 			ua:   "CURL/8.4.0",
 			want: want{"curl", "curl"},
@@ -175,6 +186,13 @@ func TestExtractClient(t *testing.T) {
 			name: "含 pi/ 子串的无关 UA 不被当成 Pi",
 			ua:   "api/1.0 (my-service)",
 			want: want{"api", "api"},
+		},
+		{
+			// 对照组：`llm-comp/1.0` 含 `omp/` 子串，omp 规则同样必须按
+			// 首个 product token 精确比对（写成 ua: ["omp/"] 会红）。
+			name: "含 omp/ 子串的无关 UA 不被当成 Oh My Pi",
+			ua:   "llm-comp/1.0",
+			want: want{"llm-comp", "llm-comp"},
 		},
 		{
 			// 对照组：没有自报头的裸 SDK UA 就该显示 SDK —— 那是线上仅有
